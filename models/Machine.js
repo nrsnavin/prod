@@ -6,6 +6,7 @@ const MachineSchema = new mongoose.Schema(
     ID: {
       type: String,
       required: true,
+      unique: true, 
     },
     manufacturer: {
       type: String,

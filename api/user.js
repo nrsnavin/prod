@@ -50,6 +50,8 @@ router.post(
         const token = generateToken(user);
 
         console.log(token);
+
+        console.log(user);
         
         
         res
