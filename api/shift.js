@@ -106,11 +106,11 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     try {
 
-      const now = new Date(req.query.date);
-const utc = new Date(now.toUTCString().slice(0, -4));
+      const now = new Date(req.query.date).setHours(0, 0, 0, 0);
+const utc = new Date(now).toUTCString();
 console.log(utc.toString()); // ignore the timezone
       const shift = await ShiftPlan.find({
-        date: { $eq: new Date(new Date(utc)).setHours(0, 0, 0, 0) },
+        date: { $eq: new Date(new Date(utc)) },
       }).populate({
         path: 'plan',
         populate: [{ path: 'employee', model: 'Employee' }, { path: 'machine', model: 'Machine' }]
