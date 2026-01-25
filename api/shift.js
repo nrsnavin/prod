@@ -112,6 +112,8 @@ router.get(
         populate: [{ path: 'employee', model: 'Employee' }, { path: 'machine', model: 'Machine' }]
       }).exec();
 
+      console.log(shift);
+
       console.log(req.query.date);
       res.status(201).json({
         success: true,
