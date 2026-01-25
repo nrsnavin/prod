@@ -113,7 +113,7 @@ router.get(
 console.log(new Date(new Date(req.query.date).setHours(0, 0, 0, 0)+( 5.5 * 60 * 60 * 1000 )));
  // ignore the timezone
       const shift = await ShiftPlan.find({
-        date: { $eq: new Date(new Date(req.query.date).setHours(0, 0, 0, 0)+( 5.5 * 60 * 60 * 1000 )) },
+        date: { $eq: new Date(new Date(req.query.date).setHours(0, 0, 0, 0)) },
       }).populate({
         path: 'plan',
         populate: [{ path: 'employee', model: 'Employee' }, { path: 'machine', model: 'Machine' }]
