@@ -103,6 +103,38 @@ router.post(
 );
 
 
+router.delete('/deletePlan',catchAsyncErrors(async (req,res,next)=>{
+  try{ 
+
+    const sp=await ShiftPlan.findById(req.query.id);
+    if(!sp){
+      return next(new ErrorHandler('Shift Plan not found',404));
+    }
+    await Promise.all(sp.plan.map( async(e)=>{
+      const sd=await ShiftDetail.findById(e);
+      const machine=await Machine.findById(sd.machine);
+      const emp=await Employee.findById(sd.employee);
+
+      machine.shifts=machine.shifts.filter( (id)=> id.toString() !== sd._id.toString() );
+      emp.shifts=emp.shifts.filter( (id)=> id.toString() !== sd._id.toString() );
+      await machine.save();
+      await emp.save();
+      await sd.remove();
+    }))
+
+    await sp.remove();
+
+    res.status(200).json({
+      success:true,
+      message:'Shift Plan deleted successfully'
+    });
+
+  }
+  catch (error) {
+      console.log(error);
+      return next(new ErrorHandler(error, 400));
+    }
+}));
 
 router.get(
   "/shiftPlanToday",

@@ -28,6 +28,11 @@ const ShiftDetailSchema = new mongoose.Schema({
     required:true,
     default:"00:00:00",
   },
+  elastics:{
+    type: String,
+    default:"",
+    required:true,
+  },
   production: {
     type: Number,
     required: true,
