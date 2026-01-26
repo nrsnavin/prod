@@ -67,6 +67,10 @@ router.post(
         });
 
         arr.push(shiftDetail._id);
+        machine.shifts.push(shiftDetail._id);
+        employee.shifts.push(shiftDetail._id);
+        await machine.save();
+        await employee.save();
 
 
       }))
@@ -257,8 +261,7 @@ router.post('/enter-shift-production', catchAsyncErrors(async (req, res, next) =
     const emp = await Employee.findById(shift.employee);
     const sp = await ShiftPlan.findById(shift.shiftPlan);
 
-    emp.shifts.push(shift._id);
-    machine.shifts.push(shift._id);
+   
     sp.totalProduction += req.body.production * machine.NoOfHead;
 
 
