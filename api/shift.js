@@ -120,10 +120,10 @@ router.delete('/deletePlan',catchAsyncErrors(async (req,res,next)=>{
       emp.shifts=emp.shifts.filter( (id)=> id.toString() !== sd._id.toString() );
       await machine.save();
       await emp.save();
-      await sd.remove();
+      await ShiftDetail.findByIdAndDelete(e);
     }))
 
-    await sp.remove();
+    await ShiftPlan.findByIdAndDelete(req.query.id);
 
     res.status(200).json({
       success:true,
