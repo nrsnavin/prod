@@ -27,7 +27,7 @@ router.post(
 
       var normalizedDate = new Date(req.body.date);
 
-     normalizedDate= normalizedDate.getTime() + ( 5.5 * 60 * 60 * 1000 )
+     normalizedDate= normalizedDate.getTime() ;
       
       console.log(normalizedDate);
 
