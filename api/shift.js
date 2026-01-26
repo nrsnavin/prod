@@ -63,6 +63,7 @@ router.post(
           machine: machine._id,
           employee: employee._id,
           shiftPlan: sp._id,
+          elastics: machine.elastics,
         });
 
         arr.push(shiftDetail._id);
@@ -88,7 +89,7 @@ router.post(
           message: `Shift plan already exists for ${req.body.shiftType} shift on selected date`
         });
       }
-
+      console.log(error);
 
       return res.status(500).json({
         success: false,
