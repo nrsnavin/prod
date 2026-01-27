@@ -11,6 +11,9 @@ const EmployeeSchema = new mongoose.Schema(
     phoneNumber: {
       type: String,
     },
+     aadhar: {
+      type: String,
+    },
     skill: {
       type: Number,
       required: true,
