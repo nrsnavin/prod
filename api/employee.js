@@ -65,7 +65,10 @@ router.post(
     // isAuthenticated,
     catchAsyncErrors(async (req, res, next) => {
         try {
+            console.log(req.body);
             const employee = await Employee.create(req.body);
+
+            console.log(employee);
 
             res.status(201).json({
                 success: true,
@@ -129,6 +132,7 @@ router.get(
                     id: employee._id,
                     name: employee.name,
                     role: employee.role,
+                    aadhar: employee.aadhar,
                     department: employee.department,
                     result: result,
                     phoneNumber: employee.phoneNumber,

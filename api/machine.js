@@ -13,6 +13,7 @@ router.post(
   
   catchAsyncErrors(async (req, res, next) => {
     try {
+      console.log(req.body)
       const machineData = req.body;
       const machine = await Machine.create(machineData);
       res.status(201).json({
