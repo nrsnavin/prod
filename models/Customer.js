@@ -22,7 +22,7 @@ const CustomerSchema = new mongoose.Schema(
         status: {
             type: String,
             required: true,
-            default: "Inactive",
+            default: "Active",
         },
         contactName: {
             type: String,

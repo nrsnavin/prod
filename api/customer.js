@@ -29,13 +29,13 @@ router.post(
 
 
 router.put(
-  "/update/:id",
+  "/update",
   // isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
-    const { id } = req.params;
+    console.log("Updating customer:");
 
     const customer = await Customer.findByIdAndUpdate(
-      id,
+      req.body._id,
       req.body,
       { new: true, runValidators: true }
     );
@@ -52,26 +52,26 @@ router.put(
 );
 
 
-router.delete(
-  "/delete/:id",
-  // isAuthenticated,
-  // isAdmin("Admin"),
-  catchAsyncErrors(async (req, res, next) => {
-    const customer = await Customer.findById(req.params.id);
+// router.delete(
+//   "/delete/:id",
+//   // isAuthenticated,
+//   // isAdmin("Admin"),
+//   catchAsyncErrors(async (req, res, next) => {
+//     const customer = await Customer.findById(req.params.id);
 
-    if (!customer) {
-      return next(new ErrorHandler("Customer not found", 404));
-    }
+//     if (!customer) {
+//       return next(new ErrorHandler("Customer not found", 404));
+//     }
 
-    customer.isActive = false;
-    await customer.save();
+//     customer.isActive = false;
+//     await customer.save();
 
-    res.status(200).json({
-      success: true,
-      message: "Customer deactivated successfully",
-    });
-  })
-);
+//     res.status(200).json({
+//       success: true,
+//       message: "Customer deactivated successfully",
+//     });
+//   })
+// );
 
 router.get(
   "/all-customers",
@@ -105,10 +105,16 @@ router.get(
 );
 
 router.get(
-  "/:id",
+  "/customerDetail",
   // isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
-    const customer = await Customer.findById(req.params.id);
+
+    console.log("sd");
+    
+    const customer = await Customer.findById(req.query.id);
+
+    console.log(req.query.id);
+    
 
     if (!customer) {
       return next(new ErrorHandler("Customer not found", 404));
@@ -116,7 +122,7 @@ router.get(
 
     res.status(200).json({
       success: true,
-      data: customer,
+       customer,
     });
   })
 );
