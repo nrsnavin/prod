@@ -84,22 +84,6 @@ const CustomerSchema = new mongoose.Schema(
             required: true,
             default: "30"
         },
-        transporter: {
-            type: {},
-        },
-        transactions: [],
-        products: [{
-            id: {
-                type: mongoose.Types.ObjectId,
-                ref: "Elastic"
-            },
-        }],
-        orders: [{
-            id: {
-                type: mongoose.Types.ObjectId,
-                ref: "Order"
-            },
-        }],
         
     },
     { timestamps: true }
