@@ -13,6 +13,7 @@ const EmployeeSchema = new mongoose.Schema(
     },
      aadhar: {
       type: String,
+      
     },
     skill: {
       type: Number,

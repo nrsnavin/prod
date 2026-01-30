@@ -4,59 +4,60 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors.js");
 const Employee = require("../models/Employee.js");
 const e = require("express");
 
+const bcrypt = require("bcryptjs");
+
+const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const ErrorHandler = require("../utils/ErrorHandler");
+
 const router = express.Router();
 
 
-
 router.post(
-    "/login-employee",
-    catchAsyncErrors(async (req, res, next) => {
-        try {
-            const { userName, password } = req.body;
+  "/login",
+  catchAsyncErrors(async (req, res, next) => {
+    const { username, password } = req.body;
 
-            console.log(password);
+    if (!username || !password) {
+      return next(new ErrorHandler("Username and password required", 400));
+    }
 
+    const employee = await Employee.findOne({ username })
+      .select("+passwordHash");
 
-            if (!userName || !password) {
-                return next(new ErrorHandler("Please provide the all fields!", 400));
-            }
+    if (!employee) {
+      return next(new ErrorHandler("Invalid credentials", 401));
+    }
 
-            const employee = await Employee.findOne({ userName }).select("+password");
+    if (!employee.isActive) {
+      return next(new ErrorHandler("Account disabled", 403));
+    }
 
+    const isMatch = await bcrypt.compare(
+      password,
+      employee.passwordHash
+    );
 
+    if (!isMatch) {
+      return next(new ErrorHandler("Invalid credentials", 401));
+    }
 
+    employee.lastLogin = new Date();
+    await employee.save();
 
-
-            if (!employee) {
-                return next(new ErrorHandler("User doesn't exists!", 400));
-            }
-            if (employee.password == password) {
-                //   const token = generateToken(employee);
-
-                //   console.log(token);
-
-
-                res
-                    .status(201)
-                    .json({
-                        username: employee.name,
-                        id: employee._id,
-                        role: employee.role,
-                        skill: employee.skill,
-                        Department: employee.Department,
-
-                        //   token: token,
-
-                    });
-            } else {
-                res.status(401).json({ message: "Invalid Credentials" });
-            }
-        }
-
-        catch (error) {
-            return next(new ErrorHandler(error.message, 500));
-        }
-    })
+    res.status(200).json({
+      success: true,
+      data: {
+        id: employee._id,
+        name: employee.name,
+        role: employee.role,
+        department: employee.department,
+        skill: employee.skill,
+        performance: employee.performance,
+        phoneNumber: employee.phoneNumber,
+        aadhar: employee.aadhar,
+      },
+    });
+  })
 );
 
 // create product
@@ -182,6 +183,26 @@ router.get(
             return next(new ErrorHandler(error, 400));
         }
     })
+);
+
+
+router.put(
+  "/disable/:id",
+  catchAsyncErrors(async (req, res, next) => {
+    const employee = await Employee.findById(req.params.id);
+
+    if (!employee) {
+      return next(new ErrorHandler("Employee not found", 404));
+    }
+
+    employee.isActive = false;
+    await employee.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Employee disabled successfully",
+    });
+  })
 );
 
 
