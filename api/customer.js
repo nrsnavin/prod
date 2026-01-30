@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 
-const { isAuthenticated, isAdmin } = require("../middleware/auth");
+// const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
 
@@ -10,7 +10,7 @@ const Customer = require("../models/Customer");
 
 router.post(
   "/create",
-  isAuthenticated,
+  // isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const customerData = req.body;
 
@@ -30,7 +30,7 @@ router.post(
 
 router.put(
   "/update/:id",
-  isAuthenticated,
+  // isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.params;
 
@@ -54,8 +54,8 @@ router.put(
 
 router.delete(
   "/delete/:id",
-  isAuthenticated,
-  isAdmin("Admin"),
+  // isAuthenticated,
+  // isAdmin("Admin"),
   catchAsyncErrors(async (req, res, next) => {
     const customer = await Customer.findById(req.params.id);
 
@@ -73,26 +73,40 @@ router.delete(
   })
 );
 
-
 router.get(
-  "/all",
-  isAuthenticated,
-  catchAsyncErrors(async (req, res, next) => {
-    const customers = await Customer.find({ isActive: true }).sort({
-      createdAt: -1,
-    });
+  "/all-customers",
+  catchAsyncErrors(async (req, res) => {
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 20;
+    const search = req.query.search || "";
+
+    const skip = (page - 1) * limit;
+
+    const query = search
+      ? {
+          $or: [
+            { name: { $regex: search, $options: "i" } },
+            { phoneNumber: { $regex: search, $options: "i" } },
+            { gstin: { $regex: search, $options: "i" } },
+          ],
+        }
+      : {};
+
+    const customers = await Customer.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
 
     res.status(200).json({
       success: true,
-      count: customers.length,
-      data: customers,
+      customers,
     });
   })
 );
 
 router.get(
   "/:id",
-  isAuthenticated,
+  // isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const customer = await Customer.findById(req.params.id);
 

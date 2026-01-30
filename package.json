@@ -25,6 +25,7 @@
     "mongodb": "^6.8.0",
     "mongoose": "^8.5.1",
     "mongoose-id-autoincrement": "^1.0.4",
+    "mongoose-sequence": "^6.0.1",
     "nodemon": "^3.1.7"
   }
 }

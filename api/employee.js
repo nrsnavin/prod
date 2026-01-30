@@ -6,7 +6,6 @@ const e = require("express");
 
 const bcrypt = require("bcryptjs");
 
-const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
 
 const router = express.Router();

@@ -16,6 +16,8 @@ const shift = require("./api/shift.js")
 
 const employee = require("./api/employee.js")
 
+const customer = require("./api/customer.js")
+
 
 
 const corsConfig = {
@@ -49,6 +51,13 @@ app.use("/api/v2/shift", (req, res, next) => {
   next()
 }, shift);
 
+
+
+app.use("/api/v2/customer", (req, res, next) => {
+  console.log("customer route hit");
+
+  next()
+}, customer);
 
 app.use("/api/v2/employee", (req, res, next) => {
   console.log("emp route hit");
