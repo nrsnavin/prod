@@ -1,4 +1,5 @@
-import mongoose from 'mongoose';
+const mongoose = require("mongoose");
+
 
 const supplierSchema = new mongoose.Schema(
   {
@@ -20,12 +21,19 @@ const supplierSchema = new mongoose.Schema(
       ],
     },
 
-    phone: {
+    phoneNumber: {
       type: String,
       trim: true,
     },
-
+    email: {
+      type: String,
+      trim: true,
+    },
     address: {
+      type: String,
+    },
+
+    contactPerson: {
       type: String,
     },
 
@@ -37,4 +45,5 @@ const supplierSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-export default mongoose.model('Supplier', supplierSchema);
+const SupplierModel = mongoose.model("Supplier", supplierSchema);
+module.exports = SupplierModel;

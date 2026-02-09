@@ -32,7 +32,16 @@ router.put(
   "/update",
   // isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
-    console.log("Updating customer:");
+    console.log("Updating customer:"
+
+
+
+
+
+
+
+      
+    );
 
     const customer = await Customer.findByIdAndUpdate(
       req.body._id,

@@ -6,7 +6,7 @@ const MachineSchema = new mongoose.Schema(
     ID: {
       type: String,
       required: true,
-      unique: true, 
+      unique: true,
     },
     manufacturer: {
       type: String,
@@ -24,14 +24,29 @@ const MachineSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
-    elastics: {
-      type: String,
+    elastics: [{
+      elastic: {
+        type: mongoose.Types.ObjectId,
+        ref: "Elastic",
+        default: null,
+      },
+
+      head: {
+        type: Number
+      }
+
+    }]
+    ,
+    orderRunning: {
+      type: mongoose.Types.ObjectId,
+      ref: "JobOrder",
+      default: null,
     },
 
     status: {
       type: String,
-      required: true,
-      default: "free"
+      enum: ["free", "running", "maintenance"],
+      default: "free",
     },
     shifts: [
       {

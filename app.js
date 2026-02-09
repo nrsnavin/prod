@@ -19,6 +19,21 @@ const employee = require("./api/employee.js")
 const customer = require("./api/customer.js")
 
 
+const supplier = require("./api/supplier.js")
+
+
+const material = require("./api/rawMaterial.js")
+
+const elastic = require("./api/elastic.js")
+
+const order = require("./api/order.js")
+const job = require("./api/job.js")
+
+const warping = require("./api/warping.js")
+
+const covering = require("./api/covering.js")
+
+
 
 const corsConfig = {
   origin: true,
@@ -65,6 +80,55 @@ app.use("/api/v2/employee", (req, res, next) => {
   next()
 }, employee);
 
+
+
+app.use("/api/v2/elastic", (req, res, next) => {
+  console.log("elastic route hit");
+
+  next()
+}, elastic);
+
+
+app.use("/api/v2/supplier", (req, res, next) => {
+  console.log("supplier route hit");
+
+  next()
+}, supplier);
+
+
+app.use("/api/v2/order", (req, res, next) => {
+  console.log("order route hit");
+
+  next()
+}, order);
+
+app.use("/api/v2/materials", (req, res, next) => {
+  console.log("material route hit");
+
+  next()
+}, material);
+
+
+app.use("/api/v2/warping", (req, res, next) => {
+  console.log("warping route hit");
+
+  next()
+}, warping);
+
+
+
+app.use("/api/v2/covering", (req, res, next) => {
+  console.log("covering route hit");
+
+  next()
+}, covering);
+
+
+app.use("/api/v2/job", (req, res, next) => {
+  console.log("job route hit");
+
+  next()
+}, job);
 
 
 // config

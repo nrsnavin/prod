@@ -1,44 +1,51 @@
-import mongoose from 'mongoose';
+const mongoose = require("mongoose");
 
-const rawMaterialSchema = new mongoose.Schema(
+const StockMovementSchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
+    date: {
+      type: Date,
       required: true,
-      trim: true,
     },
+    type: {
+      type: String, // ORDER_APPROVAL, PO_INWARD, ADJUSTMENT
+      required: true,
+    },
+    order: {
+      type: mongoose.Types.ObjectId,
+      ref: "Order",
+    },
+    quantity: {
+      type: Number,
+      required: true,
+    },
+    balance: {
+      type: Number,
+      required: true,
+    },
+  },
+  { _id: false }
+);
+
+const RawMaterialSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    category: { type: String, required: true },
 
     supplier: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Supplier',
-      required: true,
+      type: mongoose.Types.ObjectId,
+      ref: "Supplier",
     },
 
-    category: {
-      type: String,
-      enum: ['warp', 'weft', 'covering', 'rubber', 'chemicals'],
-      required: true,
-    },
+    stock: { type: Number, default: 0 },
+    minStock: { type: Number, default: 0 },
+    totalConsumption: { type: Number, default: 0 },
 
-    stock: {
-      type: Number, // Double
-      default: 0,
-    },
-
-    minStock: {
-      type: Number, // Double
-      default: 0,
-    },
-
-    totalConsumption: {
-      type: Number, // Double
-      default: 0,
+    stockMovements: {
+      type: [StockMovementSchema],
+      default: [],
     },
   },
   { timestamps: true }
 );
 
-// 🔍 Index for fast lookup
-rawMaterialSchema.index({ name: 1, category: 1 });
-
-export default mongoose.model('RawMaterial', rawMaterialSchema);
+module.exports = mongoose.model("RawMaterial", RawMaterialSchema);

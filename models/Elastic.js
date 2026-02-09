@@ -12,7 +12,7 @@ const ElasticSchema = new mongoose.Schema(
       type: String,
       required: true,
       default: "8",
-    },
+    },  
 
     image: {
       type: String,

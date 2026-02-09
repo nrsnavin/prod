@@ -54,14 +54,13 @@ const JobOrderSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: [
-        "warping",
-        "covering",
+        "preparatory",
         "weaving",
         "packing",
         "completed",
         "cancelled",
       ],
-      default: "warping",
+      default: "preparatory",
     },
 
     // 🧵 PLANNED ELASTICS

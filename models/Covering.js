@@ -40,11 +40,6 @@ const CoveringSchema = new mongoose.Schema(
     },
 
     // 🏭 MACHINE USED
-    machine: {
-      type: mongoose.Types.ObjectId,
-      ref: "Machine",
-      required: true,
-    },
 
     // 🧵 ELASTICS PLANNED FOR COVERING
     elasticPlanned: {
@@ -52,35 +47,13 @@ const CoveringSchema = new mongoose.Schema(
       default: [],
     },
 
-    // 🧵 ELASTICS COMPLETED
-    elasticCovered: {
-      type: [ElasticQtySchema],
-      default: [],
-    },
-
-    // ♻️ WASTAGE DURING COVERING
-    wastageElastic: {
-      type: [ElasticQtySchema],
-      default: [],
-    },
+ 
 
     // 🔄 STATUS FLOW
     status: {
       type: String,
       enum: ["open", "in_progress", "completed", "cancelled"],
       default: "open",
-    },
-
-    // 👷 OPERATOR
-    operator: {
-      type: mongoose.Types.ObjectId,
-      ref: "Employee",
-    },
-
-    // 👷 CLOSED BY
-    closedBy: {
-      type: mongoose.Types.ObjectId,
-      ref: "Employee",
     },
 
     // ✅ COMPLETION DATE

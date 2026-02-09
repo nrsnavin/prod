@@ -45,17 +45,18 @@ const WarpingSchema = new mongoose.Schema(
       index: true,
     },
 
+    // 📄 WARPING PLAN (NEW)
+    warpingPlan: {
+      type: mongoose.Types.ObjectId,
+      ref: "WarpingPlan",
+      default: null,
+    },
+
     // 🔄 STATUS FLOW
     status: {
       type: String,
       enum: ["open", "in_progress", "completed", "cancelled"],
       default: "open",
-    },
-
-    // 👷 CLOSED BY (EMPLOYEE)
-    closedBy: {
-      type: mongoose.Types.ObjectId,
-      ref: "Employee",
     },
 
     // ✅ COMPLETION DATE
