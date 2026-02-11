@@ -1,48 +1,92 @@
-const mongoose = require('mongoose')
+// models/ShiftDetail.js
+const mongoose = require("mongoose");
 
-const ShiftDetailSchema = new mongoose.Schema({
-  date: {
-    type: Date,
-    required: true,
+const HeadElasticSchema = new mongoose.Schema(
+  {
+    head: { type: Number, required: true },
+    elastic: {
+      type: mongoose.Types.ObjectId,
+      ref: "Elastic",
+      required: true,
+    },
   },
-  shift: {
-    type: String,
-    required: true,
-  },
-  description: {
-    type: String,
-    default:""
-  },
-  feedback: {
-    type: String,
-    default: ""
-  },
+  { _id: false }
+);
 
-  status: {
-    type: String,
-    default: "open"
-  },
+const ShiftDetailSchema = new mongoose.Schema(
+  {
+    // 📅 BASIC INFO
+    date: {
+      type: Date,
+      required: true,
+    },
 
-  timer:{
-    type:String,
-    required:true,
-    default:"00:00:00",
-  },
-  elastics:{
-    type: String,
-    default:"",
-    required:true,
-  },
-  production: {
-    type: Number,
-    required: true,
-    default: 0,
-  },
+    shift: {
+      type: String,
+      enum: ["DAY", "NIGHT"],
+      required: true,
+    },
 
-  employee: { type: mongoose.Types.ObjectId, ref: "Employee",required:true },
-  shiftPlan: { type: mongoose.Types.ObjectId, ref: "ShiftPlan" },
-  machine: { type: mongoose.Types.ObjectId, ref: "Machine" ,required:true},
-})
+    description: {
+      type: String,
+      default: "",
+    },
 
-const ShiftDetail = mongoose.model("ShiftDetail", ShiftDetailSchema);
-module.exports = ShiftDetail;
+    feedback: {
+      type: String,
+      default: "",
+    },
+
+    // 🔄 STATUS
+    status: {
+      type: String,
+      enum: ["open", "running", "completed"],
+      default: "open",
+    },
+
+    // ⏱ TIMER (HH:mm:ss)
+    timer: {
+      type: String,
+      required: true,
+      default: "00:00:00",
+    },
+
+    // 📏 TOTAL PRODUCTION (METERS)
+    productionMeters: {
+      type: Number,
+      default: 0,
+    },
+
+    // 🧵 HEAD → ELASTIC MAP (IMPORTANT)
+    elastics: {
+      type: [HeadElasticSchema],
+      required: true,
+      default: [],
+    },
+
+    // 👷 OPERATOR
+    employee: {
+      type: mongoose.Types.ObjectId,
+      ref: "Employee",
+      required: true,
+    },
+
+    // 🔗 PARENT SHIFT PLAN
+    shiftPlan: {
+      type: mongoose.Types.ObjectId,
+      ref: "ShiftPlan",
+      required: true,
+      index: true,
+    },
+
+    // 🏭 MACHINE
+    machine: {
+      type: mongoose.Types.ObjectId,
+      ref: "Machine",
+      required: true,
+    },
+  },
+  { timestamps: true }
+);
+
+module.exports = mongoose.model("ShiftDetail", ShiftDetailSchema);

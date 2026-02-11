@@ -1,41 +1,48 @@
-const mongoose = require('mongoose')
+// models/ShiftPlan.js
+const mongoose = require("mongoose");
 
-const ShifPlanSchema = new mongoose.Schema({
+const ShiftPlanSchema = new mongoose.Schema(
+  {
     date: {
-        type: Date,
-        required: true,
+      type: Date,
+      required: true,
+      index: true,
     },
+
     shift: {
-        type: String,
-      enum: ['DAY', 'NIGHT'],
-      required: true
+      type: String,
+      enum: ["DAY", "NIGHT"],
+      required: true,
+      index: true,
     },
+
     description: {
-        type: String,
-        default: ""
+      type: String,
+      default: "",
     },
+
     totalProduction: {
-        type: Number,
-        required: true,
-        default: 0,
+      type: Number,
+      default: 0,
     },
 
-
-    plan: [{
-        type:
-            mongoose.Types.ObjectId,
-            ref: "ShiftDetail",
-    }
+    plan: [
+      {
+        type: mongoose.Types.ObjectId,
+        ref: "ShiftDetail",
+      },
     ],
 
-})
-
-ShifPlanSchema.index(
-  { date: 1, shift : 1 },
-  { unique: true }
+    status: {
+      type: String,
+      enum: ["planned", "running", "completed"],
+      default: "planned",
+    },
+  },
+  { timestamps: true }
 );
 
+// 🔒 Prevent duplicate shift plans
+ShiftPlanSchema.index({ date: 1, shift: 1 }, { unique: true });
 
-
-const ShiftPlan = mongoose.model("ShiftPlan", ShifPlanSchema);
-module.exports = ShiftPlan;
+module.exports = mongoose.model("ShiftPlan", ShiftPlanSchema);

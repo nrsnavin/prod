@@ -13,23 +13,24 @@ const ShiftPlan = require("../models/ShiftPlan.js");
 
 
 const moment = require("moment");
+const JobOrder = require("../models/JobOrder.js");
 
 
 
 
 router.post(
-  "/create-shift",
+  "/create-shift-plan",
 
   catchAsyncErrors(async (req, res, next) => {
-    // console.log(req.body);
+    console.log(req.body);
     const arr = [];
     try {
 
       var normalizedDate = new Date(req.body.date);
 
-     normalizedDate= normalizedDate.getTime() ;
-      
-      console.log(normalizedDate);
+      normalizedDate = normalizedDate.getTime();
+
+      // console.log(normalizedDate);
 
       const check = await ShiftPlan.findOne({ date: normalizedDate, shift: req.body.shift });
       console.log(check);
@@ -43,21 +44,24 @@ router.post(
 
       const sp = await ShiftPlan.create({
         date: moment(normalizedDate),
-        shift: req.body.shift,
+        shift: req.body.shiftType,
       });
 
 
 
 
-      await Promise.all(Object.keys(req.body.plan).map(async (e) => {
-        const machine = await Machine.findOne({ ID: e });
-        console.log(machine);
+
+      await Promise.all(req.body.machines.map(async (e) => {
+        const machine = await Machine.findById(e.machine);
+        // console.log(machine);
         // console.log(req.body.plan[e]);
-        const employee = await Employee.findById(req.body.plan[e]);
+        const employee = await Employee.findById(e.operator);
+
+        const job = await JobOrder.findOne({ jobOrderNo: e.jobOrderNo });
 
         const shiftDetail = await ShiftDetail.create({
           date: moment(normalizedDate),
-          shift: req.body.shift,
+          shift: req.body.shiftType,
           description: req.body.description,
           status: "open",
           machine: machine._id,
@@ -65,12 +69,14 @@ router.post(
           shiftPlan: sp._id,
           elastics: machine.elastics,
         });
-
         arr.push(shiftDetail._id);
         machine.shifts.push(shiftDetail._id);
         employee.shifts.push(shiftDetail._id);
+        job.shiftDetails.push(shiftDetail._id)
         await machine.save();
         await employee.save();
+
+        await job.save();
 
 
       }))
@@ -79,7 +85,7 @@ router.post(
       sp.plan = arr;
 
       await sp.save();
-      console.log(sp);
+      console.log(" Shift Plan created successfully");
       res.status(201).json({
         success: true,
         message: "Shifts created successfully",
@@ -108,20 +114,20 @@ router.post(
 );
 
 
-router.delete('/deletePlan',catchAsyncErrors(async (req,res,next)=>{
-  try{ 
+router.delete('/deletePlan', catchAsyncErrors(async (req, res, next) => {
+  try {
 
-    const sp=await ShiftPlan.findById(req.query.id);
-    if(!sp){
-      return next(new ErrorHandler('Shift Plan not found',404));
+    const sp = await ShiftPlan.findById(req.query.id);
+    if (!sp) {
+      return next(new ErrorHandler('Shift Plan not found', 404));
     }
-    await Promise.all(sp.plan.map( async(e)=>{
-      const sd=await ShiftDetail.findById(e);
-      const machine=await Machine.findById(sd.machine);
-      const emp=await Employee.findById(sd.employee);
+    await Promise.all(sp.plan.map(async (e) => {
+      const sd = await ShiftDetail.findById(e);
+      const machine = await Machine.findById(sd.machine);
+      const emp = await Employee.findById(sd.employee);
 
-      machine.shifts=machine.shifts.filter( (id)=> id.toString() !== sd._id.toString() );
-      emp.shifts=emp.shifts.filter( (id)=> id.toString() !== sd._id.toString() );
+      machine.shifts = machine.shifts.filter((id) => id.toString() !== sd._id.toString());
+      emp.shifts = emp.shifts.filter((id) => id.toString() !== sd._id.toString());
       await machine.save();
       await emp.save();
       await ShiftDetail.findByIdAndDelete(e);
@@ -130,15 +136,15 @@ router.delete('/deletePlan',catchAsyncErrors(async (req,res,next)=>{
     await ShiftPlan.findByIdAndDelete(req.query.id);
 
     res.status(200).json({
-      success:true,
-      message:'Shift Plan deleted successfully'
+      success: true,
+      message: 'Shift Plan deleted successfully'
     });
 
   }
   catch (error) {
-      console.log(error);
-      return next(new ErrorHandler(error, 400));
-    }
+    console.log(error);
+    return next(new ErrorHandler(error, 400));
+  }
 }));
 
 router.get(
@@ -147,8 +153,8 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     try {
 
-console.log(new Date(new Date(req.query.date).setHours(0, 0, 0, 0)+( 5.5 * 60 * 60 * 1000 )));
- // ignore the timezone
+      console.log(new Date(new Date(req.query.date).setHours(0, 0, 0, 0) + (5.5 * 60 * 60 * 1000)));
+      // ignore the timezone
       const shift = await ShiftPlan.find({
         date: { $eq: new Date(new Date(req.query.date).setHours(0, 0, 0, 0)) },
       }).populate({
@@ -196,7 +202,7 @@ router.get(
 
 const getISTTime = (e) => {
   let d = new Date(e)
-  return d.getTime() + ( 5.5 * 60 * 60 * 1000 )
+  return d.getTime() + (5.5 * 60 * 60 * 1000)
 }
 router.get(
   "/get-in-range",
@@ -214,7 +220,7 @@ router.get(
 
       shifts.forEach(((e) => {
 
-        const da=getISTTime(e.date);
+        const da = getISTTime(e.date);
 
         const date = new Date(da).toISOString().slice(0, 10).split('-').reverse().join('-');
         if (p.get(date) != null) {
@@ -261,7 +267,7 @@ router.post('/enter-shift-production', catchAsyncErrors(async (req, res, next) =
     const emp = await Employee.findById(shift.employee);
     const sp = await ShiftPlan.findById(shift.shiftPlan);
 
-   
+
     sp.totalProduction += req.body.production * machine.NoOfHead;
 
 
@@ -392,6 +398,14 @@ router.get(
     }
   })
 );
+
+
+
+
+/**
+ * ✅ CREATE SHIFT DETAIL (Assign Operator + Machine)
+ */
+
 
 
 module.exports = router;

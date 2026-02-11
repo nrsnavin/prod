@@ -149,6 +149,30 @@ router.get(
 );
 
 
+// routes/shift.js
+router.get(
+  "/running-machines",
+  async (req, res, next) => {
+    try {
+      const machines = await Machine.find({ status: "running" })
+        .populate("orderRunning", "jobOrderNo")
+        .select("ID orderRunning");
+
+      const data = machines.map(m => ({
+        machineId: m._id,
+        ID: m.ID,
+        jobOrderNo: m.orderRunning?.jobOrderNo ?? "-"
+      }));
+
+      res.json({ success: true, data });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+
+
 
 
 module.exports = router
