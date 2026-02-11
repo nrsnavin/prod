@@ -657,7 +657,7 @@ router.get(
         .populate({
           path: "shiftDetails",
           populate: {
-            path: "employees",
+            path: "employee",
             select: "name",
           },
         })

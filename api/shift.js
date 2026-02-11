@@ -311,6 +311,39 @@ router.get(
   })
 );
 
+router.post("/update", async (req, res) => {
+  const { shiftId, production, timer, feedback } = req.body;
+
+  const shift = await ShiftDetail.findById(shiftId);
+
+  shift.production = production;
+  shift.timer = timer;
+  shift.feedback = feedback;
+  shift.status = "closed";
+
+  await shift.save();
+
+  res.json({ success: true, shift });
+});
+
+
+router.get("/open", async (req, res) => {
+  const shifts = await ShiftDetail.find({
+    status: "open",
+  })
+    .populate("employee")
+    .populate({
+      path: "machine",
+      populate: {
+        path: "orderRunning",
+      },
+    })
+    .sort({ date: -1 });
+
+  res.json({ success: true, shifts });
+});
+
+
 router.get(
   "/shiftDetail",
 
