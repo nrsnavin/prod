@@ -7,6 +7,7 @@ const ErrorHandler = require("../utils/ErrorHandler");
 
 const Employee = require("../models/Employee.js");
 const Machine = require("../models/Machine.js");
+const Order = require("../models/Order.js");
 
 const ShiftDetail = require("../models/ShiftDetail.js");
 const ShiftPlan = require("../models/ShiftPlan.js");
@@ -256,24 +257,123 @@ router.get(
 router.post('/enter-shift-production', catchAsyncErrors(async (req, res, next) => {
   try {
 
-    const shift = await ShiftDetail.findById(req.body.id);
+    // const shift = await ShiftDetail.findById(req.body.id);
+
+    console.log(req.body);
+    const shift = await ShiftDetail.findById(req.body.id)
+      .populate("machine")
+      .populate({
+        path: "machine",
+        populate: {
+          path: "orderRunning",
+        },
+      });
+
+        const machine = await Machine.findById(shift.machine);
+    const sp = await ShiftPlan.findById(shift.shiftPlan);
+
+
+    if (!shift) {
+      return res.status(404).json({ message: "Shift not found" });
+    }
+
+    const jobId = shift.machine.orderRunning._id;
+
+    const job = await JobOrder.findById(jobId);
+
+    if (!job) {
+      return res.status(404).json({ message: "Job not found" });
+    }
+
+    const elasticProductionMap = {};
+
+    for (const head of shift.machine.elastics) {
+      const id = head.elastic.toString();
+
+      if (!elasticProductionMap[id]) {
+        elasticProductionMap[id] = 0;
+      }
+
+      elasticProductionMap[id] += req.body.production;
+    }
+
+    for (const elasticId in elasticProductionMap) {
+      const index = job.producedElastic.findIndex(
+        (e) => e.elastic.toString() === elasticId
+      );
+
+      if (index >= 0) {
+        job.producedElastic[index].quantity += elasticProductionMap[elasticId];
+      } else {
+        job.producedElastic.push({
+          elastic: elasticId,
+          quantity: elasticProductionMap[elasticId],
+        });
+      }
+    }
+
+
+
+    job.elastics.forEach((e, index) => {
+      const produced = job.producedElastic[index].quantity;
+      const planned = e.quantity;
+
+      const pending = planned - produced;
+      if (pending < 0) job.producedElastic[index].quantity = planned;
+    });
+
+
+    console.log(job);
+
+    await job.save();
+
+    // 📦 Also Update Order Pending
+    const order = await Order.findById(job.order);
+
+    job.producedElastic.forEach((p) => {
+      const orderItem = order.producedElastic.find(
+        (o) => o.elastic.toString() === p.elastic.toString()
+      );
+
+      if (orderItem) {
+        orderItem.quantity += p.quantity;
+      }
+    });
+
+    order.pendingElastic.forEach((p) => {
+      const produced = order.producedElastic.find(
+        (o) => o.elastic.toString() === p.elastic.toString()
+      );
+
+      if (produced) {
+        p.quantity =
+          order.elasticOrdered.find(
+            (e) => e.elastic.toString() === p.elastic.toString()
+          ).quantity - produced.quantity;
+      }
+    });
+
+    console.log(order);
+
+    await order.save();
+
 
     shift.production = req.body.production;
     shift.feedback = req.body.feedback;
     shift.status = "closed";
+
     shift.timer = req.body.timer;
 
-    const machine = await Machine.findById(shift.machine);
-    const emp = await Employee.findById(shift.employee);
-    const sp = await ShiftPlan.findById(shift.shiftPlan);
+    await shift.save();
 
+    console.log(shift);
+
+  
 
     sp.totalProduction += req.body.production * machine.NoOfHead;
 
 
-    await machine.save();
     await shift.save();
-    await emp.save();
     await sp.save();
 
 
@@ -350,8 +450,16 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     try {
 
+      console.log(req.query.id)
 
-      const shift = await ShiftDetail.findById(req.query.id).populate('employee').populate('machine').exec();
+
+      const shift = await ShiftDetail.findById(req.query.id).populate('employee').populate({ path: 'elastics', populate: { path: 'elastic' } }).populate({
+        path: "machine",
+        populate: {
+          path: "orderRunning",
+        },
+
+      }).exec();
 
       res.status(201).json({
         success: true,

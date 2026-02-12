@@ -33,11 +33,6 @@ const ShiftPlanSchema = new mongoose.Schema(
       },
     ],
 
-    status: {
-      type: String,
-      enum: ["planned", "running", "completed"],
-      default: "planned",
-    },
   },
   { timestamps: true }
 );
