@@ -449,6 +449,7 @@ const Warping = require("../models/Warping");
 const Covering = require("../models/Covering");
 const Wastage = require("../models/Wastage");
 const Packing = require("../models/Packing");
+const ShiftDetail = require("../models/ShiftDetail.js");
 
 const Machine = require("../models/Machine.js");
 
@@ -842,16 +843,18 @@ router.get("/jobs-checking", async (req, res) => {
 });
 
 
-router.get("/job-operators/:jobId", async (req, res) => {
+router.get("/job-operators", async (req, res) => {
   try {
+    console.log("Fetching operators for job", req.query.id);
     const shifts = await ShiftDetail.find({
-      job: req.params.jobId,
+      job: req.query.id,
     }).populate("employee");
 
     const operators = shifts.map((s) => s.employee);
 
     res.json({ success: true, operators });
   } catch (err) {
+    console.error("Error fetching job operators:", err);  
     res.status(500).json({ message: err.message });
   }
 });

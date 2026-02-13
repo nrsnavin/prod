@@ -159,5 +159,61 @@ router.get(
 );
 
 
+router.get("/jobs-packing", async (req, res) => {
+  try {
+    console.log("Fetching packing jobs");
+    const jobs = await JobOrder.find({ status: "packing" })
+      .populate("customer")
+      .populate("elastics.elastic")
+      .select("_id jobOrderNo elastics");
+
+    res.json({ success: true, jobs });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+
+});
+
+
+router.get("/employees-by-department/:dept", async (req, res) => {
+  try {
+    const employees = await Employee.find({
+      department: req.params.dept,
+    }).select("_id name");
+
+    res.json({ success: true, employees });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+router.post("/create-packing", async (req, res) => {
+  try {
+    const packing = await Packing.create(req.body);
+
+    // 🔥 Update Job packedElastic
+    const job = await JobOrder.findById(req.body.job);
+
+    const index = job.packedElastic.findIndex(
+      (e) => e.elastic.toString() === req.body.elastic
+    );
+
+    if (index >= 0) {
+      job.packedElastic[index].quantity += req.body.meter;
+    }
+
+    job.packingDetails.push(packing._id);
+
+    await job.save();
+
+    res.json({ success: true, packing });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+
 
 module.exports = router;

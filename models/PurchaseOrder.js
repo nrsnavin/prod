@@ -1,47 +1,45 @@
-import mongoose from 'mongoose';
+const mongoose = require("mongoose");
 
-const purchaseOrderSchema = new mongoose.Schema(
+const PurchaseItemSchema = new mongoose.Schema(
   {
-    poNumber: {
-      type: String,
+    rawMaterial: {
+      type: mongoose.Types.ObjectId,
+      ref: "RawMaterial",
       required: true,
-      unique: true,
     },
+    price: Number,
+    quantity: Number,
+    receivedQuantity: {
+      type: Number,
+      default: 0,
+    },
+  },
+  { _id: false }
+);
 
+const PurchaseOrderSchema = new mongoose.Schema(
+  {
+    date: {
+      type: Date,
+      default: Date.now,
+    },
     supplier: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Supplier',
+      type: mongoose.Types.ObjectId,
+      ref: "Supplier",
       required: true,
     },
-
-    materials: [
-      {
-        rawMaterial: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: 'RawMaterial',
-          required: true,
-        },
-        quantity: {
-          type: Number, // Double
-          required: true,
-        },
-        rate: {
-          type: Number,
-        },
-      },
-    ],
-
+    items: [PurchaseItemSchema],
     status: {
       type: String,
-      enum: ['CREATED', 'PARTIALLY_RECEIVED', 'RECEIVED', 'CANCELLED'],
-      default: 'CREATED',
+      enum: ["Open", "Partial", "Completed"],
+      default: "Open",
     },
-
-    expectedDate: {
-      type: Date,
+    poNo: {
+      type: Number,
+      immutable: true,
     },
   },
   { timestamps: true }
 );
 
-export default mongoose.model('PurchaseOrder', purchaseOrderSchema);
+module.exports = mongoose.model("PurchaseOrder", PurchaseOrderSchema);

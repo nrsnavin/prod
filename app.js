@@ -33,6 +33,8 @@ const warping = require("./api/warping.js")
 
 const covering = require("./api/covering.js")
 
+const packing = require("./api/packing.js")
+
 
 
 const corsConfig = {
@@ -129,6 +131,15 @@ app.use("/api/v2/job", (req, res, next) => {
 
   next()
 }, job);
+
+
+
+app.use("/api/v2/packing", (req, res, next) => {
+  console.log("packing route hit");
+
+  next()
+}, packing);
+
 
 
 // config
