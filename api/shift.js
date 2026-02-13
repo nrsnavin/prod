@@ -358,7 +358,7 @@ router.post('/enter-shift-production', catchAsyncErrors(async (req, res, next) =
     await order.save();
 
 
-    shift.production = req.body.production;
+    shift.productionMeters = req.body.production;
     shift.feedback = req.body.feedback;
     shift.status = "closed";
 
@@ -389,6 +389,44 @@ router.post('/enter-shift-production', catchAsyncErrors(async (req, res, next) =
   }
 })
 )
+
+
+router.post("/job/update-status", async (req, res) => {
+  try {
+    const { jobId, nextStatus } = req.body;
+
+    const job = await JobOrder.findById(jobId);
+
+    if (!job) {
+      return res.status(404).json({ message: "Job not found" });
+    }
+
+    const allowedTransitions = {
+      weaving: "finishing",
+      finishing: "checking",
+      checking: "packing",
+      packing: "completed",
+    };
+
+    if (allowedTransitions[job.status] !== nextStatus) {
+      return res.status(400).json({
+        message: `Invalid transition from ${job.status} to ${nextStatus}`,
+      });
+    }
+
+    job.status = nextStatus;
+
+    await job.save();
+
+    res.json({
+      success: true,
+      job,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 
 
 

@@ -56,6 +56,8 @@ const JobOrderSchema = new mongoose.Schema(
       enum: [
         "preparatory",
         "weaving",
+        "finishing",
+        "checking",
         "packing",
         "completed",
         "cancelled",

@@ -616,6 +616,53 @@ router.post(
   })
 );
 
+router.post("/update-status", async (req, res) => {
+  try {
+    const { jobId, nextStatus } = req.body;
+
+    const job = await JobOrder.findById(jobId);
+
+    if (!job) {
+      return res.status(404).json({ message: "Job not found" });
+    }
+
+    const allowedTransitions = {
+      weaving: "finishing",
+      finishing: "checking",
+      checking: "packing",
+      packing: "completed",
+    };
+
+
+    console.log(`Attempting to transition job ${jobId} from ${job.status} to ${nextStatus}`);
+
+    if (allowedTransitions[job.status] !== nextStatus) {
+      return res.status(400).json({
+        message: `Invalid transition from ${job.status} to ${nextStatus}`,
+      });
+    }
+
+    job.status = nextStatus;
+
+     
+
+    await job.save();
+
+    console.log(`Job ${jobId} status updated to ${nextStatus}`);
+
+    res.json({
+      success: true,
+      job,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+
+
+
 
 router.get(
   "/detail",
