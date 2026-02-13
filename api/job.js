@@ -644,7 +644,7 @@ router.post("/update-status", async (req, res) => {
 
     job.status = nextStatus;
 
-     
+
 
     await job.save();
 
@@ -827,6 +827,109 @@ router.post(
 
   })
 );
+
+
+router.get("/jobs-checking", async (req, res) => {
+  try {
+    const jobs = await JobOrder.find({ status: "checking" })
+      .populate("customer")
+      .select("_id jobOrderNo elastics");
+
+    res.json({ success: true, jobs });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+router.get("/job-operators/:jobId", async (req, res) => {
+  try {
+    const shifts = await ShiftDetail.find({
+      job: req.params.jobId,
+    }).populate("employee");
+
+    const operators = shifts.map((s) => s.employee);
+
+    res.json({ success: true, operators });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+router.post("/create-wastage", async (req, res) => {
+  try {
+    const { job, elastic, employee, quantity, penalty, reason } = req.body;
+
+    const wastage = await Wastage.create({
+      job,
+      elastic,
+      employee,
+      quantity,
+      penalty,
+      reason,
+    });
+
+    // 🔥 Update Job WastageElastic
+    const jobDoc = await JobOrder.findById(job);
+
+    const index = jobDoc.wastageElastic.findIndex(
+      (e) => e.elastic.toString() === elastic
+    );
+
+    if (index >= 0) {
+      jobDoc.wastageElastic[index].quantity += quantity;
+    }
+
+    await jobDoc.save();
+
+    res.json({ success: true, wastage });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+
+router.get("/jobs", async (req, res) => {
+  try {
+    console.log("Fetching jobs with filters:", req.query);
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const status = req.query.status;
+    const search = req.query.search;
+
+    const query = {};
+
+    if (status && status !== "all") {
+      query.status = status;
+    }
+
+    if (search) {
+      query.jobOrderNo = Number(search);
+    }
+
+    const jobs = await JobOrder.find(query)
+      .populate("customer", "name")
+      .populate("machine", "ID status")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
+
+
+    const total = await JobOrder.countDocuments(query);
+
+    res.json({
+      success: true,
+      jobs,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 
 
 
