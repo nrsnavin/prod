@@ -178,6 +178,159 @@ router.get(
 );
 
 
+router.get("/today", async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const tomorrow = new Date(today);
+    tomorrow.setDate(today.getDate() + 1);
+
+    const plans = await ShiftPlan.find({
+      date: { $gte: today, $lt: tomorrow },
+    })
+      .populate({
+        path: "plan",
+        populate: [
+          { path: "machine" },
+          { path: "employee" },
+        ],
+      })
+      .lean();
+
+    const getShiftData = (shiftType) => {
+      const shift =
+        plans.find((p) => p.shift === shiftType) || null;
+
+      if (!shift) {
+        return {
+          id: "test",
+          shift: shiftType,
+          production: 0,
+          machinesRunning: 0,
+          operatorCount: 0,
+          status: "open",
+          plan: [],
+        };
+      }
+
+      const production = shift.plan.reduce(
+        (sum, detail) => sum + (detail.production || 0),
+        0
+      );
+
+      const uniqueOperators = new Set(
+        shift.plan.map((d) =>
+          d.employee ? d.employee._id.toString() : null
+        )
+      );
+
+      return {
+        ...shift,
+        production,
+        machinesRunning: shift.plan.length,
+        operatorCount: uniqueOperators.size,
+      };
+    };
+
+    res.status(200).json({
+      success: true,
+      data: {
+        dayShift: getShiftData("DAY"),
+        nightShift: getShiftData("NIGHT"),
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+
+
+router.get(
+  "/shiftPlanById", async (req, res) => {
+    try {
+      const { id } = req.query;
+      console.log(id);
+
+      const shiftPlan = await ShiftPlan.findById(id)
+        .populate({
+          path: "plan",
+          populate: [
+            {
+              path: "machine",
+              model: "Machine",
+            },
+            {
+              path: "employee",
+              model: "Employee",
+            },
+          ],
+        });
+
+      if (!shiftPlan) {
+        return res.status(404).json({
+          success: false,
+          message: "Shift Plan not found",
+        });
+      }
+
+      let totalProduction = 0;
+
+      const machines = await Promise.all(
+        shiftPlan.plan.map(async (detail) => {
+          totalProduction += detail.production || 0;
+
+          // Fetch Job from Machine
+          const machine = await Machine.findById(detail.machine._id)
+            .populate("orderRunning");
+
+          let jobOrderNo = "";
+
+          if (machine && machine.orderRunning) {
+            const job = await JobOrder.findById(machine.orderRunning);
+            jobOrderNo = job ? job.jobOrderNo.toString() : "";
+          }
+
+          return {
+            machineId: detail.machine._id,
+            machineName: detail.machine.ID || detail.machine.manufacturer + " " + detail.machine.ID,
+            jobOrderNo,
+            operatorName: detail.employee.name,
+            production: detail.production,
+            timer: detail.timer,
+            status: detail.status,
+          };
+        })
+      );
+
+      const operatorCount = shiftPlan.plan.length;
+
+      res.status(200).json({
+        success: true,
+        data: {
+          _id: shiftPlan._id,
+          date: shiftPlan.date,
+          shift: shiftPlan.shift,
+          description: shiftPlan.description,
+          totalProduction,
+          operatorCount,
+          machines,
+        },
+      });
+    } catch (error) {
+      console.error(error);
+      res.status(500).json({
+        success: false,
+        message: "Server Error",
+      });
+    }
+  });
+
 router.get(
   "/shiftPLan",
 
@@ -269,7 +422,7 @@ router.post('/enter-shift-production', catchAsyncErrors(async (req, res, next) =
         },
       });
 
-        const machine = await Machine.findById(shift.machine);
+    const machine = await Machine.findById(shift.machine);
     const sp = await ShiftPlan.findById(shift.shiftPlan);
 
 
@@ -368,7 +521,7 @@ router.post('/enter-shift-production', catchAsyncErrors(async (req, res, next) =
 
     console.log(shift);
 
-  
+
 
     sp.totalProduction += req.body.production * machine.NoOfHead;
 
