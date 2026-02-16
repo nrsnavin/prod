@@ -215,5 +215,48 @@ router.post("/create-packing", async (req, res) => {
 
 
 
+router.get("/grouped", async (req, res) => {
+  const grouped = await Packing.aggregate([
+    {
+      $group: {
+        _id: "$jobOrderNo",
+        totalBoxes: { $sum: 1 },
+      },
+    },
+    {
+      $project: {
+        jobOrderNo: "$_id",
+        totalBoxes: 1,
+        _id: 0,
+      },
+    },
+  ]);
+
+  res.json(grouped);
+});
+
+
+router.get("/job/:jobNo", async (req, res) => {
+  const data = await Packing.find({
+    jobOrderNo: req.params.jobNo,
+  });
+
+  res.json(data);
+});
+
+
+
+router.get("/:id", async (req, res) => {
+  const packing = await Packing.findById(
+    req.params.id
+  )
+    .populate("job")
+    .populate("checkedBy")
+    .populate("packedBy");
+
+  res.json(packing);
+});
+
+
 
 module.exports = router;
