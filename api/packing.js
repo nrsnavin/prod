@@ -192,6 +192,8 @@ router.post("/create-packing", async (req, res) => {
   try {
     const packing = await Packing.create(req.body);
 
+    console.log("Packing created:", packing);
+
     // 🔥 Update Job packedElastic
     const job = await JobOrder.findById(req.body.job);
 
@@ -209,6 +211,7 @@ router.post("/create-packing", async (req, res) => {
 
     res.json({ success: true, packing });
   } catch (err) {
+    console.error("Error creating packing:", err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -225,7 +228,7 @@ router.get("/grouped", async (req, res) => {
     },
     {
       $project: {
-        jobOrderNo: "$_id",
+        jobOrderNo: "$jobOrderNo",
         totalBoxes: 1,
         _id: 0,
       },

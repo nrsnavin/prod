@@ -55,13 +55,13 @@ const PackingSchema = new mongoose.Schema(
     checkedBy: {
       type: mongoose.Types.ObjectId,
       ref: "Employee",
-      required: true,
+      default: "697755809a83e2490a7f3855",
     },
 
     packedBy: {
       type: mongoose.Types.ObjectId,
       ref: "Employee",
-      required: true,
+      default: "697755809a83e2490a7f3855",
     },
   },
   { timestamps: true }
