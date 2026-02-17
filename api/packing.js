@@ -13,149 +13,149 @@ const Order = require("../models/Order.js");
 
 
 router.post(
-    "/add-packing",
-    // isAuthenticated,
-    catchAsyncErrors(async (req, res, next) => {
-        try {
-            const job = await JobOrder.findOne({ jobOrderNo: parseInt(req.body.job) });
-            const packing = await Packing.create(
-                {
-                    checkedBy: req.body.checkedBy,
-                    date: req.body.date,
-                    elastic: req.body.elastic,
-                    packedBy: req.body.packedBy,
-                    quantity: req.body.quantity,
-                    noOfJoints: req.body.noOfJoints,
-                    weight: req.body.weight,
-                    job: job._id,
-                }
-            );
-
-
-            const i = job.packedElastic.findIndex((e) => e.id == req.body.elastic)
-
-            job.packedElastic[i].quantity += req.body.quantity;
-
-
-            job.packingDetails.push(packing._id);
-
-
-
-            await job.save();
-
-
-
-            res.status(201).json({
-                success: true,
-                packing,
-            });
-        } catch (error) {
-            console.log(error.message);
-
-            return next(new ErrorHandler(error.message, 500));
+  "/add-packing",
+  // isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const job = await JobOrder.findOne({ jobOrderNo: parseInt(req.body.job) });
+      const packing = await Packing.create(
+        {
+          checkedBy: req.body.checkedBy,
+          date: req.body.date,
+          elastic: req.body.elastic,
+          packedBy: req.body.packedBy,
+          quantity: req.body.quantity,
+          noOfJoints: req.body.noOfJoints,
+          weight: req.body.weight,
+          job: job._id,
         }
-    })
+      );
+
+
+      const i = job.packedElastic.findIndex((e) => e.id == req.body.elastic)
+
+      job.packedElastic[i].quantity += req.body.quantity;
+
+
+      job.packingDetails.push(packing._id);
+
+
+
+      await job.save();
+
+
+
+      res.status(201).json({
+        success: true,
+        packing,
+      });
+    } catch (error) {
+      console.log(error.message);
+
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
 );
 
 
 router.post(
-    "/login",
-    catchAsyncErrors(async (req, res, next) => {
-        try {
-            const { userName, password } = req.body;
+  "/login",
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const { userName, password } = req.body;
 
-            console.log(password);
-
-
-            if (!userName || !password) {
-                return next(new ErrorHandler("Please provide the all fields!", 400));
-            }
-
-            const employee = await Employee.findOne({ userName }).select("+password");
+      console.log(password);
 
 
+      if (!userName || !password) {
+        return next(new ErrorHandler("Please provide the all fields!", 400));
+      }
+
+      const employee = await Employee.findOne({ userName }).select("+password");
 
 
 
-            if (!employee) {
-                return next(new ErrorHandler("User doesn't exists!", 400));
-            }
-            if (employee.password == password && employee.Department == "packing") {
-                //   const token = generateToken(employee);
-
-                //   console.log(token);
-                console.log(employee);
 
 
+      if (!employee) {
+        return next(new ErrorHandler("User doesn't exists!", 400));
+      }
+      if (employee.password == password && employee.Department == "packing") {
+        //   const token = generateToken(employee);
 
-                res
-                    .status(201)
-                    .json({
-                        username: employee.name,
-                        id: employee._id,
-                        role: employee.role,
-                        totalWastage: employee.totalWastage,
-                        totalProduction: employee.totalProduction,
-                        skill: employee.skill,
-                        Department: employee.Department,
-                        aadhar: employee.aadhar,
-                        totalShifts: employee.totalShifts,
+        //   console.log(token);
+        console.log(employee);
 
-                        //   token: token,
 
-                    });
-            } else {
-                res.status(401).json({ message: "Invalid Credentials" });
-            }
-        }
 
-        catch (error) {
-            return next(new ErrorHandler(error.message, 500));
-        }
-    })
+        res
+          .status(201)
+          .json({
+            username: employee.name,
+            id: employee._id,
+            role: employee.role,
+            totalWastage: employee.totalWastage,
+            totalProduction: employee.totalProduction,
+            skill: employee.skill,
+            Department: employee.Department,
+            aadhar: employee.aadhar,
+            totalShifts: employee.totalShifts,
+
+            //   token: token,
+
+          });
+      } else {
+        res.status(401).json({ message: "Invalid Credentials" });
+      }
+    }
+
+    catch (error) {
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
 );
 
 
 router.get(
-    "/get-packing",
-    // isAuthenticated,
-    catchAsyncErrors(async (req, res, next) => {
-        try {
-            const packing = await Packing.find().populate("elastic").sort({
-                createdAt: -1,
-            }).exec();
-            res.status(201).json({
-                success: true,
-                packing,
-            });
-        } catch (error) {
-            return next(new ErrorHandler(error.message, 500));
-        }
-    })
+  "/get-packing",
+  // isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const packing = await Packing.find().populate("elastic").sort({
+        createdAt: -1,
+      }).exec();
+      res.status(201).json({
+        success: true,
+        packing,
+      });
+    } catch (error) {
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
 );
 
 
 router.get(
-    "/get-packing-detail",
-    // isAuthenticated,
-    catchAsyncErrors(async (req, res, next) => {
-        try {
-            const packing = await Packing.findById(req.query.id)
-            .populate("elastic")
-            .populate('checkedBy')
-            .populate('packedBy')
-            .populate('job').exec();
+  "/get-packing-detail",
+  // isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const packing = await Packing.findById(req.query.id)
+        .populate("elastic")
+        .populate('checkedBy')
+        .populate('packedBy')
+        .populate('job').exec();
 
 
 
-            res.status(201).json({
-                success: true,
-                packing,
-            });
-        } catch (error) {
-            return next(new ErrorHandler(error.message, 500));
-        }
-    })
+      res.status(201).json({
+        success: true,
+        packing,
+      });
+    } catch (error) {
+      return next(new ErrorHandler(error.message, 500));
+    }
+  })
 );
 
 
@@ -219,30 +219,38 @@ router.post("/create-packing", async (req, res) => {
 
 
 router.get("/grouped", async (req, res) => {
+
+
+
   const grouped = await Packing.aggregate([
     {
       $group: {
-        _id: "$jobOrderNo",
+        _id: "$job",
         totalBoxes: { $sum: 1 },
       },
     },
     {
       $project: {
-        jobOrderNo: "$jobOrderNo",
+        job: "$_id",
         totalBoxes: 1,
         _id: 0,
       },
     },
   ]);
 
-  res.json(grouped);
+
+  const result = await JobOrder.populate(grouped, { path: "job", select: "jobOrderNo" });
+
+  res.json(result);
 });
 
 
 router.get("/job/:jobNo", async (req, res) => {
   const data = await Packing.find({
-    jobOrderNo: req.params.jobNo,
+    job: req.params.jobNo,
   });
+
+  console.log("Packing data for job", req.params.jobNo, data);
 
   res.json(data);
 });
