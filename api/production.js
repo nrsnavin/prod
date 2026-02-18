@@ -5,8 +5,87 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const Production = require("../models/Production.js");
 const Machine = require("../models/Machine.js");
 const moment = require("moment");
+const ShiftDetail = require("../models/ShiftDetail.js");
+const ShiftPlan = require("../models/ShiftPlan.js");
 
 
+
+router.get("/date",async (req, res) => {
+  try {
+    const dateParam = req.query.date;
+    const date = new Date(dateParam);
+
+    const nextDay = new Date(date);
+    nextDay.setDate(date.getDate() + 1);
+
+    const plans = await ShiftPlan.find({
+      date: { $gte: date, $lt: nextDay }
+    })
+      .populate({
+        path: "plan",
+        select: "production"
+      });
+
+    const response = plans.map(p => ({
+      id: p._id,
+      shift: p.shift,
+      totalProduction: p.totalProduction,
+      machineCount: p.plan.length
+    }));
+
+    res.json({
+      success: true,
+      data: response
+    });
+
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+})
+
+
+router.get("/date-range",
+    async (req, res) => {
+        try {
+            const { from, to } = req.query;
+
+            const start = new Date(from);
+            const end = new Date(to);
+            end.setHours(23, 59, 59, 999);
+
+            const result = await ShiftPlan.aggregate([
+                {
+                    $match: {
+                        date: { $gte: start, $lte: end },
+                       
+                    }
+                },
+                {
+                    $group: {
+                        _id: {
+                            date: {
+                                $dateToString: { format: "%Y-%m-%d", date: "$date" }
+                            }
+                        },
+                        totalProduction: { $sum: "$totalProduction" }
+                    }
+                },
+                { $sort: { "_id.date": 1 } }
+            ]);
+
+            res.json({
+                success: true,
+                data: result.map(r => ({
+                    date: r._id.date,
+                    totalProduction: r.totalProduction
+                }))
+            });
+
+        } catch (error) {
+            res.status(500).json({ message: error.message });
+        }
+    }
+)
 
 
 

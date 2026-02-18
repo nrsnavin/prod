@@ -67,6 +67,7 @@ router.post(
           status: "open",
           machine: machine._id,
           employee: employee._id,
+          job: job._id,
           shiftPlan: sp._id,
           elastics: machine.elastics,
         });

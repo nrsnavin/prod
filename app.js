@@ -37,6 +37,9 @@ const packing = require("./api/packing.js")
 
 
 
+const production = require("./api/production.js")
+
+
 const corsConfig = {
   origin: true,
   credentials: true,
@@ -140,6 +143,13 @@ app.use("/api/v2/packing", (req, res, next) => {
   next()
 }, packing);
 
+
+
+app.use("/api/v2/production", (req, res, next) => {
+  console.log("production route hit");
+
+  next()
+}, production);
 
 
 // config

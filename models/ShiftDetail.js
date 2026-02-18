@@ -44,6 +44,13 @@ const ShiftDetailSchema = new mongoose.Schema(
       default: "open",
     },
 
+
+    job: {
+      type: mongoose.Types.ObjectId,
+      ref: "JobOrder",
+      required: true,
+    },
+
     // ⏱ TIMER (HH:mm:ss)
     timer: {
       type: String,
