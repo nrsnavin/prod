@@ -379,6 +379,8 @@ router.put(
 router.get(
   "/warpingPlan",
   catchAsyncErrors(async (req, res) => {
+
+    
     const plan = await WarpingPlan.findOne({
       _id: req.query.id,
     })
@@ -403,7 +405,8 @@ console.log(plan);
 router.post(
   "/warpingPlan/create",
   catchAsyncErrors(async (req, res) => {
-    const warpingId = req.body.warpingId;
+   try {
+     const warpingId = req.body.warpingId;
 
     const warping = await Warping.findById(warpingId);
     if (!warping) {
@@ -432,6 +435,10 @@ router.post(
       success: true,
       plan,
     });
+   } catch (error) {
+    console.log(error);
+    res.status(500).json({ success: false, message: error.message });
+   }
   })
 );
 

@@ -28,7 +28,7 @@ const WarpingPlanSchema = new mongoose.Schema(
       type: mongoose.Types.ObjectId,
       ref: "Warping",
       required: true,
-      unique: true, // 🔒 ONE PLAN PER WARPING
+     // 🔒 ONE PLAN PER WARPING
     },
     job: {
       type: mongoose.Types.ObjectId,

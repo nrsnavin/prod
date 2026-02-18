@@ -635,8 +635,6 @@ router.post("/update-status", async (req, res) => {
     };
 
 
-    console.log(`Attempting to transition job ${jobId} from ${job.status} to ${nextStatus}`);
-
     if (allowedTransitions[job.status] !== nextStatus) {
       return res.status(400).json({
         message: `Invalid transition from ${job.status} to ${nextStatus}`,
@@ -644,6 +642,18 @@ router.post("/update-status", async (req, res) => {
     }
 
     job.status = nextStatus;
+
+
+    if (nextStatus === "finishing") {
+      // Release machine
+      if (job.machine) {
+        const machine = await Machine.findById(job.machine);
+        if (machine) {
+          machine.status = "free"; machine.orderRunning = null;
+          await machine.save();
+        } else { console.warn(`Machine ${job.machine} not found while completing job ${jobId}`); }
+      }
+    }
 
 
 
@@ -854,7 +864,7 @@ router.get("/job-operators", async (req, res) => {
 
     res.json({ success: true, operators });
   } catch (err) {
-    console.error("Error fetching job operators:", err);  
+    console.error("Error fetching job operators:", err);
     res.status(500).json({ message: err.message });
   }
 });
