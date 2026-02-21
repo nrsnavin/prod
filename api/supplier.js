@@ -317,6 +317,7 @@ router.post(
         poStatus: po.status,
       });
     } catch (error) {
+      console.log(error.message);
       return next(new ErrorHandler(error.message, 400));
     }
   })

@@ -159,6 +159,8 @@ router.post(
     try {
       const elasticData = req.body;
 
+      console.log("Received elastic data:", elasticData);
+
       // 1️⃣ Create Elastic first
       const elastic = await Elastic.create(elasticData);
 

@@ -4,13 +4,11 @@ const router = express.Router();
 // const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
-
 const Customer = require("../models/Customer");
 
-
+// ── Create customer ────────────────────────────────────────────
 router.post(
   "/create",
-  // isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const customerData = req.body;
 
@@ -27,21 +25,12 @@ router.post(
   })
 );
 
-
+// ── Update customer ────────────────────────────────────────────
 router.put(
   "/update",
-  // isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
-    console.log("Updating customer:"
-
-
-
-
-
-
-
-      
-    );
+    // FIX: was `console.log("Updating customer:"` — dangling string (broken syntax)
+    console.log("Updating customer:", req.body._id);
 
     const customer = await Customer.findByIdAndUpdate(
       req.body._id,
@@ -60,70 +49,78 @@ router.put(
   })
 );
 
+// ── Soft delete (deactivate) ───────────────────────────────────
+// FIX: added this route — was called by Flutter controller but missing from backend
+router.delete(
+  "/delete-customer",
+  catchAsyncErrors(async (req, res, next) => {
+    const customer = await Customer.findById(req.query.id);
 
-// router.delete(
-//   "/delete/:id",
-//   // isAuthenticated,
-//   // isAdmin("Admin"),
-//   catchAsyncErrors(async (req, res, next) => {
-//     const customer = await Customer.findById(req.params.id);
+    if (!customer) {
+      return next(new ErrorHandler("Customer not found", 404));
+    }
 
-//     if (!customer) {
-//       return next(new ErrorHandler("Customer not found", 404));
-//     }
+    // Soft delete — set status to Inactive instead of hard delete
+    customer.status = "Inactive";
+    await customer.save();
 
-//     customer.isActive = false;
-//     await customer.save();
+    res.status(200).json({
+      success: true,
+      message: "Customer deactivated successfully",
+    });
+  })
+);
 
-//     res.status(200).json({
-//       success: true,
-//       message: "Customer deactivated successfully",
-//     });
-//   })
-// );
-
+// ── Get all customers (paginated + search) ─────────────────────
 router.get(
   "/all-customers",
   catchAsyncErrors(async (req, res) => {
-    const page = Number(req.query.page) || 1;
-    const limit = Number(req.query.limit) || 20;
-    const search = req.query.search || "";
+    const page   = Number(req.query.page)  || 1;
+    const limit  = Number(req.query.limit) || 20;
+    const search = req.query.search        || "";
 
     const skip = (page - 1) * limit;
 
     const query = search
       ? {
           $or: [
-            { name: { $regex: search, $options: "i" } },
+            { name:        { $regex: search, $options: "i" } },
             { phoneNumber: { $regex: search, $options: "i" } },
-            { gstin: { $regex: search, $options: "i" } },
+            { gstin:       { $regex: search, $options: "i" } },
           ],
         }
       : {};
 
-    const customers = await Customer.find(query)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+    const [customers, total] = await Promise.all([
+      Customer.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Customer.countDocuments(query),
+    ]);
 
     res.status(200).json({
       success: true,
       customers,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
     });
   })
 );
 
+// ── Get single customer detail ─────────────────────────────────
 router.get(
   "/customerDetail",
-  // isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.query;
 
-    console.log("sd");
-    
-    const customer = await Customer.findById(req.query.id);
+    if (!id) {
+      return next(new ErrorHandler("Customer ID is required", 400));
+    }
 
-    console.log(req.query.id);
-    
+    const customer = await Customer.findById(id).lean();
 
     if (!customer) {
       return next(new ErrorHandler("Customer not found", 404));
@@ -131,10 +128,9 @@ router.get(
 
     res.status(200).json({
       success: true,
-       customer,
+      customer,
     });
   })
 );
-
 
 module.exports = router;
