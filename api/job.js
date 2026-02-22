@@ -1,949 +1,797 @@
-// const express = require("express");
-// const router = express.Router();
-
-// const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-// const ErrorHandler = require("../utils/ErrorHandler");
-
-// const Order = require("../models/Order");
-// const JobOrder = require("../models/JobOrder");
-// const Machine = require("../models/Machine");
-// const Warping = require("../models/Warping");
-// const Covering = require("../models/Covering");
-
-
-// router.post(
-//   "/create",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const { date, status, order, elastics, customer } = req.body;
-
-//     if (!order || !elastics?.length) {
-//       return next(new ErrorHandler("Invalid job data", 400));
-//     }
-
-//     const filtered = elastics.filter(e => e.quantity > 0);
-
-//     const job = await JobOrder.create({
-//       date: new Date(date),
-//       status,
-//       order,
-//       customer,
-//       elastics: filtered,
-//       producedElastic: filtered.map(e => ({ id: e.id, quantity: 0 })),
-//       packedElastic: filtered.map(e => ({ id: e.id, quantity: 0 })),
-//       wastageElastic: filtered.map(e => ({ id: e.id, quantity: 0 })),
-//     });
-
-//     const orderDoc = await Order.findById(order);
-//     if (!orderDoc) return next(new ErrorHandler("Order not found", 404));
-
-//     for (const e of filtered) {
-//       const prod = orderDoc.producedElastic.find(x => x.id.equals(e.id));
-//       const pend = orderDoc.pendingElastic.find(x => x.id.equals(e.id));
-
-//       if (prod) prod.quantity += e.quantity;
-//       if (pend) pend.quantity -= e.quantity;
-//     }
-
-//     orderDoc.jobs.push({ id: job._id, no: job.jobOrderNo });
-//     await orderDoc.save();
-
-//     res.status(201).json({ success: true, job });
-//   })
-// );
-
-
-// router.get(
-//   "/:id",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const job = await JobOrder.findById(req.params.id)
-//       .populate("elastics.id")
-//       .populate("shiftDetails")
-//       .populate("warping")
-//       .populate("covering")
-//       .populate("machine");
-
-//     if (!job) return next(new ErrorHandler("Job not found", 404));
-
-//     const elastics = job.elastics.map(e => {
-//       const id = e.id._id;
-//       return {
-//         id,
-//         name: e.id.name,
-//         ordered: e.quantity,
-//         produced: job.producedElastic.find(x => x.id.equals(id))?.quantity || 0,
-//         wastage: job.wastageElastic.find(x => x.id.equals(id))?.quantity || 0,
-//         packed: job.packedElastic.find(x => x.id.equals(id))?.quantity || 0,
-//       };
-//     });
-
-//     res.status(200).json({
-//       success: true,
-//       job: {
-//         _id: job._id,
-//         jobOrderNo: job.jobOrderNo.toString(),
-//         date: job.date,
-//         status: job.status,
-//         customer: job.customer,
-//         elastics,
-//         machine: job.machine || "Not Assigned",
-//         warping: job.warping || "Not Assigned",
-//         covering: job.covering || "Not Assigned",
-//       },
-//     });
-//   })
-// );
-
-
-// router.post(
-//   "/approve-inventory/:id",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const job = await JobOrder.findById(req.params.id);
-//     if (!job) return next(new ErrorHandler("Job not found", 404));
-
-//     const warping = await Warping.create({
-//       date: new Date(),
-//       elasticOrdered: job.elastics,
-//       job: job._id,
-//     });
-
-//     const covering = await Covering.create({
-//       date: new Date(),
-//       elasticOrdered: job.elastics,
-//       job: job._id,
-//     });
-
-//     job.warping = warping._id;
-//     job.covering = covering._id;
-//     job.status = "warping&covering";
-
-//     await job.save();
-
-//     res.status(200).json({ success: true, job });
-//   })
-// );
-
-
-// router.post(
-//   "/warping/complete/:id",
-//   catchAsyncErrors(async (req, res) => {
-//     const warping = await Warping.findById(req.params.id);
-//     warping.status = "closed";
-//     warping.completedDate = new Date();
-//     await warping.save();
-//     res.json({ success: true });
-//   })
-// );
-
-// router.post(
-//   "/covering/complete/:id",
-//   catchAsyncErrors(async (req, res) => {
-//     const covering = await Covering.findById(req.params.id);
-//     covering.status = "closed";
-//     covering.completedDate = new Date();
-//     await covering.save();
-//     res.json({ success: true });
-//   })
-// );
-
-
-// router.post(
-//   "/weaving-plan",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const { jobId, machineId, elastics } = req.body;
-
-//     const job = await JobOrder.findById(jobId);
-//     const machine = await Machine.findById(machineId);
-
-//     if (!job || !machine) {
-//       return next(new ErrorHandler("Invalid job or machine", 400));
-//     }
-
-//     job.machine = machineId;
-//     job.status = "weaving";
-//     await job.save();
-
-//     machine.elastics = elastics;
-//     machine.orderRunning = jobId;
-//     machine.status = "running";
-//     await machine.save();
-
-//     res.status(200).json({ success: true });
-//   })
-// );
-
-
-// router.post(
-//   "/weaving-plan",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const { jobId, machineId, elastics } = req.body;
-
-//     const job = await JobOrder.findById(jobId);
-//     const machine = await Machine.findById(machineId);
-
-//     if (!job || !machine) {
-//       return next(new ErrorHandler("Invalid job or machine", 400));
-//     }
-
-//     job.machine = machineId;
-//     job.status = "weaving";
-//     await job.save();
-
-//     machine.elastics = elastics;
-//     machine.orderRunning = jobId;
-//     machine.status = "running";
-//     await machine.save();
-
-//     res.status(200).json({ success: true });
-//   })
-// );
-
-
-// router.get(
-//   "/running",
-//   catchAsyncErrors(async (req, res) => {
-//     const jobs = await JobOrder.find({
-//       status: { $ne: "closed" },
-//     });
-//     res.status(200).json({ success: true, jobs });
-//   })
-// );
-
-// router.post(
-//   "/approve-inventory/:jobId",
-//   // isAuthenticated,
-//   catchAsyncErrors(async (req, res, next) => {
-//     const { jobId } = req.params;
-
-//     // 1️⃣ Fetch Job
-//     const jobOrder = await JobOrder.findById(jobId);
-//     if (!jobOrder) {
-//       return next(new ErrorHandler("JobOrder not found", 404));
-//     }
-
-//     // 2️⃣ Prevent double approval
-//     if (jobOrder.warping || jobOrder.covering) {
-//       return next(
-//         new ErrorHandler("Inventory already approved for this job", 409)
-//       );
-//     }
-
-//     // 3️⃣ Create Warping
-//     const warping = await Warping.create({
-//       date: new Date(),
-//       elasticOrdered: jobOrder.elastics,
-//       job: jobOrder._id,
-//     });
-
-//     // 4️⃣ Create Covering
-//     const covering = await Covering.create({
-//       date: new Date(),
-//       elasticOrdered: jobOrder.elastics,
-//       job: jobOrder._id,
-//     });
-
-//     // 5️⃣ Update JobOrder
-//     jobOrder.warping = warping._id;
-//     jobOrder.covering = covering._id;
-//     jobOrder.status = "warping&covering";
-
-//     await jobOrder.save();
-
-//     res.status(200).json({
-//       success: true,
-//       message: "Inventory approved successfully",
-//       data: {
-//         jobId: jobOrder._id,
-//         warping: warping._id,
-//         covering: covering._id,
-//       },
-//     });
-//   })
-// );
-
-// router.post(
-//   "/weaving/complete/:jobId",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const job = await JobOrder.findById(req.params.jobId);
-//     if (!job) return next(new ErrorHandler("Job not found", 404));
-
-//     if (job.status !== "weaving") {
-//       return next(
-//         new ErrorHandler("Job is not in weaving stage", 400)
-//       );
-//     }
-
-//     // Release machine
-//     if (job.machine) {
-//       const machine = await Machine.findById(job.machine);
-//       if (machine) {
-//         machine.status = "free";
-//         machine.orderRunning = null;
-//         await machine.save();
-//       }
-//     }
-
-//     job.status = "finishing";
-//     await job.save();
-
-//     res.status(200).json({
-//       success: true,
-//       message: "Weaving completed",
-//       jobId: job._id,
-//     });
-//   })
-// );
-
-
-// router.post(
-//   "/finishing/complete/:jobId",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const job = await JobOrder.findById(req.params.jobId);
-//     if (!job) {
-//       return next(new ErrorHandler("Job not found", 404));
-//     }
-
-//     if (job.status !== "finishing") {
-//       return next(
-//         new ErrorHandler("Job is not in finishing stage", 400)
-//       );
-//     }
-
-//     job.status = "checking";
-//     await job.save();
-
-//     res.status(200).json({
-//       success: true,
-//       message: "Finishing completed, moved to checking",
-//       jobId: job._id,
-//     });
-//   })
-// );
-
-
-
-// router.post(
-//   "/checkingAssign",
-//   // isAuthenticated,
-//   catchAsyncErrors(async (req, res, next) => {
-//     const { jobId, employeeId } = req.body;
-
-//     if (!jobId || !employeeId) {
-//       return next(
-//         new ErrorHandler("jobId and employeeId are required", 400)
-//       );
-//     }
-
-//     const job = await JobOrder.findById(jobId);
-//     if (!job) {
-//       return next(new ErrorHandler("JobOrder not found", 404));
-//     }
-
-//     // Optional: prevent reassignment
-//     if (job.checking) {
-//       return next(
-//         new ErrorHandler("Checking already assigned for this job", 409)
-//       );
-//     }
-
-//     const employee = await Employee.findById(employeeId);
-//     if (!employee) {
-//       return next(new ErrorHandler("Employee not found", 404));
-//     }
-
-//     // Optional: enforce department/role
-//     if (employee.department !== "checking") {
-//       return next(
-//         new ErrorHandler("Employee is not from checking department", 400)
-//       );
-//     }
-
-//     // Optional: enforce job state
-//     if (!["finishing", "checking"].includes(job.status)) {
-//       return next(
-//         new ErrorHandler(
-//           "Checking can be assigned only after finishing stage",
-//           400
-//         )
-//       );
-//     }
-
-//     job.checking = employeeId;
-//     job.status = "checking"; // normalize state transition
-//     await job.save();
-
-//     res.status(200).json({
-//       success: true,
-//       message: "Checking assigned successfully",
-//       data: {
-//         jobId: job._id,
-//         checking: employeeId,
-//       },
-//     });
-//   })
-// );
-
-
-// router.post(
-//   "/checking/complete/:jobId",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const job = await JobOrder.findById(req.params.jobId);
-//     if (!job) {
-//       return next(new ErrorHandler("Job not found", 404));
-//     }
-
-//     if (job.status !== "checking") {
-//       return next(
-//         new ErrorHandler("Job is not in checking stage", 400)
-//       );
-//     }
-
-//     job.status = "packing";
-//     await job.save();
-
-//     res.status(200).json({
-//       success: true,
-//       message: "Checking completed, moved to packing",
-//       jobId: job._id,
-//     });
-//   })
-// );
-
-
-// router.post(
-//   "/packing/complete/:jobId",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const job = await JobOrder.findById(req.params.jobId);
-//     if (!job) {
-//       return next(new ErrorHandler("Job not found", 404));
-//     }
-
-//     if (job.status !== "packing") {
-//       return next(
-//         new ErrorHandler("Job is not in packing stage", 400)
-//       );
-//     }
-
-//     job.status = "closed";
-//     await job.save();
-
-//     res.status(200).json({
-//       success: true,
-//       message: "Packing completed, job closed",
-//       jobId: job._id,
-//     });
-//   })
-// );
-
-
-
-// module.exports = router;
+"use strict";
 
 const express = require("express");
-const router = express.Router();
+const router  = express.Router();
+
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const ErrorHandler = require("../utils/ErrorHandler");
+const ErrorHandler     = require("../utils/ErrorHandler");
 
-const JobOrder = require("../models/JobOrder");
-const Order = require("../models/Order");
-const Warping = require("../models/Warping");
-const Covering = require("../models/Covering");
-const Wastage = require("../models/Wastage");
-const Packing = require("../models/Packing");
-const ShiftDetail = require("../models/ShiftDetail.js");
+const JobOrder    = require("../models/JobOrder");
+const Order       = require("../models/Order");
+const Warping     = require("../models/Warping");
+const Covering    = require("../models/Covering");
+const Wastage     = require("../models/Wastage");
+const Machine     = require("../models/Machine");
+const ShiftDetail = require("../models/ShiftDetail");
 
-const Machine = require("../models/Machine.js");
+// ─────────────────────────────────────────────────────────────
+//  CONSTANTS
+// ─────────────────────────────────────────────────────────────
+
+const JOB_STATUSES = [
+  "preparatory",
+  "weaving",
+  "finishing",
+  "checking",
+  "packing",
+  "completed",
+  "cancelled",
+];
+
+/** Only these forward transitions are legal */
+const STATUS_TRANSITIONS = {
+  weaving:   "finishing",
+  finishing: "checking",
+  checking:  "packing",
+  packing:   "completed",
+};
+
+// ─────────────────────────────────────────────────────────────
+//  HELPERS
+// ─────────────────────────────────────────────────────────────
 
 /**
- * 🧾 CREATE JOB ORDER + PREPARATORY (WARPING & COVERING)
+ * Full populate spec reused by GET /detail.
+ * Keeping it in one place means any future field addition
+ * only needs to be updated here.
  */
+function fullJobPopulate(query) {
+  return query
+    .populate("order",    "orderNo po status")
+    .populate("customer", "name phone")
+    .populate("machine",  "ID manufacturer NoOfHeads status")
+    .populate("elastics.elastic",        "name")
+    .populate("producedElastic.elastic", "name")
+    .populate("packedElastic.elastic",   "name")
+    .populate("wastageElastic.elastic",  "name")
+    .populate({
+      path: "warping",
+      select: "status date completedDate elasticOrdered warpingPlan",
+      populate: { path: "elasticOrdered.elastic", select: "name" },
+    })
+    .populate({
+      path: "covering",
+      select: "status date completedDate elasticPlanned",
+      populate: { path: "elasticPlanned.elastic", select: "name" },
+    })
+    .populate({
+      path: "shiftDetails",
+      populate: { path: "employee", select: "name department" },
+    })
+    .populate({
+      path: "wastages",
+      populate: [
+        { path: "elastic",  select: "name" },
+        { path: "employee", select: "name" },
+      ],
+    })
+    .populate({
+      path: "packingDetails",
+      populate: [
+        { path: "elastic",   select: "name" },
+        { path: "packedBy",  select: "name" },
+        { path: "checkedBy", select: "name" },
+      ],
+    });
+}
+
+/**
+ * Release a machine back to "free" state.
+ * Safe to call even if machineId is null/undefined.
+ */
+async function releaseMachine(machineId) {
+  if (!machineId) return;
+  const machine = await Machine.findById(machineId);
+  if (!machine) return;
+  machine.status       = "free";
+  machine.orderRunning = null;
+  await machine.save();
+}
+
+// ─────────────────────────────────────────────────────────────
+//  1.  CREATE JOB ORDER
+//      POST /job/create
+//
+//  Creates a JobOrder, Warping programme, and Covering programme
+//  in a single atomic sequence. Deducts from Order.pendingElastic
+//  and advances Order.status → "InProgress".
+// ─────────────────────────────────────────────────────────────
 router.post(
   "/create",
   catchAsyncErrors(async (req, res, next) => {
+    const { orderId, date, elastics } = req.body;
 
+    // ── Input validation ───────────────────────────────────
+    if (!orderId) return next(new ErrorHandler("orderId is required", 400));
+    if (!date)    return next(new ErrorHandler("date is required", 400));
+    if (!Array.isArray(elastics) || elastics.length === 0) {
+      return next(new ErrorHandler("elastics array must not be empty", 400));
+    }
 
-    try {
-      const { orderId, date, elastics } = req.body;
-
-      console.log("create JOb")
-
-      if (!orderId || !date || !elastics?.length) {
-        return next(new ErrorHandler("Invalid payload", 400));
+    for (const e of elastics) {
+      if (!e.elastic) {
+        return next(new ErrorHandler("Each elastic entry must have an elastic ID", 400));
       }
-
-      const order = await Order.findById(orderId);
-      if (!order) {
-        return next(new ErrorHandler("Order not found", 404));
+      if (typeof e.quantity !== "number" || e.quantity <= 0) {
+        return next(new ErrorHandler("Each elastic quantity must be a positive number", 400));
       }
+    }
 
-      if (!["Open", "InProgress"].includes(order.status)) {
+    // ── Fetch & validate Order ─────────────────────────────
+    const order = await Order.findById(orderId);
+    if (!order) return next(new ErrorHandler("Order not found", 404));
+
+    if (!["Open", "InProgress"].includes(order.status)) {
+      return next(
+        new ErrorHandler(
+          `Cannot create job for an order with status "${order.status}"`,
+          400
+        )
+      );
+    }
+
+    // ── Validate quantities against pending ────────────────
+    for (const e of elastics) {
+      const pending = order.pendingElastic.find(
+        (p) => p.elastic.toString() === e.elastic.toString()
+      );
+      if (!pending) {
         return next(
-          new ErrorHandler("Job cannot be created for this order status", 400)
+          new ErrorHandler(
+            `Elastic ${e.elastic} is not part of this order`,
+            400
+          )
         );
       }
-
-      // 🔍 Validate against pending quantities
-      for (const e of elastics) {
-        const pending = order.pendingElastic.find(
-          (p) => p.elastic.toString() === e.elastic
+      if (pending.quantity < e.quantity) {
+        return next(
+          new ErrorHandler(
+            `Requested quantity (${e.quantity}) for elastic ${e.elastic} exceeds pending quantity (${pending.quantity})`,
+            400
+          )
         );
-
-        if (!pending || pending.quantity < e.quantity) {
-          return next(
-            new ErrorHandler(
-              "Job quantity exceeds pending order quantity",
-              400
-            )
-          );
-        }
       }
+    }
 
-      // 🔄 Initialize tracking arrays
-      const zeroed = elastics.map((e) => ({
-        elastic: e.elastic,
-        quantity: 0,
-      }));
+    // ── Create JobOrder ────────────────────────────────────
+    const zeroed = elastics.map((e) => ({ elastic: e.elastic, quantity: 0 }));
 
-      // 🧾 CREATE JOB ORDER
-      const job = await JobOrder.create({
-        date,
-        order: order._id,
-        customer: order.customer,
-        status: "preparatory",
-        elastics,
-        producedElastic: zeroed,
-        packedElastic: zeroed,
-        wastageElastic: zeroed,
-      });
+    const job = await JobOrder.create({
+      date:            new Date(date),
+      order:           order._id,
+      customer:        order.customer,
+      status:          "preparatory",
+      elastics,
+      producedElastic: zeroed,
+      packedElastic:   zeroed,
+      wastageElastic:  zeroed,
+    });
 
-      // 🧶 CREATE WARPING PROGRAM
-      const warping = await Warping.create({
-        date: Date.now(),
-        job: job._id,
+    // ── Create Warping & Covering programmes ───────────────
+    const [warping, covering] = await Promise.all([
+      Warping.create({
+        date:          new Date(),
+        job:           job._id,
         elasticOrdered: elastics,
-      });
-
-      // 🧵 CREATE COVERING PROGRAM
-      const covering = await Covering.create({
-        date: Date.now(),
-        job: job._id,
+      }),
+      Covering.create({
+        date:          new Date(),
+        job:           job._id,
         elasticPlanned: elastics,
-      });
+      }),
+    ]);
 
-      // 🔗 LINK PREPARATORY TO JOB
-      job.warping = warping._id;
-      job.covering = covering._id;
-      await job.save();
-
-      // 🔄 UPDATE ORDER
-      order.jobs.push({
-        job: job._id,
-        no: job.jobOrderNo,
-      });
-
-      elastics.forEach((e) => {
-        const pending = order.pendingElastic.find(
-          (p) => p.elastic.toString() === e.elastic
-        );
-        pending.quantity -= e.quantity;
-      });
-
-      order.status = "InProgress";
-      await order.save();
-
-
-      console.log("Created job order with preparatory programs");
-
-
-
-      res.status(201).json({
-        success: true,
-        message: "Job Order with preparatory programs created",
-        job,
-        warping,
-        covering,
-      });
-    } catch (e) {
-      console.error(e);
-      return next(new ErrorHandler("Server Error", 500));
-    }
-
-  })
-);
-
-
-router.post(
-  "/job-orders/assign-machine",
-  catchAsyncErrors(async (req, res) => {
-    const jobId = req.query.id;
-    const { machineId } = req.body;
-
-    const job = await JobOrder.findById(jobId);
-    if (!job) {
-      return res.status(404).json({ message: "Job not found" });
-    }
-
-    if (job.status !== "weaving") {
-      return res.status(400).json({
-        message: "Job is not ready for weaving",
-      });
-    }
-
-    if (job.machine) {
-      return res.status(400).json({
-        message: "Machine already assigned",
-      });
-    }
-
-    const machine = await Machine.findById(machineId);
-    if (!machine || machine.status !== "free") {
-      return res.status(400).json({
-        message: "Machine is not available",
-      });
-    }
-
-    // 🔁 ASSIGN
-    job.machine = machine._id;
+    // ── Link programmes back to job ────────────────────────
+    job.warping  = warping._id;
+    job.covering = covering._id;
     await job.save();
 
-    machine.status = "running";
-    machine.orderRunning = job._id;
-    await machine.save();
+    // ── Update Order ───────────────────────────────────────
+    order.jobs.push({ job: job._id, no: job.jobOrderNo });
 
-    res.json({
+    for (const e of elastics) {
+      const pending = order.pendingElastic.find(
+        (p) => p.elastic.toString() === e.elastic.toString()
+      );
+      if (pending) pending.quantity -= e.quantity;
+    }
+
+    order.status = "InProgress";
+    await order.save();
+
+    console.log(`[job/create] JobOrder #${job.jobOrderNo} created for Order ${orderId}`);
+
+    res.status(201).json({
       success: true,
-      job,
-      machine,
+      message: "Job Order created with Warping & Covering programmes",
+      data: {
+        job:      { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
+        warping:  { _id: warping._id,  status: warping.status  },
+        covering: { _id: covering._id, status: covering.status },
+      },
     });
   })
 );
 
-router.post("/update-status", async (req, res) => {
-  try {
-    const { jobId, nextStatus } = req.body;
 
-    const job = await JobOrder.findById(jobId);
-
-    if (!job) {
-      return res.status(404).json({ message: "Job not found" });
-    }
-
-    const allowedTransitions = {
-      weaving: "finishing",
-      finishing: "checking",
-      checking: "packing",
-      packing: "completed",
-    };
-
-
-    if (allowedTransitions[job.status] !== nextStatus) {
-      return res.status(400).json({
-        message: `Invalid transition from ${job.status} to ${nextStatus}`,
-      });
-    }
-
-    job.status = nextStatus;
-
-
-    if (nextStatus === "finishing") {
-      // Release machine
-      if (job.machine) {
-        const machine = await Machine.findById(job.machine);
-        if (machine) {
-          machine.status = "free"; machine.orderRunning = null;
-          await machine.save();
-        } else { console.warn(`Machine ${job.machine} not found while completing job ${jobId}`); }
-      }
-    }
-
-
-
-    await job.save();
-
-    console.log(`Job ${jobId} status updated to ${nextStatus}`);
-
-    res.json({
-      success: true,
-      job,
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
-
-
-
-
+// ─────────────────────────────────────────────────────────────
+//  2.  LIST JOBS
+//      GET /job/jobs
+//
+//  Query params:
+//    status  – filter by status (omit or "all" for no filter)
+//    search  – numeric jobOrderNo substring search
+//    page    – 1-based page (default 1)
+//    limit   – items per page (default 10, max 50)
+// ─────────────────────────────────────────────────────────────
 router.get(
-  "/detail",
+  "/jobs",
   catchAsyncErrors(async (req, res, next) => {
-    try {
-      const { id } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page)  || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
+    const skip  = (page - 1) * limit;
 
-      if (!id) {
-        return next(new ErrorHandler("Job ID is required", 400));
-      }
+    const { status, search } = req.query;
 
-      const job = await JobOrder.findById(id)
-        // 🧵 Elastics
-        .populate("elastics.elastic", "name")
-        .populate("producedElastic.elastic", "name")
-        .populate("packedElastic.elastic", "name")
-        .populate("wastageElastic.elastic", "name")
-
-        // 🧶 Preparatory
-        .populate({
-          path: "warping",
-          populate: {
-            path: "elasticOrdered.elastic",
-            select: "name",
-          },
-        })
-        .populate({
-          path: "covering",
-          populate: {
-            path: "elasticPlanned.elastic",
-            select: "name",
-          },
-        })
-
-        // 🏭 Machine
-        .populate("machine")
-
-        // ⏱ Shift details
-        .populate({
-          path: "shiftDetails",
-          populate: {
-            path: "employee",
-            select: "name",
-          },
-        })
-
-        // ♻️ Wastage
-        .populate({
-          path: "wastages",
-          populate: [
-            { path: "elastic", select: "name" },
-            { path: "employee", select: "name" },
-          ],
-        })
-
-        // 📦 Packing
-        .populate({
-          path: "packingDetails",
-          populate: [
-            { path: "elastic", select: "name" },
-            { path: "packedBy", select: "name" },
-            { path: "checkedBy", select: "name" },
-          ],
-        })
-        .exec();
-
-      if (!job) {
-        return next(new ErrorHandler("Job not found", 404));
-      }
-
-      console.log("Fetched detailed job info", job);
-      res.status(200).json({
-        success: true,
-        job,
-      });
-    } catch (error) {
-      console.error(error);
-      return next(new ErrorHandler("Server Error", 500));
-    }
-  })
-);
-router.post(
-  "/plan-weaving",
-  catchAsyncErrors(async (req, res, next) => {
-
-    try {
-      const { jobId, machineId, headElasticMap } = req.body;
-      console.log(req.body);
-      if (!jobId || !machineId || !headElasticMap) {
-        return next(new ErrorHandler("Missing required fields", 400));
-      }
-
-      // 🔹 Fetch Job
-      const job = await JobOrder.findById(jobId);
-      console.log(job)
-      if (!job) {
-        return next(new ErrorHandler("JobOrder not found", 404));
-      }
-
-      if (job.status !== "preparatory") {
-        return next(
-          new ErrorHandler("Job is not ready for weaving", 400)
-        );
-      }
-
-      // 🔹 Fetch Machine
-      const machine = await Machine.findById(machineId);
-      if (!machine) {
-
-        return next(new ErrorHandler("Machine not found", 404));
-      }
-
-      if (machine.status !== "free") {
-        return next(
-          new ErrorHandler("Machine is already running another job", 400)
-        );
-      }
-
-      // 🔹 Convert headElasticMap → array
-      const elasticAssignments = Object.keys(headElasticMap).map((head) => ({
-        head: Number(head) + 1, // human-readable head no
-        elastic: headElasticMap[head],
-      }));
-
-      if (elasticAssignments.length === 0) {
-        return next(
-          new ErrorHandler("No elastics assigned to machine heads", 400)
-        );
-      }
-
-      // 🔹 UPDATE MACHINE
-      machine.status = "running";
-      machine.orderRunning = job._id;
-      machine.elastics = elasticAssignments;
-
-      await machine.save();
-
-      // 🔹 UPDATE JOB
-      job.status = "weaving";
-      job.machine = machine._id;
-
-      await job.save();
-
-      console.log("done")
-
-      res.status(200).json({
-        success: true,
-        message: "Weaving planned successfully",
-        job: {
-          id: job._id,
-          status: job.status,
-        },
-        machine: {
-          id: machine._id,
-          status: machine.status,
-          elastics: machine.elastics,
-        },
-      });
-    } catch (error) {
-      console.log(error)
-    }
-
-  })
-);
-
-
-router.get("/jobs-checking", async (req, res) => {
-  try {
-    const jobs = await JobOrder.find({ status: "checking" })
-      .populate("customer")
-      .select("_id jobOrderNo elastics");
-
-    res.json({ success: true, jobs });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-
-router.get("/job-operators", async (req, res) => {
-  try {
-    console.log("Fetching operators for job", req.query.id);
-    const shifts = await ShiftDetail.find({
-      job: req.query.id,
-    }).populate("employee");
-
-    const operators = shifts.map((s) => s.employee);
-
-    res.json({ success: true, operators });
-  } catch (err) {
-    console.error("Error fetching job operators:", err);
-    res.status(500).json({ message: err.message });
-  }
-});
-
-
-router.post("/create-wastage", async (req, res) => {
-  try {
-    const { job, elastic, employee, quantity, penalty, reason } = req.body;
-
-    const wastage = await Wastage.create({
-      job,
-      elastic,
-      employee,
-      quantity,
-      penalty,
-      reason,
-    });
-
-    // 🔥 Update Job WastageElastic
-    const jobDoc = await JobOrder.findById(job);
-
-    const index = jobDoc.wastageElastic.findIndex(
-      (e) => e.elastic.toString() === elastic
-    );
-
-    if (index >= 0) {
-      jobDoc.wastageElastic[index].quantity += quantity;
-    }
-
-    await jobDoc.save();
-
-    res.json({ success: true, wastage });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-
-router.get("/jobs", async (req, res) => {
-  try {
-    console.log("Fetching jobs with filters:", req.query);
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const status = req.query.status;
-    const search = req.query.search;
-
-    const query = {};
+    const filter = {};
 
     if (status && status !== "all") {
-      query.status = status;
+      if (!JOB_STATUSES.includes(status)) {
+        return next(
+          new ErrorHandler(
+            `Invalid status "${status}". Valid values: ${JOB_STATUSES.join(", ")}`,
+            400
+          )
+        );
+      }
+      filter.status = status;
     }
 
     if (search) {
-      query.jobOrderNo = Number(search);
+      const n = Number(search);
+      if (!isNaN(n) && Number.isInteger(n)) {
+        filter.jobOrderNo = n;
+      }
+      // Non-numeric search is silently ignored (job numbers are ints)
     }
 
-    const jobs = await JobOrder.find(query)
-      .populate("customer", "name")
-      .populate("machine", "ID status")
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit);
-
-
-    const total = await JobOrder.countDocuments(query);
+    const [jobs, total] = await Promise.all([
+      JobOrder.find(filter)
+        .populate("customer", "name")
+        .populate("machine",  "ID status")
+        .select("jobOrderNo status date customer machine createdAt")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      JobOrder.countDocuments(filter),
+    ]);
 
     res.json({
       success: true,
       jobs,
-      total,
-      page,
-      pages: Math.ceil(total / limit),
+      pagination: {
+        total,
+        page,
+        limit,
+        pages:   Math.ceil(total / limit),
+        hasMore: skip + jobs.length < total,
+      },
     });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
+  })
+);
 
 
+// ─────────────────────────────────────────────────────────────
+//  3.  GET JOB DETAIL
+//      GET /job/detail?id=<jobId>
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/detail",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.query;
+    if (!id) return next(new ErrorHandler("Job ID is required", 400));
+
+    const job = await fullJobPopulate(JobOrder.findById(id));
+    if (!job) return next(new ErrorHandler("Job not found", 404));
+
+    res.json({ success: true, job });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  4.  PLAN WEAVING
+//      POST /job/plan-weaving
+//
+//  Assigns a free machine, records the head→elastic map on the
+//  machine, and advances job status: preparatory → weaving.
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/plan-weaving",
+  catchAsyncErrors(async (req, res, next) => {
+    const { jobId, machineId, headElasticMap } = req.body;
+
+    // ── Input validation ───────────────────────────────────
+    if (!jobId)         return next(new ErrorHandler("jobId is required", 400));
+    if (!machineId)     return next(new ErrorHandler("machineId is required", 400));
+    if (!headElasticMap || typeof headElasticMap !== "object" ||
+        Object.keys(headElasticMap).length === 0) {
+      return next(new ErrorHandler("headElasticMap must be a non-empty object", 400));
+    }
+
+    // ── Validate head assignments are complete ─────────────
+    const unassigned = Object.values(headElasticMap).filter((v) => !v);
+    if (unassigned.length > 0) {
+      return next(
+        new ErrorHandler(
+          `${unassigned.length} machine head(s) have no elastic assigned`,
+          400
+        )
+      );
+    }
+
+    // ── Fetch Job ──────────────────────────────────────────
+    const job = await JobOrder.findById(jobId);
+    if (!job) return next(new ErrorHandler("Job not found", 404));
+
+    if (job.status !== "preparatory") {
+      return next(
+        new ErrorHandler(
+          `Job must be in "preparatory" status to plan weaving (current: "${job.status}")`,
+          400
+        )
+      );
+    }
+
+    // ── Fetch Machine ──────────────────────────────────────
+    const machine = await Machine.findById(machineId);
+    if (!machine) return next(new ErrorHandler("Machine not found", 404));
+
+    if (machine.status !== "free") {
+      return next(
+        new ErrorHandler(
+          `Machine is not free (current status: "${machine.status}")`,
+          400
+        )
+      );
+    }
+
+    // ── Build head assignment array ────────────────────────
+    // headElasticMap keys are 0-based head indexes from the client
+    const headPlan = Object.entries(headElasticMap).map(([head, elastic]) => ({
+      head:    Number(head) + 1,   // store as 1-based human-readable head number
+      elastic,
+    }));
+
+    // ── Assign Machine ─────────────────────────────────────
+    machine.status       = "running";
+    machine.orderRunning = job._id;
+    machine.elastics     = headPlan;
+    await machine.save();
+
+    // ── Advance Job ────────────────────────────────────────
+    job.status  = "weaving";
+    job.machine = machine._id;
+    await job.save();
+
+    console.log(
+      `[job/plan-weaving] Job #${job.jobOrderNo} → weaving, Machine ${machine.ID || machine._id}`
+    );
+
+    res.json({
+      success: true,
+      message: "Weaving plan saved. Job is now in weaving.",
+      data: {
+        job:     { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
+        machine: { _id: machine._id, ID: machine.ID, status: machine.status, headPlan },
+      },
+    });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  5.  UPDATE JOB STATUS
+//      POST /job/update-status
+//
+//  Enforces the forward-only status flow:
+//  weaving → finishing → checking → packing → completed
+//
+//  Side effects:
+//    weaving → finishing : releases machine back to "free"
+//    packing → completed : marks Order as "Completed" if ALL
+//                          its jobs are now completed
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/update-status",
+  catchAsyncErrors(async (req, res, next) => {
+    const { jobId, nextStatus } = req.body;
+
+    if (!jobId)      return next(new ErrorHandler("jobId is required", 400));
+    if (!nextStatus) return next(new ErrorHandler("nextStatus is required", 400));
+
+    const job = await JobOrder.findById(jobId);
+    if (!job) return next(new ErrorHandler("Job not found", 404));
+
+    const expected = STATUS_TRANSITIONS[job.status];
+    if (!expected) {
+      return next(
+        new ErrorHandler(
+          `Job in status "${job.status}" cannot advance further`,
+          400
+        )
+      );
+    }
+    if (expected !== nextStatus) {
+      return next(
+        new ErrorHandler(
+          `Invalid transition: "${job.status}" → "${nextStatus}". Expected next status: "${expected}"`,
+          400
+        )
+      );
+    }
+
+    // ── Side effects ───────────────────────────────────────
+    if (nextStatus === "finishing") {
+      // Weaving complete → release machine
+      await releaseMachine(job.machine);
+      job.machine = undefined;
+    }
+
+    if (nextStatus === "completed") {
+      // Check if all jobs on the parent order are now completed
+      const siblingJobs = await JobOrder.find({
+        order: job.order,
+        _id:   { $ne: job._id },
+      }).select("status");
+
+      const allDone = siblingJobs.every((j) =>
+        ["completed", "cancelled"].includes(j.status)
+      );
+
+      if (allDone) {
+        await Order.findByIdAndUpdate(job.order, { status: "Completed" });
+        console.log(
+          `[job/update-status] All jobs done — Order ${job.order} marked Completed`
+        );
+      }
+    }
+
+    job.status = nextStatus;
+    await job.save();
+
+    console.log(`[job/update-status] Job #${job.jobOrderNo}: ${job.status} → ${nextStatus}`);
+
+    res.json({
+      success: true,
+      message: `Job advanced to "${nextStatus}"`,
+      data: { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
+    });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  6.  CANCEL JOB
+//      POST /job/cancel
+//
+//  - Releases machine if in weaving stage
+//  - Restores deducted quantities back to Order.pendingElastic
+//  - Does NOT affect a completed or already-cancelled job
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/cancel",
+  catchAsyncErrors(async (req, res, next) => {
+    const { jobId, reason } = req.body;
+
+    if (!jobId) return next(new ErrorHandler("jobId is required", 400));
+
+    const job = await JobOrder.findById(jobId);
+    if (!job) return next(new ErrorHandler("Job not found", 404));
+
+    if (job.status === "cancelled") {
+      return next(new ErrorHandler("Job is already cancelled", 400));
+    }
+    if (job.status === "completed") {
+      return next(new ErrorHandler("A completed job cannot be cancelled", 400));
+    }
+
+    // ── Release machine if it was weaving ──────────────────
+    if (job.status === "weaving" && job.machine) {
+      await releaseMachine(job.machine);
+      job.machine = undefined;
+    }
+
+    // ── Restore pending quantities on the parent Order ─────
+    const order = await Order.findById(job.order);
+    if (order) {
+      for (const e of job.elastics) {
+        const pending = order.pendingElastic.find(
+          (p) => p.elastic.toString() === e.elastic.toString()
+        );
+        if (pending) {
+          pending.quantity += e.quantity;
+        } else {
+          // Elastic existed in job but was fully removed from order — re-add it
+          order.pendingElastic.push({
+            elastic:  e.elastic,
+            quantity: e.quantity,
+          });
+        }
+      }
+
+      // If no remaining non-cancelled/completed jobs exist,
+      // revert order status back to "Approved"
+      const remainingJobs = await JobOrder.find({
+        order: job.order,
+        _id:   { $ne: job._id },
+        status: { $nin: ["cancelled", "completed"] },
+      }).countDocuments();
+
+      if (remainingJobs === 0) {
+        order.status = "Approved";
+      }
+
+      await order.save();
+    }
+
+    job.status = "cancelled";
+    if (reason) job.cancelReason = reason;     // stored if model supports it
+    await job.save();
+
+    console.log(`[job/cancel] Job #${job.jobOrderNo} cancelled`);
+
+    res.json({
+      success: true,
+      message: "Job cancelled and quantities restored to order",
+      data: { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
+    });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  7.  CREATE WASTAGE ENTRY
+//      POST /job/create-wastage
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/create-wastage",
+  catchAsyncErrors(async (req, res, next) => {
+    const { jobId, elasticId, employeeId, quantity, penalty, reason } =
+      req.body;
+
+    // ── Validate ───────────────────────────────────────────
+    if (!jobId)      return next(new ErrorHandler("jobId is required", 400));
+    if (!elasticId)  return next(new ErrorHandler("elasticId is required", 400));
+    if (!employeeId) return next(new ErrorHandler("employeeId is required", 400));
+    if (!reason || !reason.trim()) {
+      return next(new ErrorHandler("reason is required", 400));
+    }
+    if (typeof quantity !== "number" || quantity <= 0) {
+      return next(new ErrorHandler("quantity must be a positive number", 400));
+    }
+
+    const job = await JobOrder.findById(jobId);
+    if (!job) return next(new ErrorHandler("Job not found", 404));
+
+    if (!["weaving", "finishing", "checking"].includes(job.status)) {
+      return next(
+        new ErrorHandler(
+          `Wastage can only be recorded during weaving, finishing, or checking (current: "${job.status}")`,
+          400
+        )
+      );
+    }
+
+    // ── Ensure elastic is part of the job ─────────────────
+    const jobElastic = job.elastics.find(
+      (e) => e.elastic.toString() === elasticId.toString()
+    );
+    if (!jobElastic) {
+      return next(
+        new ErrorHandler("Elastic is not part of this job", 400)
+      );
+    }
+
+    // ── Create wastage doc ─────────────────────────────────
+    const wastage = await Wastage.create({
+      job:      job._id,
+      elastic:  elasticId,
+      employee: employeeId,
+      quantity,
+      penalty:  penalty || 0,
+      reason:   reason.trim(),
+    });
+
+    // ── Update job wastage tally & link wastage ────────────
+    const idx = job.wastageElastic.findIndex(
+      (e) => e.elastic.toString() === elasticId.toString()
+    );
+    if (idx >= 0) {
+      job.wastageElastic[idx].quantity += quantity;
+    }
+    job.wastages.push(wastage._id);
+    await job.save();
+
+    console.log(
+      `[job/create-wastage] ${quantity}m wastage on Job #${job.jobOrderNo}`
+    );
+
+    res.status(201).json({ success: true, wastage });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  8.  DAILY PRODUCTION SUMMARY (shift entry helper)
+//      GET /job/summary?jobId=<id>
+//
+//  Returns totals useful for shift entry forms — how much has
+//  been produced, packed, wasted, and what remains.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/summary",
+  catchAsyncErrors(async (req, res, next) => {
+    const { jobId } = req.query;
+    if (!jobId) return next(new ErrorHandler("jobId is required", 400));
+
+    const job = await JobOrder.findById(jobId)
+      .populate("elastics.elastic",        "name")
+      .populate("producedElastic.elastic", "name")
+      .populate("packedElastic.elastic",   "name")
+      .populate("wastageElastic.elastic",  "name");
+
+    if (!job) return next(new ErrorHandler("Job not found", 404));
+
+    const summary = job.elastics.map((e) => {
+      const find = (arr) =>
+        arr.find((x) => x.elastic._id.toString() === e.elastic._id.toString())
+          ?.quantity || 0;
+
+      const planned  = e.quantity;
+      const produced = find(job.producedElastic);
+      const packed   = find(job.packedElastic);
+      const wasted   = find(job.wastageElastic);
+      const remaining = Math.max(0, planned - produced - wasted);
+
+      return {
+        elasticId:   e.elastic._id,
+        elasticName: e.elastic.name,
+        planned,
+        produced,
+        packed,
+        wasted,
+        remaining,
+        packingPct: planned > 0 ? Math.round((packed / planned) * 100) : 0,
+      };
+    });
+
+    res.json({
+      success: true,
+      jobId:   job._id,
+      jobNo:   job.jobOrderNo,
+      status:  job.status,
+      summary,
+    });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  9.  JOB OPERATORS
+//      GET /job/job-operators?id=<jobId>
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/job-operators",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.query;
+    if (!id) return next(new ErrorHandler("Job ID is required", 400));
+
+    const shifts = await ShiftDetail.find({ job: id })
+      .populate("employee", "name department");
+
+    // Deduplicate — same operator can appear in multiple shifts
+    const seen = new Set();
+    const operators = [];
+    for (const s of shifts) {
+      if (s.employee && !seen.has(s.employee._id.toString())) {
+        seen.add(s.employee._id.toString());
+        operators.push(s.employee);
+      }
+    }
+
+    res.json({ success: true, operators });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  10. JOBS IN CHECKING  (for checking-assignment screens)
+//      GET /job/jobs-checking
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/jobs-checking",
+  catchAsyncErrors(async (req, res, next) => {
+    const jobs = await JobOrder.find({ status: "checking" })
+      .populate("customer", "name")
+      .select("_id jobOrderNo elastics customer date");
+
+    res.json({ success: true, jobs });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  11. ASSIGN MACHINE (post-plan manual re-assignment)
+//      POST /job/assign-machine
+//
+//  Used if a machine needs to be swapped after the weaving
+//  plan was already submitted.
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/assign-machine",
+  catchAsyncErrors(async (req, res, next) => {
+    const { jobId, machineId } = req.body;
+
+    if (!jobId)     return next(new ErrorHandler("jobId is required", 400));
+    if (!machineId) return next(new ErrorHandler("machineId is required", 400));
+
+    const job = await JobOrder.findById(jobId);
+    if (!job) return next(new ErrorHandler("Job not found", 404));
+
+    if (job.status !== "weaving") {
+      return next(
+        new ErrorHandler(
+          `Machine can only be assigned/reassigned while job is in "weaving" status (current: "${job.status}")`,
+          400
+        )
+      );
+    }
+
+    // Release old machine if there is one
+    if (job.machine) {
+      await releaseMachine(job.machine);
+    }
+
+    const machine = await Machine.findById(machineId);
+    if (!machine) return next(new ErrorHandler("Machine not found", 404));
+
+    if (machine.status !== "free") {
+      return next(
+        new ErrorHandler(
+          `Machine is not free (current status: "${machine.status}")`,
+          400
+        )
+      );
+    }
+
+    machine.status       = "running";
+    machine.orderRunning = job._id;
+    await machine.save();
+
+    job.machine = machine._id;
+    await job.save();
+
+    res.json({
+      success: true,
+      message: "Machine assigned",
+      data: {
+        job:     { _id: job._id, jobOrderNo: job.jobOrderNo },
+        machine: { _id: machine._id, ID: machine.ID, status: machine.status },
+      },
+    });
+  })
+);
 
 
 module.exports = router;
