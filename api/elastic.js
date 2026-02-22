@@ -168,6 +168,9 @@ router.post(
       const { materialCost, details } =
         await calculateElasticCosting(elasticData);
 
+        console.log("Calculated material cost:", materialCost);
+        console.log("Cost breakdown:", details);
+
       const conversionCost = elasticData.conversionCost ?? 1.25;
       const totalCost = materialCost + conversionCost;
 
