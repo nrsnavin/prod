@@ -1,5 +1,4 @@
-import mongoose from 'mongoose';
-
+const mongoose = require("mongoose");
 const materialOutwardSchema = new mongoose.Schema(
   {
     rawMaterial: {
