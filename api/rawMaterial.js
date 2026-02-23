@@ -5,7 +5,7 @@ const router            = express.Router();
 const mongoose          = require("mongoose");
 const RawMaterial       = require("../models/RawMaterial");
 const PurchaseOrder     = require("../models/PurchaseOrder");
-const MaterialInward    = require("../models/MaterialInward");
+const MaterialInward    = require("../models/Materialnward"); // ← FIX: was not imported; needed for material inward route to register the model
 // FIX: MaterialOut.js used ES module syntax (import/export default) which
 //      crashes under CommonJS require(). The schema is converted to CJS below.
 //      If you have kept the original file as-is, require() will throw
