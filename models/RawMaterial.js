@@ -36,7 +36,7 @@ const RawMaterialSchema = new mongoose.Schema(
       ref: "Supplier",
     },
 
-    price: { type: Number, required: true, default: 0 }, // per kg
+   price: { type: Number, default: 0 }, // per kg
 
     stock: { type: Number, default: 0 },
     minStock: { type: Number, default: 0 },
