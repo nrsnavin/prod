@@ -1,4 +1,6 @@
-const mongoose = require("mongoose");
+const mongoose =require("mongoose");
+
+
 const materialOutwardSchema = new mongoose.Schema(
   {
     rawMaterial: {
@@ -39,4 +41,4 @@ const materialOutwardSchema = new mongoose.Schema(
 materialOutwardSchema.index({ rawMaterial: 1, outwardDate: -1 });
 materialOutwardSchema.index({ job: 1 });
 
-export default mongoose.model('MaterialOutward', materialOutwardSchema);
+module.exports = mongoose.model('MaterialOutward', materialOutwardSchema);

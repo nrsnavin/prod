@@ -10,7 +10,7 @@ const MaterialInward    = require("../models/Materialnward"); // ← FIX: was no
 //      crashes under CommonJS require(). The schema is converted to CJS below.
 //      If you have kept the original file as-is, require() will throw
 //      "Must use import to load ES Module". Fix: convert MaterialOut.js to CJS.
-const MaterialOutward   = require("../models/MaterialOut");   // ← FIX: was not imported; needed for material outward route to register the model
+const MaterialOutward   = require("../models/MaterialOut.cjs");   // ← FIX: was not imported; needed for material outward route to register the model
 const Supplier          = require("../models/Supplier");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
