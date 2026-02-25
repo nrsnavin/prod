@@ -794,4 +794,242 @@ router.post(
 );
 
 
+router.get('/:jobId', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    if (!/^[a-f\d]{24}$/i.test(jobId)) {
+      return res.status(400).json({ success: false, message: 'Invalid job ID.' });
+    }
+
+    const job = await JobOrder.findById(jobId)
+      .populate('customer', 'name phone')
+      .populate('order', 'orderNo status')
+      // ▶ NEW — machine populate
+      .populate('machine', 'ID manufacturer NoOfHead NoOfHooks status')
+      .populate('elastics.elastic', 'name weaveType weight')
+      .populate('producedElastic.elastic', 'name')
+      .populate('packedElastic.elastic', 'name')
+      .populate('wastageElastic.elastic', 'name')
+      .populate({
+        path: 'warping',
+        populate: {
+          path: 'warpingPlan',
+          populate: { path: 'beams.sections.warpYarn', model: 'RawMaterial', select: 'name unit' },
+        },
+      })
+      .populate({ path: 'covering', populate: { path: 'elasticPlanned.elastic', select: 'name' } })
+      .populate({
+        path: 'shiftDetails',
+        model: 'ShiftDetail',
+        populate: [
+          { path: 'machine',  model: 'Machine',  select: 'ID NoOfHead status' },
+          { path: 'employee', model: 'Employee', select: 'name department' },
+          { path: 'elastics.elastic', model: 'Elastic', select: 'name weaveType' },
+        ],
+      })
+      .populate({
+        path: 'wastages', model: 'Wastage',
+        populate: [
+          { path: 'elastic',  model: 'Elastic',  select: 'name' },
+          { path: 'employee', model: 'Employee', select: 'name' },
+        ],
+      })
+      .populate({
+        path: 'packingDetails', model: 'Packing',
+        populate: [
+          { path: 'elastic',  model: 'Elastic',  select: 'name' },
+          { path: 'employee', model: 'Employee', select: 'name' },
+        ],
+      })
+      .lean();
+
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
+
+    const fmtDateLabel = (d) => d
+      ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+      : null;
+
+    const mapElasticQty = (arr) => (arr || []).map((e) => ({
+      elasticId:   e.elastic?._id   || null,
+      elasticName: e.elastic?.name  || 'Unknown',
+      quantity:    e.quantity || 0,
+    }));
+
+    const w  = job.warping;
+    const wp = w?.warpingPlan;
+    const warping = w ? {
+      status:        w.status || 'open',
+      date:          fmtDateLabel(w.date),
+      completedDate: fmtDateLabel(w.completedDate),
+      noOfBeams:     wp?.noOfBeams || 0,
+      remarks:       wp?.remarks   || '',
+      beams: (wp?.beams || []).map((b) => ({
+        beamNo:    b.beamNo,
+        totalEnds: b.totalEnds,
+        sections:  (b.sections || []).map((s, i) => ({
+          sectionNo: i + 1,
+          yarnName:  s.warpYarn?.name || 'Unknown',
+          yarnUnit:  s.warpYarn?.unit || '',
+          ends:      s.ends || 0,
+        })),
+      })),
+    } : null;
+
+    const c = job.covering;
+    const covering = c ? {
+      status:         c.status || 'open',
+      date:           fmtDateLabel(c.date),
+      completedDate:  fmtDateLabel(c.completedDate),
+      remarks:        c.remarks || '',
+      elasticPlanned: mapElasticQty(c.elasticPlanned),
+    } : null;
+
+    const shiftDetails = (job.shiftDetails || [])
+      .sort((a, b) => new Date(a.date) - new Date(b.date))
+      .map((d) => ({
+        id:               d._id,
+        date:             fmtDateLabel(d.date),
+        shift:            d.shift,
+        status:           d.status,
+        timer:            d.timer            || '00:00:00',
+        productionMeters: d.productionMeters || 0,
+        machineName:      d.machine?.ID      || '-',
+        machineNoOfHead:  d.machine?.NoOfHead || 0,
+        operatorName:     d.employee?.name   || '-',
+        operatorDept:     d.employee?.department || '',
+        elastics: (d.elastics || []).map((he) => ({
+          head:        he.head,
+          elasticName: he.elastic?.name || '-',
+        })),
+        description: d.description || '',
+        feedback:    d.feedback    || '',
+      }));
+
+    const wastages = (job.wastages || []).map((wst) => ({
+      id:           wst._id,
+      elasticName:  wst.elastic?.name  || '-',
+      employeeName: wst.employee?.name || '-',
+      quantity:     wst.quantity  || 0,
+      penalty:      wst.penalty   || 0,
+      reason:       wst.reason    || '',
+      date:         fmtDateLabel(wst.createdAt),
+    }));
+
+    const packingDetails = (job.packingDetails || []).map((pk) => ({
+      id:            pk._id,
+      elasticName:   pk.elastic?.name  || '-',
+      employeeName:  pk.employee?.name || '-',
+      quantity:      pk.quantity || 0,
+      rolls:         pk.rolls   || 0,
+      metersPerRoll: pk.metersPerRoll || 0,
+      total:         pk.total   || 0,
+      batch:         pk.batch   || '-',
+      status:        pk.status  || 'open',
+      date:          fmtDateLabel(pk.createdAt),
+    }));
+
+    return res.json({
+      success: true,
+      data: {
+        id:            job._id,
+        jobOrderNo:    job.jobOrderNo,
+        jobNo:         `J-${job.jobOrderNo}`,
+        date:          fmtDateLabel(job.date),
+        status:        job.status,
+        customerName:  job.customer?.name  || '-',
+        customerPhone: job.customer?.phone || '',
+        orderNo:       job.order?.orderNo  || '',
+        // ▶ NEW — machine block
+        machine: job.machine ? {
+          machineId:       job.machine._id,
+          machineName:     job.machine.ID           || '-',
+          machineNoOfHead: job.machine.NoOfHead     || 0,
+          manufacturer:    job.machine.manufacturer || '',
+          status:          job.machine.status       || 'free',
+        } : null,
+        // existing
+        plannedElastics:  mapElasticQty(job.elastics),
+        producedElastics: mapElasticQty(job.producedElastic),
+        packedElastics:   mapElasticQty(job.packedElastic),
+        wastageElastics:  mapElasticQty(job.wastageElastic),
+        warping,
+        covering,
+        shiftDetails,
+        wastages,
+        packingDetails,
+      },
+    });
+
+  } catch (err) {
+    console.error('[GET /jobs/:jobId]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── GET /api/v2/jobs  (list — lightweight) ────────────────────
+router.get('/', async (req, res) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    const filter = {};
+    if (status) filter.status = status;
+
+    const [jobs, total] = await Promise.all([
+      JobOrder.find(filter)
+        .populate('customer', 'name')
+        .populate('elastics.elastic', 'name')
+        .select('jobOrderNo date status customer elastics producedElastic')
+        .sort({ jobOrderNo: -1 })
+        .skip((+page - 1) * +limit)
+        .limit(+limit)
+        .lean(),
+      JobOrder.countDocuments(filter),
+    ]);
+
+    return res.json({
+      success: true,
+      total,
+      page: +page,
+      pages: Math.ceil(total / +limit),
+      data: jobs.map(j => ({
+        id:          j._id,
+        jobOrderNo:  j.jobOrderNo,
+        jobNo:       `J-${j.jobOrderNo}`,
+        date:        new Date(j.date).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }),
+        status:      j.status,
+        customerName:j.customer?.name || '-',
+        totalPlanned: (j.elastics || []).reduce((s, e) => s + (e.quantity || 0), 0),
+        totalProduced:(j.producedElastic || []).reduce((s, e) => s + (e.quantity || 0), 0),
+      })),
+    });
+  } catch (err) {
+    console.error('[GET /jobs]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+
+router.get(
+  '/free-machines',
+  catchAsyncErrors(async (req, res) => {
+    // Returns all machines whose status is 'free'.
+    // Flutter uses this to populate the "Assign Machine" bottom sheet.
+    const machines = await Machine.find({ status: 'free' })
+      .select('ID manufacturer NoOfHead NoOfHooks')
+      .lean();
+
+    return res.json({
+      success: true,
+      count: machines.length,
+      machines: machines.map((m) => ({
+        id:           m._id,
+        machineID:    m.ID         || '-',
+        manufacturer: m.manufacturer || '',
+        noOfHead:     m.NoOfHead   || 0,
+        noOfHooks:    m.NoOfHooks  || 0,
+      })),
+    });
+  })
+);
+
 module.exports = router;

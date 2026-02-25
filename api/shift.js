@@ -549,7 +549,10 @@ router.post(
 router.get(
   "/shiftDetail",
   catchAsyncErrors(async (req, res, next) => {
+
+   
     const { id } = req.query;
+     console.log(id);
     if (!id) return next(new ErrorHandler("id is required", 400));
 
     const shift = await ShiftDetail.findById(id)
@@ -560,6 +563,9 @@ router.get(
         populate: { path: "orderRunning" },
       })
       .exec();
+
+
+    console.log(shift);
 
     if (!shift) return next(new ErrorHandler("Shift detail not found", 404));
 
