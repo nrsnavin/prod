@@ -560,7 +560,7 @@ router.get(
       .populate({ path: "elastics", populate: { path: "elastic" } })
       .populate({
         path: "machine",
-        populate: { path: "orderRunning" },
+        populate: { path: "orderRunning",populate: { path: "jobOrderNo" } },
       })
       .exec();
 

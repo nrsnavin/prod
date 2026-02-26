@@ -794,6 +794,30 @@ router.post(
 );
 
 
+router.get(
+  '/free-machines',
+  catchAsyncErrors(async (req, res) => {
+    console.log('[GET /jobs/free-machines] Fetching free machines for assignment');
+    // Returns all machines whose status is 'free'.
+    // Flutter uses this to populate the "Assign Machine" bottom sheet.
+    const machines = await Machine.find({ status: 'free' })
+      .select('ID manufacturer NoOfHead NoOfHooks')
+      .lean();
+
+    return res.json({
+      success: true,
+      count: machines.length,
+      machines: machines.map((m) => ({
+        id:           m._id,
+        machineID:    m.ID         || '-',
+        manufacturer: m.manufacturer || '',
+        noOfHead:     m.NoOfHead   || 0,
+        noOfHooks:    m.NoOfHooks  || 0,
+      })),
+    });
+  })
+);
+
 router.get('/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -1009,27 +1033,6 @@ router.get('/', async (req, res) => {
 });
 
 
-router.get(
-  '/free-machines',
-  catchAsyncErrors(async (req, res) => {
-    // Returns all machines whose status is 'free'.
-    // Flutter uses this to populate the "Assign Machine" bottom sheet.
-    const machines = await Machine.find({ status: 'free' })
-      .select('ID manufacturer NoOfHead NoOfHooks')
-      .lean();
 
-    return res.json({
-      success: true,
-      count: machines.length,
-      machines: machines.map((m) => ({
-        id:           m._id,
-        machineID:    m.ID         || '-',
-        manufacturer: m.manufacturer || '',
-        noOfHead:     m.NoOfHead   || 0,
-        noOfHooks:    m.NoOfHooks  || 0,
-      })),
-    });
-  })
-);
 
 module.exports = router;
