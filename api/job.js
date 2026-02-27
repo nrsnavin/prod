@@ -739,84 +739,180 @@ router.get(
 //  plan was already submitted.
 // ─────────────────────────────────────────────────────────────
 router.post(
-  "/assign-machine",
+  '/assign-machine',
   catchAsyncErrors(async (req, res, next) => {
-    const { jobId, machineId } = req.body;
+    const { jobId, machineId, elastics } = req.body;
 
-    if (!jobId)     return next(new ErrorHandler("jobId is required", 400));
-    if (!machineId) return next(new ErrorHandler("machineId is required", 400));
+    // ── 1. Presence checks ─────────────────────────────────────────────
+    if (!jobId)     return next(new ErrorHandler('jobId is required.',     400));
+    if (!machineId) return next(new ErrorHandler('machineId is required.', 400));
 
+    if (!Array.isArray(elastics) || elastics.length === 0) {
+      return next(new ErrorHandler(
+        'elastics must be a non-empty array of { head, elastic }.', 400,
+      ));
+    }
+
+    // ── 2. Validate each entry ─────────────────────────────────────────
+    for (const entry of elastics) {
+      if (typeof entry.head !== 'number' || !Number.isInteger(entry.head) || entry.head < 1) {
+        return next(new ErrorHandler(
+          `Invalid head value "${entry.head}". Must be a positive integer.`, 400,
+        ));
+      }
+      if (!entry.elastic) {
+        return next(new ErrorHandler(
+          `Missing elastic id for head ${entry.head}.`, 400,
+        ));
+      }
+      // Validate elastic ObjectId format
+      if (!mongoose.Types.ObjectId.isValid(entry.elastic)) {
+        return next(new ErrorHandler(
+          `Invalid elastic id "${entry.elastic}" for head ${entry.head}.`, 400,
+        ));
+      }
+    }
+
+    // No duplicate head numbers
+    const headNums = elastics.map((e) => e.head);
+    if (new Set(headNums).size !== headNums.length) {
+      return next(new ErrorHandler(
+        'Duplicate head numbers found in elastics array.', 400,
+      ));
+    }
+
+    // ── 3. Load Job ────────────────────────────────────────────────────
     const job = await JobOrder.findById(jobId);
-    if (!job) return next(new ErrorHandler("Job not found", 404));
+    if (!job) return next(new ErrorHandler('Job not found.', 404));
 
-    if (job.status !== "weaving") {
-      return next(
-        new ErrorHandler(
-          `Machine can only be assigned/reassigned while job is in "weaving" status (current: "${job.status}")`,
-          400
-        )
-      );
+    if (job.status !== 'weaving') {
+      return next(new ErrorHandler(
+        `Machine can only be assigned while job is in "weaving" status ` +
+        `(current: "${job.status}").`, 400,
+      ));
     }
 
-    // Release old machine if there is one
-    if (job.machine) {
-      await releaseMachine(job.machine);
-    }
-
+    // ── 4. Load Machine ────────────────────────────────────────────────
     const machine = await Machine.findById(machineId);
-    if (!machine) return next(new ErrorHandler("Machine not found", 404));
+    if (!machine) return next(new ErrorHandler('Machine not found.', 404));
 
-    if (machine.status !== "free") {
-      return next(
-        new ErrorHandler(
-          `Machine is not free (current status: "${machine.status}")`,
-          400
-        )
-      );
+    // Free, or already owned by this job (reassign)
+    const ownedByThisJob =
+      machine.orderRunning?.toString() === job._id.toString();
+
+    if (machine.status !== 'free' && !ownedByThisJob) {
+      return next(new ErrorHandler(
+        `Machine "${machine.ID}" is currently ${machine.status} ` +
+        `on another job and cannot be assigned.`, 400,
+      ));
     }
 
-    machine.status       = "running";
+    // ── 5. Head count must match machine.NoOfHead ──────────────────────
+    if (elastics.length !== machine.NoOfHead) {
+      return next(new ErrorHandler(
+        `Expected ${machine.NoOfHead} head entries (one per head), ` +
+        `got ${elastics.length}.`, 400,
+      ));
+    }
+
+    // Head numbers must be exactly 1 … NoOfHead with no gaps
+    const sortedHeads = [...headNums].sort((a, b) => a - b);
+    for (let i = 0; i < sortedHeads.length; i++) {
+      if (sortedHeads[i] !== i + 1) {
+        return next(new ErrorHandler(
+          `Head numbers must run from 1 to ${machine.NoOfHead} without gaps. ` +
+          `Got: [${sortedHeads.join(', ')}].`, 400,
+        ));
+      }
+    }
+
+    // ── 6. Every elastic must belong to this job ───────────────────────
+    // job.elastics = [{ elastic: ObjectId, quantity }]
+    const jobElasticIds = new Set(
+      job.elastics.map((e) => e.elastic.toString()),
+    );
+
+    for (const entry of elastics) {
+      if (!jobElasticIds.has(entry.elastic.toString())) {
+        return next(new ErrorHandler(
+          `Elastic "${entry.elastic}" (head ${entry.head}) is not part of this job.`, 400,
+        ));
+      }
+    }
+
+    // ── 7. Release old machine if job had a different one ──────────────
+    if (job.machine && job.machine.toString() !== machineId.toString()) {
+      const oldMachine = await Machine.findById(job.machine);
+      if (oldMachine) {
+        oldMachine.status       = 'free';
+        oldMachine.orderRunning = null;
+        oldMachine.elastics     = [];
+        await oldMachine.save();
+      }
+    }
+
+    // ── 8. Write head→elastic plan to machine ─────────────────────────
+    // Matches Machine.js schema:  elastics: [{ elastic: ObjectId, head: Number }]
+    machine.elastics = elastics.map((e) => ({
+      head:    e.head,
+      elastic: new mongoose.Types.ObjectId(e.elastic),
+    }));
+    machine.status       = 'running';
     machine.orderRunning = job._id;
     await machine.save();
 
+    // ── 9. Link machine to job ─────────────────────────────────────────
     job.machine = machine._id;
     await job.save();
 
-    res.json({
+    // ── 10. Build populated response ───────────────────────────────────
+    // Populate elastic names so the caller can immediately display the plan
+    const populatedMachine = await Machine.findById(machine._id)
+      .populate('elastics.elastic', 'name')
+      .lean();
+
+    return res.status(200).json({
       success: true,
-      message: "Machine assigned",
+      message: `Machine "${machine.ID}" assigned with ${machine.NoOfHead}-head plan.`,
       data: {
-        job:     { _id: job._id, jobOrderNo: job.jobOrderNo },
-        machine: { _id: machine._id, ID: machine.ID, status: machine.status },
+        jobId:     job._id,
+        machineId: machine._id,
+        machineID: machine.ID,
+        NoOfHead:  machine.NoOfHead,
+        // Echo back the saved plan with elastic names for the UI
+        headPlan: (populatedMachine.elastics || []).map((e) => ({
+          head:        e.head,
+          elasticId:   e.elastic?._id,
+          elasticName: e.elastic?.name ?? '-',
+        })),
       },
     });
-  })
+  }),
 );
+
 
 
 router.get(
   '/free-machines',
-  catchAsyncErrors(async (req, res) => {
-    console.log('[GET /jobs/free-machines] Fetching free machines for assignment');
-    // Returns all machines whose status is 'free'.
-    // Flutter uses this to populate the "Assign Machine" bottom sheet.
+  catchAsyncErrors(async (_req, res) => {
     const machines = await Machine.find({ status: 'free' })
       .select('ID manufacturer NoOfHead NoOfHooks')
       .lean();
 
-    return res.json({
-      success: true,
-      count: machines.length,
+    return res.status(200).json({
+      success:  true,
+      count:    machines.length,
       machines: machines.map((m) => ({
         id:           m._id,
-        machineID:    m.ID         || '-',
-        manufacturer: m.manufacturer || '',
-        noOfHead:     m.NoOfHead   || 0,
-        noOfHooks:    m.NoOfHooks  || 0,
+        machineID:    m.ID,
+        manufacturer: m.manufacturer ?? '',
+        noOfHead:     m.NoOfHead,
+        noOfHooks:    m.NoOfHooks,
       })),
     });
-  })
+  }),
 );
+
 
 router.get('/:jobId', async (req, res) => {
   try {
@@ -863,7 +959,8 @@ router.get('/:jobId', async (req, res) => {
         path: 'packingDetails', model: 'Packing',
         populate: [
           { path: 'elastic',  model: 'Elastic',  select: 'name' },
-          { path: 'employee', model: 'Employee', select: 'name' },
+          { path: 'checkedBy', model: 'Employee', select: 'name' },
+           { path: 'packedBy', model: 'Employee', select: 'name' },
         ],
       })
       .lean();
