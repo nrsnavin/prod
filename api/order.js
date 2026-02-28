@@ -273,6 +273,7 @@ router.post(
         message: "Order approved and stock deducted",
       });
     } catch (error) {
+      console.error("[approve-order]", error);
       await session.abortTransaction();
       session.endSession();
       return next(error);
