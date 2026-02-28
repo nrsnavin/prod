@@ -258,7 +258,7 @@ router.post(
           type:     "ORDER_APPROVAL",
           order:    order._id,
           quantity: rm.requiredWeight,
-        
+          balance:  material.stock,
         });
         await material.save({ session });
       }
