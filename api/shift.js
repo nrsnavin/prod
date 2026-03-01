@@ -291,7 +291,7 @@ router.get(
 
     const machines = await Promise.all(
       shiftPlan.plan.map(async (detail) => {
-        totalProduction += detail.production || 0;
+        totalProduction += detail.productionMeters || 0;
 
         const machine = await Machine.findById(detail.machine._id).populate(
           "orderRunning"
