@@ -496,7 +496,7 @@ router.post(
     }
 
     // ── Close shift detail ─────────────────────────────────
-    shift.productionMeters = prodValue;
+    shift.productionMeters = prodValue*machine?.NoOfHeads || prodValue; // FIX: was machine.NoOfHead (typo) → machine.NoOfHeads
     shift.production       = prodValue;
     shift.feedback         = feedback || "";
     shift.timer            = timer    || 0;
