@@ -39,6 +39,8 @@ const packing = require("./api/packing.js")
 
 const production = require("./api/production.js")
 
+const wastage = require("./api/wastage.js")
+
 
 const corsConfig = {
   origin: true,
@@ -119,6 +121,15 @@ app.use("/api/v2/warping", (req, res, next) => {
 
   next()
 }, warping);
+
+
+
+app.use("/api/v2/wastage", (req, res, next) => {
+  console.log("wastage route hit");
+
+  next()
+}, wastage);
+
 
 
 
