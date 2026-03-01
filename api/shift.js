@@ -309,7 +309,7 @@ router.get(
                         `${detail.machine.manufacturer ?? ""} ${detail.machine.ID ?? ""}`.trim(),
           jobOrderNo,
           operatorName: detail.employee?.name ?? "—",
-          production:   detail.production || 0,
+          production:   detail.productionMeters || 0,
           timer:        detail.timer,
           status:       detail.status,
         };
