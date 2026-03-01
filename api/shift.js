@@ -496,7 +496,7 @@ router.post(
     }
 
     // ── Close shift detail ─────────────────────────────────
-    shift.productionMeters = prodValue*machine?.NoOfHeads || prodValue; // FIX: was machine.NoOfHead (typo) → machine.NoOfHeads
+    shift.productionMeters = prodValue*machine?.NoOfHead || prodValue; // FIX: was machine.NoOfHead (typo) → machine.NoOfHeads
     shift.production       = prodValue;
     shift.feedback         = feedback || "";
     shift.timer            = timer    || 0;
@@ -509,7 +509,7 @@ router.post(
     if (sp) {
       // FIX: was machine.NoOfHead (typo) → machine.NoOfHeads
       sp.totalProduction =
-        (sp.totalProduction || 0) + prodValue * (machine?.NoOfHeads || 1);
+        (sp.totalProduction || 0) + prodValue * (machine?.NoOfHead || 1);
       await sp.save();
     }
 
