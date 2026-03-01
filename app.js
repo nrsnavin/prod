@@ -41,7 +41,11 @@ const production = require("./api/production.js")
 
 const wastage = require("./api/wastage.js")
 
-const attendence = require("./api//attendence.js")
+const attendence = require("./api/attendence.js")
+
+const payroll = require("./api/payroll.js")
+
+const leave = require("./api/leave.js")
 
 
 const corsConfig = {
@@ -171,6 +175,29 @@ app.use("/api/v2/production", (req, res, next) => {
 
   next()
 }, production);
+
+
+
+app.use("/api/v2/payroll", (req, res, next) => {
+  console.log("payroll route hit");
+
+  next()
+}, payroll);
+
+app.use("/api/v2/leave", (req, res, next) => {
+  console.log("leave route hit");
+
+  next()
+}, leave);
+
+
+
+app.use("/api/v2/production", (req, res, next) => {
+  console.log("production route hit");
+
+  next()
+}, production);
+
 
 
 // config
