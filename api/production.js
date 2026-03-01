@@ -191,12 +191,20 @@ router.get('/date-range', async (req, res) => {
     }
 
     // ── Summarise one ShiftPlan into a slot object ────────────
+    //
+    //  FIX: field names now match ShiftSummary.fromJson exactly:
+    //    machineCount  → machines      (was being read as 0)
+    //    operatorCount → operators     (was being read as 0)
+    //    statusSummary → status        (was being read as 'none')
+    //  ADDED: efficiency, target       (Flutter expects these fields)
     const summarise = (sp) => {
       if (!sp) {
         return {
           exists: false, shiftPlanId: null,
-          machineCount: 0, operatorCount: 0, shiftDetailCount: 0,
-          production: 0, description: '', statusSummary: 'none',
+          // FIX: use keys Flutter model reads
+          machines: 0, operators: 0, shiftDetailCount: 0,
+          production: 0, target: 0, efficiency: 0,
+          status: 'none',
         };
       }
 
@@ -208,6 +216,8 @@ router.get('/date-range', async (req, res) => {
       const statuses    = new Set();
 
       for (const d of details) {
+        // d.machine is populated as { _id: ObjectId } (select: '_id')
+        // Fall back to raw ObjectId string if populate didn't resolve
         const mid = d.machine?._id?.toString()  || d.machine?.toString();
         const eid = d.employee?._id?.toString() || d.employee?.toString();
         if (mid) machineIds.add(mid);
@@ -216,27 +226,38 @@ router.get('/date-range', async (req, res) => {
       }
 
       // Collapse multiple statuses into one label
-      let statusSummary;
-      if (statuses.size === 0)             statusSummary = 'open';
-      else if (statuses.size === 1)        statusSummary = [...statuses][0];
-      else if (statuses.has('running'))    statusSummary = 'running';
-      else if (statuses.has('open'))       statusSummary = 'open';
-      else                                 statusSummary = 'closed';
+      // FIX: key renamed from statusSummary → status
+      let status;
+      if (statuses.size === 0)           status = 'open';
+      else if (statuses.size === 1)      status = [...statuses][0];
+      else if (statuses.has('running'))  status = 'running';
+      else if (statuses.has('open'))     status = 'open';
+      else                               status = 'closed';
+
+      const production = sp.totalProduction || 0;
 
       return {
         exists:           true,
         shiftPlanId:      sp._id,
-        machineCount:     machineIds.size,
-        operatorCount:    employeeIds.size,
+        // FIX: 'machines' and 'operators' — these were the keys
+        //       being read by Flutter that always returned 0
+        machines:         machineIds.size,
+        operators:        employeeIds.size,
         shiftDetailCount: details.length,
-        // ShiftPlan.totalProduction is the canonical production figure
-        production:       sp.totalProduction || 0,
-        description:      sp.description    || '',
-        statusSummary,
+        production,
+        target:           0,       // No target field in ShiftPlan schema
+        efficiency:       0,       // Cannot compute without target
+        status,                    // FIX: was 'statusSummary'
       };
     };
 
     // ── Iterate every calendar day in the range ───────────────
+    //
+    //  FIX: daily row now includes fields Flutter reads on DailyProduction:
+    //    runningMachines  (was absent → always 0 in UI)
+    //    totalOperators   (was absent → always 0 in UI)
+    //    efficiency       (was absent → always 0 in UI)
+    //    totalTarget      (was absent → always 0 in UI)
     const result = [];
     const cursor = new Date(rangeStart);
     cursor.setHours(0, 0, 0, 0);
@@ -246,12 +267,24 @@ router.get('/date-range', async (req, res) => {
       const daySlot  = summarise(byDate[key]?.DAY   || null);
       const nightSlot= summarise(byDate[key]?.NIGHT || null);
 
+      // Aggregate machine + operator counts across both shifts for the day row
+      // Flutter's DailyProduction reads runningMachines and totalOperators
+      // directly on the day object (not inside dayShift/nightShift)
+      const runningMachines = (daySlot.machines || 0) + (nightSlot.machines || 0);
+      const totalOperators  = (daySlot.operators || 0) + (nightSlot.operators || 0);
+      const totalProduction = daySlot.production + nightSlot.production;
+
       result.push({
         date:            key,
         dateLabel:       toDateLabel(cursor),
         dayOfWeek:       toDayOfWeek(cursor),
         hasData:         daySlot.exists || nightSlot.exists,
-        totalProduction: daySlot.production + nightSlot.production,
+        totalProduction,
+        totalTarget:     0,    // No target in schema; Flutter defaults to 0
+        efficiency:      0,    // Cannot compute without target
+        // FIX: these two were absent — Flutter showed 0 machines / 0 operators
+        runningMachines,
+        totalOperators,
         dayShift:        daySlot,
         nightShift:      nightSlot,
       });
@@ -376,96 +409,102 @@ router.get('/shift-detail/:shiftPlanId', async (req, res) => {
     const rawDetails = sp.plan || [];
 
     // ── Build detail rows ─────────────────────────────────────
-    const detailRows = rawDetails.map((d) => {
-      const timerSec = timerToSeconds(d.timer);
-
-      // Map ShiftDetail.elastics[{head, elastic}]
-      const elasticsOut = (d.elastics || []).map((he) => ({
-        head: he.head,
-        elastic: he.elastic
-          ? {
-              id:          he.elastic._id,
-              name:        he.elastic.name,
-              weaveType:   he.elastic.weaveType,
-              spandexEnds: he.elastic.spandexEnds,
-              pick:        he.elastic.pick,
-              noOfHook:    he.elastic.noOfHook,
-              weight:      he.elastic.weight,
-            }
-          : null,
-      }));
-
-      // Map Machine fields: ID, NoOfHead, NoOfHooks, status
-      const machineOut = d.machine
-        ? {
-            id:           d.machine._id,
-            machineID:    d.machine.ID,            // Machine.ID
-            manufacturer: d.machine.manufacturer,
-            noOfHead:     d.machine.NoOfHead,      // Machine.NoOfHead
-            noOfHooks:    d.machine.NoOfHooks,     // Machine.NoOfHooks
-            status:       d.machine.status,        // free|running|maintenance
-          }
-        : null;
-
-      // Map Employee fields
-      const employeeOut = d.employee
-        ? {
-            id:          d.employee._id,
-            name:        d.employee.name,
-            department:  d.employee.department,
-            skill:       d.employee.skill,
-            role:        d.employee.role,
-            performance: d.employee.performance,
-          }
-        : null;
-
-      // Map JobOrder ref
-      const jobOut = d.job
-        ? {
-            id:    d.job._id,
-            jobNo: d.job.jobOrderNo,
-            status:d.job.status,
-          }
-        : null;
+    //
+    //  FIX: previously returned nested { machine: {...}, employee: {...} }
+    //  objects. Flutter's MachineShiftDetail.fromJson reads FLAT fields:
+    //    machineId, machineNo, noOfHeads, operatorId, operatorName, etc.
+    //  Also:
+    //    productionMeters → production
+    //    timerSeconds     → runMinutes  (÷60)
+    //    rowIndex         added (1-based position)
+    const detailRows = rawDetails.map((d, idx) => {
+      const timerSec  = timerToSeconds(d.timer);
+      const runMinutes = Math.round(timerSec / 60);
 
       return {
-        shiftDetailId:    d._id,
-        date:             d.date ? toISODate(d.date) : null,
-        shift:            d.shift,                // "DAY" | "NIGHT"
-        status:           d.status,               // "open"|"running"|"closed"
-        description:      d.description || '',
-        feedback:         d.feedback    || '',
-        timer:            d.timer || '00:00:00',  // "HH:mm:ss" as stored
-        timerSeconds:     timerSec,
-        timerLabel:       secondsToLabel(timerSec),
-        productionMeters: d.productionMeters || 0,
-        machine:          machineOut,
-        employee:         employeeOut,
-        job:              jobOut,
-        elastics:         elasticsOut,
+        // ── Identity ───────────────────────────────────────────
+        shiftDetailId: d._id,
+        rowIndex:      idx + 1,    // 1-based row number
+
+        // ── Machine (flattened) ────────────────────────────────
+        // FIX: was nested d.machine object; Flutter reads flat keys
+        machineId:   d.machine?._id?.toString()  ?? null,
+        machineNo:   d.machine?.ID               ?? '-',    // Machine.ID
+        machineType: d.machine?.manufacturer     ?? '-',
+        department:  d.employee?.department      ?? '-',
+        noOfHeads:   d.machine?.NoOfHead         ?? 0,
+        speed:       0,   // Not in ShiftDetail schema
+
+        // ── Operator (flattened) ───────────────────────────────
+        // FIX: was nested d.employee object; Flutter reads flat keys
+        operatorId:   d.employee?._id?.toString() ?? null,
+        operatorName: d.employee?.name            ?? '-',
+        operatorDept: d.employee?.department      ?? '-',
+        operatorSkill:d.employee?.skill           ?? '-',
+
+        // ── Production ─────────────────────────────────────────
+        // FIX: was 'productionMeters'; Flutter reads 'production'
+        production:      d.productionMeters || 0,
+        target:          0,    // Not in ShiftDetail schema
+        efficiency:      0,    // Cannot compute without target
+
+        // ── Timer ──────────────────────────────────────────────
+        // FIX: was 'timerSeconds'; Flutter reads 'runMinutes'
+        runMinutes,
+        downtimeMinutes: 0,          // Not in ShiftDetail schema
+        activeMinutes:   runMinutes, // No downtime data → all time is active
+        downtimeReasons: [],
+
+        // ── Misc ───────────────────────────────────────────────
+        // FIX: 'remarks' from description (Flutter reads 'remarks')
+        remarks:  d.description || d.feedback || '',
+        status:   d.status,   // "open" | "running" | "closed"
+        shift:    d.shift,
+
+        // ── Job link ───────────────────────────────────────────
+        job: d.job
+          ? { id: d.job._id, jobNo: d.job.jobOrderNo, status: d.job.status }
+          : null,
+
+        // ── Elastics (per-head assignments) ───────────────────
+        elastics: (d.elastics || []).map((he) => ({
+          head: he.head,
+          elastic: he.elastic ? {
+            id:          he.elastic._id,
+            name:        he.elastic.name,
+            weaveType:   he.elastic.weaveType,
+            spandexEnds: he.elastic.spandexEnds,
+            pick:        he.elastic.pick,
+            noOfHook:    he.elastic.noOfHook,
+            weight:      he.elastic.weight,
+          } : null,
+        })),
       };
     });
 
     // ── Compute summary totals ────────────────────────────────
     const uniqueMachines  = new Set(
       detailRows
-        .map((r) => r.machine?.id?.toString())
+        .map((r) => r.machineId?.toString())
         .filter(Boolean)
     );
     const uniqueOperators = new Set(
       detailRows
-        .map((r) => r.employee?.id?.toString())
+        .map((r) => r.operatorId?.toString())
         .filter(Boolean)
     );
 
     // ShiftPlan.totalProduction is authoritative;
     // fall back to summing detail rows only if it is 0 / missing
     const totalProduction = sp.totalProduction
-      || detailRows.reduce((sum, r) => sum + r.productionMeters, 0);
+      || detailRows.reduce((sum, r) => sum + r.production, 0);
 
+    // FIX: Flutter reads 'totalRunMinutes' not 'totalTimerSeconds'
+    //      Convert seconds → minutes
     const totalTimerSec = detailRows.reduce(
-      (sum, r) => sum + r.timerSeconds, 0
+      (sum, r) => sum + (r.runMinutes * 60), 0
     );
+    const totalRunMinutes = Math.round(totalTimerSec / 60);
 
     // Count detail rows by status
     const statusCounts = { open: 0, running: 0, closed: 0 };
@@ -473,16 +512,27 @@ router.get('/shift-detail/:shiftPlanId', async (req, res) => {
       if (r.status in statusCounts) statusCounts[r.status]++;
     }
 
+    // Highest producer by productionMeters
+    const topDetail = detailRows.reduce(
+      (best, r) => r.production > (best?.production ?? -1) ? r : best,
+      null
+    );
+
     const summary = {
-      totalMachines:           uniqueMachines.size,
-      totalOperators:          uniqueOperators.size,
+      totalMachines:    uniqueMachines.size,
+      totalOperators:   uniqueOperators.size,
       totalProduction,
-      totalTimerSeconds:       totalTimerSec,
-      timerLabel:              secondsToLabel(totalTimerSec),
-      avgProductionPerMachine:
+      totalTarget:      0,     // No target field in ShiftPlan schema
+      // FIX: was 'avgProductionPerMachine' — Flutter reads 'avgEfficiency'
+      avgEfficiency:
         uniqueMachines.size > 0
           ? Math.round((totalProduction / uniqueMachines.size) * 10) / 10
           : 0,
+      // FIX: was 'totalTimerSeconds' — Flutter reads 'totalRunMinutes'
+      totalRunMinutes,
+      totalDowntime:    0,     // No downtime field in ShiftDetail schema
+      // FIX: was absent — Flutter reads 'highestProducer'
+      highestProducer:  topDetail?.machineNo ?? '-',
       statusCounts,
     };
 
@@ -492,11 +542,19 @@ router.get('/shift-detail/:shiftPlanId', async (req, res) => {
         shiftPlanId:     sp._id,
         date:            toISODate(sp.date),
         dateLabel:       toDateLabel(sp.date),
-        shift:           sp.shift,           // "DAY" | "NIGHT"
+        // FIX: was 'shift' — Flutter reads 'shiftType'
+        shiftType:       (sp.shift || 'DAY').toLowerCase(), // 'day' | 'night'
+        // FIX: add status derived from detail statuses (Flutter reads this)
+        status:          summary.statusCounts.running > 0 ? 'running'
+                       : summary.statusCounts.open    > 0 ? 'open'
+                       : 'closed',
         description:     sp.description || '',
+        remarks:         sp.description || '',
+        department:      '-',
         totalProduction,
         summary,
-        details:         detailRows,
+        // FIX: was 'details' — Flutter reads 'machines'
+        machines:        detailRows,
       },
     });
 
