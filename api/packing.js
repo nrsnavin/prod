@@ -39,7 +39,9 @@ function packingDetailQuery(query) {
 router.get(
   "/jobs-packing",
   catchAsyncErrors(async (req, res, next) => {
-    const jobs = await JobOrder.find({ status: "packing" })
+    const jobs = await JobOrder.find({
+          status: { $in: ["weaving", "finishing", "checking"] },
+        })
       .populate("customer", "name")
       .populate("elastics.elastic", "name")
       .select("_id jobOrderNo elastics customer");
