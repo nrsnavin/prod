@@ -14,7 +14,7 @@
 const express      = require('express');
 const router       = express.Router();
 const LeaveRequest = require('../models/LeaveRequest');
-const Attendance   = require('../models/Attendance');
+const Attendance   = require('../models/Attendence.js');
 const Employee     = require('../models/Employee');
 
 function toISODate(d)   { return new Date(d).toISOString().split('T')[0]; }
