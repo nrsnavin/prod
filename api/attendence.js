@@ -17,7 +17,7 @@
 
 const express    = require('express');
 const router     = express.Router();
-const Attendance = require('../models/Attendance');
+const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
 const ShiftDetail= require('../models/ShiftDetail');
 

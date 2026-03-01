@@ -41,7 +41,7 @@ const production = require("./api/production.js")
 
 const wastage = require("./api/wastage.js")
 
-const attendence = require("./api/attendence.js")
+const attendence = require("./api//attendence.js")
 
 
 const corsConfig = {
@@ -133,7 +133,7 @@ app.use("/api/v2/wastage", (req, res, next) => {
 }, wastage);
 
 
-app.use("/api/v2/attendence", (req, res, next) => {
+app.use("/api/v2/attendance", (req, res, next) => {
   console.log("attendence route hit");
 
   next()
