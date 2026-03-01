@@ -678,5 +678,323 @@ router.get('/summary-stats', async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
+// ═════════════════════════════════════════════════════════════
+//  ENDPOINT 4 — GET /analytics
+//
+//  Comprehensive production analytics with anomaly detection
+//  and employee performance ranking.
+//
+//  Query params:
+//    startDate   YYYY-MM-DD  (required)
+//    endDate     YYYY-MM-DD  (required)
+//    shift       DAY | NIGHT | all  (default: all)
+//    machineId   ObjectId    (optional — filter to single machine)
+//    employeeId  ObjectId    (optional — filter to single employee)
+//
+//  Response:
+//  {
+//    success: true,
+//    filters: { startDate, endDate, shift, machineId, employeeId },
+//    data: {
+//      summary: { totalProduction, activeShifts, activeMachines,
+//                 activeEmployees, avgPerShift, totalTarget, overallAvg },
+//      trend:     [{ date, dateLabel, dayOfWeek, production, machines, operators }],
+//      byMachine: [{ machineId, machineNo, manufacturer, noOfHeads,
+//                    shiftCount, totalProduction, avgPerShift,
+//                    trend: [{date, production}], anomalyCount, isActive }],
+//      byEmployee:[{ employeeId, name, department, skill, rank,
+//                    shiftCount, totalProduction, avgPerShift,
+//                    badge, badgeLabel, isTopPerformer }],
+//      anomalies: [{ type, severity, date, dateLabel, entityType,
+//                    entityId, entityName, value, threshold, message }]
+//    }
+//  }
+// ═════════════════════════════════════════════════════════════
+router.get('/analytics', async (req, res) => {
+  try {
+    const { startDate, endDate, shift = 'all', machineId, employeeId } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'startDate and endDate are required (YYYY-MM-DD).',
+      });
+    }
+
+    let rangeStart, rangeEnd;
+    try {
+      rangeStart = parseDateParam(startDate, 0, 0, 0, 0);
+      rangeEnd   = parseDateParam(endDate, 23, 59, 59, 999);
+    } catch (e) {
+      return res.status(400).json({ success: false, message: e.message });
+    }
+
+    // ── Build DB filter ────────────────────────────────────────
+    const dbFilter = { date: { $gte: rangeStart, $lte: rangeEnd } };
+    if (shift !== 'all') dbFilter.shift = shift.toUpperCase();
+    if (machineId)  dbFilter.machine  = machineId;
+    if (employeeId) dbFilter.employee = employeeId;
+
+    // ── Fetch all ShiftDetails in range ───────────────────────
+    const details = await ShiftDetail.find(dbFilter)
+      .populate({ path: 'machine',  select: 'ID manufacturer NoOfHead NoOfHooks status' })
+      .populate({ path: 'employee', select: 'name department skill role performance' })
+      .lean();
+
+    if (details.length === 0) {
+      return res.json({
+        success: true,
+        filters: { startDate, endDate, shift, machineId: machineId || null, employeeId: employeeId || null },
+        data: {
+          summary:    { totalProduction: 0, activeShifts: 0, activeMachines: 0, activeEmployees: 0, avgPerShift: 0, overallAvg: 0 },
+          trend:      [],
+          byMachine:  [],
+          byEmployee: [],
+          anomalies:  [],
+        },
+      });
+    }
+
+    // ── Aggregate by machine ───────────────────────────────────
+    const machineMap = new Map(); // machineId → { meta, entries[{date,prod}] }
+    const employeeMap = new Map(); // employeeId → { meta, entries[{date,prod}] }
+    const dateMap     = new Map(); // 'YYYY-MM-DD' → { production, machineIds, employeeIds }
+
+    for (const d of details) {
+      const mid  = d.machine?._id?.toString()  || d.machine?.toString();
+      const eid  = d.employee?._id?.toString() || d.employee?.toString();
+      const prod = d.productionMeters || 0;
+      const dateKey = toISODate(d.date);
+
+      // ── Date trend ─────────────────────────────────────────
+      if (!dateMap.has(dateKey)) {
+        dateMap.set(dateKey, {
+          date:       dateKey,
+          dateLabel:  toDateLabel(d.date),
+          dayOfWeek:  toDayOfWeek(d.date),
+          production: 0,
+          machineIds: new Set(),
+          employeeIds: new Set(),
+        });
+      }
+      const dt = dateMap.get(dateKey);
+      dt.production += prod;
+      if (mid) dt.machineIds.add(mid);
+      if (eid) dt.employeeIds.add(eid);
+
+      // ── Machine aggregation ────────────────────────────────
+      if (mid) {
+        if (!machineMap.has(mid)) {
+          machineMap.set(mid, {
+            machineId:    mid,
+            machineNo:    d.machine?.ID            ?? '-',
+            manufacturer: d.machine?.manufacturer  ?? '-',
+            noOfHeads:    d.machine?.NoOfHead       ?? 0,
+            isActive:     d.machine?.status === 'running',
+            totalProduction: 0,
+            shiftCount:   0,
+            entries:      [],
+          });
+        }
+        const m = machineMap.get(mid);
+        m.totalProduction += prod;
+        m.shiftCount++;
+        m.entries.push({ date: dateKey, production: prod });
+      }
+
+      // ── Employee aggregation ───────────────────────────────
+      if (eid) {
+        if (!employeeMap.has(eid)) {
+          employeeMap.set(eid, {
+            employeeId:   eid,
+            name:         d.employee?.name        ?? '-',
+            department:   d.employee?.department  ?? '-',
+            skill:        d.employee?.skill       ?? '-',
+            role:         d.employee?.role        ?? '-',
+            totalProduction: 0,
+            shiftCount:   0,
+            entries:      [],
+          });
+        }
+        const emp = employeeMap.get(eid);
+        emp.totalProduction += prod;
+        emp.shiftCount++;
+        emp.entries.push({ date: dateKey, production: prod });
+      }
+    }
+
+    // ── Compute machine averages ───────────────────────────────
+    const machineList = [...machineMap.values()].map((m) => ({
+      ...m,
+      avgPerShift: m.shiftCount > 0 ? Math.round(m.totalProduction / m.shiftCount) : 0,
+      trend: m.entries,
+    })).sort((a, b) => b.totalProduction - a.totalProduction);
+
+    // ── Compute employee averages + ranking + badges ──────────
+    const overallAvgPerShift = details.length > 0
+      ? details.reduce((s, d) => s + (d.productionMeters || 0), 0) / details.length
+      : 0;
+
+    const employeeListRaw = [...employeeMap.values()].map((emp) => ({
+      ...emp,
+      avgPerShift: emp.shiftCount > 0 ? Math.round(emp.totalProduction / emp.shiftCount) : 0,
+    })).sort((a, b) => b.totalProduction - a.totalProduction);
+
+    const employeeList = employeeListRaw.map((emp, idx) => {
+      const rank = idx + 1;
+      // Badge logic
+      let badge = 'none';
+      let badgeLabel = '';
+      if (rank === 1) { badge = 'gold';   badgeLabel = '🥇 Top Producer';    }
+      else if (rank === 2) { badge = 'silver'; badgeLabel = '🥈 2nd Place';      }
+      else if (rank === 3) { badge = 'bronze'; badgeLabel = '🥉 3rd Place';      }
+      else if (emp.shiftCount >= 3 && emp.avgPerShift > overallAvgPerShift * 1.2) {
+        badge = 'star'; badgeLabel = '⭐ High Performer';
+      }
+      return { ...emp, rank, badge, badgeLabel, isTopPerformer: rank <= 3 };
+    });
+
+    // ── Anomaly detection ──────────────────────────────────────
+    //
+    //  Each entity uses its OWN avg as the baseline — so a slow
+    //  machine is not flagged just for being slower than another.
+    //  Thresholds:
+    //    ZERO:           prod == 0  in an active shift entry
+    //    LOW (high):     prod < 40% of entity avg
+    //    UNDERPERFORM:   prod < 70% of entity avg
+    //    SPIKE:          prod > 150% of entity avg  (unusual upside)
+    const anomalies = [];
+
+    const detectAnomalies = (entries, avg, entityType, entityId, entityName) => {
+      if (avg === 0 || entries.length < 2) return; // Need baseline
+      for (const e of entries) {
+        const pct = e.production / avg;
+        if (e.production === 0) {
+          anomalies.push({
+            type:       'ZERO_PRODUCTION',
+            severity:   'high',
+            date:       e.date,
+            dateLabel:  toDateLabel(new Date(e.date)),
+            entityType,
+            entityId,
+            entityName,
+            value:      0,
+            threshold:  avg,
+            message:    `${entityName} recorded 0m production on ${toDateLabel(new Date(e.date))}`,
+          });
+        } else if (pct < 0.40) {
+          anomalies.push({
+            type:       'LOW_PRODUCTION',
+            severity:   'high',
+            date:       e.date,
+            dateLabel:  toDateLabel(new Date(e.date)),
+            entityType,
+            entityId,
+            entityName,
+            value:      e.production,
+            threshold:  Math.round(avg * 0.40),
+            message:    `${entityName} produced only ${e.production}m (avg ${Math.round(avg)}m) — ${Math.round(pct*100)}% of normal`,
+          });
+        } else if (pct < 0.70) {
+          anomalies.push({
+            type:       'UNDERPERFORMANCE',
+            severity:   'medium',
+            date:       e.date,
+            dateLabel:  toDateLabel(new Date(e.date)),
+            entityType,
+            entityId,
+            entityName,
+            value:      e.production,
+            threshold:  Math.round(avg * 0.70),
+            message:    `${entityName} underperformed on ${toDateLabel(new Date(e.date))}: ${e.production}m vs avg ${Math.round(avg)}m`,
+          });
+        } else if (pct > 1.50) {
+          anomalies.push({
+            type:       'PRODUCTION_SPIKE',
+            severity:   'low',
+            date:       e.date,
+            dateLabel:  toDateLabel(new Date(e.date)),
+            entityType,
+            entityId,
+            entityName,
+            value:      e.production,
+            threshold:  Math.round(avg * 1.50),
+            message:    `${entityName} exceptional output on ${toDateLabel(new Date(e.date))}: ${e.production}m (${Math.round(pct*100)}% of avg)`,
+          });
+        }
+      }
+    };
+
+    for (const m of machineList) {
+      detectAnomalies(m.entries, m.avgPerShift, 'machine', m.machineId, m.machineNo);
+    }
+    for (const emp of employeeList) {
+      detectAnomalies(emp.entries, emp.avgPerShift, 'employee', emp.employeeId, emp.name);
+    }
+
+    // Sort: high severity first, then by date desc
+    const severityOrder = { high: 0, medium: 1, low: 2 };
+    anomalies.sort((a, b) => {
+      const sd = severityOrder[a.severity] - severityOrder[b.severity];
+      return sd !== 0 ? sd : b.date.localeCompare(a.date);
+    });
+
+    // ── Trend array (sorted by date asc) ──────────────────────
+    const trend = [...dateMap.values()]
+      .map((dt) => ({
+        date:       dt.date,
+        dateLabel:  dt.dateLabel,
+        dayOfWeek:  dt.dayOfWeek,
+        production: dt.production,
+        machines:   dt.machineIds.size,
+        operators:  dt.employeeIds.size,
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    // ── Summary ────────────────────────────────────────────────
+    const totalProduction  = details.reduce((s, d) => s + (d.productionMeters || 0), 0);
+    const activeMachines   = new Set(details.map((d) => d.machine?._id?.toString() || d.machine?.toString()).filter(Boolean));
+    const activeEmployees  = new Set(details.map((d) => d.employee?._id?.toString() || d.employee?.toString()).filter(Boolean));
+
+    const summary = {
+      totalProduction,
+      activeShifts:    details.length,
+      activeMachines:  activeMachines.size,
+      activeEmployees: activeEmployees.size,
+      avgPerShift:     details.length > 0 ? Math.round(totalProduction / details.length) : 0,
+      overallAvg:      Math.round(overallAvgPerShift),
+      anomalyCount:    anomalies.filter((a) => a.severity === 'high').length,
+    };
+
+    // Strip internal 'entries' array (already in trend) from response lists
+    const machineOut  = machineList.map(({ entries, ...rest }) => ({
+      ...rest,
+      anomalyCount: anomalies.filter((a) => a.entityId === rest.machineId).length,
+    }));
+    const employeeOut = employeeList.map(({ entries, ...rest }) => rest);
+
+    return res.json({
+      success: true,
+      filters: {
+        startDate,
+        endDate,
+        shift,
+        machineId:  machineId  || null,
+        employeeId: employeeId || null,
+      },
+      data: {
+        summary,
+        trend,
+        byMachine:  machineOut,
+        byEmployee: employeeOut,
+        anomalies,
+      },
+    });
+
+  } catch (err) {
+    console.error('[GET /analytics]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 module.exports = router;
