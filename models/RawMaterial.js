@@ -34,6 +34,7 @@ const RawMaterialSchema = new mongoose.Schema(
     supplier: {
       type: mongoose.Types.ObjectId,
       ref: "Supplier",
+      default:"697e40c4e79c50e10e17ab61"
     },
 
    price: { type: Number, default: 0 }, // per kg

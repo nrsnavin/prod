@@ -8,6 +8,10 @@ const cors = require("cors");
 
 
 
+
+
+
+
 const user = require("./api/user.js")
 
 const machine = require("./api/machine.js")
@@ -45,7 +49,8 @@ const attendence = require("./api/attendence.js")
 
 const payroll = require("./api/payroll.js")
 
-const leave = require("./api/leave.js")
+const leave = require("./api/leave.js");
+const RawMaterial = require("./models/RawMaterial.js");
 
 
 const corsConfig = {
