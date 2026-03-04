@@ -229,7 +229,7 @@ router.get(
 
     const elastics = await Elastic.find(filter)
       .skip((page - 1) * limit)
-      .limit(Number(limit))
+      .limit(search ? 0 : Number(limit))  // 0 = no limit when searching so all matches are returned
       .sort({ createdAt: -1 });
 
     const total = await Elastic.countDocuments(filter);

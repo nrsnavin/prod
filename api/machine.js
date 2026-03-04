@@ -113,7 +113,67 @@ router.get(
 //
 //  FIX: status code was 201 → now 200.
 //  Changed: limit reduced to 10 (as requested by the task).
+
+
 // ─────────────────────────────────────────────────────────────
+
+router.patch(
+  '/update-heads',
+  catchAsyncErrors(async (req, res, next) => {
+    const { machineId, noOfHead } = req.body;
+
+    // ── Validate input ──────────────────────────────────────
+    if (!machineId)
+      return next(new ErrorHandler('machineId is required.', 400));
+
+    if (
+      typeof noOfHead !== 'number' ||
+      !Number.isInteger(noOfHead) ||
+      noOfHead < 1
+    ) {
+      return next(
+        new ErrorHandler('noOfHead must be a positive integer.', 400)
+      );
+    }
+
+    // ── Load machine ────────────────────────────────────────
+    const machine = await Machine.findById(machineId);
+    if (!machine)
+      return next(new ErrorHandler('Machine not found.', 404));
+
+    // ── Guard: only free machines can be modified ───────────
+    if (machine.status !== 'free') {
+      return next(
+        new ErrorHandler(
+          `Head count can only be updated when the machine is free ` +
+          `(current status: "${machine.status}").`,
+          400
+        )
+      );
+    }
+
+    // ── Persist ─────────────────────────────────────────────
+    const old = machine.NoOfHead;
+    machine.NoOfHead = noOfHead;
+    await machine.save();
+
+    console.log(
+      `[machine/update-heads] ${machine.ID}: NoOfHead ${old} → ${noOfHead}`
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Head count updated from ${old} to ${noOfHead}.`,
+      data: {
+        machineId: machine._id,
+        machineID: machine.ID,
+        noOfHead:  machine.NoOfHead,
+      },
+    });
+  })
+);
+
+
 router.get(
   "/get-machine-detail",
   catchAsyncErrors(async (req, res, next) => {
