@@ -35,6 +35,8 @@ const covering = require("./api/covering.js")
 
 const packing = require("./api/packing.js")
 
+const deliveryChallanRouter = require("./api/deliveryChallan.js");
+
 
 
 const production = require("./api/production.js")
@@ -100,6 +102,13 @@ app.use("/api/v2/elastic", (req, res, next) => {
 
   next()
 }, elastic);
+
+
+app.use("/api/v2/dc", (req, res, next) => {
+  console.log("elastic route hit");
+
+  next()
+}, deliveryChallanRouter);
 
 
 app.use("/api/v2/supplier", (req, res, next) => {
