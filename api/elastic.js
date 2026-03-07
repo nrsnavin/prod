@@ -226,4 +226,29 @@ router.post(
 );
 
 
+// ────────────────────────────────────────────────────────────────
+//  DELETE ELASTIC
+// ────────────────────────────────────────────────────────────────
+router.delete(
+  "/delete-elastic",
+  catchAsyncErrors(async (req, res, next) => {
+    const elastic = await Elastic.findById(req.query.id);
+    if (!elastic)
+      return next(new ErrorHandler("Elastic not found", 404));
+
+    // Delete associated costing document if it exists
+    if (elastic.costing) {
+      await Costing.findByIdAndDelete(elastic.costing);
+    }
+
+    await elastic.deleteOne();
+
+    res.json({
+      success: true,
+      message: "Elastic deleted successfully",
+    });
+  })
+);
+
+
 module.exports = router;
