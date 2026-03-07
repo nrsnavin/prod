@@ -9,7 +9,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 
 // ── Initialise Anthropic client ───────────────────────────────
 // Set ANTHROPIC_API_KEY in your .env file
-const anthropic = new Anthropic({ apiKey: "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" });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ─────────────────────────────────────────────────────────────
 //  POST /api/v2/ai/generate-warping-plan
