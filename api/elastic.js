@@ -12,169 +12,24 @@ const Costing = require("../models/Costing");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
 
 
-async function calculateElasticCost(elasticData) {
-  let totalCost = 0;
-  const breakdown = [];
-
-  const addCost = async (materialId, weight, category) => {
-    const material = await RawMaterial.findById(materialId);
-    if (!material) throw new Error("Raw material not found");
-
-    const cost = (material.price * weight) / 1000;
-    totalCost += cost;
-
-    breakdown.push({
-      material: material.name,
-      category,
-      rate: material.price,
-      weight,
-      cost,
-    });
-  };
-
-  // Warp Spandex
-  await addCost(
-    elasticData.warpSpandex.id,
-    elasticData.warpSpandex.weight,
-    "Spandex"
-  );
-
-  // Covering
-  await addCost(
-    elasticData.spandexCovering.id,
-    elasticData.spandexCovering.weight,
-    "Covering"
-  );
-
-  // Weft
-  await addCost(
-    elasticData.weftYarn.id,
-    elasticData.weftYarn.weight,
-    "Weft"
-  );
-
-  // Warp Yarns
-  for (const w of elasticData.warpYarn) {
-    await addCost(w.id, w.weight, "Warp Yarn");
-  }
-
-  return { totalCost, breakdown };
-}
-
-
-
-// router.post(
-//   "/create-elastic",
-//   // isAuthenticated,
-//   catchAsyncErrors(async (req, res, next) => {
-//     const elasticData = req.body;
-
-//     let materialCost = 0;
-//     const costDetails = [];
-
-//     // 🔹 Helper to calculate material cost
-//     const addMaterialCost = async (materialId, weight) => {
-//       const material = await RawMaterial.findById(materialId);
-//       if (!material) {
-//         throw new Error(`Raw material not found`);
-//       }
-
-//       const cost = (material.price * weight) / 1000;
-//       materialCost += cost;
-
-//       costDetails.push({
-//         type: "material",
-//         description: material.name,
-//         quantity: weight,
-//         rate: material.price,
-//         cost,
-//       });
-//     };
-
-//     // 🧶 Spandex covering
-//     await addMaterialCost(
-//       elasticData.spandexCovering.id,
-//       elasticData.spandexCovering.weight
-//     );
-
-//     // 🧶 Warp spandex (rubber)
-//     await addMaterialCost(
-//       elasticData.warpSpandex.id,
-//       elasticData.warpSpandex.weight
-//     );
-
-//     // 🧵 Weft yarn
-//     await addMaterialCost(
-//       elasticData.weftYarn.id,
-//       elasticData.weftYarn.weight
-//     );
-
-//     // 🧵 Warp yarns (MULTIPLE)
-//     for (const yarn of elasticData.warpYarn) {
-//       await addMaterialCost(yarn.id, yarn.weight);
-//     }
-
-//     // 🧵 CREATE ELASTIC
-//     const elastic = await Elastic.create({
-//       name: elasticData.name,
-//       weaveType: elasticData.weaveType,
-
-//       warpSpandex: elasticData.warpSpandex,
-//       warpYarn: elasticData.warpYarn,
-//       spandexCovering: elasticData.spandexCovering,
-//       weftYarn: elasticData.weftYarn,
-
-//       spandexEnds: elasticData.spandexEnds,
-//       yarnEnds: elasticData.yarnEnds,
-//       pick: Number(elasticData.pick),
-//       noOfHook: Number(elasticData.noOfHook),
-//       weight: Number(elasticData.weight),
-
-//       testingParameters: elasticData.testingParameters,
-//       image: elasticData.image,
-//     });
-
-//     // 💰 CREATE COSTING
-//     const costing = await Costing.create({
-//       date: new Date(),
-//       elastic: elastic._id,
-//       materialCost,
-//       details: costDetails,
-//       totalCost: materialCost,
-//       status: "Final",
-//     });
-
-//     elastic.costing = costing._id;
-//     await elastic.save();
-
-//     res.status(201).json({
-//       success: true,
-//       data: elastic,
-//     });
-//   })
-// );
+// ────────────────────────────────────────────────────────────────
+//  CREATE ELASTIC
+// ────────────────────────────────────────────────────────────────
 router.post(
   "/create-elastic",
   catchAsyncErrors(async (req, res, next) => {
     try {
       const elasticData = req.body;
-
       console.log("Received elastic data:", elasticData);
 
-      // 1️⃣ Create Elastic first
       const elastic = await Elastic.create(elasticData);
 
-      // 2️⃣ Calculate costing
       const { materialCost, details } =
         await calculateElasticCosting(elasticData);
-
-        console.log("Calculated material cost:", materialCost);
-        console.log("Cost breakdown:", details);
 
       const conversionCost = elasticData.conversionCost ?? 1.25;
       const totalCost = materialCost + conversionCost;
 
-      // 3️⃣ Save Costing
       const costing = await Costing.create({
         date: new Date(),
         elastic: elastic._id,
@@ -184,16 +39,11 @@ router.post(
         totalCost,
         status: "Draft",
       });
-      console.log("Costing created:", costing);
-      // 4️⃣ Attach costing to elastic
+
       elastic.costing = costing._id;
       await elastic.save();
 
-      res.status(201).json({
-        success: true,
-        elastic,
-        costing,
-      });
+      res.status(201).json({ success: true, elastic, costing });
     } catch (err) {
       console.error(err);
       return next(new ErrorHandler(err.message, 400));
@@ -202,22 +52,9 @@ router.post(
 );
 
 
-// router.get(
-//   "/all",
-//   catchAsyncErrors(async (req, res) => {
-//     const elastics = await Elastic.find()
-//       .sort({ createdAt: -1 })
-//       .populate("costing");
-
-//     res.status(200).json({
-//       success: true,
-//       count: elastics.length,
-//       data: elastics,
-//     });
-//   })
-// );
-
-
+// ────────────────────────────────────────────────────────────────
+//  LIST ELASTICS
+// ────────────────────────────────────────────────────────────────
 router.get(
   "/get-elastics",
   catchAsyncErrors(async (req, res) => {
@@ -229,20 +66,19 @@ router.get(
 
     const elastics = await Elastic.find(filter)
       .skip((page - 1) * limit)
-      .limit(search ? 0 : Number(limit))  // 0 = no limit when searching so all matches are returned
+      .limit(search ? 0 : Number(limit))
       .sort({ createdAt: -1 });
 
     const total = await Elastic.countDocuments(filter);
 
-    res.json({
-      success: true,
-      elastics,
-      total,
-      page: Number(page),
-    });
+    res.json({ success: true, elastics, total, page: Number(page) });
   })
 );
 
+
+// ────────────────────────────────────────────────────────────────
+//  GET ELASTIC DETAIL
+// ────────────────────────────────────────────────────────────────
 router.get(
   "/get-elastic-detail",
   catchAsyncErrors(async (req, res, next) => {
@@ -256,79 +92,138 @@ router.get(
     if (!elastic)
       return next(new ErrorHandler("Elastic not found", 404));
 
-    res.json({
-      success: true,
-      elastic,
-    });
-  })
-);
-
-
-router.put(
-  "/update-elastic",
-  catchAsyncErrors(async (req, res, next) => {
-    const elastic = await Elastic.findById(req.body._id);
-    if (!elastic)
-      return next(new ErrorHandler("Elastic not found", 404));
-
-    const { totalCost, breakdown } =
-      await calculateElasticCost(req.body);
-
-    Object.assign(elastic, req.body);
-    await elastic.save();
-
-    await Costing.findByIdAndUpdate(elastic.costing, {
-      materialCost: totalCost,
-      details: breakdown,
-    });
-
     res.json({ success: true, elastic });
   })
 );
 
 
-router.post(
-  "/recalculate-elastic-cost",
-  catchAsyncErrors(async (req, res) => {
-    const elastic = await Elastic.findById(req.body.elasticId);
-    if (!elastic)
-      return res.status(404).json({ success: false });
+// ────────────────────────────────────────────────────────────────
+//  UPDATE ELASTIC
+//  FIX: was using a local calculateElasticCost() that always assumed
+//  warpSpandex/weftYarn/spandexCovering were present — crash on optional
+//  fields. Now uses calculateElasticCosting util (handles optional fields).
+//  Also: creates a costing doc if one doesn't exist yet; field-level
+//  assignment prevents accidental null overwrites.
+// ────────────────────────────────────────────────────────────────
+router.put(
+  "/update-elastic",
+  catchAsyncErrors(async (req, res, next) => {
+    try {
+      const elasticData = req.body;
 
-    const { totalCost, breakdown } =
-      await calculateElasticCost(elastic);
+      if (!elasticData._id) {
+        return next(new ErrorHandler("Elastic _id is required", 400));
+      }
 
-    await Costing.findByIdAndUpdate(elastic.costing, {
-      materialCost: totalCost,
-      details: breakdown,
-    });
+      const elastic = await Elastic.findById(elasticData._id);
+      if (!elastic)
+        return next(new ErrorHandler("Elastic not found", 404));
 
-    res.json({ success: true });
+      // ── 1. Update elastic fields ──────────────────────────────
+      const fieldsToCopy = [
+        "name", "weaveType", "pick", "noOfHook", "weight",
+        "spandexEnds", "warpSpandex", "weftYarn", "spandexCovering",
+        "warpYarn", "testingParameters",
+      ];
+      for (const field of fieldsToCopy) {
+        if (elasticData[field] !== undefined) {
+          elastic[field] = elasticData[field];
+        }
+      }
+      // Coerce numeric types so Mongoose validators pass
+      if (elasticData.pick      !== undefined) elastic.pick      = Number(elasticData.pick);
+      if (elasticData.noOfHook  !== undefined) elastic.noOfHook  = Number(elasticData.noOfHook);
+      if (elasticData.weight    !== undefined) elastic.weight    = Number(elasticData.weight);
+      if (elasticData.spandexEnds !== undefined) elastic.spandexEnds = Number(elasticData.spandexEnds);
+
+      await elastic.save();
+
+      // ── 2. Recalculate costing ────────────────────────────────
+      let materialCost = 0;
+      let details = [];
+
+      try {
+        const result = await calculateElasticCosting(elasticData);
+        materialCost = result.materialCost;
+        details      = result.details;
+      } catch (costErr) {
+        // Non-fatal: log and continue — costing will show 0 until fixed
+        console.warn("Costing recalculation warning:", costErr.message);
+      }
+
+      // ── 3. Update or create costing document ─────────────────
+      if (elastic.costing) {
+        const existingCosting = await Costing.findById(elastic.costing);
+        const conversionCost  = existingCosting?.conversionCost ?? 1.25;
+
+        await Costing.findByIdAndUpdate(elastic.costing, {
+          materialCost,
+          details,
+          totalCost: materialCost + conversionCost,
+          status: "Draft",
+        });
+      } else {
+        // Elastic had no costing — create one now
+        const conversionCost = 1.25;
+        const costing = await Costing.create({
+          date: new Date(),
+          elastic: elastic._id,
+          conversionCost,
+          materialCost,
+          details,
+          totalCost: materialCost + conversionCost,
+          status: "Draft",
+        });
+        elastic.costing = costing._id;
+        await elastic.save();
+      }
+
+      // ── 4. Return fully populated elastic ────────────────────
+      const updated = await Elastic.findById(elastic._id)
+        .populate("warpSpandex.id")
+        .populate("spandexCovering.id")
+        .populate("weftYarn.id")
+        .populate("warpYarn.id")
+        .populate("costing");
+
+      res.json({ success: true, elastic: updated });
+    } catch (err) {
+      console.error("update-elastic error:", err);
+      return next(new ErrorHandler(err.message, 400));
+    }
   })
 );
 
 
+// ────────────────────────────────────────────────────────────────
+//  RECALCULATE COST  (manual trigger)
+// ────────────────────────────────────────────────────────────────
+router.post(
+  "/recalculate-elastic-cost",
+  catchAsyncErrors(async (req, res, next) => {
+    const elastic = await Elastic.findById(req.body.elasticId);
+    if (!elastic)
+      return res.status(404).json({ success: false });
 
-// router.get(
-//   "/:id",
-//   catchAsyncErrors(async (req, res, next) => {
-//     const elastic = await Elastic.findById(req.params.id)
-//       .populate("warpSpandex.id")
-//       .populate("spandexCovering.id")
-//       .populate("weftYarn.id")
-//       .populate("warpYarn.id")
-//       .populate("costing");
+    try {
+      const { materialCost, details } =
+        await calculateElasticCosting(elastic.toObject());
 
-//     if (!elastic) {
-//       return next(new ErrorHandler("Elastic not found", 404));
-//     }
+      const existingCosting = await Costing.findById(elastic.costing);
+      const conversionCost  = existingCosting?.conversionCost ?? 1.25;
 
-//     res.status(200).json({
-//       success: true,
-//       data: elastic,
-//     });
-//   })
-// );
+      await Costing.findByIdAndUpdate(elastic.costing, {
+        materialCost,
+        details,
+        totalCost: materialCost + conversionCost,
+      });
 
+      res.json({ success: true });
+    } catch (err) {
+      return next(new ErrorHandler(err.message, 400));
+    }
+  })
+);
 
 
 module.exports = router;
