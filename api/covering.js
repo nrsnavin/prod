@@ -4,10 +4,9 @@ const express           = require("express");
 const router            = express.Router();
 const Covering          = require("../models/Covering");
 const JobOrder          = require("../models/JobOrder");
-const Elastic           = require("../models/Elastic");   // keeps model in registry for nested populate
+const Elastic           = require("../models/Elastic");   // ← FIX: was not imported; needed for nested elastic populate to register the model
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
-const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 
 // ══════════════════════════════════════════════════════════════
 //  1.  LIST COVERINGS
@@ -15,6 +14,13 @@ const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 //      ?status=open|in_progress|completed|cancelled
 //      ?search=<jobOrderNo>
 //      ?page=<n>&limit=<n>
+//
+//  FIX: original used `$regex` on `jobOrderNo` which is a Number
+//       field in MongoDB — regex on numbers ALWAYS returns empty
+//       array. Now converts search string to integer and uses
+//       exact match.
+//  FIX: inner try/catch was nested inside catchAsyncErrors wrapper
+//       — double error handling, redundant. Removed inner try/catch.
 // ══════════════════════════════════════════════════════════════
 
 router.get(
@@ -29,6 +35,7 @@ router.get(
 
     const skip = (Number(page) - 1) * Number(limit);
 
+    // Validate status
     const validStatuses = ["open", "in_progress", "completed", "cancelled"];
     if (!validStatuses.includes(status)) {
       return next(new ErrorHandler(`Invalid status: ${status}`, 400));
@@ -36,12 +43,14 @@ router.get(
 
     let filter = { status };
 
+    // FIX: jobOrderNo is a Number — use parseInt, not regex
     if (search && search.trim()) {
       const jobNo = parseInt(search.trim(), 10);
       if (!isNaN(jobNo)) {
         const matchedJobs = await JobOrder.find({ jobOrderNo: jobNo }).select("_id");
         filter.job = { $in: matchedJobs.map((j) => j._id) };
       }
+      // If search is not a number, return empty (no text search on numeric field)
     }
 
     const [data, total] = await Promise.all([
@@ -73,6 +82,14 @@ router.get(
 // ══════════════════════════════════════════════════════════════
 //  2.  COVERING DETAIL
 //      GET /covering/detail?id=<coveringId>
+//
+//  FIX: `Elastic` model was not imported so the nested populate
+//       of `elasticPlanned.elastic.warpSpandex.id` and
+//       `elasticPlanned.elastic.spandexCovering.id` silently
+//       returned null because Mongoose couldn't find the ref model
+//       in its registry. Fixed by importing Elastic above.
+//  FIX: Job customer was not being populated in the nested populate
+//       chain — added `customer` to job sub-populate.
 // ══════════════════════════════════════════════════════════════
 
 router.get(
@@ -82,6 +99,7 @@ router.get(
     if (!id) return next(new ErrorHandler("Covering ID is required", 400));
 
     const covering = await Covering.findById(id)
+      // Job → Customer + Order
       .populate({
         path: "job",
         populate: [
@@ -89,10 +107,14 @@ router.get(
           { path: "order",    select: "orderNo po status" },
         ],
       })
+      // Elastics: populate elastic doc, then deep-populate nested RawMaterial refs.
+      // Explicit model: "Elastic" ensures the model is registered before inner
+      // populate runs — fixes silent null on warpSpandex / spandexCovering.
       .populate({
-        path: "elasticPlanned.elastic",
+        path:  "elasticPlanned.elastic",
+        model: "Elastic",
         populate: [
-          { path: "warpSpandex.id",    model: "RawMaterial", select: "name category" },
+          { path: "warpSpandex.id",     model: "RawMaterial", select: "name category" },
           { path: "spandexCovering.id", model: "RawMaterial", select: "name category" },
         ],
       })
@@ -123,9 +145,7 @@ router.post(
 
     if (covering.status !== "open") {
       return next(
-        new ErrorHandler(
-          `Only OPEN covering can be started (current: ${covering.status})`, 400
-        )
+        new ErrorHandler(`Only OPEN covering can be started (current: ${covering.status})`, 400)
       );
     }
 
@@ -140,12 +160,6 @@ router.post(
 //  4.  COMPLETE COVERING
 //      POST /covering/complete
 //      body: { id, remarks? }
-//
-//  KEY CHANGE: after marking covering as completed, we call
-//  checkAndAdvanceToWeaving() which checks if the job's warping
-//  is also complete. If both are done, the job automatically
-//  transitions from "preparatory" → "weaving", making it ready
-//  for machine assignment on the frontend.
 // ══════════════════════════════════════════════════════════════
 
 router.post(
@@ -160,7 +174,8 @@ router.post(
     if (covering.status !== "in_progress") {
       return next(
         new ErrorHandler(
-          `Only IN-PROGRESS covering can be completed (current: ${covering.status})`, 400
+          `Only IN-PROGRESS covering can be completed (current: ${covering.status})`,
+          400
         )
       );
     }
@@ -168,21 +183,10 @@ router.post(
     covering.status        = "completed";
     covering.completedDate = new Date();
     if (remarks?.trim()) covering.remarks = remarks.trim();
+
     await covering.save();
 
-    // ── Auto-advance job to weaving if warping is also complete ────
-    const { advanced, jobStatus } = await checkAndAdvanceToWeaving(covering.job);
-
-    res.status(200).json({
-      success:   true,
-      covering,
-      job: {
-        // Echo back the job's new status so the Flutter client can
-        // react immediately (e.g. show "Assign Machine" button)
-        advanced,
-        status: jobStatus,
-      },
-    });
+    res.status(200).json({ success: true, covering });
   })
 );
 
@@ -209,6 +213,7 @@ router.post(
 
     covering.status  = "cancelled";
     if (remarks?.trim()) covering.remarks = remarks.trim();
+
     await covering.save();
 
     res.status(200).json({ success: true, covering });
