@@ -21,10 +21,14 @@ const _populate = (q) =>
 // ── Helper: normalise + compute totalEnds per beam ─────────────
 function _normalisePlan(template) {
   const beams = (template.beams || []).map((b, i) => {
-    const sections = (b.sections || []).filter(
-      (s) => s.warpYarn && Number(s.ends) > 0
-    );
-    const totalEnds = sections.reduce((sum, s) => sum + Number(s.ends || 0), 0);
+    const sections = (b.sections || [])
+      .filter((s) => s.warpYarn && Number(s.ends) > 0)
+      .map((s) => ({
+        warpYarn:  s.warpYarn,
+        ends:      Number(s.ends || 0),
+        maxMeters: Number(s.maxMeters || 0),
+      }));
+    const totalEnds = sections.reduce((sum, s) => sum + s.ends, 0);
     return {
       beamNo:    b.beamNo ?? i + 1,
       totalEnds,

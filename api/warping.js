@@ -251,46 +251,50 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
     });
   });
 
-  // ── Find first elastic with a valid warpingPlanTemplate ────
-  // Normalise so warpYarn is always { id, name } regardless of
-  // whether Mongoose returned a populated doc or a plain ObjectId.
-  let prefillTemplate = null;
-  for (const entry of (job.elastics || [])) {
-    const tpl = entry?.elastic?.warpingPlanTemplate;
-    if (!tpl || !tpl.beams || tpl.beams.length === 0) continue;
-
-    // Build a serialisable version with populated yarn names
-    const normalisedBeams = tpl.beams.map((beam) => ({
-      beamNo:     beam.beamNo,
-      totalEnds:  beam.totalEnds,
-      sections:   (beam.sections || [])
+  // ── Normalise helper ───────────────────────────────────────
+  const normaliseBeams = (tpl, warpMap) => {
+    return (tpl.beams || []).map((beam) => ({
+      beamNo:    beam.beamNo,
+      totalEnds: beam.totalEnds,
+      sections:  (beam.sections || [])
         .filter((s) => s.warpYarn && s.ends > 0)
         .map((s) => {
-          // warpYarn may be a populated doc (Map) or a bare ObjectId
           const isPopulated = s.warpYarn && typeof s.warpYarn === "object" && s.warpYarn.name;
           return {
             warpYarnId:   isPopulated ? s.warpYarn._id.toString() : s.warpYarn.toString(),
             warpYarnName: isPopulated ? s.warpYarn.name : (warpMap.get(s.warpYarn.toString())?.name ?? ""),
             ends:         s.ends,
+            maxMeters:    s.maxMeters ?? 0,
           };
         }),
     })).filter((b) => b.sections.length > 0);
+  };
 
-    if (normalisedBeams.length > 0) {
-      prefillTemplate = {
-        noOfBeams: normalisedBeams.length,
-        beams:     normalisedBeams,
-        source:    entry.elastic?._id?.toString() ?? null,
-      };
-      break;
-    }
+  // ── Collect per-elastic templates (ALL elastics that have one) ─
+  const elasticTemplates = [];
+  for (const entry of (job.elastics || [])) {
+    const elastic = entry?.elastic;
+    if (!elastic) continue;
+    const tpl = elastic.warpingPlanTemplate;
+    if (!tpl || !tpl.beams || tpl.beams.length === 0) continue;
+    const normalisedBeams = normaliseBeams(tpl, warpMap);
+    if (normalisedBeams.length === 0) continue;
+    elasticTemplates.push({
+      elasticId:   elastic._id.toString(),
+      elasticName: elastic.name ?? "Elastic",
+      beams:       normalisedBeams,
+    });
   }
 
+  // First elastic template also used as the auto-prefill
+  const prefillTemplate = elasticTemplates.length > 0 ? elasticTemplates[0] : null;
+
   res.json({
-    success:         true,
-    jobId:           job._id,
-    warpYarns:       Array.from(warpMap.values()),
-    prefillTemplate, // null if no elastic has a template
+    success:          true,
+    jobId:            job._id,
+    warpYarns:        Array.from(warpMap.values()),
+    prefillTemplate,   // first elastic's template — used to auto-fill on page open
+    elasticTemplates,  // all elastic templates — used for per-elastic copy buttons
   });
 }));
 

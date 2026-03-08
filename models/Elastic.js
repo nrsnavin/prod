@@ -11,16 +11,18 @@ const PlanSectionSchema = new mongoose.Schema(
       ref: "RawMaterial",
       required: true,
     },
-    ends: { type: Number, default: 0 },
+    ends:      { type: Number, default: 0 },
+    maxMeters: { type: Number, default: 0 },
   },
   { _id: false }
 );
 
 const PlanBeamSchema = new mongoose.Schema(
   {
-    beamNo:    { type: Number },
-    totalEnds: { type: Number, default: 0 },
-    sections:  { type: [PlanSectionSchema], default: [] },
+    beamNo:       { type: Number },
+    totalEnds:    { type: Number, default: 0 },
+    sections:     { type: [PlanSectionSchema], default: [] },
+    pairedBeamNo: { type: Number, default: null },
   },
   { _id: false }
 );
