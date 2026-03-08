@@ -221,16 +221,24 @@ router.post("/warpingPlan/create", catchAsyncErrors(async (req, res, next) => {
 }));
 
 
-// ── 9. PLAN CONTEXT — WARP YARNS FOR JOB ──────────────────────
+// ── 9. PLAN CONTEXT — WARP YARNS + PREFILL TEMPLATE FOR JOB ──
 router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
   const job = await JobOrder.findById(req.params.jobId)
     .populate({
       path: "elastics.elastic",
-      populate: { path: "warpYarn.id", model: "RawMaterial" },
+      populate: [
+        { path: "warpYarn.id", model: "RawMaterial" },
+        {
+          path: "warpingPlanTemplate.beams.sections.warpYarn",
+          model: "RawMaterial",
+          select: "name category",
+        },
+      ],
     });
 
   if (!job) return next(new ErrorHandler("Job not found", 404));
 
+  // ── Collect all unique warp yarns across all elastics ──────
   const warpMap = new Map();
   job.elastics.forEach((e) => {
     if (!e.elastic) return;
@@ -243,7 +251,47 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
     });
   });
 
-  res.json({ success: true, jobId: job._id, warpYarns: Array.from(warpMap.values()) });
+  // ── Find first elastic with a valid warpingPlanTemplate ────
+  // Normalise so warpYarn is always { id, name } regardless of
+  // whether Mongoose returned a populated doc or a plain ObjectId.
+  let prefillTemplate = null;
+  for (const entry of (job.elastics || [])) {
+    const tpl = entry?.elastic?.warpingPlanTemplate;
+    if (!tpl || !tpl.beams || tpl.beams.length === 0) continue;
+
+    // Build a serialisable version with populated yarn names
+    const normalisedBeams = tpl.beams.map((beam) => ({
+      beamNo:     beam.beamNo,
+      totalEnds:  beam.totalEnds,
+      sections:   (beam.sections || [])
+        .filter((s) => s.warpYarn && s.ends > 0)
+        .map((s) => {
+          // warpYarn may be a populated doc (Map) or a bare ObjectId
+          const isPopulated = s.warpYarn && typeof s.warpYarn === "object" && s.warpYarn.name;
+          return {
+            warpYarnId:   isPopulated ? s.warpYarn._id.toString() : s.warpYarn.toString(),
+            warpYarnName: isPopulated ? s.warpYarn.name : (warpMap.get(s.warpYarn.toString())?.name ?? ""),
+            ends:         s.ends,
+          };
+        }),
+    })).filter((b) => b.sections.length > 0);
+
+    if (normalisedBeams.length > 0) {
+      prefillTemplate = {
+        noOfBeams: normalisedBeams.length,
+        beams:     normalisedBeams,
+        source:    entry.elastic?._id?.toString() ?? null,
+      };
+      break;
+    }
+  }
+
+  res.json({
+    success:         true,
+    jobId:           job._id,
+    warpYarns:       Array.from(warpMap.values()),
+    prefillTemplate, // null if no elastic has a template
+  });
 }));
 
 
