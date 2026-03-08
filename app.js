@@ -38,7 +38,6 @@ const packing = require("./api/packing.js")
 const deliveryChallanRouter = require("./api/deliveryChallan.js");
 
 
-const ai = require("./api/ai.js");
 
 
 
@@ -156,11 +155,7 @@ app.use("/api/v2/attendance", (req, res, next) => {
 }, attendence);
 
 
-app.use("/api/v2/ai", (req, res, next) => {
-  console.log("ai route hit");
 
-  next()
-}, ai);
 
 
 app.use("/api/v2/covering", (req, res, next) => {
