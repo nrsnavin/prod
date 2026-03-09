@@ -5,6 +5,7 @@ const router            = express.Router();
 const Covering          = require("../models/Covering");
 const JobOrder          = require("../models/JobOrder");
 const Elastic           = require("../models/Elastic");   // ← FIX: was not imported; needed for nested elastic populate to register the model
+const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 
@@ -107,14 +108,11 @@ router.get(
           { path: "order",    select: "orderNo po status" },
         ],
       })
-      // Elastics: populate elastic doc, then deep-populate nested RawMaterial refs.
-      // Explicit model: "Elastic" ensures the model is registered before inner
-      // populate runs — fixes silent null on warpSpandex / spandexCovering.
+      // Elastics → with nested RawMaterial refs
       .populate({
-        path:  "elasticPlanned.elastic",
-        model: "Elastic",
+        path: "elasticPlanned.elastic",
         populate: [
-          { path: "warpSpandex.id",     model: "RawMaterial", select: "name category" },
+          { path: "warpSpandex.id",    model: "RawMaterial", select: "name category" },
           { path: "spandexCovering.id", model: "RawMaterial", select: "name category" },
         ],
       })
@@ -186,7 +184,14 @@ router.post(
 
     await covering.save();
 
-    res.status(200).json({ success: true, covering });
+    // Auto-advance job from "preparatory" → "weaving" if warping is also complete
+    const { advanced, jobStatus } = await checkAndAdvanceToWeaving(covering.job);
+
+    res.status(200).json({
+      success: true,
+      covering,
+      job: { advanced, status: jobStatus },
+    });
   })
 );
 
