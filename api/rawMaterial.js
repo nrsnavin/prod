@@ -337,7 +337,97 @@ router.post(
 );
 
 // ══════════════════════════════════════════════════════════════
-//  10. LOW STOCK  (legacy)
+//  10. STOCK ADJUSTMENT HISTORY
+//      GET /materials/adjust-history
+//      ?page=1 &limit=50 &days=90 &category=<cat> &search=<n>
+//
+//  Returns every STOCK_ADJUST movement across all materials,
+//  newest first, with full material info per entry.
+//  Groups entries by calendar date so the Flutter UI can
+//  render date-section headers.
+// ══════════════════════════════════════════════════════════════
+router.get(
+  "/adjust-history",
+  catchAsyncErrors(async (req, res, next) => {
+    const {
+      page     = 1,
+      limit    = 50,
+      days     = 90,
+      category,
+      search,
+    } = req.query;
+
+    const pageNum  = Math.max(1, parseInt(page, 10)  || 1);
+    const limitNum = Math.min(200, parseInt(limit, 10) || 50);
+    const daysNum  = Math.max(1, parseInt(days, 10)  || 90);
+    const since    = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000);
+
+    // Build match filter on the material-level fields
+    const matFilter = {};
+    if (category && category !== "All") matFilter.category = category;
+    if (search)                          matFilter.name = { $regex: search, $options: "i" };
+
+    const pipeline = [
+      // 1. Filter by material-level fields first
+      { $match: matFilter },
+
+      // 2. Unwind stockMovements (keep the parent doc for each movement)
+      { $unwind: { path: "$stockMovements", preserveNullAndEmptyArrays: false } },
+
+      // 3. Only STOCK_ADJUST type within the requested date window
+      {
+        $match: {
+          "stockMovements.type": "STOCK_ADJUST",
+          "stockMovements.date": { $gte: since },
+        },
+      },
+
+      // 4. Project just what we need
+      {
+        $project: {
+          _id:          0,
+          materialId:   "$_id",
+          materialName: "$name",
+          category:     "$category",
+          currentStock: "$stock",   // current stock at query time
+          date:         "$stockMovements.date",
+          adjustment:   "$stockMovements.quantity",
+          balance:      "$stockMovements.balance",  // stock after this adjustment
+          reason:       "$stockMovements.reason",
+        },
+      },
+
+      // 5. Sort newest first
+      { $sort: { date: -1 } },
+    ];
+
+    // Total count for pagination
+    const countPipeline = [...pipeline, { $count: "total" }];
+    const [countResult] = await RawMaterial.aggregate(countPipeline);
+    const total = countResult?.total ?? 0;
+
+    // Paginated data
+    const dataPipeline = [
+      ...pipeline,
+      { $skip:  (pageNum - 1) * limitNum },
+      { $limit: limitNum },
+    ];
+    const adjustments = await RawMaterial.aggregate(dataPipeline);
+
+    res.status(200).json({
+      success: true,
+      total,
+      page:    pageNum,
+      limit:   limitNum,
+      pages:   Math.ceil(total / limitNum),
+      days:    daysNum,
+      adjustments,
+    });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  11. LOW STOCK  (legacy)
 // ══════════════════════════════════════════════════════════════
 router.get(
   "/get-low-stock-materials",
@@ -352,7 +442,7 @@ router.get(
 );
 
 // ══════════════════════════════════════════════════════════════
-//  11. MATERIAL FOR NEW ELASTIC  (legacy)
+//  13. MATERIAL FOR NEW ELASTIC  (legacy)
 // ══════════════════════════════════════════════════════════════
 router.get(
   "/materialForNewElastic",

@@ -7,7 +7,7 @@ const StockMovementSchema = new mongoose.Schema(
       required: true,
     },
     type: {
-      type: String, // ORDER_APPROVAL, PO_INWARD, ADJUSTMENT
+      type: String, // ORDER_APPROVAL, PO_INWARD, ADJUSTMENT, STOCK_ADJUST
       required: true,
     },
     order: {
@@ -18,7 +18,14 @@ const StockMovementSchema = new mongoose.Schema(
       type: Number,
       required: true,
     },
-  
+    balance: {
+      type: Number,
+      default: null,
+    },
+    reason: {
+      type: String,
+      default: "",
+    },
   },
   { _id: false }
 );
