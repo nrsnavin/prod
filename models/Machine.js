@@ -1,5 +1,40 @@
 const mongoose = require("mongoose");
 
+const ServiceLogSchema = new mongoose.Schema(
+  {
+    date: {
+      type: Date,
+      required: true,
+      default: Date.now,
+    },
+    type: {
+      type: String,
+      enum: ["Preventive", "Corrective", "Breakdown", "Inspection", "Other"],
+      required: true,
+    },
+    description: {
+      type: String,
+      required: true,
+    },
+    technician: {
+      type: String,
+      default: "",
+    },
+    cost: {
+      type: Number,
+      default: 0,
+    },
+    nextServiceDate: {
+      type: Date,
+      default: null,
+    },
+    resolved: {
+      type: Boolean,
+      default: true,
+    },
+  },
+  { timestamps: true }
+);
 
 const MachineSchema = new mongoose.Schema(
   {
@@ -11,7 +46,6 @@ const MachineSchema = new mongoose.Schema(
     manufacturer: {
       type: String,
       required: true,
-
     },
     DateOfPurchase: {
       type: String,
@@ -30,19 +64,15 @@ const MachineSchema = new mongoose.Schema(
         ref: "Elastic",
         default: null,
       },
-
       head: {
-        type: Number
-      }
-
-    }]
-    ,
+        type: Number,
+      },
+    }],
     orderRunning: {
       type: mongoose.Types.ObjectId,
       ref: "JobOrder",
       default: null,
     },
-
     status: {
       type: String,
       enum: ["free", "running", "maintenance"],
@@ -56,12 +86,14 @@ const MachineSchema = new mongoose.Schema(
         default: [],
       },
     ],
-
+    serviceLogs: {
+      type: [ServiceLogSchema],
+      default: [],
+    },
   },
   { timestamps: true }
 );
 
 const Machine = mongoose.model("Machine", MachineSchema);
-
 
 module.exports = Machine;

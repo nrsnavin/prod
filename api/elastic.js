@@ -6,6 +6,7 @@ const ErrorHandler = require("../utils/ErrorHandler");
 
 const Elastic  = require("../models/Elastic");
 const Costing  = require("../models/Costing");
+const Order    = require("../models/Order");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
 
 // ── Helper: full populate for elastic ─────────────────────────
@@ -281,5 +282,55 @@ router.delete(
   })
 );
 
+
+// ────────────────────────────────────────────────────────────────
+//  ORDERS BY ELASTIC
+//  GET /elastic/orders-by-elastic?id=<elasticId>&limit=20
+//
+//  Returns all orders that contain this elastic in elasticOrdered[],
+//  with per-order qty breakdown: ordered / produced / packed / pending.
+//  Sorted newest first.
+// ────────────────────────────────────────────────────────────────
+router.get(
+  "/orders-by-elastic",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.query;
+    if (!id) return next(new ErrorHandler("id is required", 400));
+
+    const limit = Math.min(100, parseInt(req.query.limit, 10) || 50);
+
+    const orders = await Order.find({ "elasticOrdered.elastic": id })
+      .populate("customer", "name")
+      .sort({ date: -1 })
+      .limit(limit)
+      .lean();
+
+    // Extract this elastic's qty from each quantity array
+    const findQty = (arr, elasticId) => {
+      if (!Array.isArray(arr)) return 0;
+      const entry = arr.find(
+        (e) => e.elastic?.toString() === elasticId.toString()
+      );
+      return entry?.quantity ?? 0;
+    };
+
+    const result = orders.map((o) => ({
+      orderId:       o._id,
+      orderNo:       o.orderNo,
+      po:            o.po,
+      customer:      o.customer?.name ?? "—",
+      date:          o.date,
+      supplyDate:    o.supplyDate,
+      status:        o.status,
+      orderedQty:    findQty(o.elasticOrdered,  id),
+      producedQty:   findQty(o.producedElastic, id),
+      packedQty:     findQty(o.packedElastic,   id),
+      pendingQty:    findQty(o.pendingElastic,  id),
+      jobCount:      (o.jobs ?? []).length,
+    }));
+
+    res.json({ success: true, orders: result, total: result.length });
+  })
+);
 
 module.exports = router;

@@ -20,6 +20,34 @@ const ElasticQtySchema = new mongoose.Schema(
 );
 
 /**
+ * 🔹 Beam Entry Sub-Schema
+ *    Records each individual beam produced during covering.
+ *    weight is in kg. note is optional.
+ */
+const BeamEntrySchema = new mongoose.Schema(
+  {
+    beamNo: {
+      type: Number,
+      required: true,
+    },
+    weight: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+    note: {
+      type: String,
+      default: "",
+    },
+    enteredAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { timestamps: false }
+);
+
+/**
  * 🧵 COVERING SCHEMA
  */
 const CoveringSchema = new mongoose.Schema(
@@ -39,15 +67,23 @@ const CoveringSchema = new mongoose.Schema(
       index: true,
     },
 
-    // 🏭 MACHINE USED
-
     // 🧵 ELASTICS PLANNED FOR COVERING
     elasticPlanned: {
       type: [ElasticQtySchema],
       default: [],
     },
 
- 
+    // 🏗 BEAM ENTRIES (weight log per beam)
+    beamEntries: {
+      type: [BeamEntrySchema],
+      default: [],
+    },
+
+    // ⚖️ TOTAL PRODUCED WEIGHT (kg) — auto-summed from beamEntries
+    producedWeight: {
+      type: Number,
+      default: 0,
+    },
 
     // 🔄 STATUS FLOW
     status: {

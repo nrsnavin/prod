@@ -229,6 +229,8 @@ router.get(
         dateOfPurchase: machine.DateOfPurchase || null,
         currentJobNo: machine.orderRunning?.jobOrderNo?.toString() ?? null,
         result,
+        serviceLogs:  [...machine.serviceLogs]
+          .sort((a, b) => new Date(b.date) - new Date(a.date)),
       },
     });
   })
@@ -370,6 +372,74 @@ router.patch(
     res.status(200).json({
       success: true,
       machine: { _id: machine._id, ID: machine.ID, status: machine.status },
+    });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  8.  ADD SERVICE LOG
+//      POST /machine/add-service-log
+//
+//  Body:
+//  {
+//    machineId:       "<mongo _id>",
+//    type:            "Preventive" | "Corrective" | "Breakdown" | "Inspection" | "Other",
+//    description:     "Replaced drive belt",
+//    technician:      "Rajan Kumar",        (optional)
+//    cost:            1500,                  (optional, default 0)
+//    nextServiceDate: "2026-06-15",          (optional ISO string)
+//    resolved:        true                   (optional, default true)
+//  }
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/add-service-log",
+  catchAsyncErrors(async (req, res, next) => {
+    const {
+      machineId,
+      type,
+      description,
+      technician   = "",
+      cost         = 0,
+      nextServiceDate,
+      resolved     = true,
+    } = req.body;
+
+    if (!machineId)   return next(new ErrorHandler("machineId is required", 400));
+    if (!type)        return next(new ErrorHandler("type is required", 400));
+    if (!description?.trim())
+      return next(new ErrorHandler("description is required", 400));
+
+    const validTypes = ["Preventive", "Corrective", "Breakdown", "Inspection", "Other"];
+    if (!validTypes.includes(type)) {
+      return next(
+        new ErrorHandler(`type must be one of: ${validTypes.join(", ")}`, 400)
+      );
+    }
+
+    const machine = await Machine.findById(machineId);
+    if (!machine) return next(new ErrorHandler("Machine not found", 404));
+
+    const log = {
+      date:        new Date(),
+      type,
+      description: description.trim(),
+      technician:  technician?.trim() || "",
+      cost:        Number(cost) || 0,
+      nextServiceDate: nextServiceDate ? new Date(nextServiceDate) : null,
+      resolved:    Boolean(resolved),
+    };
+
+    machine.serviceLogs.push(log);
+    await machine.save();
+
+    const saved = machine.serviceLogs[machine.serviceLogs.length - 1];
+
+    console.log(`[machine/add-service-log] ${machine.ID}: ${type} log added`);
+
+    res.status(201).json({
+      success: true,
+      log: saved,
+      totalLogs: machine.serviceLogs.length,
     });
   })
 );
