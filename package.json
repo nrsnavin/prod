@@ -4,7 +4,13 @@
   "main": "index.js",
   "scripts": {
     "start": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "jest --runInBand"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/tests/**/*.test.js"
+    ]
   },
   "author": "nawin27",
   "license": "ISC",
@@ -28,5 +34,9 @@
     "mongoose-id-autoincrement": "^1.0.4",
     "mongoose-sequence": "^6.0.1",
     "nodemon": "^3.1.7"
+  },
+  "devDependencies": {
+    "jest": "^30.3.0",
+    "supertest": "^7.2.2"
   }
 }
