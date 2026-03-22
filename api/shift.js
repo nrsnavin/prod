@@ -333,6 +333,117 @@ router.get(
 );
 
 
+
+
+
+router.post('/bulk-enter-production', async (req, res) => {
+  try {
+    const { entries } = req.body;
+ 
+    // ── Input validation ─────────────────────────────────────
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'entries must be a non-empty array.',
+      });
+    }
+ 
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+ 
+      if (!e.id || !/^[a-f\d]{24}$/i.test(e.id)) {
+        return res.status(400).json({
+          success: false,
+          message: `entries[${i}].id is missing or invalid.`,
+        });
+      }
+ 
+      const prod = Number(e.production);
+      if (!Number.isInteger(prod) || prod < 0) {
+        return res.status(400).json({
+          success: false,
+          message: `entries[${i}].production must be a non-negative integer.`,
+        });
+      }
+    }
+ 
+    // ── Process entries ──────────────────────────────────────
+    const saved   = [];
+    const skipped = [];
+ 
+    // Collect unique shiftPlan IDs so we can recalc totals once
+    const affectedPlanIds = new Set();
+ 
+    for (const entry of entries) {
+      const { id, production, timer = '00:00:00', feedback = '' } = entry;
+      const prodNum = Number(production);
+ 
+      const sd = await ShiftDetail.findById(id)
+        .select('_id status shiftPlan')
+        .lean();
+ 
+      if (!sd) {
+        skipped.push({ id, reason: 'ShiftDetail not found' });
+        continue;
+      }
+ 
+      if (sd.status === 'closed') {
+        // Already done — skip to avoid double-counting
+        skipped.push({ id, reason: 'Already closed' });
+        continue;
+      }
+ 
+      await ShiftDetail.findByIdAndUpdate(id, {
+        $set: {
+          productionMeters: prodNum,
+          timer:            timer,
+          feedback:         feedback,
+          status:           'closed',
+        },
+      });
+ 
+      if (sd.shiftPlan) {
+        affectedPlanIds.add(sd.shiftPlan.toString());
+      }
+ 
+      saved.push({ id, production: prodNum, status: 'saved' });
+    }
+ 
+    // ── Recalculate totalProduction on each affected ShiftPlan ──
+    // Sum productionMeters across ALL ShiftDetails in the plan
+    // (both pre-existing closed rows + the ones we just updated).
+    for (const planId of affectedPlanIds) {
+      const allDetails = await ShiftDetail.find({ shiftPlan: planId })
+        .select('productionMeters')
+        .lean();
+ 
+      const newTotal = allDetails.reduce(
+        (sum, d) => sum + (d.productionMeters || 0), 0
+      );
+ 
+      await ShiftPlan.findByIdAndUpdate(planId, {
+        $set: { totalProduction: newTotal },
+      });
+    }
+ 
+    return res.json({
+      success: true,
+      saved:   saved.length,
+      skipped: skipped.length,
+      results: saved,
+      skipped,
+    });
+ 
+  } catch (err) {
+    console.error('[POST /shift/bulk-enter-production]', err);
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+});
+
+
 // ─────────────────────────────────────────────────────────────
 //  5.  GET SHIFT PLAN (simple, by id)
 //      GET /shift/shiftPLan?id=<planId>
