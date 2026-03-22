@@ -26,11 +26,9 @@ const ShiftPlanSchema = new mongoose.Schema(
       default: 0,
     },
 
-    // ── Draft / Confirm lifecycle ─────────────────────────
+    // ── Draft / Confirm lifecycle ──────────────────────────
     // draft     → saved from the create form; not yet active.
-    //             Operators can still be edited.
-    // confirmed → supervisor has reviewed and confirmed.
-    //             ShiftDetail records become active (status: "open").
+    // confirmed → supervisor confirmed in the detail page.
     status: {
       type: String,
       enum: ["draft", "confirmed"],
@@ -47,7 +45,7 @@ const ShiftPlanSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// 🔒 Prevent duplicate shift plans for same date+shift
+// 🔒 Prevent duplicate shift plans for same date + shift
 ShiftPlanSchema.index({ date: 1, shift: 1 }, { unique: true });
 
 module.exports = mongoose.model("ShiftPlan", ShiftPlanSchema);

@@ -200,6 +200,7 @@ router.get(
         shift:           shiftPlan.shift,
         description:     shiftPlan.description,
         totalProduction,
+        status:          shiftPlan.status ?? 'confirmed', // older records without status default to confirmed
         operatorCount:   shiftPlan.plan.length,
         machines,
       },
