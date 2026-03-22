@@ -312,6 +312,7 @@ router.get(
           production:   detail.productionMeters || 0,
           timer:        detail.timer,
           status:       detail.status,
+          id:           detail._id,
         };
       })
     );
