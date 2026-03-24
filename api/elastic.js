@@ -6,7 +6,6 @@ const ErrorHandler = require("../utils/ErrorHandler");
 
 const Elastic  = require("../models/Elastic");
 const Costing  = require("../models/Costing");
-const Order    = require("../models/Order");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
 
 // ── Helper: full populate for elastic ─────────────────────────
@@ -241,25 +240,93 @@ router.put(
 
 
 // ────────────────────────────────────────────────────────────────
-//  RECALCULATE COST  (manual trigger)
+//  RECALCULATE COST  (manual trigger from detail page)
+//
+//  POST /elastic/recalculate-elastic-cost
+//  Body: { elasticId, conversionCost? }
+//
+//  Changes vs original:
+//  • Uses _populate() so raw material prices are always fresh from DB
+//  • Accepts an optional conversionCost override from the client
+//    (allows the user to change conversion cost inline)
+//  • Updates costing.date to now (tracks when last recalculated)
+//  • Returns the full updated costing object so Flutter can
+//    update the UI without a second fetch
 // ────────────────────────────────────────────────────────────────
 router.post(
   "/recalculate-elastic-cost",
   catchAsyncErrors(async (req, res, next) => {
-    const elastic = await Elastic.findById(req.body.elasticId);
-    if (!elastic) return res.status(404).json({ success: false });
+    const { elasticId, conversionCost: convCostOverride } = req.body;
+
+    if (!elasticId) {
+      return next(new ErrorHandler("elasticId is required", 400));
+    }
+
+    // ── Load with full population so calculateElasticCosting
+    //    receives populated raw material objects (with current price)
+    const elastic = await _populate(Elastic.findById(elasticId));
+    if (!elastic) {
+      return res.status(404).json({ success: false, message: "Elastic not found" });
+    }
 
     try {
-      const { materialCost, details } = await calculateElasticCosting(elastic.toObject());
-      const existingCosting = await Costing.findById(elastic.costing);
-      const conversionCost  = existingCosting?.conversionCost ?? 1.25;
+      const { materialCost, details } =
+        await calculateElasticCosting(elastic.toObject());
 
-      await Costing.findByIdAndUpdate(elastic.costing, {
-        materialCost, details,
-        totalCost: materialCost + conversionCost,
-      });
-      res.json({ success: true });
+      // Determine conversion cost:
+      //   1. Use override from request body if supplied
+      //   2. Fall back to existing costing value
+      //   3. Default to 1.25
+      const existingCosting = elastic.costing
+        ? await Costing.findById(
+            typeof elastic.costing === "object"
+              ? elastic.costing._id
+              : elastic.costing
+          )
+        : null;
+
+      const conversionCost =
+        convCostOverride != null
+          ? Number(convCostOverride)
+          : (existingCosting?.conversionCost ?? 1.25);
+
+      const totalCost = materialCost + conversionCost;
+
+      let updatedCosting;
+
+      if (existingCosting) {
+        // Update in place
+        updatedCosting = await Costing.findByIdAndUpdate(
+          existingCosting._id,
+          {
+            $set: {
+              materialCost,
+              conversionCost,
+              details,
+              totalCost,
+              date: new Date(),   // mark when last recalculated
+            },
+          },
+          { new: true }
+        );
+      } else {
+        // No costing document yet — create one
+        updatedCosting = await Costing.create({
+          date: new Date(),
+          elastic: elastic._id,
+          conversionCost,
+          materialCost,
+          details,
+          totalCost,
+          status: "Draft",
+        });
+        elastic.costing = updatedCosting._id;
+        await elastic.save();
+      }
+
+      res.json({ success: true, costing: updatedCosting });
     } catch (err) {
+      console.error("[recalculate-elastic-cost]", err.message);
       return next(new ErrorHandler(err.message, 400));
     }
   })
@@ -282,55 +349,5 @@ router.delete(
   })
 );
 
-
-// ────────────────────────────────────────────────────────────────
-//  ORDERS BY ELASTIC
-//  GET /elastic/orders-by-elastic?id=<elasticId>&limit=20
-//
-//  Returns all orders that contain this elastic in elasticOrdered[],
-//  with per-order qty breakdown: ordered / produced / packed / pending.
-//  Sorted newest first.
-// ────────────────────────────────────────────────────────────────
-router.get(
-  "/orders-by-elastic",
-  catchAsyncErrors(async (req, res, next) => {
-    const { id } = req.query;
-    if (!id) return next(new ErrorHandler("id is required", 400));
-
-    const limit = Math.min(100, parseInt(req.query.limit, 10) || 50);
-
-    const orders = await Order.find({ "elasticOrdered.elastic": id })
-      .populate("customer", "name")
-      .sort({ date: -1 })
-      .limit(limit)
-      .lean();
-
-    // Extract this elastic's qty from each quantity array
-    const findQty = (arr, elasticId) => {
-      if (!Array.isArray(arr)) return 0;
-      const entry = arr.find(
-        (e) => e.elastic?.toString() === elasticId.toString()
-      );
-      return entry?.quantity ?? 0;
-    };
-
-    const result = orders.map((o) => ({
-      orderId:       o._id,
-      orderNo:       o.orderNo,
-      po:            o.po,
-      customer:      o.customer?.name ?? "—",
-      date:          o.date,
-      supplyDate:    o.supplyDate,
-      status:        o.status,
-      orderedQty:    findQty(o.elasticOrdered,  id),
-      producedQty:   findQty(o.producedElastic, id),
-      packedQty:     findQty(o.packedElastic,   id),
-      pendingQty:    findQty(o.pendingElastic,  id),
-      jobCount:      (o.jobs ?? []).length,
-    }));
-
-    res.json({ success: true, orders: result, total: result.length });
-  })
-);
 
 module.exports = router;
