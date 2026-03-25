@@ -10,7 +10,7 @@ const materialInwardSchema = new mongoose.Schema(
     purchaseOrder: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "PurchaseOrder",
-      required: true,
+     
     },
     quantity: {
       type: Number,

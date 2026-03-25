@@ -11,7 +11,7 @@ const CustomerSchema = new mongoose.Schema(
         },
         email: {
             type: String,
-            required: true,
+            
             default: "",
             max: 50,
         },
@@ -34,12 +34,7 @@ const CustomerSchema = new mongoose.Schema(
             required: true,
             default: "",
         },
-        handledBy: {
-            type: mongoose.Types.ObjectId,
-            ref: "User",
-            required: true,
-            default: "674094bc34142bb04850c005",
-        },
+       
         purchase: {
             type: {
                 name: {

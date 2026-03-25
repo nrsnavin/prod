@@ -51,6 +51,7 @@ const payroll = require("./api/payroll.js")
 
 const leave = require("./api/leave.js");
 const RawMaterial = require("./models/RawMaterial.js");
+const Customer = require("./models/Customer.js");
 
 
 const corsConfig = {
@@ -202,7 +203,6 @@ app.use("/api/v2/production", (req, res, next) => {
 
   next()
 }, production);
-
 
 
 // config
