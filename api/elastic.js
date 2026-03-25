@@ -324,6 +324,8 @@ router.post(
         await elastic.save();
       }
 
+    
+
       res.json({ success: true, costing: updatedCosting });
     } catch (err) {
       console.error("[recalculate-elastic-cost]", err.message);

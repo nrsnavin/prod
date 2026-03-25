@@ -78,9 +78,15 @@ router.get(
 
     if (!material) return next(new ErrorHandler("Raw material not found", 404));
 
+    // Sort stockMovements newest-first, keep last 50
     material.stockMovements = (material.stockMovements || [])
       .sort((a, b) => new Date(b.date) - new Date(a.date))
-      .slice(0, 30);
+      .slice(0, 50);
+
+    // Sort priceHistory newest-first, keep last 20
+    material.priceHistory = (material.priceHistory || [])
+      .sort((a, b) => new Date(b.changedAt) - new Date(a.changedAt))
+      .slice(0, 20);
 
     const inwards = await MaterialInward.find({ rawMaterial: id })
       .populate("purchaseOrder", "poNo status")
@@ -89,7 +95,8 @@ router.get(
       .lean();
 
     const outwards = await MaterialOutward.find({ rawMaterial: id })
-      .populate("job", "jobOrderNo")
+      .populate("job",   "jobOrderNo")
+      .populate("order", "orderNo")
       .sort({ outwardDate: -1 })
       .limit(50)
       .lean();
@@ -128,10 +135,29 @@ router.put(
     const { _id, ...update } = req.body;
     if (!_id) return next(new ErrorHandler("Material ID required", 400));
 
+    const existing = await RawMaterial.findById(_id);
+    if (!existing) return next(new ErrorHandler("Raw material not found", 404));
+
+    // ── Track price change ────────────────────────────────────
+    if (
+      update.price !== undefined &&
+      Number(update.price) !== Number(existing.price)
+    ) {
+      update.$push = {
+        priceHistory: {
+          price:    Number(update.price),
+          oldPrice: Number(existing.price),
+          changedAt: new Date(),
+          reason:   update.priceReason?.trim() || "Manual edit",
+        },
+      };
+      // Remove priceReason from the root update (not a schema field)
+      delete update.priceReason;
+    }
+
     const material = await RawMaterial.findByIdAndUpdate(_id, update, {
       new: true, runValidators: true,
     });
-    if (!material) return next(new ErrorHandler("Raw material not found", 404));
 
     res.status(200).json({ success: true, material });
   })
@@ -302,15 +328,42 @@ router.post(
           const newStock  = Math.max(0, oldStock + item.adjustment);
 
           material.stock = newStock;
+
+          // Running balance log
           material.stockMovements.push({
             date:     new Date(),
             type:     "STOCK_ADJUST",
             quantity: item.adjustment,
             balance:  newStock,
-            reason:   item.reason?.trim() || globalReason,
           });
-
           await material.save();
+
+          const reason = item.reason?.trim() || globalReason;
+
+          // Create proper ledger record
+          if (item.adjustment > 0) {
+            // Positive adjustment → inward
+            await MaterialInward.create({
+              rawMaterial:   material._id,
+              // Stock adjustments have no PO — use a sentinel value or
+              // omit purchaseOrder if it's not required on your schema.
+              // Since the schema requires purchaseOrder, store a note in remarks.
+              purchaseOrder: item.purchaseOrderId || undefined,
+              quantity:      item.adjustment,
+              inwardDate:    new Date(),
+              remarks:       `Stock adjustment: ${reason}`,
+            }).catch(() => {}); // non-fatal if purchaseOrder is required
+          } else {
+            // Negative adjustment → outward
+            await MaterialOutward.create({
+              rawMaterial: material._id,
+              quantity:    Math.abs(item.adjustment),
+              type:        "STOCK_ADJUST",
+              outwardDate: new Date(),
+              unitPrice:   material.price || 0,
+              remarks:     `Stock adjustment: ${reason}`,
+            });
+          }
 
           updated.push({
             id:         material._id,
@@ -337,97 +390,7 @@ router.post(
 );
 
 // ══════════════════════════════════════════════════════════════
-//  10. STOCK ADJUSTMENT HISTORY
-//      GET /materials/adjust-history
-//      ?page=1 &limit=50 &days=90 &category=<cat> &search=<n>
-//
-//  Returns every STOCK_ADJUST movement across all materials,
-//  newest first, with full material info per entry.
-//  Groups entries by calendar date so the Flutter UI can
-//  render date-section headers.
-// ══════════════════════════════════════════════════════════════
-router.get(
-  "/adjust-history",
-  catchAsyncErrors(async (req, res, next) => {
-    const {
-      page     = 1,
-      limit    = 50,
-      days     = 90,
-      category,
-      search,
-    } = req.query;
-
-    const pageNum  = Math.max(1, parseInt(page, 10)  || 1);
-    const limitNum = Math.min(200, parseInt(limit, 10) || 50);
-    const daysNum  = Math.max(1, parseInt(days, 10)  || 90);
-    const since    = new Date(Date.now() - daysNum * 24 * 60 * 60 * 1000);
-
-    // Build match filter on the material-level fields
-    const matFilter = {};
-    if (category && category !== "All") matFilter.category = category;
-    if (search)                          matFilter.name = { $regex: search, $options: "i" };
-
-    const pipeline = [
-      // 1. Filter by material-level fields first
-      { $match: matFilter },
-
-      // 2. Unwind stockMovements (keep the parent doc for each movement)
-      { $unwind: { path: "$stockMovements", preserveNullAndEmptyArrays: false } },
-
-      // 3. Only STOCK_ADJUST type within the requested date window
-      {
-        $match: {
-          "stockMovements.type": "STOCK_ADJUST",
-          "stockMovements.date": { $gte: since },
-        },
-      },
-
-      // 4. Project just what we need
-      {
-        $project: {
-          _id:          0,
-          materialId:   "$_id",
-          materialName: "$name",
-          category:     "$category",
-          currentStock: "$stock",   // current stock at query time
-          date:         "$stockMovements.date",
-          adjustment:   "$stockMovements.quantity",
-          balance:      "$stockMovements.balance",  // stock after this adjustment
-          reason:       "$stockMovements.reason",
-        },
-      },
-
-      // 5. Sort newest first
-      { $sort: { date: -1 } },
-    ];
-
-    // Total count for pagination
-    const countPipeline = [...pipeline, { $count: "total" }];
-    const [countResult] = await RawMaterial.aggregate(countPipeline);
-    const total = countResult?.total ?? 0;
-
-    // Paginated data
-    const dataPipeline = [
-      ...pipeline,
-      { $skip:  (pageNum - 1) * limitNum },
-      { $limit: limitNum },
-    ];
-    const adjustments = await RawMaterial.aggregate(dataPipeline);
-
-    res.status(200).json({
-      success: true,
-      total,
-      page:    pageNum,
-      limit:   limitNum,
-      pages:   Math.ceil(total / limitNum),
-      days:    daysNum,
-      adjustments,
-    });
-  })
-);
-
-// ══════════════════════════════════════════════════════════════
-//  11. LOW STOCK  (legacy)
+//  10. LOW STOCK  (legacy)
 // ══════════════════════════════════════════════════════════════
 router.get(
   "/get-low-stock-materials",
@@ -442,7 +405,7 @@ router.get(
 );
 
 // ══════════════════════════════════════════════════════════════
-//  13. MATERIAL FOR NEW ELASTIC  (legacy)
+//  11. MATERIAL FOR NEW ELASTIC  (legacy)
 // ══════════════════════════════════════════════════════════════
 router.get(
   "/materialForNewElastic",
@@ -454,6 +417,87 @@ router.get(
       RawMaterial.find({ category: "covering" }).sort({ name: 1 }),
     ]);
     res.status(200).json({ warp, weft, rubber, covering });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  BULK UPDATE PRICES
+//  POST /materials/bulk-update-prices
+//
+//  Body:
+//  {
+//    updates: [{ _id, price }],   // only materials whose price changed
+//    reason: "Monthly revision"   // shown in price history
+//  }
+//
+//  • Skips materials where price hasn't actually changed
+//  • Appends a priceHistory entry for each change
+//  • Returns { success, updated: N, skipped: N, results: [...] }
+// ══════════════════════════════════════════════════════════════
+router.post(
+  "/bulk-update-prices",
+  catchAsyncErrors(async (req, res, next) => {
+    const { updates = [], reason = "Bulk price update" } = req.body;
+
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return next(new ErrorHandler("updates array is required", 400));
+    }
+
+    // Validate all entries first
+    for (const u of updates) {
+      if (!u._id) return next(new ErrorHandler("Each update must have _id", 400));
+      if (u.price === undefined || u.price === null || isNaN(Number(u.price))) {
+        return next(new ErrorHandler(`Invalid price for material ${u._id}`, 400));
+      }
+      if (Number(u.price) < 0) {
+        return next(new ErrorHandler(`Price cannot be negative for ${u._id}`, 400));
+      }
+    }
+
+    const results  = [];
+    let   skipped  = 0;
+
+    // Process in parallel
+    await Promise.all(
+      updates.map(async (u) => {
+        const material = await RawMaterial.findById(u._id).select("name price priceHistory");
+        if (!material) { skipped++; return; }
+
+        const newPrice = Number(u.price);
+        const oldPrice = Number(material.price);
+
+        // Skip if price hasn't changed
+        if (newPrice === oldPrice) { skipped++; return; }
+
+        await RawMaterial.findByIdAndUpdate(u._id, {
+          $set:  { price: newPrice },
+          $push: {
+            priceHistory: {
+              price:     newPrice,
+              oldPrice,
+              changedAt: new Date(),
+              reason:    reason.trim() || "Bulk price update",
+            },
+          },
+        });
+
+        results.push({
+          _id:      u._id,
+          name:     material.name,
+          oldPrice,
+          newPrice,
+          change:   +(newPrice - oldPrice).toFixed(4),
+        });
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `Updated ${results.length} price(s)`,
+      updated: results.length,
+      skipped,
+      results,
+    });
   })
 );
 
