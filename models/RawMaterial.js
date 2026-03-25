@@ -39,13 +39,10 @@ const RawMaterialSchema = new mongoose.Schema(
 
     price:    { type: Number, default: 0 },  // per kg — current price
 
-<<<<<<< HEAD
-    stock: { type: Number, default: 0 },
-    minStock: { type: Number, default: 100 },
-=======
+
     stock:            { type: Number, default: 0 },
     minStock:         { type: Number, default: 0 },
->>>>>>> 9a59ae94248cc73cbf02aaeaa27a74e5cd2ec278
+
     totalConsumption: { type: Number, default: 0 },
 
     // ── Price history (appended on every price change) ────────
