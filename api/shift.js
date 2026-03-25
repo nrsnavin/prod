@@ -41,132 +41,7 @@ function normDate(raw) {
 //      per-machine try/catch — one bad machine ID killed the whole
 //      plan with a cryptic 500 instead of a useful message.
 // ─────────────────────────────────────────────────────────────
-router.post(
-  "/create-shift-plan",
-  catchAsyncErrors(async (req, res, next) => {
-    const { date, shiftType, description, machines } = req.body;
 
-    // ── Input validation ───────────────────────────────────
-    if (!date)      return next(new ErrorHandler("date is required", 400));
-    if (!shiftType) return next(new ErrorHandler("shiftType is required", 400));
-    if (!["DAY", "NIGHT"].includes(shiftType)) {
-      return next(new ErrorHandler(`shiftType must be "DAY" or "NIGHT"`, 400));
-    }
-    if (!Array.isArray(machines) || machines.length === 0) {
-      return next(new ErrorHandler("machines array must not be empty", 400));
-    }
-
-    // Validate all operator assignments are present
-    const missing = machines.filter((m) => !m.operator);
-    if (missing.length > 0) {
-      return next(
-        new ErrorHandler(
-          `${missing.length} machine(s) have no operator assigned`,
-          400
-        )
-      );
-    }
-
-    const normalizedDate = normDate(date);
-
-    // ── FIX: duplicate check uses shiftType (was req.body.shift) ──
-    const existing = await ShiftPlan.findOne({
-      date:  normalizedDate,
-      shift: shiftType,                // FIX: was req.body.shift → always undefined
-    });
-
-    if (existing) {
-      return res.status(409).json({
-        success: false,
-        message: `A ${shiftType} shift plan already exists for ${moment(normalizedDate).format("DD MMM YYYY")}`,
-      });
-    }
-
-    // ── Create ShiftPlan document ──────────────────────────
-    const sp = await ShiftPlan.create({
-      date:        normalizedDate,
-      shift:       shiftType,
-      description: description?.trim() || "",
-    });
-
-    // ── Create one ShiftDetail per machine ─────────────────
-    const shiftDetailIds = [];
-    const errors         = [];
-
-    await Promise.all(
-      machines.map(async (entry) => {
-        try {
-          const machine  = await Machine.findById(entry.machine);
-          if (!machine) throw new Error(`Machine ${entry.machine} not found`);
-
-          const employee = await Employee.findById(entry.operator);
-          if (!employee) throw new Error(`Employee ${entry.operator} not found`);
-
-          // Look up the job by jobOrderNo (numeric)
-          const job = await JobOrder.findOne({
-            jobOrderNo: Number(entry.jobOrderNo),
-          });
-          if (!job) {
-            throw new Error(`Job Order #${entry.jobOrderNo} not found`);
-          }
-
-          const shiftDetail = await ShiftDetail.create({
-            date:        normalizedDate,
-            shift:       shiftType,
-            description: description?.trim() || "",
-            status:      "open",
-            machine:     machine._id,
-            employee:    employee._id,
-            job:         job._id,
-            shiftPlan:   sp._id,
-            elastics:    machine.elastics,
-          });
-
-          shiftDetailIds.push(shiftDetail._id);
-
-          // Link shift detail into machine, employee and job
-          machine.shifts.push(shiftDetail._id);
-          employee.shifts.push(shiftDetail._id);
-          job.shiftDetails.push(shiftDetail._id);
-
-          await Promise.all([machine.save(), employee.save(), job.save()]);
-        } catch (machineErr) {
-          errors.push(machineErr.message);
-          console.error("[shift/create-shift-plan] per-machine error:", machineErr.message);
-        }
-      })
-    );
-
-    // If any per-machine errors occurred, roll back the plan and report
-    if (errors.length > 0) {
-      await ShiftPlan.findByIdAndDelete(sp._id);
-      return next(
-        new ErrorHandler(
-          `Failed to create some shift entries: ${errors.join("; ")}`,
-          400
-        )
-      );
-    }
-
-    sp.plan = shiftDetailIds;
-    await sp.save();
-
-    console.log(
-      `[shift/create-shift-plan] ${shiftType} plan created for ${moment(normalizedDate).format("DD MMM YYYY")} (${shiftDetailIds.length} machines)`
-    );
-
-    res.status(201).json({
-      success: true,
-      message: `${shiftType} shift plan created successfully`,
-      data: {
-        _id:   sp._id,
-        date:  sp.date,
-        shift: sp.shift,
-        machineCount: shiftDetailIds.length,
-      },
-    });
-  })
-);
 
 
 // ─────────────────────────────────────────────────────────────
@@ -312,6 +187,7 @@ router.get(
           production:   detail.productionMeters || 0,
           timer:        detail.timer,
           status:       detail.status,
+          id:           detail._id,
         };
       })
     );
@@ -324,12 +200,124 @@ router.get(
         shift:           shiftPlan.shift,
         description:     shiftPlan.description,
         totalProduction,
+        status:          shiftPlan.status ?? 'confirmed', // older records without status default to confirmed
         operatorCount:   shiftPlan.plan.length,
         machines,
       },
     });
   })
 );
+
+
+
+
+
+router.post('/bulk-enter-production', async (req, res) => {
+  try {
+    const { entries } = req.body;
+ 
+    // ── Input validation ─────────────────────────────────────
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'entries must be a non-empty array.',
+      });
+    }
+ 
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+ 
+      if (!e.id || !/^[a-f\d]{24}$/i.test(e.id)) {
+        return res.status(400).json({
+          success: false,
+          message: `entries[${i}].id is missing or invalid.`,
+        });
+      }
+ 
+      const prod = Number(e.production);
+      if (!Number.isInteger(prod) || prod < 0) {
+        return res.status(400).json({
+          success: false,
+          message: `entries[${i}].production must be a non-negative integer.`,
+        });
+      }
+    }
+ 
+    // ── Process entries ──────────────────────────────────────
+    const saved   = [];
+    const skipped = [];
+ 
+    // Collect unique shiftPlan IDs so we can recalc totals once
+    const affectedPlanIds = new Set();
+ 
+    for (const entry of entries) {
+      const { id, production, timer = '00:00:00', feedback = '' } = entry;
+      const prodNum = Number(production);
+ 
+      const sd = await ShiftDetail.findById(id)
+        .select('_id status shiftPlan')
+        .lean();
+ 
+      if (!sd) {
+        skipped.push({ id, reason: 'ShiftDetail not found' });
+        continue;
+      }
+ 
+      if (sd.status === 'closed') {
+        // Already done — skip to avoid double-counting
+        skipped.push({ id, reason: 'Already closed' });
+        continue;
+      }
+ 
+      await ShiftDetail.findByIdAndUpdate(id, {
+        $set: {
+          productionMeters: prodNum,
+          timer:            timer,
+          feedback:         feedback,
+          status:           'closed',
+        },
+      });
+ 
+      if (sd.shiftPlan) {
+        affectedPlanIds.add(sd.shiftPlan.toString());
+      }
+ 
+      saved.push({ id, production: prodNum, status: 'saved' });
+    }
+ 
+    // ── Recalculate totalProduction on each affected ShiftPlan ──
+    // Sum productionMeters across ALL ShiftDetails in the plan
+    // (both pre-existing closed rows + the ones we just updated).
+    for (const planId of affectedPlanIds) {
+      const allDetails = await ShiftDetail.find({ shiftPlan: planId })
+        .select('productionMeters')
+        .lean();
+ 
+      const newTotal = allDetails.reduce(
+        (sum, d) => sum + (d.productionMeters || 0), 0
+      );
+ 
+      await ShiftPlan.findByIdAndUpdate(planId, {
+        $set: { totalProduction: newTotal },
+      });
+    }
+ 
+    return res.json({
+      success: true,
+      saved:   saved.length,
+      skipped: skipped.length,
+      results: saved,
+      skipped,
+    });
+ 
+  } catch (err) {
+    console.error('[POST /shift/bulk-enter-production]', err);
+    return res.status(500).json({
+      success: false,
+      message: err.message,
+    });
+  }
+});
 
 
 // ─────────────────────────────────────────────────────────────
@@ -656,6 +644,9 @@ router.get(
 );
 
 
+
+
+
 // ─────────────────────────────────────────────────────────────
 //  14. SHIFT PLAN ON DATE
 //      GET /shift/shiftPlanOnDate?date=DD-MM-YYYY
@@ -731,6 +722,167 @@ router.delete(
     res.json({ success: true, message: "Shift Plan deleted successfully" });
   })
 );
+
+
+
+
+
+
+
+
+
+
+router.post('/create-shift-plan', async (req, res) => {
+  try {
+    const { date, shiftType, description = '', machines = [] } = req.body;
+ 
+    if (!date || !shiftType) {
+      return res.status(400).json({
+        success: false,
+        message: 'date and shiftType are required.',
+      });
+    }
+ 
+    if (!Array.isArray(machines) || machines.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'At least one machine must be assigned.',
+      });
+    }
+ 
+    // Normalise date to midnight UTC
+    const planDate = new Date(date);
+    planDate.setUTCHours(0, 0, 0, 0);
+ 
+    // ── Create ShiftPlan as DRAFT ─────────────────────────
+    const shiftPlan = await ShiftPlan.create({
+      date:        planDate,
+      shift:       shiftType,
+      description: description.trim(),
+      status:      'draft',   // ← key change: always start as draft
+    });
+ 
+    // ── Create ShiftDetail per machine ────────────────────
+    const detailIds = [];
+    for (const m of machines) {
+      if (!m.machine || !m.operator) continue; // skip unassigned
+ 
+      // Fetch elastic list from the machine's current job
+      const machineDoc = await require('../models/Machine')
+        .findById(m.machine)
+        .populate('elastics.elastic')
+        .lean();
+ 
+      const elastics = (machineDoc?.elastics || []).map((e) => ({
+        head:    e.head,
+        elastic: e.elastic?._id ?? e.elastic,
+      }));
+ 
+      const detail = await ShiftDetail.create({
+        date:     planDate,
+        shift:    shiftType,
+        job:      machineDoc?.orderRunning ?? m.machine, // fallback
+        machine:  m.machine,
+        employee: m.operator,
+        shiftPlan: shiftPlan._id,
+        elastics,
+        status:   'open',
+        timer:    '00:00:00',
+      });
+ 
+      detailIds.push(detail._id);
+    }
+ 
+    // Push all detail IDs onto the plan's plan[] array
+    await ShiftPlan.findByIdAndUpdate(shiftPlan._id, {
+      $push: { plan: { $each: detailIds } },
+    });
+ 
+    // Add shift plan reference to each operator's shifts array
+    for (const m of machines) {
+      if (m.operator) {
+        await Employee.findByIdAndUpdate(m.operator, {
+          $push: { shifts: { $each: detailIds } },
+        });
+      }
+    }
+ 
+    return res.status(201).json({
+      success:     true,
+      shiftPlanId: shiftPlan._id,
+      status:      'draft',
+      message:     `Shift plan saved as draft (${detailIds.length} machine(s) included).`,
+    });
+ 
+  } catch (err) {
+    // Duplicate shift plan for same date+shift
+    if (err.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: 'A shift plan already exists for this date and shift type.',
+      });
+    }
+    console.error('[POST /create-shift-plan]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+ 
+ 
+// ═════════════════════════════════════════════════════════════
+//  POST /shift/confirm-shift-plan
+//
+//  NEW ROUTE. Supervisor confirms a draft shift plan.
+//  Changes ShiftPlan.status: "draft" → "confirmed".
+//  ShiftDetail records are already in status "open" so no
+//  further changes to individual rows are needed.
+//
+//  Request body:
+//  { "id": "<ShiftPlan _id>" }
+//
+//  Response:
+//  { success: true, shiftPlanId: "...", status: "confirmed" }
+// ═════════════════════════════════════════════════════════════
+router.post('/confirm-shift-plan', async (req, res) => {
+  try {
+    const { id } = req.body;
+ 
+    if (!id || !/^[a-f\d]{24}$/i.test(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'A valid shiftPlan id is required.',
+      });
+    }
+ 
+    const plan = await ShiftPlan.findById(id).select('status shift date');
+ 
+    if (!plan) {
+      return res.status(404).json({
+        success: false,
+        message: 'Shift plan not found.',
+      });
+    }
+ 
+    if (plan.status === 'confirmed') {
+      return res.status(400).json({
+        success: false,
+        message: 'This shift plan is already confirmed.',
+      });
+    }
+ 
+    await ShiftPlan.findByIdAndUpdate(id, { $set: { status: 'confirmed' } });
+ 
+    return res.json({
+      success:     true,
+      shiftPlanId: id,
+      status:      'confirmed',
+      message:     'Shift plan confirmed successfully.',
+    });
+ 
+  } catch (err) {
+    console.error('[POST /confirm-shift-plan]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 
 module.exports = router;

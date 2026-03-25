@@ -1,5 +1,7 @@
-const mongoose =require("mongoose");
+// models/MaterialOut.js  — CommonJS (matches rest of codebase)
+'use strict';
 
+const mongoose = require('mongoose');
 
 const materialOutwardSchema = new mongoose.Schema(
   {
@@ -10,15 +12,20 @@ const materialOutwardSchema = new mongoose.Schema(
     },
 
     quantity: {
-      type: Number, // Double
+      type: Number,
       required: true,
     },
 
-    // 🔗 NEW REFERENCE
+    // ── Source reference (one of these will be set) ───────
+    // Order approval deduction → order is set
+    order: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Order',
+    },
+    // Job-level consumption → job is set
     job: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Job', // 👈 future Job schema
-      required: false, // optional for now
+      ref: 'JobOrder',
     },
 
     outwardDate: {
@@ -26,19 +33,30 @@ const materialOutwardSchema = new mongoose.Schema(
       default: Date.now,
     },
 
-    remarks: {
+    // STOCK_ADJUST (negative), ORDER_APPROVAL, JOB_CONSUMPTION
+    type: {
       type: String,
+      enum: ['ORDER_APPROVAL', 'JOB_CONSUMPTION', 'STOCK_ADJUST'],
+      required: true,
     },
 
-    // 💰 Cost captured at issue time (FIFO / Avg)
-    cost: {
+    remarks: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+
+    // Price per unit captured at issue time
+    unitPrice: {
       type: Number,
+      default: 0,
     },
   },
   { timestamps: true }
 );
 
 materialOutwardSchema.index({ rawMaterial: 1, outwardDate: -1 });
-materialOutwardSchema.index({ job: 1 });
+materialOutwardSchema.index({ order: 1 });
+materialOutwardSchema.index({ job:   1 });
 
 module.exports = mongoose.model('MaterialOutward', materialOutwardSchema);

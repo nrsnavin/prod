@@ -39,6 +39,12 @@ const covering = require("./api/covering.js")
 
 const packing = require("./api/packing.js")
 
+const bonus = require("./api/bonus.js")
+
+const deliveryChallanRouter = require("./api/deliveryChallan.js");
+
+
+
 
 
 const production = require("./api/production.js")
@@ -108,11 +114,25 @@ app.use("/api/v2/elastic", (req, res, next) => {
 }, elastic);
 
 
+app.use("/api/v2/dc", (req, res, next) => {
+  console.log("elastic route hit");
+
+  next()
+}, deliveryChallanRouter);
+
+
 app.use("/api/v2/supplier", (req, res, next) => {
   console.log("supplier route hit");
 
   next()
 }, supplier);
+
+
+app.use("/api/v2/bonus", (req, res, next) => {
+  console.log("bonus route hit");
+
+  next()
+}, bonus);
 
 
 app.use("/api/v2/order", (req, res, next) => {

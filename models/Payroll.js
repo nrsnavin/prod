@@ -57,6 +57,12 @@ const PayrollSchema = new mongoose.Schema(
     unapprovedAbsents:  { type: Number, default: 0 },  // absents with no approved leave
     excessAbsents:      { type: Number, default: 0 },  // absents beyond monthly quota
 
+    // ── Wastage penalty ────────────────────────────────────────
+    // Sum of Wastage.penalty for this employee × month.
+    // Already reflected in totalDeductions and lineItems.
+    wastageDeduction:   { type: Number, default: 0 },
+    wastageRecordCount: { type: Number, default: 0 },
+
     // ── Bonus flags ────────────────────────────────────────────
     noLeaveBonus:           { type: Number, default: 0 },
     perfectAttendanceBonus: { type: Number, default: 0 },

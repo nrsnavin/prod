@@ -42,6 +42,7 @@ const Payroll          = require('../models/Payroll');
 const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
 const YearlyBonus      = require('../models/YearlyBonus');
+const Wastage          = require('../models/Wastage');          // wastage penalty
 
 const SHIFT_HOURS = { DAY: 12, NIGHT: 8 };
 const r2 = (n) => Math.round(n * 100) / 100;
@@ -215,6 +216,26 @@ async function computePayroll(empId, year, month) {
 
   const bonusBeforeAdvance = r2(noLeaveBonusAmt + perfectAttBonusAmt + streakBonusTotal);
 
+  // ── WASTAGE PENALTY ───────────────────────────────────────
+  // Sum all Wastage.penalty > 0 entries for this employee this month.
+  const wastageRecords = await Wastage.find({
+    employee:  empId,
+    createdAt: { $gte: start, $lte: end },
+    penalty:   { $gt: 0 },
+  }).lean();
+
+  const wastageDeduction    = r2(wastageRecords.reduce((s, w) => s + (w.penalty || 0), 0));
+  const wastageRecordCount  = wastageRecords.length;
+
+  if (wastageDeduction > 0) {
+    lineItems.push({
+      label:  `⚠️ Wastage Penalty (${wastageRecordCount} record${wastageRecordCount !== 1 ? 's' : ''})`,
+      amount: -wastageDeduction,
+      type:   'deduction',
+    });
+    totalDeductions = r2(totalDeductions + wastageDeduction);
+  }
+
   // ── ADVANCE DEDUCTION ─────────────────────────────────────
   // Check for approved advances scheduled to be deducted this month
   const advances = await AdvanceRequest.find({
@@ -247,6 +268,7 @@ async function computePayroll(empId, year, month) {
     absentShifts: unapprovedAbsents,
     approvedLeaveShifts, totalLateMinutes,
     unapprovedAbsents, excessAbsents,
+    wastageDeduction, wastageRecordCount,
     dayShiftsWorked, nightShiftsWorked,
     dayShiftEarnings:    r2(dayShiftEarnings),
     nightShiftEarnings:  r2(nightShiftEarnings),
@@ -415,6 +437,7 @@ router.get('/dashboard', async (req, res) => {
         presentShifts:   p.presentShifts,
         absentShifts:    p.absentShifts,
         excessAbsents:   p.excessAbsents ?? 0,
+        wastageDeduction: p.wastageDeduction ?? 0,
         grossEarnings:   p.grossEarnings,
         totalDeductions: p.totalDeductions,
         totalBonuses:    p.totalBonuses,

@@ -1,69 +1,83 @@
-'use strict';
+"use strict";
+
+// ══════════════════════════════════════════════════════════════
+//  utils/jobStatusHelper.js
+//
+//  checkAndAdvanceToWeaving(jobId)
+//  ─────────────────────────────
+//  Called after EITHER warping OR covering is marked completed.
+//  Looks up the job's linked warping and covering docs; if BOTH
+//  are in "completed" status AND the job is still "preparatory",
+//  advances the job to "weaving".
+//
+//  Returns: { advanced: Boolean, jobStatus: String }
+//
+//  Why here and not inline?
+//  Both warping.js and covering.js need to call the same logic.
+//  Centralising avoids duplication and drift.
+// ══════════════════════════════════════════════════════════════
+
+const JobOrder = require("../models/JobOrder");
+const Warping  = require("../models/Warping");
+const Covering = require("../models/Covering");
 
 /**
- * jobStatusHelper.js
+ * Check if both warping and covering for a job are completed.
+ * If so, and if the job is still "preparatory", advance it to "weaving".
  *
- * Shared utility called by both warping and covering completion routes.
- *
- * LOGIC:
- *   When a job is in "preparatory" status, it cannot start weaving until
- *   BOTH its warping programme AND its covering programme are marked
- *   "completed". This function is called every time either programme
- *   completes. It re-checks the other programme and, if both are done,
- *   advances the job to "weaving" automatically.
- *
- *   The machine assignment happens separately on the frontend after this
- *   auto-transition — the "Assign Machine" button is shown whenever the
- *   job is in "weaving" status but has no machine yet.
- */
-
-const JobOrder = require('../models/JobOrder');
-const Warping  = require('../models/Warping');
-const Covering = require('../models/Covering');
-
-/**
- * @param {string|ObjectId} jobId
+ * @param {ObjectId|string} jobId
  * @returns {{ advanced: boolean, jobStatus: string }}
  */
 async function checkAndAdvanceToWeaving(jobId) {
+  // Fetch the job with its warping and covering refs
   const job = await JobOrder.findById(jobId)
-    .populate('warping',  'status')
-    .populate('covering', 'status');
+    .select("status warping covering")
+    .lean();
 
   if (!job) {
-    console.warn(`[jobStatusHelper] Job ${jobId} not found`);
-    return { advanced: false, jobStatus: null };
+    console.warn(`[jobStatusHelper] Job not found: ${jobId}`);
+    return { advanced: false, jobStatus: "unknown" };
   }
 
-  // Only act if the job is still in preparatory
-  if (job.status !== 'preparatory') {
+  // Job must be in "preparatory" to advance — if it's already weaving
+  // or beyond, nothing to do.
+  if (job.status !== "preparatory") {
     return { advanced: false, jobStatus: job.status };
   }
 
-  const warpingDone  = job.warping?.status  === 'completed';
-  const coveringDone = job.covering?.status === 'completed';
-
-  if (warpingDone && coveringDone) {
-    job.status = 'weaving';
-    await job.save();
-
-    console.log(
-      `[jobStatusHelper] Job #${job.jobOrderNo} auto-advanced ` +
-      `"preparatory" → "weaving" (warping ✓  covering ✓)`
-    );
-    return { advanced: true, jobStatus: 'weaving' };
+  // Job must have BOTH a warping and a covering linked
+  if (!job.warping || !job.covering) {
+    return { advanced: false, jobStatus: job.status };
   }
 
-  // Log which one is still pending
-  const pending = [];
-  if (!warpingDone)  pending.push('warping');
-  if (!coveringDone) pending.push('covering');
-  console.log(
-    `[jobStatusHelper] Job #${job.jobOrderNo} still preparatory — ` +
-    `waiting for: ${pending.join(', ')}`
+  // Fetch both docs in parallel — only need the status field
+  const [warping, covering] = await Promise.all([
+    Warping.findById(job.warping).select("status").lean(),
+    Covering.findById(job.covering).select("status").lean(),
+  ]);
+
+  const warpingDone  = warping?.status  === "completed";
+  const coveringDone = covering?.status === "completed";
+
+  if (!warpingDone || !coveringDone) {
+    // One or both still pending — log for debugging
+    console.info(
+      `[jobStatusHelper] Job ${jobId} not ready yet — ` +
+      `warping: ${warping?.status ?? "missing"}, ` +
+      `covering: ${covering?.status ?? "missing"}`
+    );
+    return { advanced: false, jobStatus: job.status };
+  }
+
+  // Both done — advance to weaving
+  const updated = await JobOrder.findByIdAndUpdate(
+    jobId,
+    { status: "weaving" },
+    { new: true, select: "status" }
   );
 
-  return { advanced: false, jobStatus: 'preparatory' };
+  console.info(`[jobStatusHelper] Job ${jobId} advanced → weaving`);
+  return { advanced: true, jobStatus: updated?.status ?? "weaving" };
 }
 
 module.exports = { checkAndAdvanceToWeaving };

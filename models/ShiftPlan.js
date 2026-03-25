@@ -26,18 +26,26 @@ const ShiftPlanSchema = new mongoose.Schema(
       default: 0,
     },
 
+    // ── Draft / Confirm lifecycle ──────────────────────────
+    // draft     → saved from the create form; not yet active.
+    // confirmed → supervisor confirmed in the detail page.
+    status: {
+      type: String,
+      enum: ["draft", "confirmed"],
+      default: "draft",
+    },
+
     plan: [
       {
         type: mongoose.Types.ObjectId,
         ref: "ShiftDetail",
       },
     ],
-
   },
   { timestamps: true }
 );
 
-// 🔒 Prevent duplicate shift plans
+// 🔒 Prevent duplicate shift plans for same date + shift
 ShiftPlanSchema.index({ date: 1, shift: 1 }, { unique: true });
 
 module.exports = mongoose.model("ShiftPlan", ShiftPlanSchema);

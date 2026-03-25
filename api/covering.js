@@ -215,4 +215,119 @@ router.post(
   })
 );
 
+// ══════════════════════════════════════════════════════════════
+//  6.  ADD BEAM ENTRY
+//      POST /covering/beam-entry
+//      body: { id, beamNo, weight, note? }
+//
+//  • Pushes a new beam entry into covering.beamEntries
+//  • Recalculates covering.producedWeight as sum of all entry weights
+//  • Returns the updated covering (with beamEntries + producedWeight)
+// ══════════════════════════════════════════════════════════════
+
+router.post(
+  "/beam-entry",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id, beamNo, weight, note = "" } = req.body;
+
+    if (!id)     return next(new ErrorHandler("Covering ID required", 400));
+    if (!beamNo) return next(new ErrorHandler("beamNo is required", 400));
+
+    const w = Number(weight);
+    if (isNaN(w) || w <= 0) {
+      return next(new ErrorHandler("weight must be a positive number (kg)", 400));
+    }
+
+    const covering = await Covering.findById(id);
+    if (!covering) return next(new ErrorHandler("Covering not found", 404));
+
+    if (covering.status === "completed" || covering.status === "cancelled") {
+      return next(
+        new ErrorHandler(
+          `Cannot add beam entry to a ${covering.status} covering`, 400
+        )
+      );
+    }
+
+    // Push entry
+    covering.beamEntries.push({
+      beamNo:    Number(beamNo),
+      weight:    w,
+      note:      note?.trim() || "",
+      enteredAt: new Date(),
+    });
+
+    // Recalculate total produced weight
+    covering.producedWeight = covering.beamEntries.reduce(
+      (sum, e) => sum + e.weight,
+      0
+    );
+
+    await covering.save();
+
+    console.log(
+      `[covering/beam-entry] Covering ${id}: beam ${beamNo} = ${w} kg ` +
+      `| total = ${covering.producedWeight.toFixed(3)} kg`
+    );
+
+    res.status(201).json({
+      success:        true,
+      beamEntry:      covering.beamEntries[covering.beamEntries.length - 1],
+      producedWeight: covering.producedWeight,
+      totalBeams:     covering.beamEntries.length,
+    });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  7.  DELETE BEAM ENTRY
+//      DELETE /covering/beam-entry?coveringId=<id>&entryId=<id>
+//
+//  Removes a single beam entry by its _id and recalculates
+//  producedWeight. Only allowed on open / in_progress coverings.
+// ══════════════════════════════════════════════════════════════
+
+router.delete(
+  "/beam-entry",
+  catchAsyncErrors(async (req, res, next) => {
+    const { coveringId, entryId } = req.query;
+
+    if (!coveringId) return next(new ErrorHandler("coveringId is required", 400));
+    if (!entryId)    return next(new ErrorHandler("entryId is required", 400));
+
+    const covering = await Covering.findById(coveringId);
+    if (!covering) return next(new ErrorHandler("Covering not found", 404));
+
+    if (covering.status === "completed" || covering.status === "cancelled") {
+      return next(
+        new ErrorHandler(
+          `Cannot remove beam entry from a ${covering.status} covering`, 400
+        )
+      );
+    }
+
+    const before = covering.beamEntries.length;
+    covering.beamEntries = covering.beamEntries.filter(
+      (e) => e._id.toString() !== entryId
+    );
+
+    if (covering.beamEntries.length === before) {
+      return next(new ErrorHandler("Beam entry not found", 404));
+    }
+
+    covering.producedWeight = covering.beamEntries.reduce(
+      (sum, e) => sum + e.weight,
+      0
+    );
+
+    await covering.save();
+
+    res.status(200).json({
+      success:        true,
+      producedWeight: covering.producedWeight,
+      totalBeams:     covering.beamEntries.length,
+    });
+  })
+);
+
 module.exports = router;

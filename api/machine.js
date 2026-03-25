@@ -113,7 +113,67 @@ router.get(
 //
 //  FIX: status code was 201 → now 200.
 //  Changed: limit reduced to 10 (as requested by the task).
+
+
 // ─────────────────────────────────────────────────────────────
+
+router.patch(
+  '/update-heads',
+  catchAsyncErrors(async (req, res, next) => {
+    const { machineId, noOfHead } = req.body;
+
+    // ── Validate input ──────────────────────────────────────
+    if (!machineId)
+      return next(new ErrorHandler('machineId is required.', 400));
+
+    if (
+      typeof noOfHead !== 'number' ||
+      !Number.isInteger(noOfHead) ||
+      noOfHead < 1
+    ) {
+      return next(
+        new ErrorHandler('noOfHead must be a positive integer.', 400)
+      );
+    }
+
+    // ── Load machine ────────────────────────────────────────
+    const machine = await Machine.findById(machineId);
+    if (!machine)
+      return next(new ErrorHandler('Machine not found.', 404));
+
+    // ── Guard: only free machines can be modified ───────────
+    if (machine.status !== 'free') {
+      return next(
+        new ErrorHandler(
+          `Head count can only be updated when the machine is free ` +
+          `(current status: "${machine.status}").`,
+          400
+        )
+      );
+    }
+
+    // ── Persist ─────────────────────────────────────────────
+    const old = machine.NoOfHead;
+    machine.NoOfHead = noOfHead;
+    await machine.save();
+
+    console.log(
+      `[machine/update-heads] ${machine.ID}: NoOfHead ${old} → ${noOfHead}`
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Head count updated from ${old} to ${noOfHead}.`,
+      data: {
+        machineId: machine._id,
+        machineID: machine.ID,
+        noOfHead:  machine.NoOfHead,
+      },
+    });
+  })
+);
+
+
 router.get(
   "/get-machine-detail",
   catchAsyncErrors(async (req, res, next) => {
@@ -169,6 +229,8 @@ router.get(
         dateOfPurchase: machine.DateOfPurchase || null,
         currentJobNo: machine.orderRunning?.jobOrderNo?.toString() ?? null,
         result,
+        serviceLogs:  [...machine.serviceLogs]
+          .sort((a, b) => new Date(b.date) - new Date(a.date)),
       },
     });
   })
@@ -310,6 +372,74 @@ router.patch(
     res.status(200).json({
       success: true,
       machine: { _id: machine._id, ID: machine.ID, status: machine.status },
+    });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  8.  ADD SERVICE LOG
+//      POST /machine/add-service-log
+//
+//  Body:
+//  {
+//    machineId:       "<mongo _id>",
+//    type:            "Preventive" | "Corrective" | "Breakdown" | "Inspection" | "Other",
+//    description:     "Replaced drive belt",
+//    technician:      "Rajan Kumar",        (optional)
+//    cost:            1500,                  (optional, default 0)
+//    nextServiceDate: "2026-06-15",          (optional ISO string)
+//    resolved:        true                   (optional, default true)
+//  }
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/add-service-log",
+  catchAsyncErrors(async (req, res, next) => {
+    const {
+      machineId,
+      type,
+      description,
+      technician   = "",
+      cost         = 0,
+      nextServiceDate,
+      resolved     = true,
+    } = req.body;
+
+    if (!machineId)   return next(new ErrorHandler("machineId is required", 400));
+    if (!type)        return next(new ErrorHandler("type is required", 400));
+    if (!description?.trim())
+      return next(new ErrorHandler("description is required", 400));
+
+    const validTypes = ["Preventive", "Corrective", "Breakdown", "Inspection", "Other"];
+    if (!validTypes.includes(type)) {
+      return next(
+        new ErrorHandler(`type must be one of: ${validTypes.join(", ")}`, 400)
+      );
+    }
+
+    const machine = await Machine.findById(machineId);
+    if (!machine) return next(new ErrorHandler("Machine not found", 404));
+
+    const log = {
+      date:        new Date(),
+      type,
+      description: description.trim(),
+      technician:  technician?.trim() || "",
+      cost:        Number(cost) || 0,
+      nextServiceDate: nextServiceDate ? new Date(nextServiceDate) : null,
+      resolved:    Boolean(resolved),
+    };
+
+    machine.serviceLogs.push(log);
+    await machine.save();
+
+    const saved = machine.serviceLogs[machine.serviceLogs.length - 1];
+
+    console.log(`[machine/add-service-log] ${machine.ID}: ${type} log added`);
+
+    res.status(201).json({
+      success: true,
+      log: saved,
+      totalLogs: machine.serviceLogs.length,
     });
   })
 );

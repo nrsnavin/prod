@@ -705,9 +705,9 @@ router.post(
         return next(new ErrorHandler(
           `Invalid head value "${entry.head}". Must be a positive integer.`, 400
         ));
-      if (!entry.elastic)
-        return next(new ErrorHandler(`Missing elastic id for head ${entry.head}.`, 400));
-      if (!mongoose.Types.ObjectId.isValid(entry.elastic))
+      // elastic: null means the head is intentionally left free — skip ObjectId check
+      if (entry.elastic != null &&
+          !mongoose.Types.ObjectId.isValid(entry.elastic))
         return next(new ErrorHandler(
           `Invalid elastic id "${entry.elastic}" for head ${entry.head}.`, 400
         ));
@@ -758,7 +758,9 @@ router.post(
 
     const jobElasticIds = new Set(job.elastics.map((e) => e.elastic.toString()));
     for (const entry of elastics) {
-      if (!jobElasticIds.has(entry.elastic.toString())) {
+      // Free heads (elastic: null) are not checked against the job's elastic list
+      if (entry.elastic != null &&
+          !jobElasticIds.has(entry.elastic.toString())) {
         return next(new ErrorHandler(
           `Elastic "${entry.elastic}" (head ${entry.head}) is not part of this job.`, 400
         ));
@@ -778,7 +780,7 @@ router.post(
 
     machine.elastics = elastics.map((e) => ({
       head:    e.head,
-      elastic: new mongoose.Types.ObjectId(e.elastic),
+      elastic: e.elastic ? new mongoose.Types.ObjectId(e.elastic) : null,
     }));
     machine.status       = 'running';
     machine.orderRunning = job._id;
