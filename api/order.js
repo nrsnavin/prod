@@ -7,7 +7,7 @@ const Job = require("../models/JobOrder.js");
 const Elastic = require("../models/Elastic.js");
 const ErrorHandler = require("../utils/ErrorHandler.js");
 const RawMaterial    = require("../models/RawMaterial.js");
-const MaterialOutward = require("../models/MaterialOut.js");
+const MaterialOutward = require("../models/Materialnward.js");
 const mongoose = require("mongoose");
 
 
