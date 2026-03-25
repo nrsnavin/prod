@@ -6,8 +6,9 @@ const Order = require("../models/Order.js");
 const Job = require("../models/JobOrder.js");
 const Elastic = require("../models/Elastic.js");
 const ErrorHandler = require("../utils/ErrorHandler.js");
-const RawMaterial = require("../models/RawMaterial.js");
-const mongoose = require("mongoose");
+const RawMaterial     = require("../models/RawMaterial.js");
+const MaterialOutward = require("../models/MaterialOut.cjs");
+const mongoose        = require("mongoose");
 
 
 // ════════════════════════════════════════════════════════════════
@@ -145,32 +146,6 @@ router.get(
       };
     });
 
-    // ── Fetch LIVE stock for every material in this order ────────
-    // order.rawMaterialRequired stores inStock at creation time only.
-    // We re-fetch current RawMaterial.stock so the UI always shows the
-    // real available quantity and can correctly compute canApprove.
-    const liveRawMaterials = await Promise.all(
-      order.rawMaterialRequired.map(async (rm) => {
-        const mat = await RawMaterial.findById(rm.rawMaterial)
-          .select('name stock unit')
-          .lean();
-        const inStock = mat?.stock ?? 0;
-        return {
-          rawMaterial:      rm.rawMaterial,
-          name:             mat?.name ?? rm.name ?? '—',
-          unit:             mat?.unit ?? 'kg',
-          requiredWeight:   rm.requiredWeight,
-          inStock,                                       // live value
-          stockSufficient:  inStock >= rm.requiredWeight, // live flag
-        };
-      })
-    );
-
-    // canApprove = true only when every material has sufficient stock
-    const canApprove = order.status === 'Open'
-      ? liveRawMaterials.every((m) => m.stockSufficient)
-      : undefined; // not relevant for other statuses
-
     res.status(200).json({
       success: true,
       data: {
@@ -184,8 +159,7 @@ router.get(
         customer: order.customer,
         elastics,
         jobs: order.jobs,
-        rawMaterialRequired: liveRawMaterials, // live, not stored snapshot
-        canApprove,
+        rawMaterialRequired: order.rawMaterialRequired,
       },
     });
   })
@@ -215,17 +189,32 @@ router.post(
           throw new ErrorHandler(`Insufficient stock for ${material.name}`, 400);
       }
 
-      // Deduct stock
+      // Deduct stock + create MaterialOutward record per material
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
+
+        // 1. Deduct from RawMaterial stock
         material.stock -= rm.requiredWeight;
         material.totalConsumption = (material.totalConsumption || 0) + rm.requiredWeight;
         material.stockMovements?.push({
-          date: new Date(), type: "ORDER_APPROVAL",
-          order: order._id, quantity: rm.requiredWeight,
-          balance: material.stock,
+          date:     new Date(),
+          type:     "ORDER_APPROVAL",
+          order:    order._id,
+          quantity: rm.requiredWeight,
+          balance:  material.stock,
         });
         await material.save({ session });
+
+        // 2. Create MaterialOutward record for full audit trail
+        await MaterialOutward.create([{
+          rawMaterial: rm.rawMaterial,
+          quantity:    rm.requiredWeight,
+          order:       order._id,
+          type:        "ORDER_APPROVAL",
+          outwardDate: new Date(),
+          unitPrice:   material.price ?? 0,
+          remarks:     `Order #${order.orderNo ?? ""} approval`,
+        }], { session });
       }
 
       order.status = "Approved";
