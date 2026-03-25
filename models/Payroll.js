@@ -47,6 +47,12 @@ const PayrollSchema = new mongoose.Schema(
     dayShiftEarnings:   { type: Number, default: 0 },
     nightShiftEarnings: { type: Number, default: 0 },
 
+    // ── Overtime ───────────────────────────────────────────────
+    // Total raw overtime minutes across all shifts in the month.
+    // Earnings are calculated after the per-shift grace window (default 60 min).
+    totalOvertimeMinutes: { type: Number, default: 0 },
+    overtimeEarnings:     { type: Number, default: 0 },
+
     // ── Pay components ─────────────────────────────────────────
     grossEarnings:    { type: Number, default: 0 },  // raw hours × rate
     totalDeductions:  { type: Number, default: 0 },  // late cuts + excess absent penalty
@@ -56,12 +62,6 @@ const PayrollSchema = new mongoose.Schema(
     // ── Leave detail ───────────────────────────────────────────
     unapprovedAbsents:  { type: Number, default: 0 },  // absents with no approved leave
     excessAbsents:      { type: Number, default: 0 },  // absents beyond monthly quota
-
-    // ── Wastage penalty ────────────────────────────────────────
-    // Sum of Wastage.penalty for this employee × month.
-    // Already reflected in totalDeductions and lineItems.
-    wastageDeduction:   { type: Number, default: 0 },
-    wastageRecordCount: { type: Number, default: 0 },
 
     // ── Bonus flags ────────────────────────────────────────────
     noLeaveBonus:           { type: Number, default: 0 },

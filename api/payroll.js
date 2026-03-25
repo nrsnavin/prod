@@ -42,7 +42,6 @@ const Payroll          = require('../models/Payroll');
 const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
 const YearlyBonus      = require('../models/YearlyBonus');
-const Wastage          = require('../models/Wastage');          // wastage penalty
 
 const SHIFT_HOURS = { DAY: 12, NIGHT: 8 };
 const r2 = (n) => Math.round(n * 100) / 100;
@@ -216,26 +215,6 @@ async function computePayroll(empId, year, month) {
 
   const bonusBeforeAdvance = r2(noLeaveBonusAmt + perfectAttBonusAmt + streakBonusTotal);
 
-  // ── WASTAGE PENALTY ───────────────────────────────────────
-  // Sum all Wastage.penalty > 0 entries for this employee this month.
-  const wastageRecords = await Wastage.find({
-    employee:  empId,
-    createdAt: { $gte: start, $lte: end },
-    penalty:   { $gt: 0 },
-  }).lean();
-
-  const wastageDeduction    = r2(wastageRecords.reduce((s, w) => s + (w.penalty || 0), 0));
-  const wastageRecordCount  = wastageRecords.length;
-
-  if (wastageDeduction > 0) {
-    lineItems.push({
-      label:  `⚠️ Wastage Penalty (${wastageRecordCount} record${wastageRecordCount !== 1 ? 's' : ''})`,
-      amount: -wastageDeduction,
-      type:   'deduction',
-    });
-    totalDeductions = r2(totalDeductions + wastageDeduction);
-  }
-
   // ── ADVANCE DEDUCTION ─────────────────────────────────────
   // Check for approved advances scheduled to be deducted this month
   const advances = await AdvanceRequest.find({
@@ -268,7 +247,6 @@ async function computePayroll(empId, year, month) {
     absentShifts: unapprovedAbsents,
     approvedLeaveShifts, totalLateMinutes,
     unapprovedAbsents, excessAbsents,
-    wastageDeduction, wastageRecordCount,
     dayShiftsWorked, nightShiftsWorked,
     dayShiftEarnings:    r2(dayShiftEarnings),
     nightShiftEarnings:  r2(nightShiftEarnings),
@@ -437,7 +415,6 @@ router.get('/dashboard', async (req, res) => {
         presentShifts:   p.presentShifts,
         absentShifts:    p.absentShifts,
         excessAbsents:   p.excessAbsents ?? 0,
-        wastageDeduction: p.wastageDeduction ?? 0,
         grossEarnings:   p.grossEarnings,
         totalDeductions: p.totalDeductions,
         totalBonuses:    p.totalBonuses,
@@ -699,5 +676,63 @@ router.get('/analytics', async (req, res) => {
     });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
+
+// ══════════════════════════════════════════════════════════════
+//  DAILY ATTENDANCE  (for payslip calendar view)
+//  GET /payroll/attendance?employeeId=&year=&month=
+//
+//  Returns every attendance record for the employee in the
+//  given month so the Flutter payslip can render a day-by-day
+//  calendar with present / absent / overtime markers.
+// ══════════════════════════════════════════════════════════════
+router.get('/attendance', async (req, res) => {
+  try {
+    const { employeeId, year, month } = req.query;
+    if (!employeeId || !year || !month)
+      return res.status(400).json({ success: false, message: 'employeeId, year and month are required' });
+
+    const start = new Date(+year, +month - 1, 1);
+    const end   = new Date(+year, +month,     0, 23, 59, 59, 999);
+
+    const records = await Attendance.find({
+      employee: employeeId,
+      date: { $gte: start, $lte: end },
+    }).sort({ date: 1, shift: 1 }).lean();
+
+    // Load overtime settings for grace window
+    const s = await PayrollSettings.findOne({}).lean() ?? {};
+    const graceMinutes = s.overtimeGraceMinutes ?? 60;
+
+    const days = records.map((r) => {
+      const rawOt       = r.overtimeMinutes ?? 0;
+      const billableOt  = Math.max(0, rawOt - graceMinutes);
+      return {
+        date:             new Date(r.date).toISOString().slice(0, 10),
+        shift:            r.shift,
+        status:           r.status,
+        approvedLeave:    r.approvedLeave ?? false,
+        lateMinutes:      r.lateMinutes   ?? 0,
+        overtimeMinutes:  rawOt,
+        billableOtMinutes: billableOt,
+        hasOvertime:      rawOt > 0,
+        overtimePaid:     billableOt > 0,
+      };
+    });
+
+    // Summary counts
+    const summary = {
+      present:       days.filter(d => ['present','late'].includes(d.status) && !d.approvedLeave).length,
+      absent:        days.filter(d => ['absent','on_leave'].includes(d.status) && !d.approvedLeave).length,
+      halfDay:       days.filter(d => d.status === 'half_day').length,
+      approvedLeave: days.filter(d => d.approvedLeave).length,
+      overtime:      days.filter(d => d.hasOvertime).length,
+      overtimePaid:  days.filter(d => d.overtimePaid).length,
+      totalOtMinutes: days.reduce((s, d) => s + d.overtimeMinutes, 0),
+    };
+
+    res.json({ success: true, days, summary });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
 
 module.exports = router;
