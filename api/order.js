@@ -146,6 +146,33 @@ router.get(
       };
     });
 
+    // ── Fetch LIVE stock for every raw material ──────────────────
+    // order.rawMaterialRequired stores inStock at creation time only.
+    // Re-query RawMaterial.stock on every detail request so the UI
+    // always shows the current warehouse stock, not the stale snapshot.
+    const liveRawMaterials = await Promise.all(
+      order.rawMaterialRequired.map(async (rm) => {
+        const mat = await RawMaterial.findById(rm.rawMaterial)
+          .select("name stock unit")
+          .lean();
+        const inStock = mat?.stock ?? 0;
+        return {
+          rawMaterial:     rm.rawMaterial,
+          name:            mat?.name ?? rm.name ?? "—",
+          unit:            mat?.unit ?? "kg",
+          requiredWeight:  rm.requiredWeight,
+          inStock,                                        // live
+          stockSufficient: inStock >= rm.requiredWeight,  // live flag
+        };
+      })
+    );
+
+    // canApprove: true only when every material has sufficient stock.
+    // Only computed for Open orders (irrelevant otherwise).
+    const canApprove = order.status === "Open"
+      ? liveRawMaterials.every((m) => m.stockSufficient)
+      : undefined;
+
     res.status(200).json({
       success: true,
       data: {
@@ -159,7 +186,8 @@ router.get(
         customer: order.customer,
         elastics,
         jobs: order.jobs,
-        rawMaterialRequired: order.rawMaterialRequired,
+        rawMaterialRequired: liveRawMaterials, // live — not the stored snapshot
+        canApprove,                            // drives approve button state
       },
     });
   })
