@@ -1,18 +1,26 @@
 const express = require("express");
-const ErrorHandler = require("./middleware/error.js");
-const app = express();
-const cookieParser = require("cookie-parser");
-const bodyParser = require("body-parser");
-const cors = require("cors");
+const mongoose = require("mongoose");
 
-// config — load env before any route requires so vars are available everywhere
-// BUG FIX: was at the bottom of the file (too late) and used path ".env"
-// instead of "config/.env" which is what index.js uses.
+// dotenv must come before any code reads env vars (and before the audit
+// plugin is registered, since it doesn't need env but route files do).
 if (process.env.NODE_ENV !== "PRODUCTION") {
   require("dotenv").config({
     path: "config/.env",
   });
 }
+
+// Register the global audit-fields plugin BEFORE any model is required.
+// This adds createdBy/updatedBy + auto-populating pre-save hooks to every
+// schema, so every action is fingerprinted to the authenticated user.
+const auditFields = require("./models/plugins/auditFields.js");
+mongoose.plugin(auditFields);
+
+const ErrorHandler = require("./middleware/error.js");
+const app = express();
+const cookieParser = require("cookie-parser");
+const bodyParser = require("body-parser");
+const cors = require("cors");
+const { setUserContext } = require("./middleware/userContext.js");
 
 const user     = require("./api/user.js");
 const machine  = require("./api/machine.js");
@@ -34,8 +42,6 @@ const wastage     = require("./api/wastage.js");
 const attendence  = require("./api/attendence.js");
 const payroll     = require("./api/payroll.js");
 const leave       = require("./api/leave.js");
-// BUG FIX: Removed unused RawMaterial and Customer model imports that
-// were required at app level but never referenced.
 
 const corsConfig = {
   origin: true,
@@ -48,110 +54,34 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 
-
-app.use("/api/v2/user", (req, res, next) => {
-  console.log("Hi");
-  next();
-}, user);
-
-app.use("/api/v2/machine", (req, res, next) => {
-  console.log("machine route hit");
-  next();
-}, machine);
-
-app.use("/api/v2/shift", (req, res, next) => {
-  console.log("shift route hit");
-  next();
-}, shift);
-
-app.use("/api/v2/customer", (req, res, next) => {
-  console.log("customer route hit");
-  next();
-}, customer);
-
-app.use("/api/v2/employee", (req, res, next) => {
-  console.log("emp route hit");
-  next();
-}, employee);
-
-app.use("/api/v2/elastic", (req, res, next) => {
-  console.log("elastic route hit");
-  next();
-}, elastic);
-
-app.use("/api/v2/dc", (req, res, next) => {
-  console.log("dc route hit");
-  next();
-}, deliveryChallanRouter);
-
-app.use("/api/v2/supplier", (req, res, next) => {
-  console.log("supplier route hit");
-  next();
-}, supplier);
-
-app.use("/api/v2/bonus", (req, res, next) => {
-  console.log("bonus route hit");
-  next();
-}, bonus);
-
-app.use("/api/v2/order", (req, res, next) => {
-  console.log("order route hit");
-  next();
-}, order);
-
-app.use("/api/v2/materials", (req, res, next) => {
-  console.log("material route hit");
-  next();
-}, material);
-
-app.use("/api/v2/warping", (req, res, next) => {
-  console.log("warping route hit");
-  next();
-}, warping);
-
-app.use("/api/v2/wastage", (req, res, next) => {
-  console.log("wastage route hit");
-  next();
-}, wastage);
-
-app.use("/api/v2/attendance", (req, res, next) => {
-  console.log("attendence route hit");
-  next();
-}, attendence);
-
-app.use("/api/v2/covering", (req, res, next) => {
-  console.log("covering route hit");
-  next();
-}, covering);
-
-app.use("/api/v2/job", (req, res, next) => {
-  console.log("job route hit");
-  next();
-}, job);
-
-app.use("/api/v2/packing", (req, res, next) => {
-  console.log("packing route hit");
-  next();
-}, packing);
-
-// BUG FIX: /production was registered twice. Removed the duplicate.
-app.use("/api/v2/production", (req, res, next) => {
-  console.log("production route hit");
-  next();
-}, production);
-
-app.use("/api/v2/payroll", (req, res, next) => {
-  console.log("payroll route hit");
-  next();
-}, payroll);
-
-app.use("/api/v2/leave", (req, res, next) => {
-  console.log("leave route hit");
-  next();
-}, leave);
+// Optional auth: when the request has a valid JWT cookie, attach req.user
+// AND run downstream middleware in a user-context store so schema hooks
+// can stamp createdBy/updatedBy automatically. Doesn't block unauth routes.
+app.use(setUserContext);
 
 
-// Error handling middleware
+app.use("/api/v2/user", user);
+app.use("/api/v2/machine", machine);
+app.use("/api/v2/shift", shift);
+app.use("/api/v2/customer", customer);
+app.use("/api/v2/employee", employee);
+app.use("/api/v2/elastic", elastic);
+app.use("/api/v2/dc", deliveryChallanRouter);
+app.use("/api/v2/supplier", supplier);
+app.use("/api/v2/bonus", bonus);
+app.use("/api/v2/order", order);
+app.use("/api/v2/materials", material);
+app.use("/api/v2/warping", warping);
+app.use("/api/v2/wastage", wastage);
+app.use("/api/v2/attendance", attendence);
+app.use("/api/v2/covering", covering);
+app.use("/api/v2/job", job);
+app.use("/api/v2/packing", packing);
+app.use("/api/v2/production", production);
+app.use("/api/v2/payroll", payroll);
+app.use("/api/v2/leave", leave);
+
+
 app.use(ErrorHandler);
 
 module.exports = app;
