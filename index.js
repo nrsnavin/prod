@@ -13,7 +13,7 @@ process.on("uncaughtException", (err) => {
 // it works regardless of process.cwd().
 if (process.env.NODE_ENV !== "PRODUCTION") {
   require("dotenv").config({
-    path: path.resolve(__dirname, "config/.env"),
+    path: path.resolve(__dirname, "/.env"),
   });
 }
 
