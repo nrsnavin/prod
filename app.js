@@ -5,60 +5,37 @@ const cookieParser = require("cookie-parser");
 const bodyParser = require("body-parser");
 const cors = require("cors");
 
+// config — load env before any route requires so vars are available everywhere
+// BUG FIX: was at the bottom of the file (too late) and used path ".env"
+// instead of "config/.env" which is what index.js uses.
+if (process.env.NODE_ENV !== "PRODUCTION") {
+  require("dotenv").config({
+    path: "config/.env",
+  });
+}
 
-
-
-
-
-
-
-const user = require("./api/user.js")
-
-const machine = require("./api/machine.js")
-
-const shift = require("./api/shift.js")
-
-const employee = require("./api/employee.js")
-
-const customer = require("./api/customer.js")
-
-
-const supplier = require("./api/supplier.js")
-
-
-const material = require("./api/rawMaterial.js")
-
-const elastic = require("./api/elastic.js")
-
-const order = require("./api/order.js")
-const job = require("./api/job.js")
-
-const warping = require("./api/warping.js")
-
-const covering = require("./api/covering.js")
-
-const packing = require("./api/packing.js")
-
-const bonus = require("./api/bonus.js")
-
+const user     = require("./api/user.js");
+const machine  = require("./api/machine.js");
+const shift    = require("./api/shift.js");
+const employee = require("./api/employee.js");
+const customer = require("./api/customer.js");
+const supplier = require("./api/supplier.js");
+const material = require("./api/rawMaterial.js");
+const elastic  = require("./api/elastic.js");
+const order    = require("./api/order.js");
+const job      = require("./api/job.js");
+const warping  = require("./api/warping.js");
+const covering = require("./api/covering.js");
+const packing  = require("./api/packing.js");
+const bonus    = require("./api/bonus.js");
 const deliveryChallanRouter = require("./api/deliveryChallan.js");
-
-
-
-
-
-const production = require("./api/production.js")
-
-const wastage = require("./api/wastage.js")
-
-const attendence = require("./api/attendence.js")
-
-const payroll = require("./api/payroll.js")
-
-const leave = require("./api/leave.js");
-const RawMaterial = require("./models/RawMaterial.js");
-const Customer = require("./models/Customer.js");
-
+const production  = require("./api/production.js");
+const wastage     = require("./api/wastage.js");
+const attendence  = require("./api/attendence.js");
+const payroll     = require("./api/payroll.js");
+const leave       = require("./api/leave.js");
+// BUG FIX: Removed unused RawMaterial and Customer model imports that
+// were required at app level but never referenced.
 
 const corsConfig = {
   origin: true,
@@ -66,7 +43,7 @@ const corsConfig = {
 };
 
 app.use(cors(corsConfig));
-app.options('*', cors(corsConfig))
+app.options('*', cors(corsConfig));
 app.use(express.json());
 app.use(cookieParser());
 app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
@@ -74,166 +51,107 @@ app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 
 app.use("/api/v2/user", (req, res, next) => {
   console.log("Hi");
-
-  next()
+  next();
 }, user);
 
 app.use("/api/v2/machine", (req, res, next) => {
   console.log("machine route hit");
-
-  next()
+  next();
 }, machine);
-
 
 app.use("/api/v2/shift", (req, res, next) => {
   console.log("shift route hit");
-
-  next()
+  next();
 }, shift);
-
-
 
 app.use("/api/v2/customer", (req, res, next) => {
   console.log("customer route hit");
-
-  next()
+  next();
 }, customer);
 
 app.use("/api/v2/employee", (req, res, next) => {
   console.log("emp route hit");
-
-  next()
+  next();
 }, employee);
-
-
 
 app.use("/api/v2/elastic", (req, res, next) => {
   console.log("elastic route hit");
-
-  next()
+  next();
 }, elastic);
 
-
 app.use("/api/v2/dc", (req, res, next) => {
-  console.log("elastic route hit");
-
-  next()
+  console.log("dc route hit");
+  next();
 }, deliveryChallanRouter);
-
 
 app.use("/api/v2/supplier", (req, res, next) => {
   console.log("supplier route hit");
-
-  next()
+  next();
 }, supplier);
-
 
 app.use("/api/v2/bonus", (req, res, next) => {
   console.log("bonus route hit");
-
-  next()
+  next();
 }, bonus);
-
 
 app.use("/api/v2/order", (req, res, next) => {
   console.log("order route hit");
-
-  next()
+  next();
 }, order);
 
 app.use("/api/v2/materials", (req, res, next) => {
   console.log("material route hit");
-
-  next()
+  next();
 }, material);
-
 
 app.use("/api/v2/warping", (req, res, next) => {
   console.log("warping route hit");
-
-  next()
+  next();
 }, warping);
-
-
 
 app.use("/api/v2/wastage", (req, res, next) => {
   console.log("wastage route hit");
-
-  next()
+  next();
 }, wastage);
-
 
 app.use("/api/v2/attendance", (req, res, next) => {
   console.log("attendence route hit");
-
-  next()
+  next();
 }, attendence);
-
-
-
-
 
 app.use("/api/v2/covering", (req, res, next) => {
   console.log("covering route hit");
-
-  next()
+  next();
 }, covering);
-
 
 app.use("/api/v2/job", (req, res, next) => {
   console.log("job route hit");
-
-  next()
+  next();
 }, job);
-
-
 
 app.use("/api/v2/packing", (req, res, next) => {
   console.log("packing route hit");
-
-  next()
+  next();
 }, packing);
 
-
-
+// BUG FIX: /production was registered twice. Removed the duplicate.
 app.use("/api/v2/production", (req, res, next) => {
   console.log("production route hit");
-
-  next()
+  next();
 }, production);
-
-
 
 app.use("/api/v2/payroll", (req, res, next) => {
   console.log("payroll route hit");
-
-  next()
+  next();
 }, payroll);
 
 app.use("/api/v2/leave", (req, res, next) => {
   console.log("leave route hit");
-
-  next()
+  next();
 }, leave);
 
 
-
-app.use("/api/v2/production", (req, res, next) => {
-  console.log("production route hit");
-
-  next()
-}, production);
-
-
-// config
-if (process.env.NODE_ENV !== "PRODUCTION") {
-  require("dotenv").config({
-    path: ".env",
-  });
-}
-
-
-// it's for ErrorHandling
+// Error handling middleware
 app.use(ErrorHandler);
 
 module.exports = app;
