@@ -11,9 +11,9 @@ const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
 
 
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 //  LIST ORDERS  (by status)
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 router.get(
   "/list",
   catchAsyncErrors(async (req, res, next) => {
@@ -22,7 +22,7 @@ router.get(
       return next(new ErrorHandler("Status is required", 400));
     }
     const orders = await Order.find({ status })
-      .populate("customer", "name")
+      .populate("customer",  "name")
       .populate("createdBy", "name role")
       .populate("updatedBy", "name role")
       .sort({ createdAt: -1 });
@@ -31,9 +31,9 @@ router.get(
 );
 
 
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 //  CREATE ORDER
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 router.post(
   "/create-order",
   catchAsyncErrors(async (req, res, next) => {
@@ -83,18 +83,10 @@ router.post(
 
       const rawMaterialRequired = Array.from(rawMap.values());
 
-      const producedElastic = elasticOrdered.map((e) => ({
-        elastic: e.elastic, quantity: 0,
-      }));
-      const packedElastic = elasticOrdered.map((e) => ({
-        elastic: e.elastic, quantity: 0,
-      }));
-      const pendingElastic = elasticOrdered.map((e) => ({
-        elastic: e.elastic, quantity: e.quantity,
-      }));
+      const producedElastic = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+      const packedElastic   = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+      const pendingElastic  = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: e.quantity }));
 
-      // Note: the audit plugin auto-fills createdBy/updatedBy from the
-      // authenticated user during .save() (called inside Order.create).
       const order = await Order.create({
         date, po, customer, supplyDate, description,
         elasticOrdered, producedElastic, packedElastic,
@@ -110,9 +102,9 @@ router.post(
 );
 
 
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 //  GET ORDER DETAIL
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 router.get(
   "/get-orderDetail",
   catchAsyncErrors(async (req, res, next) => {
@@ -120,33 +112,27 @@ router.get(
     if (!id) return next(new ErrorHandler("Order ID is required", 400));
 
     const order = await Order.findById(id)
-      .populate("customer", "name gstin")
+      .populate("customer",  "name gstin")
       .populate("elasticOrdered.elastic", "name")
       .populate("jobs.job")
-      .populate("createdBy", "name role")
-      .populate("updatedBy", "name role")
+      .populate("createdBy",  "name role")
+      .populate("updatedBy",  "name role")
+      .populate("approvedBy", "name role")
+      .populate("cancelledBy","name role")
+      .populate("startedBy",  "name role")
+      .populate("completedBy","name role")
       .lean();
 
     if (!order) return next(new ErrorHandler("Order not found", 404));
 
     const elastics = order.elasticOrdered.map((e) => {
-      const produced =
-        order.producedElastic.find((p) =>
-          p.elastic.equals(e.elastic._id)
-        )?.quantity || 0;
-      const packed =
-        order.packedElastic.find((p) =>
-          p.elastic.equals(e.elastic._id)
-        )?.quantity || 0;
-      const pending =
-        order.pendingElastic.find((p) =>
-          p.elastic.equals(e.elastic._id)
-        )?.quantity ?? e.quantity;
-
+      const produced = order.producedElastic.find((p) => p.elastic.equals(e.elastic._id))?.quantity || 0;
+      const packed   = order.packedElastic.find((p)   => p.elastic.equals(e.elastic._id))?.quantity || 0;
+      const pending  = order.pendingElastic.find((p)  => p.elastic.equals(e.elastic._id))?.quantity ?? e.quantity;
       return {
-        id: e.elastic._id,
-        name: e.elastic.name,
-        ordered: e.quantity,
+        id:       e.elastic._id,
+        name:     e.elastic.name,
+        ordered:  e.quantity,
         produced, packed, pending,
       };
     });
@@ -175,31 +161,40 @@ router.get(
     res.status(200).json({
       success: true,
       data: {
-        _id: order._id,
-        orderNo: order.orderNo,
-        po: order.po,
-        status: order.status,
-        date: order.date,
-        supplyDate: order.supplyDate,
+        _id:         order._id,
+        orderNo:     order.orderNo,
+        po:          order.po,
+        status:      order.status,
+        date:        order.date,
+        supplyDate:  order.supplyDate,
         description: order.description,
-        customer: order.customer,
+        customer:    order.customer,
         elastics,
-        jobs: order.jobs,
+        jobs:        order.jobs,
         rawMaterialRequired: liveRawMaterials,
         canApprove,
-        createdBy: order.createdBy,
-        updatedBy: order.updatedBy,
-        createdAt: order.createdAt,
-        updatedAt: order.updatedAt,
+        // ── Full audit trail ──
+        createdBy:   order.createdBy  || null,
+        createdAt:   order.createdAt  || null,
+        updatedBy:   order.updatedBy  || null,
+        updatedAt:   order.updatedAt  || null,
+        approvedBy:  order.approvedBy || null,
+        approvedAt:  order.approvedAt || null,
+        cancelledBy: order.cancelledBy|| null,
+        cancelledAt: order.cancelledAt|| null,
+        startedBy:   order.startedBy  || null,
+        startedAt:   order.startedAt  || null,
+        completedBy: order.completedBy|| null,
+        completedAt: order.completedAt|| null,
       },
     });
   })
 );
 
 
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 //  APPROVE ORDER  (deducts stock — uses transaction)
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 router.post(
   "/approve",
   catchAsyncErrors(async (req, res, next) => {
@@ -221,18 +216,13 @@ router.post(
 
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
-
         material.stock -= rm.requiredWeight;
         material.totalConsumption = (material.totalConsumption || 0) + rm.requiredWeight;
         material.stockMovements?.push({
-          date:     new Date(),
-          type:     "ORDER_APPROVAL",
-          order:    order._id,
-          quantity: rm.requiredWeight,
-          balance:  material.stock,
+          date: new Date(), type: "ORDER_APPROVAL", order: order._id,
+          quantity: rm.requiredWeight, balance: material.stock,
         });
         await material.save({ session });
-
         await MaterialOutward.create([{
           rawMaterial: rm.rawMaterial,
           quantity:    rm.requiredWeight,
@@ -244,15 +234,14 @@ router.post(
         }], { session });
       }
 
-      order.status = "Approved";
+      order.status     = "Approved";
+      order.approvedBy = req.user?._id || null;
+      order.approvedAt = new Date();
       await order.save({ session });
       await session.commitTransaction();
       session.endSession();
 
-      res.status(200).json({
-        success: true,
-        message: "Order approved and stock deducted",
-      });
+      res.status(200).json({ success: true, message: "Order approved and stock deducted" });
     } catch (error) {
       await session.abortTransaction();
       session.endSession();
@@ -262,75 +251,61 @@ router.post(
 );
 
 
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 //  CANCEL ORDER
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 router.post(
   "/cancel",
   catchAsyncErrors(async (req, res, next) => {
     const { orderId } = req.body;
-    if (!orderId)
-      return next(new ErrorHandler("Order ID is required", 400));
+    if (!orderId) return next(new ErrorHandler("Order ID is required", 400));
 
     const order = await Order.findById(orderId);
     if (!order) return next(new ErrorHandler("Order not found", 404));
 
     if (!["Open", "Approved"].includes(order.status)) {
-      return next(
-        new ErrorHandler(
-          `Cannot cancel an order with status "${order.status}"`,
-          400
-        )
-      );
+      return next(new ErrorHandler(`Cannot cancel an order with status "${order.status}"`, 400));
     }
 
-    order.status = "Cancelled";
+    order.status      = "Cancelled";
+    order.cancelledBy = req.user?._id || null;
+    order.cancelledAt = new Date();
     await order.save();
 
-    res.status(200).json({
-      success: true,
-      message: "Order cancelled",
-      orderId: order._id,
-      status: order.status,
-    });
+    res.status(200).json({ success: true, message: "Order cancelled", orderId: order._id, status: order.status });
   })
 );
 
 
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 //  START PRODUCTION  (Approved → InProgress)
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 router.post(
   "/start-production",
   catchAsyncErrors(async (req, res, next) => {
     const { orderId } = req.body;
-    if (!orderId)
-      return next(new ErrorHandler("Order ID is required", 400));
+    if (!orderId) return next(new ErrorHandler("Order ID is required", 400));
 
     const order = await Order.findById(orderId);
     if (!order) return next(new ErrorHandler("Order not found", 404));
 
     if (order.status !== "Approved") {
-      return next(
-        new ErrorHandler("Order must be Approved before starting production", 400)
-      );
+      return next(new ErrorHandler("Order must be Approved before starting production", 400));
     }
 
-    order.status = "InProgress";
+    order.status    = "InProgress";
+    order.startedBy = req.user?._id || null;
+    order.startedAt = new Date();
     await order.save();
 
-    res.status(200).json({
-      success: true,
-      message: "Order moved to InProgress",
-      status: order.status,
-    });
+    res.status(200).json({ success: true, message: "Order moved to InProgress", status: order.status });
   })
 );
 
 
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 //  COMPLETE ORDER
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 router.post(
   "/complete",
   catchAsyncErrors(async (req, res, next) => {
@@ -339,21 +314,21 @@ router.post(
     if (!order) return next(new ErrorHandler("Order not found", 404));
 
     if (order.status !== "InProgress") {
-      return next(
-        new ErrorHandler("Only InProgress orders can be completed", 400)
-      );
+      return next(new ErrorHandler("Only InProgress orders can be completed", 400));
     }
 
-    order.status = "Completed";
+    order.status      = "Completed";
+    order.completedBy = req.user?._id || null;
+    order.completedAt = new Date();
     await order.save();
     res.status(200).json({ success: true, message: "Order completed", status: order.status });
   })
 );
 
 
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 //  GET OPEN ORDERS
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 router.get(
   "/get-open-orders",
   catchAsyncErrors(async (req, res, next) => {
@@ -365,9 +340,9 @@ router.get(
 );
 
 
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 //  GET PENDING (APPROVED) ORDERS
-// ═════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
 router.get(
   "/get-pending-orders",
   catchAsyncErrors(async (req, res, next) => {
