@@ -43,7 +43,23 @@ function parseDateParam(s, h, m, sec, ms) {
 function startOfDay(s)  { return parseDateParam(s,  0,  0,  0,   0); }
 function endOfDay(s)    { return parseDateParam(s, 23, 59, 59, 999); }
 
-// ── Summarise one attendance record ───────────────────────────
+// BUG FIX helper: compute shiftHours and hoursWorked for a given status.
+// Needed because Mongoose pre-save hooks do NOT fire for bulkWrite ops.
+function computeHours(shiftType, status, lateMinutes) {
+  const baseHours = shiftType === 'DAY' ? 12 : 8;
+  let hoursWorked;
+  switch (status) {
+    case 'present':  hoursWorked = baseHours; break;
+    case 'late':     hoursWorked = Math.max(0, baseHours - (lateMinutes || 0) / 60); break;
+    case 'half_day': hoursWorked = baseHours / 2; break;
+    case 'absent':
+    case 'on_leave': hoursWorked = 0; break;
+    default:         hoursWorked = baseHours;
+  }
+  return { shiftHours: baseHours, hoursWorked };
+}
+
+// ── Summarise one attendance record ────────────────────────────────────
 function fmtRecord(a) {
   return {
     id:           a._id,
@@ -69,29 +85,9 @@ function fmtRecord(a) {
 }
 
 
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 //  POST /mark
-//
-//  Body:
-//  {
-//    date:    "YYYY-MM-DD",
-//    shift:   "DAY" | "NIGHT",
-//    records: [
-//      {
-//        employeeId:  "...",
-//        status:      "present" | "late" | "half_day" | "absent" | "on_leave",
-//        checkIn:     "09:00",   (optional)
-//        checkOut:    "18:00",   (optional)
-//        lateMinutes: 15,        (optional)
-//        leaveType:   "sick",    (optional)
-//        notes:       "..."      (optional)
-//      }
-//    ],
-//    markedBy: "admin"           (optional)
-//  }
-//
-//  Uses bulkWrite with upsert so repeated POSTs are idempotent.
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 router.post('/mark', async (req, res) => {
   try {
     const { date, shift, records = [], markedBy = 'admin' } = req.body;
@@ -103,29 +99,41 @@ router.post('/mark', async (req, res) => {
     if (!Array.isArray(records) || records.length === 0)
       return res.status(400).json({ success: false, message: 'records array must not be empty.' });
 
-    const dateObj = startOfDay(date);
+    const dateObj  = startOfDay(date);
+    const shiftUp  = shift.toUpperCase();
 
-    const ops = records.map(r => ({
-      updateOne: {
-        filter: {
-          employee: r.employeeId,
-          date:     dateObj,
-          shift:    shift.toUpperCase(),
-        },
-        update: {
-          $set: {
-            status:      r.status      || 'present',
-            checkIn:     r.checkIn     || '',
-            checkOut:    r.checkOut    || '',
-            lateMinutes: r.lateMinutes || 0,
-            leaveType:   r.leaveType   || '',
-            notes:       r.notes       || '',
-            markedBy,
+    // BUG FIX: Mongoose pre-save hooks do NOT fire for bulkWrite operations.
+    // Manually compute shiftHours and hoursWorked here so these fields are
+    // correctly set on every upserted document.
+    const ops = records.map(r => {
+      const status     = r.status || 'present';
+      const lateMinutes = r.lateMinutes || 0;
+      const { shiftHours, hoursWorked } = computeHours(shiftUp, status, lateMinutes);
+
+      return {
+        updateOne: {
+          filter: {
+            employee: r.employeeId,
+            date:     dateObj,
+            shift:    shiftUp,
           },
+          update: {
+            $set: {
+              status,
+              checkIn:     r.checkIn   || '',
+              checkOut:    r.checkOut  || '',
+              lateMinutes,
+              leaveType:   r.leaveType || '',
+              notes:       r.notes     || '',
+              markedBy,
+              shiftHours,
+              hoursWorked,
+            },
+          },
+          upsert: true,
         },
-        upsert: true,
-      },
-    }));
+      };
+    });
 
     const result = await Attendance.bulkWrite(ops);
 
@@ -143,12 +151,9 @@ router.post('/mark', async (req, res) => {
 });
 
 
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 //  PUT /:id   — edit a single attendance record
-//
-//  Body: any subset of { status, checkIn, checkOut,
-//                        lateMinutes, leaveType, notes }
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -174,16 +179,9 @@ router.put('/:id', async (req, res) => {
 });
 
 
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 //  GET /date
-//
-//  Query:  date (YYYY-MM-DD, required)
-//          shift (DAY|NIGHT|all, default all)
-//
-//  Returns: all attendance records for that date PLUS a list of
-//  all active employees not yet marked (so the UI can show who
-//  is still pending).
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 router.get('/date', async (req, res) => {
   try {
     const { date, shift = 'all' } = req.query;
@@ -200,12 +198,10 @@ router.get('/date', async (req, res) => {
       .sort({ 'employee.name': 1 })
       .lean();
 
-    // All employees (to show who is unmarked)
     const allEmployees = await Employee.find({}, 'name department skill role').lean();
     const markedIds    = new Set(records.map(r => r.employee?._id?.toString() ?? r.employee?.toString()));
     const unmarked     = allEmployees.filter(e => !markedIds.has(e._id.toString()));
 
-    // Status breakdown
     const breakdown = { present:0, late:0, half_day:0, absent:0, on_leave:0 };
     for (const r of records) breakdown[r.status] = (breakdown[r.status]||0)+1;
 
@@ -230,14 +226,9 @@ router.get('/date', async (req, res) => {
 });
 
 
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 //  GET /employee/:empId
-//
-//  Query:  startDate, endDate (YYYY-MM-DD)
-//          shift (DAY|NIGHT|all)
-//
-//  Returns: attendance history + summary stats for that employee.
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 router.get('/employee/:empId', async (req, res) => {
   try {
     const { empId } = req.params;
@@ -260,7 +251,6 @@ router.get('/employee/:empId', async (req, res) => {
     if (!employee)
       return res.status(404).json({ success: false, message: 'Employee not found.' });
 
-    // Summary
     const total     = records.length;
     const present   = records.filter(r => r.status==='present').length;
     const late      = records.filter(r => r.status==='late').length;
@@ -301,14 +291,9 @@ router.get('/employee/:empId', async (req, res) => {
 });
 
 
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 //  GET /summary
-//
-//  Query: startDate, endDate, shift (optional)
-//
-//  Returns: per-employee aggregated stats for the period,
-//  sorted by attendance % ascending (lowest first = needs attention).
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 router.get('/summary', async (req, res) => {
   try {
     const { startDate, endDate, shift = 'all' } = req.query;
@@ -324,7 +309,6 @@ router.get('/summary', async (req, res) => {
       .populate('employee', 'name department skill role')
       .lean();
 
-    // Group by employee
     const empMap = new Map();
     for (const r of records) {
       const id   = r.employee?._id?.toString() ?? r.employee?.toString();
@@ -354,7 +338,6 @@ router.get('/summary', async (req, res) => {
       };
     }).sort((a,b) => a.attendancePct - b.attendancePct);
 
-    // Factory-level totals
     const totalShifts  = records.length;
     const presentCount = records.filter(r=>r.status==='present').length;
     const lateCount    = records.filter(r=>r.status==='late').length;
@@ -380,14 +363,9 @@ router.get('/summary', async (req, res) => {
 });
 
 
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 //  GET /monthly/:empId
-//
-//  Query:  year (YYYY), month (1-12)
-//
-//  Returns a day-by-day calendar object for a month,
-//  suitable for rendering a calendar grid.
-// ═════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 router.get('/monthly/:empId', async (req, res) => {
   try {
     const { empId } = req.params;
@@ -406,7 +384,6 @@ router.get('/monthly/:empId', async (req, res) => {
     if (!employee)
       return res.status(404).json({ success:false, message:'Employee not found.' });
 
-    // Build day map: "YYYY-MM-DD" → { day, shifts:[] }
     const dayMap = {};
     const daysInMonth = new Date(year, month, 0).getDate();
     for (let d = 1; d <= daysInMonth; d++) {
@@ -417,7 +394,7 @@ router.get('/monthly/:empId', async (req, res) => {
         dayOfWeek: new Date(year, month-1, d).toLocaleDateString('en-IN',{weekday:'short'}),
         dayShift:  null,
         nightShift:null,
-        summary:  'untracked',  // untracked | present | late | half_day | absent | on_leave | mixed
+        summary:  'untracked',
       };
     }
 
@@ -437,7 +414,6 @@ router.get('/monthly/:empId', async (req, res) => {
       if (r.shift === 'NIGHT') dayMap[key].nightShift = slot;
     }
 
-    // Compute per-day summary colour
     for (const v of Object.values(dayMap)) {
       const statuses = [v.dayShift?.status, v.nightShift?.status].filter(Boolean);
       if (statuses.length === 0)      v.summary = 'untracked';
@@ -447,7 +423,6 @@ router.get('/monthly/:empId', async (req, res) => {
       else                                        v.summary = statuses[0];
     }
 
-    // Monthly stats
     const allSlots = records;
     const stats = {
       total:       allSlots.length,
