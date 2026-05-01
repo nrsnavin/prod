@@ -11,9 +11,9 @@ const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
 
 
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 //  LIST ORDERS  (by status)
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.get(
   "/list",
   catchAsyncErrors(async (req, res, next) => {
@@ -23,15 +23,17 @@ router.get(
     }
     const orders = await Order.find({ status })
       .populate("customer", "name")
+      .populate("createdBy", "name role")
+      .populate("updatedBy", "name role")
       .sort({ createdAt: -1 });
     res.status(200).json({ success: true, orders });
   })
 );
 
 
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 //  CREATE ORDER
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.post(
   "/create-order",
   catchAsyncErrors(async (req, res, next) => {
@@ -47,7 +49,6 @@ router.post(
         .populate("warpYarn.id")
         .lean();
 
-      // Build raw material requirement map
       const rawMap = new Map();
       const addMaterial = (material, weightKg) => {
         const key = material._id.toString();
@@ -92,6 +93,8 @@ router.post(
         elastic: e.elastic, quantity: e.quantity,
       }));
 
+      // Note: the audit plugin auto-fills createdBy/updatedBy from the
+      // authenticated user during .save() (called inside Order.create).
       const order = await Order.create({
         date, po, customer, supplyDate, description,
         elasticOrdered, producedElastic, packedElastic,
@@ -107,9 +110,9 @@ router.post(
 );
 
 
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 //  GET ORDER DETAIL
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.get(
   "/get-orderDetail",
   catchAsyncErrors(async (req, res, next) => {
@@ -120,6 +123,8 @@ router.get(
       .populate("customer", "name gstin")
       .populate("elasticOrdered.elastic", "name")
       .populate("jobs.job")
+      .populate("createdBy", "name role")
+      .populate("updatedBy", "name role")
       .lean();
 
     if (!order) return next(new ErrorHandler("Order not found", 404));
@@ -146,10 +151,6 @@ router.get(
       };
     });
 
-    // ── Fetch LIVE stock for every raw material ──────────────────
-    // order.rawMaterialRequired stores inStock at creation time only.
-    // Re-query RawMaterial.stock on every detail request so the UI
-    // always shows the current warehouse stock, not the stale snapshot.
     const liveRawMaterials = await Promise.all(
       order.rawMaterialRequired.map(async (rm) => {
         const mat = await RawMaterial.findById(rm.rawMaterial)
@@ -161,14 +162,12 @@ router.get(
           name:            mat?.name ?? rm.name ?? "—",
           unit:            mat?.unit ?? "kg",
           requiredWeight:  rm.requiredWeight,
-          inStock,                                        // live
-          stockSufficient: inStock >= rm.requiredWeight,  // live flag
+          inStock,
+          stockSufficient: inStock >= rm.requiredWeight,
         };
       })
     );
 
-    // canApprove: true only when every material has sufficient stock.
-    // Only computed for Open orders (irrelevant otherwise).
     const canApprove = order.status === "Open"
       ? liveRawMaterials.every((m) => m.stockSufficient)
       : undefined;
@@ -186,17 +185,21 @@ router.get(
         customer: order.customer,
         elastics,
         jobs: order.jobs,
-        rawMaterialRequired: liveRawMaterials, // live — not the stored snapshot
-        canApprove,                            // drives approve button state
+        rawMaterialRequired: liveRawMaterials,
+        canApprove,
+        createdBy: order.createdBy,
+        updatedBy: order.updatedBy,
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
       },
     });
   })
 );
 
 
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 //  APPROVE ORDER  (deducts stock — uses transaction)
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.post(
   "/approve",
   catchAsyncErrors(async (req, res, next) => {
@@ -209,7 +212,6 @@ router.post(
       if (order.status !== "Open")
         throw new ErrorHandler("Only Open orders can be approved", 400);
 
-      // Check stock
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
         if (!material) throw new ErrorHandler("Raw material not found", 404);
@@ -217,11 +219,9 @@ router.post(
           throw new ErrorHandler(`Insufficient stock for ${material.name}`, 400);
       }
 
-      // Deduct stock + create MaterialOutward record per material
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
 
-        // 1. Deduct from RawMaterial stock
         material.stock -= rm.requiredWeight;
         material.totalConsumption = (material.totalConsumption || 0) + rm.requiredWeight;
         material.stockMovements?.push({
@@ -233,7 +233,6 @@ router.post(
         });
         await material.save({ session });
 
-        // 2. Create MaterialOutward record for full audit trail
         await MaterialOutward.create([{
           rawMaterial: rm.rawMaterial,
           quantity:    rm.requiredWeight,
@@ -263,11 +262,9 @@ router.post(
 );
 
 
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 //  CANCEL ORDER
-//  FIX: This route was COMPLETELY MISSING — frontend always got 404.
-//       cancelOrder() was broken in production.
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.post(
   "/cancel",
   catchAsyncErrors(async (req, res, next) => {
@@ -287,7 +284,7 @@ router.post(
       );
     }
 
-    order.status = "Cancelled"; // FIX: correct casing matches schema enum
+    order.status = "Cancelled";
     await order.save();
 
     res.status(200).json({
@@ -300,11 +297,9 @@ router.post(
 );
 
 
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 //  START PRODUCTION  (Approved → InProgress)
-//  FIX: /startProduction didn't validate current status. Now uses
-//       /start-production which checks order must be "Approved" first.
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.post(
   "/start-production",
   catchAsyncErrors(async (req, res, next) => {
@@ -333,9 +328,9 @@ router.post(
 );
 
 
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 //  COMPLETE ORDER
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.post(
   "/complete",
   catchAsyncErrors(async (req, res, next) => {
@@ -356,15 +351,13 @@ router.post(
 );
 
 
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 //  GET OPEN ORDERS
-//  FIX: was querying { status: "open" } (lowercase) — schema stores
-//       "Open" (capitalized). Returned zero results always.
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.get(
   "/get-open-orders",
   catchAsyncErrors(async (req, res, next) => {
-    const openOrders = await Order.find({ status: "Open" }) // FIX: was "open"
+    const openOrders = await Order.find({ status: "Open" })
       .populate("customer")
       .sort({ createdAt: -1 });
     res.status(200).json({ success: true, openOrders });
@@ -372,14 +365,13 @@ router.get(
 );
 
 
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 //  GET PENDING (APPROVED) ORDERS
-//  FIX: was querying { status: "approved" } (lowercase). Always zero results.
-// ════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════
 router.get(
   "/get-pending-orders",
   catchAsyncErrors(async (req, res, next) => {
-    const pending = await Order.find({ status: "Approved" }) // FIX: was "approved"
+    const pending = await Order.find({ status: "Approved" })
       .populate("customer")
       .sort({ createdAt: -1 });
     res.status(200).json({ success: true, pending });
