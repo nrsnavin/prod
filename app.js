@@ -1,11 +1,14 @@
 const express = require("express");
 const mongoose = require("mongoose");
+const path = require("path");
 
-// dotenv must come before any code reads env vars (and before the audit
-// plugin is registered, since it doesn't need env but route files do).
+// Resolve config/.env relative to THIS file, not process.cwd().
+// nodemon (and `node index.js`) sometimes runs from a parent directory,
+// in which case a bare "config/.env" path silently misses the file and
+// PORT / MONGO_URL come back undefined.
 if (process.env.NODE_ENV !== "PRODUCTION") {
   require("dotenv").config({
-    path: "config/.env",
+    path: path.resolve(__dirname, "config/.env"),
   });
 }
 
