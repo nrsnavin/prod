@@ -19,7 +19,7 @@ const DEMO_USER = {
 
 (async () => {
   try {
-    await mongoose.connect(process.env.MONGO_URL);
+    await mongoose.connect("mongodb+srv://navin:navin@cluster0.ftoq7bw.mongodb.net/?appName=Cluster0");
     console.log('Connected to MongoDB');
 
     const existing = await User.findOne({ email: DEMO_USER.email });
