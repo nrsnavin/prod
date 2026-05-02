@@ -9,6 +9,7 @@ const ErrorHandler = require("../utils/ErrorHandler.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
+const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
 
 
 // ════════════════════════════════════════════════════════════════
@@ -98,7 +99,25 @@ router.post(
         pendingElastic, rawMaterialRequired, status: "Open",
       });
 
-      res.status(201).json({ success: true, orderId: order._id });
+      // 🪪 Fingerprint: ORDER_CREATED
+      const fp = buildFingerprint(ACTION_CODES.ORDER_CREATED, {
+        entityId: order._id,
+        actor:    actorFromRequest(req),
+        meta: {
+          po,
+          customer:        customer?.toString?.() ?? customer,
+          totalElastics:   elasticOrdered.length,
+          totalRawMats:    rawMaterialRequired.length,
+        },
+      });
+      order.fingerprints.push(fp);
+      await order.save();
+
+      res.status(201).json({
+        success:     true,
+        orderId:     order._id,
+        fingerprint: fp,
+      });
     } catch (error) {
       console.error(error);
       return next(new ErrorHandler(error.message, 500));
@@ -173,6 +192,11 @@ router.get(
       ? liveRawMaterials.every((m) => m.stockSufficient)
       : undefined;
 
+    // 🪪 Newest-first fingerprint feed for the UI timeline
+    const fingerprints = (order.fingerprints || [])
+      .slice()
+      .sort((a, b) => new Date(b.at) - new Date(a.at));
+
     res.status(200).json({
       success: true,
       data: {
@@ -188,6 +212,7 @@ router.get(
         jobs: order.jobs,
         rawMaterialRequired: liveRawMaterials, // live — not the stored snapshot
         canApprove,                            // drives approve button state
+        fingerprints,                          // audit timeline (newest first)
       },
     });
   })
@@ -218,6 +243,7 @@ router.post(
       }
 
       // Deduct stock + create MaterialOutward record per material
+      const deductionFingerprints = [];
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
 
@@ -243,7 +269,34 @@ router.post(
           unitPrice:   material.price ?? 0,
           remarks:     `Order #${order.orderNo ?? ""} approval`,
         }], { session });
+
+        // 3. 🪪 Fingerprint per raw-material deduction
+        const deductFp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_DEDUCTED, {
+          entityId: order._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            rawMaterialId:   rm.rawMaterial.toString(),
+            rawMaterialName: material.name,
+            quantity:        rm.requiredWeight,
+            unit:            "kg",
+            balanceAfter:    material.stock,
+          },
+        });
+        order.fingerprints.push(deductFp);
+        deductionFingerprints.push(deductFp);
       }
+
+      // 🪪 Fingerprint: ORDER_APPROVED (single summary entry)
+      const approveFp = buildFingerprint(ACTION_CODES.ORDER_APPROVED, {
+        entityId: order._id,
+        actor:    actorFromRequest(req),
+        meta: {
+          previousStatus:   "Open",
+          newStatus:        "Approved",
+          materialsDeducted: deductionFingerprints.length,
+        },
+      });
+      order.fingerprints.push(approveFp);
 
       order.status = "Approved";
       await order.save({ session });
@@ -251,8 +304,10 @@ router.post(
       session.endSession();
 
       res.status(200).json({
-        success: true,
-        message: "Order approved and stock deducted",
+        success:               true,
+        message:               "Order approved and stock deducted",
+        fingerprint:           approveFp,
+        deductionFingerprints,
       });
     } catch (error) {
       await session.abortTransaction();
@@ -287,7 +342,16 @@ router.post(
       );
     }
 
+    const previousStatus = order.status;
     order.status = "Cancelled"; // FIX: correct casing matches schema enum
+
+    // 🪪 Fingerprint: ORDER_CANCELLED
+    const fp = buildFingerprint(ACTION_CODES.ORDER_CANCELLED, {
+      entityId: order._id,
+      actor:    actorFromRequest(req),
+      meta: { previousStatus, newStatus: "Cancelled" },
+    });
+    order.fingerprints.push(fp);
     await order.save();
 
     res.status(200).json({
@@ -295,6 +359,7 @@ router.post(
       message: "Order cancelled",
       orderId: order._id,
       status: order.status,
+      fingerprint: fp,
     });
   })
 );
@@ -322,12 +387,21 @@ router.post(
     }
 
     order.status = "InProgress";
+
+    // 🪪 Fingerprint: ORDER_PRODUCTION_STARTED
+    const fp = buildFingerprint(ACTION_CODES.ORDER_PRODUCTION_STARTED, {
+      entityId: order._id,
+      actor:    actorFromRequest(req),
+      meta: { previousStatus: "Approved", newStatus: "InProgress" },
+    });
+    order.fingerprints.push(fp);
     await order.save();
 
     res.status(200).json({
       success: true,
       message: "Order moved to InProgress",
       status: order.status,
+      fingerprint: fp,
     });
   })
 );
@@ -350,8 +424,22 @@ router.post(
     }
 
     order.status = "Completed";
+
+    // 🪪 Fingerprint: ORDER_COMPLETED
+    const fp = buildFingerprint(ACTION_CODES.ORDER_COMPLETED, {
+      entityId: order._id,
+      actor:    actorFromRequest(req),
+      meta: { previousStatus: "InProgress", newStatus: "Completed" },
+    });
+    order.fingerprints.push(fp);
     await order.save();
-    res.status(200).json({ success: true, message: "Order completed", status: order.status });
+
+    res.status(200).json({
+      success: true,
+      message: "Order completed",
+      status:  order.status,
+      fingerprint: fp,
+    });
   })
 );
 
