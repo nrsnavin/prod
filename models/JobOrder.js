@@ -1,142 +1,57 @@
 const mongoose = require("mongoose");
 const AutoIncrement = require("mongoose-sequence")(mongoose);
 
-/**
- * 🔹 Reusable Elastic Quantity Sub-Schema
- */
 const ElasticQtySchema = new mongoose.Schema(
   {
-    elastic: {
-      type: mongoose.Types.ObjectId,
-      ref: "Elastic",
-      required: true,
-    },
-    quantity: {
-      type: Number,
-      default: 0,
-    },
+    elastic:  { type: mongoose.Types.ObjectId, ref: "Elastic", required: true },
+    quantity: { type: Number, default: 0 },
   },
   { _id: false }
 );
 
-/**
- * 🧾 JOB ORDER SCHEMA
- */
 const JobOrderSchema = new mongoose.Schema(
   {
-    // 📅 BASIC INFO
-    date: {
-      type: Date,
-      required: true,
-    },
+    date: { type: Date, required: true },
+    order: { type: mongoose.Types.ObjectId, ref: "Order", required: true, index: true },
+    customer: { type: mongoose.Types.ObjectId, ref: "Customer", required: true },
+    jobOrderNo: { type: Number, immutable: true },
 
-    // 🔗 LINK TO MAIN ORDER (IMPORTANT)
-    order: {
-      type: mongoose.Types.ObjectId,
-      ref: "Order",
-      required: true,
-      index: true,
-    },
-
-    customer: {
-      type: mongoose.Types.ObjectId,
-      ref: "Customer",
-      required: true,
-    },
-
-    // 🔢 AUTO INCREMENT
-    jobOrderNo: {
-      type: Number,
-      immutable: true,
-    },
-
-    // 🏗 JOB STATUS (FLOW-BASED)
     status: {
       type: String,
-      enum: [
-        "preparatory",
-        "weaving",
-        "finishing",
-        "checking",
-        "packing",
-        "completed",
-        "cancelled",
-      ],
+      enum: ["preparatory", "weaving", "finishing", "checking", "packing", "completed", "cancelled"],
       default: "preparatory",
     },
 
-    // 🧵 PLANNED ELASTICS
-    elastics: {
-      type: [ElasticQtySchema],
-      default: [],
-    },
+    elastics:        { type: [ElasticQtySchema], default: [] },
+    producedElastic: { type: [ElasticQtySchema], default: [] },
+    packedElastic:   { type: [ElasticQtySchema], default: [] },
+    wastageElastic:  { type: [ElasticQtySchema], default: [] },
 
-    // 🧵 PRODUCED ELASTICS
-    producedElastic: {
-      type: [ElasticQtySchema],
-      default: [],
-    },
+    warping:  { type: mongoose.Types.ObjectId, ref: "Warping" },
+    covering: { type: mongoose.Types.ObjectId, ref: "Covering" },
+    machine:  { type: mongoose.Types.ObjectId, ref: "Machine" },
 
-    // 📦 PACKED ELASTICS
-    packedElastic: {
-      type: [ElasticQtySchema],
-      default: [],
-    },
+    shiftDetails:   [{ type: mongoose.Types.ObjectId, ref: "ShiftDetail" }],
+    wastages:       [{ type: mongoose.Types.ObjectId, ref: "Wastage" }],
+    packingDetails: [{ type: mongoose.Types.ObjectId, ref: "Packing" }],
 
-    // ♻️ WASTAGE
-    wastageElastic: {
-      type: [ElasticQtySchema],
-      default: [],
-    },
-
-    // 🏭 PROCESS REFERENCES
-    warping: {
-      type: mongoose.Types.ObjectId,
-      ref: "Warping",
-    },
-
-    covering: {
-      type: mongoose.Types.ObjectId,
-      ref: "Covering",
-    },
-
-    machine: {
-      type: mongoose.Types.ObjectId,
-      ref: "Machine",
-    },
-
-    // ⏱ SHIFT-LEVEL TRACEABILITY
-    shiftDetails: [
-      {
-        type: mongoose.Types.ObjectId,
-        ref: "ShiftDetail",
-      },
-    ],
-
-    // ♻️ WASTAGE LOG
-    wastages: [
-      {
-        type: mongoose.Types.ObjectId,
-        ref: "Wastage",
-      },
-    ],
-
-    // 📦 PACKING DETAILS
-    packingDetails: [
-      {
-        type: mongoose.Types.ObjectId,
-        ref: "Packing",
-      },
-    ],
+    // Per-stage fingerprints — set explicitly in each route handler
+    weavingBy:   { type: mongoose.Types.ObjectId, ref: "User" },
+    weavingAt:   { type: Date },
+    finishingBy: { type: mongoose.Types.ObjectId, ref: "User" },
+    finishingAt: { type: Date },
+    checkingBy:  { type: mongoose.Types.ObjectId, ref: "User" },
+    checkingAt:  { type: Date },
+    packingBy:   { type: mongoose.Types.ObjectId, ref: "User" },
+    packingAt:   { type: Date },
+    completedBy: { type: mongoose.Types.ObjectId, ref: "User" },
+    completedAt: { type: Date },
+    cancelledBy: { type: mongoose.Types.ObjectId, ref: "User" },
+    cancelledAt: { type: Date },
   },
   { timestamps: true }
 );
 
-/**
- * 🔢 AUTO-INCREMENT JOB ORDER NO
- */
-JobOrderSchema.plugin(AutoIncrement, {
-  inc_field: "jobOrderNo",
-});
+JobOrderSchema.plugin(AutoIncrement, { inc_field: "jobOrderNo" });
 
 module.exports = mongoose.model("JobOrder", JobOrderSchema);
