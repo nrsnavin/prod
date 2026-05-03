@@ -23,7 +23,9 @@ router.get(
       return next(new ErrorHandler("Status is required", 400));
     }
     const orders = await Order.find({ status })
-      .populate("customer", "name")
+      .populate("customer",  "name")
+      .populate("createdBy", "name role")
+      .populate("updatedBy", "name role")
       .sort({ createdAt: -1 });
     res.status(200).json({ success: true, orders });
   })
@@ -48,7 +50,6 @@ router.post(
         .populate("warpYarn.id")
         .lean();
 
-      // Build raw material requirement map
       const rawMap = new Map();
       const addMaterial = (material, weightKg) => {
         const key = material._id.toString();
@@ -83,15 +84,9 @@ router.post(
 
       const rawMaterialRequired = Array.from(rawMap.values());
 
-      const producedElastic = elasticOrdered.map((e) => ({
-        elastic: e.elastic, quantity: 0,
-      }));
-      const packedElastic = elasticOrdered.map((e) => ({
-        elastic: e.elastic, quantity: 0,
-      }));
-      const pendingElastic = elasticOrdered.map((e) => ({
-        elastic: e.elastic, quantity: e.quantity,
-      }));
+      const producedElastic = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+      const packedElastic   = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+      const pendingElastic  = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: e.quantity }));
 
       const order = await Order.create({
         date, po, customer, supplyDate, description,
@@ -105,9 +100,9 @@ router.post(
         actor:    actorFromRequest(req),
         meta: {
           po,
-          customer:        customer?.toString?.() ?? customer,
-          totalElastics:   elasticOrdered.length,
-          totalRawMats:    rawMaterialRequired.length,
+          customer:      customer?.toString?.() ?? customer,
+          totalElastics: elasticOrdered.length,
+          totalRawMats:  rawMaterialRequired.length,
         },
       });
       order.fingerprints.push(fp);
@@ -136,39 +131,31 @@ router.get(
     if (!id) return next(new ErrorHandler("Order ID is required", 400));
 
     const order = await Order.findById(id)
-      .populate("customer", "name gstin")
+      .populate("customer",  "name gstin")
       .populate("elasticOrdered.elastic", "name")
       .populate("jobs.job")
+      .populate("createdBy",  "name role")
+      .populate("updatedBy",  "name role")
+      .populate("approvedBy", "name role")
+      .populate("cancelledBy","name role")
+      .populate("startedBy",  "name role")
+      .populate("completedBy","name role")
       .lean();
 
     if (!order) return next(new ErrorHandler("Order not found", 404));
 
     const elastics = order.elasticOrdered.map((e) => {
-      const produced =
-        order.producedElastic.find((p) =>
-          p.elastic.equals(e.elastic._id)
-        )?.quantity || 0;
-      const packed =
-        order.packedElastic.find((p) =>
-          p.elastic.equals(e.elastic._id)
-        )?.quantity || 0;
-      const pending =
-        order.pendingElastic.find((p) =>
-          p.elastic.equals(e.elastic._id)
-        )?.quantity ?? e.quantity;
-
+      const produced = order.producedElastic.find((p) => p.elastic.equals(e.elastic._id))?.quantity || 0;
+      const packed   = order.packedElastic.find((p)   => p.elastic.equals(e.elastic._id))?.quantity || 0;
+      const pending  = order.pendingElastic.find((p)  => p.elastic.equals(e.elastic._id))?.quantity ?? e.quantity;
       return {
-        id: e.elastic._id,
-        name: e.elastic.name,
-        ordered: e.quantity,
+        id:       e.elastic._id,
+        name:     e.elastic.name,
+        ordered:  e.quantity,
         produced, packed, pending,
       };
     });
 
-    // ── Fetch LIVE stock for every raw material ──────────────────
-    // order.rawMaterialRequired stores inStock at creation time only.
-    // Re-query RawMaterial.stock on every detail request so the UI
-    // always shows the current warehouse stock, not the stale snapshot.
     const liveRawMaterials = await Promise.all(
       order.rawMaterialRequired.map(async (rm) => {
         const mat = await RawMaterial.findById(rm.rawMaterial)
@@ -180,14 +167,12 @@ router.get(
           name:            mat?.name ?? rm.name ?? "—",
           unit:            mat?.unit ?? "kg",
           requiredWeight:  rm.requiredWeight,
-          inStock,                                        // live
-          stockSufficient: inStock >= rm.requiredWeight,  // live flag
+          inStock,
+          stockSufficient: inStock >= rm.requiredWeight,
         };
       })
     );
 
-    // canApprove: true only when every material has sufficient stock.
-    // Only computed for Open orders (irrelevant otherwise).
     const canApprove = order.status === "Open"
       ? liveRawMaterials.every((m) => m.stockSufficient)
       : undefined;
@@ -200,19 +185,33 @@ router.get(
     res.status(200).json({
       success: true,
       data: {
-        _id: order._id,
-        orderNo: order.orderNo,
-        po: order.po,
-        status: order.status,
-        date: order.date,
-        supplyDate: order.supplyDate,
+        _id:         order._id,
+        orderNo:     order.orderNo,
+        po:          order.po,
+        status:      order.status,
+        date:        order.date,
+        supplyDate:  order.supplyDate,
         description: order.description,
-        customer: order.customer,
+        customer:    order.customer,
         elastics,
-        jobs: order.jobs,
-        rawMaterialRequired: liveRawMaterials, // live — not the stored snapshot
-        canApprove,                            // drives approve button state
-        fingerprints,                          // audit timeline (newest first)
+        jobs:        order.jobs,
+        rawMaterialRequired: liveRawMaterials,
+        canApprove,
+        // ── Per-state audit pointers ──
+        createdBy:   order.createdBy  || null,
+        createdAt:   order.createdAt  || null,
+        updatedBy:   order.updatedBy  || null,
+        updatedAt:   order.updatedAt  || null,
+        approvedBy:  order.approvedBy || null,
+        approvedAt:  order.approvedAt || null,
+        cancelledBy: order.cancelledBy|| null,
+        cancelledAt: order.cancelledAt|| null,
+        startedBy:   order.startedBy  || null,
+        startedAt:   order.startedAt  || null,
+        completedBy: order.completedBy|| null,
+        completedAt: order.completedAt|| null,
+        // 🪪 Full audit timeline (newest-first)
+        fingerprints,
       },
     });
   })
@@ -234,7 +233,6 @@ router.post(
       if (order.status !== "Open")
         throw new ErrorHandler("Only Open orders can be approved", 400);
 
-      // Check stock
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
         if (!material) throw new ErrorHandler("Raw material not found", 404);
@@ -242,24 +240,17 @@ router.post(
           throw new ErrorHandler(`Insufficient stock for ${material.name}`, 400);
       }
 
-      // Deduct stock + create MaterialOutward record per material
+      const actor = actorFromRequest(req);
       const deductionFingerprints = [];
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
-
-        // 1. Deduct from RawMaterial stock
         material.stock -= rm.requiredWeight;
         material.totalConsumption = (material.totalConsumption || 0) + rm.requiredWeight;
         material.stockMovements?.push({
-          date:     new Date(),
-          type:     "ORDER_APPROVAL",
-          order:    order._id,
-          quantity: rm.requiredWeight,
-          balance:  material.stock,
+          date: new Date(), type: "ORDER_APPROVAL", order: order._id,
+          quantity: rm.requiredWeight, balance: material.stock,
         });
         await material.save({ session });
-
-        // 2. Create MaterialOutward record for full audit trail
         await MaterialOutward.create([{
           rawMaterial: rm.rawMaterial,
           quantity:    rm.requiredWeight,
@@ -270,10 +261,10 @@ router.post(
           remarks:     `Order #${order.orderNo ?? ""} approval`,
         }], { session });
 
-        // 3. 🪪 Fingerprint per raw-material deduction
+        // 🪪 Fingerprint per raw-material deduction
         const deductFp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_DEDUCTED, {
           entityId: order._id,
-          actor:    actorFromRequest(req),
+          actor,
           meta: {
             rawMaterialId:   rm.rawMaterial.toString(),
             rawMaterialName: material.name,
@@ -286,19 +277,21 @@ router.post(
         deductionFingerprints.push(deductFp);
       }
 
-      // 🪪 Fingerprint: ORDER_APPROVED (single summary entry)
+      // 🪪 ORDER_APPROVED summary fingerprint
       const approveFp = buildFingerprint(ACTION_CODES.ORDER_APPROVED, {
         entityId: order._id,
-        actor:    actorFromRequest(req),
+        actor,
         meta: {
-          previousStatus:   "Open",
-          newStatus:        "Approved",
+          previousStatus:    "Open",
+          newStatus:         "Approved",
           materialsDeducted: deductionFingerprints.length,
         },
       });
       order.fingerprints.push(approveFp);
 
-      order.status = "Approved";
+      order.status     = "Approved";
+      order.approvedBy = req.user?._id || null;
+      order.approvedAt = new Date();
       await order.save({ session });
       await session.commitTransaction();
       session.endSession();
@@ -320,36 +313,30 @@ router.post(
 
 // ════════════════════════════════════════════════════════════════
 //  CANCEL ORDER
-//  FIX: This route was COMPLETELY MISSING — frontend always got 404.
-//       cancelOrder() was broken in production.
 // ════════════════════════════════════════════════════════════════
 router.post(
   "/cancel",
   catchAsyncErrors(async (req, res, next) => {
     const { orderId } = req.body;
-    if (!orderId)
-      return next(new ErrorHandler("Order ID is required", 400));
+    if (!orderId) return next(new ErrorHandler("Order ID is required", 400));
 
     const order = await Order.findById(orderId);
     if (!order) return next(new ErrorHandler("Order not found", 404));
 
     if (!["Open", "Approved"].includes(order.status)) {
-      return next(
-        new ErrorHandler(
-          `Cannot cancel an order with status "${order.status}"`,
-          400
-        )
-      );
+      return next(new ErrorHandler(`Cannot cancel an order with status "${order.status}"`, 400));
     }
 
     const previousStatus = order.status;
-    order.status = "Cancelled"; // FIX: correct casing matches schema enum
+    order.status      = "Cancelled";
+    order.cancelledBy = req.user?._id || null;
+    order.cancelledAt = new Date();
 
     // 🪪 Fingerprint: ORDER_CANCELLED
     const fp = buildFingerprint(ACTION_CODES.ORDER_CANCELLED, {
       entityId: order._id,
       actor:    actorFromRequest(req),
-      meta: { previousStatus, newStatus: "Cancelled" },
+      meta:     { previousStatus, newStatus: "Cancelled" },
     });
     order.fingerprints.push(fp);
     await order.save();
@@ -358,7 +345,7 @@ router.post(
       success: true,
       message: "Order cancelled",
       orderId: order._id,
-      status: order.status,
+      status:  order.status,
       fingerprint: fp,
     });
   })
@@ -367,32 +354,29 @@ router.post(
 
 // ════════════════════════════════════════════════════════════════
 //  START PRODUCTION  (Approved → InProgress)
-//  FIX: /startProduction didn't validate current status. Now uses
-//       /start-production which checks order must be "Approved" first.
 // ════════════════════════════════════════════════════════════════
 router.post(
   "/start-production",
   catchAsyncErrors(async (req, res, next) => {
     const { orderId } = req.body;
-    if (!orderId)
-      return next(new ErrorHandler("Order ID is required", 400));
+    if (!orderId) return next(new ErrorHandler("Order ID is required", 400));
 
     const order = await Order.findById(orderId);
     if (!order) return next(new ErrorHandler("Order not found", 404));
 
     if (order.status !== "Approved") {
-      return next(
-        new ErrorHandler("Order must be Approved before starting production", 400)
-      );
+      return next(new ErrorHandler("Order must be Approved before starting production", 400));
     }
 
-    order.status = "InProgress";
+    order.status    = "InProgress";
+    order.startedBy = req.user?._id || null;
+    order.startedAt = new Date();
 
     // 🪪 Fingerprint: ORDER_PRODUCTION_STARTED
     const fp = buildFingerprint(ACTION_CODES.ORDER_PRODUCTION_STARTED, {
       entityId: order._id,
       actor:    actorFromRequest(req),
-      meta: { previousStatus: "Approved", newStatus: "InProgress" },
+      meta:     { previousStatus: "Approved", newStatus: "InProgress" },
     });
     order.fingerprints.push(fp);
     await order.save();
@@ -400,7 +384,7 @@ router.post(
     res.status(200).json({
       success: true,
       message: "Order moved to InProgress",
-      status: order.status,
+      status:  order.status,
       fingerprint: fp,
     });
   })
@@ -418,18 +402,18 @@ router.post(
     if (!order) return next(new ErrorHandler("Order not found", 404));
 
     if (order.status !== "InProgress") {
-      return next(
-        new ErrorHandler("Only InProgress orders can be completed", 400)
-      );
+      return next(new ErrorHandler("Only InProgress orders can be completed", 400));
     }
 
-    order.status = "Completed";
+    order.status      = "Completed";
+    order.completedBy = req.user?._id || null;
+    order.completedAt = new Date();
 
     // 🪪 Fingerprint: ORDER_COMPLETED
     const fp = buildFingerprint(ACTION_CODES.ORDER_COMPLETED, {
       entityId: order._id,
       actor:    actorFromRequest(req),
-      meta: { previousStatus: "InProgress", newStatus: "Completed" },
+      meta:     { previousStatus: "InProgress", newStatus: "Completed" },
     });
     order.fingerprints.push(fp);
     await order.save();
@@ -446,13 +430,11 @@ router.post(
 
 // ════════════════════════════════════════════════════════════════
 //  GET OPEN ORDERS
-//  FIX: was querying { status: "open" } (lowercase) — schema stores
-//       "Open" (capitalized). Returned zero results always.
 // ════════════════════════════════════════════════════════════════
 router.get(
   "/get-open-orders",
   catchAsyncErrors(async (req, res, next) => {
-    const openOrders = await Order.find({ status: "Open" }) // FIX: was "open"
+    const openOrders = await Order.find({ status: "Open" })
       .populate("customer")
       .sort({ createdAt: -1 });
     res.status(200).json({ success: true, openOrders });
@@ -462,12 +444,11 @@ router.get(
 
 // ════════════════════════════════════════════════════════════════
 //  GET PENDING (APPROVED) ORDERS
-//  FIX: was querying { status: "approved" } (lowercase). Always zero results.
 // ════════════════════════════════════════════════════════════════
 router.get(
   "/get-pending-orders",
   catchAsyncErrors(async (req, res, next) => {
-    const pending = await Order.find({ status: "Approved" }) // FIX: was "approved"
+    const pending = await Order.find({ status: "Approved" })
       .populate("customer")
       .sort({ createdAt: -1 });
     res.status(200).json({ success: true, pending });

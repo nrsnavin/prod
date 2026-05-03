@@ -1,6 +1,6 @@
-const app=require('./app');
-const connectDatabase=require('./db/Database')
-
+const app = require('./app');
+const connectDatabase = require('./db/Database');
+const path = require('path');
 
 // Handling uncaught Exception
 process.on("uncaughtException", (err) => {
@@ -8,16 +8,17 @@ process.on("uncaughtException", (err) => {
   console.log(`shutting down the server for handling uncaught exception`);
 });
 
-// config
+// dotenv (idempotent — app.js already loads this on require, but keeping
+// it here too makes index.js safe to run standalone). Path is absolute so
+// it works regardless of process.cwd().
 if (process.env.NODE_ENV !== "PRODUCTION") {
   require("dotenv").config({
-    path: "config/.env",
+    path: path.resolve(__dirname, "/.env"),
   });
 }
 
 // connect db
 connectDatabase.connectDatabase();
-
 
 // create server
 const server = app.listen(process.env.PORT, () => {
