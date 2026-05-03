@@ -10,6 +10,7 @@ const Elastic          = require("../models/Elastic");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
+const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
 
 // ── 1. CREATE WARPING ──────────────────────────────────────────
@@ -148,7 +149,16 @@ router.put("/start", catchAsyncErrors(async (req, res, next) => {
 
   warping.status = "in_progress";
   await warping.save();
-  res.json({ success: true, warping });
+
+  // 🪪 Fingerprint on the parent JobOrder
+  const fp = buildFingerprint(ACTION_CODES.WARPING_STARTED, {
+    entityId: warping.job,
+    actor:    actorFromRequest(req),
+    meta:     { warpingId: warping._id.toString() },
+  });
+  await JobOrder.findByIdAndUpdate(warping.job, { $push: { fingerprints: fp } });
+
+  res.json({ success: true, warping, fingerprint: fp });
 }));
 
 
@@ -165,7 +175,25 @@ router.put("/complete", catchAsyncErrors(async (req, res, next) => {
   await warping.save();
 
   const { advanced, jobStatus } = await checkAndAdvanceToWeaving(warping.job);
-  res.json({ success: true, warping, job: { advanced, status: jobStatus } });
+
+  // 🪪 Fingerprint on the parent JobOrder
+  const fp = buildFingerprint(ACTION_CODES.WARPING_COMPLETED, {
+    entityId: warping.job,
+    actor:    actorFromRequest(req),
+    meta: {
+      warpingId:     warping._id.toString(),
+      completedDate: warping.completedDate,
+      jobAdvanced:   advanced,
+      jobStatus,
+    },
+  });
+  await JobOrder.findByIdAndUpdate(warping.job, { $push: { fingerprints: fp } });
+
+  res.json({
+    success: true, warping,
+    job:     { advanced, status: jobStatus },
+    fingerprint: fp,
+  });
 }));
 
 

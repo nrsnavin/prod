@@ -9,6 +9,7 @@ const Packing          = require("../models/Packing");
 const JobOrder         = require("../models/JobOrder");
 const Employee         = require("../models/Employee");
 const Elastic          = require("../models/Elastic");
+const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
 // ─────────────────────────────────────────────────────────────
 //  SHARED POPULATE CHAIN for full Packing detail
@@ -219,13 +220,31 @@ router.post(
     // don't crash — just log.
 
     jobDoc.packingDetails.push(packing._id);
+
+    // 🪪 Fingerprint per packing record on the parent JobOrder
+    const fp = buildFingerprint(ACTION_CODES.PACKING_CREATED, {
+      entityId: jobDoc._id,
+      actor:    actorFromRequest(req),
+      meta: {
+        packingId:   packing._id.toString(),
+        elasticId:   elastic.toString(),
+        elasticName: elasticDoc.name,
+        meter:       Number(meter),
+        joints:      Number(joints) || 0,
+        netWeight:   Number(netWeight),
+        grossWeight: Number(grossWeight),
+        size:        size || undefined,
+        stretch:     stretch || undefined,
+      },
+    });
+    jobDoc.fingerprints.push(fp);
     await jobDoc.save();
 
     console.log(
       `[packing/create] Job #${jobDoc.jobOrderNo} | elastic ${elasticDoc.name} | ${meter}m`
     );
 
-    res.status(201).json({ success: true, packing });
+    res.status(201).json({ success: true, packing, fingerprint: fp });
   })
 );
 

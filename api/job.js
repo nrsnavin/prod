@@ -520,8 +520,24 @@ router.post(
     const idx = job.wastageElastic.findIndex(e => e.elastic.toString() === elasticId.toString());
     if (idx >= 0) job.wastageElastic[idx].quantity += quantity;
     job.wastages.push(wastage._id);
+
+    // 🪪 Fingerprint per wastage entry on the job's timeline
+    const fp = buildFingerprint(ACTION_CODES.WASTAGE_RECORDED, {
+      entityId: job._id,
+      actor:    actorFromRequest(req),
+      meta: {
+        wastageId:  wastage._id.toString(),
+        elasticId:  elasticId.toString(),
+        employeeId: employeeId.toString(),
+        quantity,
+        penalty:    penalty || 0,
+        reason:     reason.trim(),
+        jobStage:   job.status,
+      },
+    });
+    job.fingerprints.push(fp);
     await job.save();
-    res.status(201).json({ success: true, wastage });
+    res.status(201).json({ success: true, wastage, fingerprint: fp });
   })
 );
 

@@ -27,16 +27,25 @@
 const crypto = require('crypto');
 
 const ACTION_CODES = Object.freeze({
-  ORDER_CREATED:           'ORDER_CREATED',
-  ORDER_APPROVED:          'ORDER_APPROVED',
-  RAW_MATERIAL_DEDUCTED:   'RAW_MATERIAL_DEDUCTED',
-  ORDER_PRODUCTION_STARTED:'ORDER_PRODUCTION_STARTED',
-  ORDER_COMPLETED:         'ORDER_COMPLETED',
-  ORDER_CANCELLED:         'ORDER_CANCELLED',
-  JOB_CREATED:             'JOB_CREATED',
-  JOB_STAGE_UPDATED:       'JOB_STAGE_UPDATED',
-  JOB_COMPLETED:           'JOB_COMPLETED',
-  JOB_CANCELLED:           'JOB_CANCELLED',
+  ORDER_CREATED:            'ORDER_CREATED',
+  ORDER_APPROVED:           'ORDER_APPROVED',
+  RAW_MATERIAL_DEDUCTED:    'RAW_MATERIAL_DEDUCTED',
+  ORDER_PRODUCTION_STARTED: 'ORDER_PRODUCTION_STARTED',
+  ORDER_COMPLETED:          'ORDER_COMPLETED',
+  ORDER_CANCELLED:          'ORDER_CANCELLED',
+  JOB_CREATED:              'JOB_CREATED',
+  JOB_STAGE_UPDATED:        'JOB_STAGE_UPDATED',
+  JOB_COMPLETED:            'JOB_COMPLETED',
+  JOB_CANCELLED:            'JOB_CANCELLED',
+  // Sub-stage / per-action events recorded on the parent JobOrder
+  WARPING_STARTED:          'WARPING_STARTED',
+  WARPING_COMPLETED:        'WARPING_COMPLETED',
+  COVERING_STARTED:         'COVERING_STARTED',
+  COVERING_COMPLETED:       'COVERING_COMPLETED',
+  COVERING_BEAM_ENTRY:      'COVERING_BEAM_ENTRY',
+  SHIFT_PRODUCTION_ENTERED: 'SHIFT_PRODUCTION_ENTERED',
+  PACKING_CREATED:          'PACKING_CREATED',
+  WASTAGE_RECORDED:         'WASTAGE_RECORDED',
 });
 
 const ACTION_LABELS = Object.freeze({
@@ -50,6 +59,14 @@ const ACTION_LABELS = Object.freeze({
   JOB_STAGE_UPDATED:        'Job Stage Updated',
   JOB_COMPLETED:            'Job Completed',
   JOB_CANCELLED:            'Job Cancelled',
+  WARPING_STARTED:          'Warping Started',
+  WARPING_COMPLETED:        'Warping Completed',
+  COVERING_STARTED:         'Covering Started',
+  COVERING_COMPLETED:       'Covering Completed',
+  COVERING_BEAM_ENTRY:      'Covering Beam Entry',
+  SHIFT_PRODUCTION_ENTERED: 'Shift Production Entered',
+  PACKING_CREATED:          'Packing Recorded',
+  WASTAGE_RECORDED:         'Wastage Recorded',
 });
 
 /**

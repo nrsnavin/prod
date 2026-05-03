@@ -13,6 +13,7 @@ const Order       = require("../models/Order");
 const ShiftDetail = require("../models/ShiftDetail");
 const ShiftPlan   = require("../models/ShiftPlan");
 const JobOrder    = require("../models/JobOrder");
+const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS
@@ -501,7 +502,27 @@ router.post(
       await sp.save();
     }
 
-    res.json({ success: true, shift });
+    // 🪪 Fingerprint on the parent JobOrder. Action covers any
+    // weaving / finishing / checking shift entry — the job's stage
+    // is recorded in meta so the timeline can label it accurately.
+    const fp = buildFingerprint(ACTION_CODES.SHIFT_PRODUCTION_ENTERED, {
+      entityId: job._id,
+      actor:    actorFromRequest(req),
+      meta: {
+        jobStage:         job.status,
+        shiftId:          shift._id.toString(),
+        shiftLabel:       shift.shift || null,
+        productionMeters: shift.productionMeters,
+        production:       prodValue,
+        timer:            shift.timer || null,
+        machineId:        machine?._id?.toString() || null,
+        machineName:      machine?.ID || null,
+        feedback:         feedback || undefined,
+      },
+    });
+    await JobOrder.findByIdAndUpdate(job._id, { $push: { fingerprints: fp } });
+
+    res.json({ success: true, shift, fingerprint: fp });
   })
 );
 

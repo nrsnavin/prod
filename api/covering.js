@@ -8,6 +8,7 @@ const Elastic           = require("../models/Elastic");   // keeps model in regi
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
+const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
 // ══════════════════════════════════════════════════════════════
 //  1.  LIST COVERINGS
@@ -132,7 +133,15 @@ router.post(
     covering.status = "in_progress";
     await covering.save();
 
-    res.status(200).json({ success: true, covering });
+    // 🪪 Fingerprint on the parent JobOrder
+    const fp = buildFingerprint(ACTION_CODES.COVERING_STARTED, {
+      entityId: covering.job,
+      actor:    actorFromRequest(req),
+      meta:     { coveringId: covering._id.toString() },
+    });
+    await JobOrder.findByIdAndUpdate(covering.job, { $push: { fingerprints: fp } });
+
+    res.status(200).json({ success: true, covering, fingerprint: fp });
   })
 );
 
@@ -173,15 +182,24 @@ router.post(
     // ── Auto-advance job to weaving if warping is also complete ────
     const { advanced, jobStatus } = await checkAndAdvanceToWeaving(covering.job);
 
+    // 🪪 Fingerprint on the parent JobOrder
+    const fp = buildFingerprint(ACTION_CODES.COVERING_COMPLETED, {
+      entityId: covering.job,
+      actor:    actorFromRequest(req),
+      meta: {
+        coveringId:    covering._id.toString(),
+        completedDate: covering.completedDate,
+        jobAdvanced:   advanced,
+        jobStatus,
+      },
+    });
+    await JobOrder.findByIdAndUpdate(covering.job, { $push: { fingerprints: fp } });
+
     res.status(200).json({
       success:   true,
       covering,
-      job: {
-        // Echo back the job's new status so the Flutter client can
-        // react immediately (e.g. show "Assign Machine" button)
-        advanced,
-        status: jobStatus,
-      },
+      job: { advanced, status: jobStatus },
+      fingerprint: fp,
     });
   })
 );
@@ -270,11 +288,28 @@ router.post(
       `| total = ${covering.producedWeight.toFixed(3)} kg`
     );
 
+    // 🪪 Fingerprint per beam entry (parent JobOrder timeline)
+    const fp = buildFingerprint(ACTION_CODES.COVERING_BEAM_ENTRY, {
+      entityId: covering.job,
+      actor:    actorFromRequest(req),
+      meta: {
+        coveringId:        covering._id.toString(),
+        beamNo:            Number(beamNo),
+        weight:            w,
+        unit:              'kg',
+        producedWeight:    covering.producedWeight,
+        totalBeams:        covering.beamEntries.length,
+        note:              note?.trim() || undefined,
+      },
+    });
+    await JobOrder.findByIdAndUpdate(covering.job, { $push: { fingerprints: fp } });
+
     res.status(201).json({
       success:        true,
       beamEntry:      covering.beamEntries[covering.beamEntries.length - 1],
       producedWeight: covering.producedWeight,
       totalBeams:     covering.beamEntries.length,
+      fingerprint:    fp,
     });
   })
 );
