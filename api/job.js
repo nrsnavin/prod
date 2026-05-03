@@ -15,6 +15,8 @@ const Wastage     = require('../models/Wastage');
 const Machine     = require('../models/Machine');
 const ShiftDetail = require('../models/ShiftDetail');
 
+const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
+
 const JOB_STATUSES = [
   'preparatory', 'weaving', 'finishing', 'checking', 'packing', 'completed', 'cancelled',
 ];
@@ -144,6 +146,21 @@ router.post(
 
     job.warping  = warping._id;
     job.covering = covering._id;
+
+    // 🪪 Fingerprint: JOB_CREATED on the job itself
+    const actor = actorFromRequest(req);
+    const jobFp = buildFingerprint(ACTION_CODES.JOB_CREATED, {
+      entityId: job._id,
+      actor,
+      meta: {
+        orderId:       order._id.toString(),
+        orderNo:       order.orderNo,
+        jobOrderNo:    job.jobOrderNo,
+        elasticCount:  elastics.length,
+        totalQuantity: elastics.reduce((s, e) => s + (e.quantity || 0), 0),
+      },
+    });
+    job.fingerprints.push(jobFp);
     await job.save();
 
     order.jobs.push({ job: job._id, no: job.jobOrderNo });
@@ -152,6 +169,20 @@ router.post(
       if (pending) pending.quantity -= e.quantity;
     }
     order.status = 'InProgress';
+
+    // 🪪 Mirror fingerprint on the parent Order so the order timeline
+    //    also shows that a job was spun off.
+    order.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_CREATED, {
+      entityId: order._id,
+      actor,
+      meta: {
+        jobId:          job._id.toString(),
+        jobOrderNo:     job.jobOrderNo,
+        elasticCount:   elastics.length,
+        relatedHash:    jobFp.hash,
+        relatedShortId: jobFp.shortId,
+      },
+    }));
     await order.save();
 
     res.status(201).json({
@@ -162,6 +193,7 @@ router.post(
         warping:  { _id: warping._id,  status: warping.status  },
         covering: { _id: covering._id, status: covering.status },
       },
+      fingerprint: jobFp,
     });
   })
 );
@@ -213,7 +245,13 @@ router.get(
     if (!id) return next(new ErrorHandler('Job ID is required', 400));
     const job = await fullJobPopulate(JobOrder.findById(id));
     if (!job) return next(new ErrorHandler('Job not found', 404));
-    res.json({ success: true, job });
+
+    // 🪪 Surface a sorted fingerprint feed alongside the raw job
+    const fingerprints = (job.fingerprints || [])
+      .slice()
+      .sort((a, b) => new Date(b.at) - new Date(a.at));
+
+    res.json({ success: true, job, fingerprints });
   })
 );
 
@@ -276,6 +314,18 @@ router.post(
     if (job.status === 'preparatory') {
       job.status = 'weaving';
       stampStage(job, 'weaving', req.user?._id);
+      // 🪪 Fingerprint: JOB_STAGE_UPDATED (preparatory → weaving)
+      job.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
+        entityId: job._id,
+        actor:    actorFromRequest(req),
+        meta:     {
+          previousStage: 'preparatory',
+          newStage:      'weaving',
+          jobOrderNo:    job.jobOrderNo,
+          machineId:     machine._id.toString(),
+          machineName:   machine.ID,
+        },
+      }));
     }
     job.machine = machine._id;
     await job.save();
@@ -315,10 +365,61 @@ router.post(
       job.machine = undefined;
     }
 
+    const previousStage = job.status;
+    const actor = actorFromRequest(req);
+
+    // 🪪 Stage update fingerprint (every transition)
+    const stageFp = buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
+      entityId: job._id,
+      actor,
+      meta: {
+        previousStage,
+        newStage:        nextStatus,
+        jobOrderNo:      job.jobOrderNo,
+        machineReleased: nextStatus === 'finishing',
+      },
+    });
+    job.fingerprints.push(stageFp);
+
+    let completionFp = null;
     if (nextStatus === 'completed') {
       const siblingJobs = await JobOrder.find({ order: job.order, _id: { $ne: job._id } }).select('status');
-      if (siblingJobs.every(j => ['completed', 'cancelled'].includes(j.status)))
-        await Order.findByIdAndUpdate(job.order, { status: 'Completed' });
+      const allDone = siblingJobs.every(j => ['completed', 'cancelled'].includes(j.status));
+
+      // 🪪 Job completion milestone fingerprint
+      completionFp = buildFingerprint(ACTION_CODES.JOB_COMPLETED, {
+        entityId: job._id,
+        actor,
+        meta: {
+          jobOrderNo:        job.jobOrderNo,
+          orderId:           job.order.toString(),
+          allSiblingsDone:   allDone,
+          orderClosedByThis: allDone,
+        },
+      });
+      job.fingerprints.push(completionFp);
+
+      if (allDone) {
+        const order = await Order.findById(job.order);
+        if (order) {
+          order.status      = 'Completed';
+          order.completedBy = req.user?._id || null;
+          order.completedAt = new Date();
+          order.fingerprints.push(buildFingerprint(ACTION_CODES.ORDER_COMPLETED, {
+            entityId: order._id,
+            actor,
+            meta: {
+              previousStatus:  'InProgress',
+              newStatus:       'Completed',
+              triggeredByJob:  job._id.toString(),
+              triggerJobNo:    job.jobOrderNo,
+              relatedHash:     completionFp.hash,
+              relatedShortId:  completionFp.shortId,
+            },
+          }));
+          await order.save();
+        }
+      }
     }
 
     stampStage(job, nextStatus, req.user?._id);
@@ -328,7 +429,9 @@ router.post(
     res.json({
       success: true,
       message: `Job advanced to "${nextStatus}"`,
-      data: { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
+      data:    { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
+      fingerprint: stageFp,
+      completionFingerprint: completionFp,
     });
   })
 );
@@ -365,15 +468,29 @@ router.post(
       await order.save();
     }
 
+    const previousStatus = job.status;
     stampStage(job, 'cancelled', req.user?._id);
     job.status = 'cancelled';
     if (reason) job.cancelReason = reason;
+
+    // 🪪 Fingerprint: JOB_CANCELLED
+    const fp = buildFingerprint(ACTION_CODES.JOB_CANCELLED, {
+      entityId: job._id,
+      actor:    actorFromRequest(req),
+      meta: {
+        previousStatus,
+        reason:     reason || null,
+        jobOrderNo: job.jobOrderNo,
+      },
+    });
+    job.fingerprints.push(fp);
     await job.save();
 
     res.json({
       success: true,
       message: 'Job cancelled and quantities restored to order',
       data: { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
+      fingerprint: fp,
     });
   })
 );
@@ -528,6 +645,18 @@ router.post(
     if (job.status === 'preparatory') {
       job.status = 'weaving';
       stampStage(job, 'weaving', req.user?._id);
+      // 🪪 Fingerprint: JOB_STAGE_UPDATED (preparatory → weaving)
+      job.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
+        entityId: job._id,
+        actor:    actorFromRequest(req),
+        meta: {
+          previousStage: 'preparatory',
+          newStage:      'weaving',
+          jobOrderNo:    job.jobOrderNo,
+          machineId:     machine._id.toString(),
+          machineName:   machine.ID,
+        },
+      }));
     }
     job.machine = machine._id;
     await job.save();
@@ -627,6 +756,20 @@ router.get('/:jobId', async (req, res) => {
     const wastages = (job.wastages || []).map(wst => ({ id: wst._id, elasticName: wst.elastic?.name || '-', employeeName: wst.employee?.name || '-', quantity: wst.quantity || 0, penalty: wst.penalty || 0, reason: wst.reason || '', date: fmtDate(wst.createdAt) }));
     const packingDetails = (job.packingDetails || []).map(pk => ({ id: pk._id, elasticName: pk.elastic?.name || '-', quantity: pk.quantity || 0, rolls: pk.rolls || 0, metersPerRoll: pk.metersPerRoll || 0, total: pk.total || 0, batch: pk.batch || '-', status: pk.status || 'open', date: fmtDate(pk.createdAt) }));
 
+    // 🪪 Newest-first fingerprint feed for the timeline UI
+    const fingerprints = (job.fingerprints || [])
+      .slice()
+      .sort((a, b) => new Date(b.at) - new Date(a.at))
+      .map(f => ({
+        code:    f.code,
+        label:   f.label,
+        hash:    f.hash,
+        shortId: f.shortId,
+        at:      f.at,
+        actor:   f.actor || { id: 'system', name: 'System', role: 'system' },
+        meta:    f.meta  || {},
+      }));
+
     return res.json({
       success: true,
       data: {
@@ -640,7 +783,7 @@ router.get('/:jobId', async (req, res) => {
         packedElastics: mapElasticQty(job.packedElastic),
         wastageElastics: mapElasticQty(job.wastageElastic),
         warping, covering, shiftDetails, wastages, packingDetails,
-        // ── Full audit trail ──
+        // ── Per-stage audit pointers ──
         createdBy:   fpUser(job.createdBy),
         createdAt:   job.createdAt || null,
         updatedBy:   fpUser(job.updatedBy),
@@ -657,6 +800,8 @@ router.get('/:jobId', async (req, res) => {
         completedAt: job.completedAt || null,
         cancelledBy: fpUser(job.cancelledBy),
         cancelledAt: job.cancelledAt || null,
+        // 🪪 Full audit timeline (newest-first)
+        fingerprints,
       },
     });
   } catch (err) {

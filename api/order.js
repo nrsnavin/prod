@@ -9,6 +9,7 @@ const ErrorHandler = require("../utils/ErrorHandler.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
+const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
 
 
 // ════════════════════════════════════════════════════════════════
@@ -93,7 +94,25 @@ router.post(
         pendingElastic, rawMaterialRequired, status: "Open",
       });
 
-      res.status(201).json({ success: true, orderId: order._id });
+      // 🪪 Fingerprint: ORDER_CREATED
+      const fp = buildFingerprint(ACTION_CODES.ORDER_CREATED, {
+        entityId: order._id,
+        actor:    actorFromRequest(req),
+        meta: {
+          po,
+          customer:      customer?.toString?.() ?? customer,
+          totalElastics: elasticOrdered.length,
+          totalRawMats:  rawMaterialRequired.length,
+        },
+      });
+      order.fingerprints.push(fp);
+      await order.save();
+
+      res.status(201).json({
+        success:     true,
+        orderId:     order._id,
+        fingerprint: fp,
+      });
     } catch (error) {
       console.error(error);
       return next(new ErrorHandler(error.message, 500));
@@ -158,6 +177,11 @@ router.get(
       ? liveRawMaterials.every((m) => m.stockSufficient)
       : undefined;
 
+    // 🪪 Newest-first fingerprint feed for the UI timeline
+    const fingerprints = (order.fingerprints || [])
+      .slice()
+      .sort((a, b) => new Date(b.at) - new Date(a.at));
+
     res.status(200).json({
       success: true,
       data: {
@@ -173,7 +197,7 @@ router.get(
         jobs:        order.jobs,
         rawMaterialRequired: liveRawMaterials,
         canApprove,
-        // ── Full audit trail ──
+        // ── Per-state audit pointers ──
         createdBy:   order.createdBy  || null,
         createdAt:   order.createdAt  || null,
         updatedBy:   order.updatedBy  || null,
@@ -186,6 +210,8 @@ router.get(
         startedAt:   order.startedAt  || null,
         completedBy: order.completedBy|| null,
         completedAt: order.completedAt|| null,
+        // 🪪 Full audit timeline (newest-first)
+        fingerprints,
       },
     });
   })
@@ -214,6 +240,8 @@ router.post(
           throw new ErrorHandler(`Insufficient stock for ${material.name}`, 400);
       }
 
+      const actor = actorFromRequest(req);
+      const deductionFingerprints = [];
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
         material.stock -= rm.requiredWeight;
@@ -232,7 +260,34 @@ router.post(
           unitPrice:   material.price ?? 0,
           remarks:     `Order #${order.orderNo ?? ""} approval`,
         }], { session });
+
+        // 🪪 Fingerprint per raw-material deduction
+        const deductFp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_DEDUCTED, {
+          entityId: order._id,
+          actor,
+          meta: {
+            rawMaterialId:   rm.rawMaterial.toString(),
+            rawMaterialName: material.name,
+            quantity:        rm.requiredWeight,
+            unit:            "kg",
+            balanceAfter:    material.stock,
+          },
+        });
+        order.fingerprints.push(deductFp);
+        deductionFingerprints.push(deductFp);
       }
+
+      // 🪪 ORDER_APPROVED summary fingerprint
+      const approveFp = buildFingerprint(ACTION_CODES.ORDER_APPROVED, {
+        entityId: order._id,
+        actor,
+        meta: {
+          previousStatus:    "Open",
+          newStatus:         "Approved",
+          materialsDeducted: deductionFingerprints.length,
+        },
+      });
+      order.fingerprints.push(approveFp);
 
       order.status     = "Approved";
       order.approvedBy = req.user?._id || null;
@@ -241,7 +296,12 @@ router.post(
       await session.commitTransaction();
       session.endSession();
 
-      res.status(200).json({ success: true, message: "Order approved and stock deducted" });
+      res.status(200).json({
+        success:               true,
+        message:               "Order approved and stock deducted",
+        fingerprint:           approveFp,
+        deductionFingerprints,
+      });
     } catch (error) {
       await session.abortTransaction();
       session.endSession();
@@ -267,12 +327,27 @@ router.post(
       return next(new ErrorHandler(`Cannot cancel an order with status "${order.status}"`, 400));
     }
 
+    const previousStatus = order.status;
     order.status      = "Cancelled";
     order.cancelledBy = req.user?._id || null;
     order.cancelledAt = new Date();
+
+    // 🪪 Fingerprint: ORDER_CANCELLED
+    const fp = buildFingerprint(ACTION_CODES.ORDER_CANCELLED, {
+      entityId: order._id,
+      actor:    actorFromRequest(req),
+      meta:     { previousStatus, newStatus: "Cancelled" },
+    });
+    order.fingerprints.push(fp);
     await order.save();
 
-    res.status(200).json({ success: true, message: "Order cancelled", orderId: order._id, status: order.status });
+    res.status(200).json({
+      success: true,
+      message: "Order cancelled",
+      orderId: order._id,
+      status:  order.status,
+      fingerprint: fp,
+    });
   })
 );
 
@@ -296,9 +371,22 @@ router.post(
     order.status    = "InProgress";
     order.startedBy = req.user?._id || null;
     order.startedAt = new Date();
+
+    // 🪪 Fingerprint: ORDER_PRODUCTION_STARTED
+    const fp = buildFingerprint(ACTION_CODES.ORDER_PRODUCTION_STARTED, {
+      entityId: order._id,
+      actor:    actorFromRequest(req),
+      meta:     { previousStatus: "Approved", newStatus: "InProgress" },
+    });
+    order.fingerprints.push(fp);
     await order.save();
 
-    res.status(200).json({ success: true, message: "Order moved to InProgress", status: order.status });
+    res.status(200).json({
+      success: true,
+      message: "Order moved to InProgress",
+      status:  order.status,
+      fingerprint: fp,
+    });
   })
 );
 
@@ -320,8 +408,22 @@ router.post(
     order.status      = "Completed";
     order.completedBy = req.user?._id || null;
     order.completedAt = new Date();
+
+    // 🪪 Fingerprint: ORDER_COMPLETED
+    const fp = buildFingerprint(ACTION_CODES.ORDER_COMPLETED, {
+      entityId: order._id,
+      actor:    actorFromRequest(req),
+      meta:     { previousStatus: "InProgress", newStatus: "Completed" },
+    });
+    order.fingerprints.push(fp);
     await order.save();
-    res.status(200).json({ success: true, message: "Order completed", status: order.status });
+
+    res.status(200).json({
+      success: true,
+      message: "Order completed",
+      status:  order.status,
+      fingerprint: fp,
+    });
   })
 );
 
