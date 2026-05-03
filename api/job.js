@@ -509,35 +509,53 @@ router.post(
     if (typeof quantity !== 'number' || quantity <= 0)
       return next(new ErrorHandler('quantity must be a positive number', 400));
 
-    const job = await JobOrder.findById(jobId);
-    if (!job) return next(new ErrorHandler('Job not found', 404));
-    if (!['weaving', 'finishing', 'checking'].includes(job.status))
-      return next(new ErrorHandler(`Wastage can only be recorded during weaving, finishing, or checking`, 400));
-    if (!job.elastics.find(e => e.elastic.toString() === elasticId.toString()))
-      return next(new ErrorHandler('Elastic is not part of this job', 400));
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const job = await JobOrder.findById(jobId).session(session);
+        if (!job) throw new ErrorHandler('Job not found', 404);
+        if (!['weaving', 'finishing', 'checking'].includes(job.status))
+          throw new ErrorHandler(`Wastage can only be recorded during weaving, finishing, or checking`, 400);
+        if (!job.elastics.find(e => e.elastic.toString() === elasticId.toString()))
+          throw new ErrorHandler('Elastic is not part of this job', 400);
 
-    const wastage = await Wastage.create({ job: job._id, elastic: elasticId, employee: employeeId, quantity, penalty: penalty || 0, reason: reason.trim() });
-    const idx = job.wastageElastic.findIndex(e => e.elastic.toString() === elasticId.toString());
-    if (idx >= 0) job.wastageElastic[idx].quantity += quantity;
-    job.wastages.push(wastage._id);
+        // Wastage.create with a session expects array-form input
+        const [wastage] = await Wastage.create([{
+          job: job._id, elastic: elasticId, employee: employeeId,
+          quantity, penalty: penalty || 0, reason: reason.trim(),
+        }], { session });
 
-    // 🪪 Fingerprint per wastage entry on the job's timeline
-    const fp = buildFingerprint(ACTION_CODES.WASTAGE_RECORDED, {
-      entityId: job._id,
-      actor:    actorFromRequest(req),
-      meta: {
-        wastageId:  wastage._id.toString(),
-        elasticId:  elasticId.toString(),
-        employeeId: employeeId.toString(),
-        quantity,
-        penalty:    penalty || 0,
-        reason:     reason.trim(),
-        jobStage:   job.status,
-      },
-    });
-    job.fingerprints.push(fp);
-    await job.save();
-    res.status(201).json({ success: true, wastage, fingerprint: fp });
+        const idx = job.wastageElastic.findIndex(e => e.elastic.toString() === elasticId.toString());
+        if (idx >= 0) job.wastageElastic[idx].quantity += quantity;
+        job.wastages.push(wastage._id);
+
+        // 🪪 Fingerprint per wastage entry on the job's timeline.
+        //    Job-only — granular events don't fan out to the order.
+        const fp = buildFingerprint(ACTION_CODES.WASTAGE_RECORDED, {
+          entityId: job._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            wastageId:  wastage._id.toString(),
+            elasticId:  elasticId.toString(),
+            employeeId: employeeId.toString(),
+            quantity,
+            penalty:    penalty || 0,
+            reason:     reason.trim(),
+            jobStage:   job.status,
+          },
+        });
+        job.fingerprints.push(fp);
+        await job.save({ session });
+
+        resp = { wastage, fingerprint: fp };
+      });
+      res.status(201).json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
   })
 );
 

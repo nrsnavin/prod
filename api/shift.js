@@ -1,8 +1,9 @@
 "use strict";
 
-const express = require("express");
-const router  = express.Router();
-const moment  = require("moment");
+const express  = require("express");
+const router   = express.Router();
+const moment   = require("moment");
+const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
@@ -408,121 +409,126 @@ router.post(
       return next(new ErrorHandler("production must be a non-negative number", 400));
     }
 
-    const shift = await ShiftDetail.findById(id)
-      .populate("machine")
-      .populate({ path: "machine", populate: { path: "orderRunning" } });
+    // Whole flow runs in one transaction so the shift, job, order,
+    // shift-plan and JobOrder.fingerprints update or roll back as a unit.
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const shift = await ShiftDetail.findById(id)
+          .populate("machine")
+          .populate({ path: "machine", populate: { path: "orderRunning" } })
+          .session(session);
 
-    if (!shift) return next(new ErrorHandler("Shift detail not found", 404));
-
-    // FIX: validate shift is still open
-    if (shift.status === "closed") {
-      return next(new ErrorHandler("Shift is already closed", 400));
-    }
-
-    const machine = await Machine.findById(shift.machine);
-    const sp      = await ShiftPlan.findById(shift.shiftPlan);
-
-    if (!shift.machine?.orderRunning) {
-      return next(new ErrorHandler("Machine has no running job", 400));
-    }
-
-    const job = await JobOrder.findById(shift.machine.orderRunning._id);
-    if (!job) return next(new ErrorHandler("Job not found", 404));
-
-    // ── Update produced elastic quantities ─────────────────
-    const elasticProductionMap = {};
-
-    for (const head of (shift.machine.elastics || [])) {
-      const id = head.elastic.toString();
-      elasticProductionMap[id] = (elasticProductionMap[id] || 0) + prodValue;
-    }
-
-    for (const [elasticId, qty] of Object.entries(elasticProductionMap)) {
-      const idx = job.producedElastic.findIndex(
-        (e) => e.elastic.toString() === elasticId
-      );
-      if (idx >= 0) {
-        job.producedElastic[idx].quantity += qty;
-      } else {
-        job.producedElastic.push({ elastic: elasticId, quantity: qty });
-      }
-    }
-
-    // Clamp — produced cannot exceed planned
-    job.elastics.forEach((e, i) => {
-      const planned  = e.quantity;
-      const produced = job.producedElastic[i]?.quantity ?? 0;
-      if (produced > planned && job.producedElastic[i]) {
-        job.producedElastic[i].quantity = planned;
-      }
-    });
-
-    await job.save();
-
-    // ── Update Order produced & pending ───────────────────
-    const order = await Order.findById(job.order);
-    if (order) {
-      for (const p of job.producedElastic) {
-        const orderItem = order.producedElastic.find(
-          (o) => o.elastic.toString() === p.elastic.toString()
-        );
-        if (orderItem) orderItem.quantity += p.quantity;
-      }
-
-      for (const p of order.pendingElastic) {
-        const produced = order.producedElastic.find(
-          (o) => o.elastic.toString() === p.elastic.toString()
-        );
-        const ordered = order.elasticOrdered.find(
-          (e) => e.elastic.toString() === p.elastic.toString()
-        );
-        if (produced && ordered) {
-          p.quantity = Math.max(0, ordered.quantity - produced.quantity);
+        if (!shift) throw new ErrorHandler("Shift detail not found", 404);
+        if (shift.status === "closed") {
+          throw new ErrorHandler("Shift is already closed", 400);
         }
-      }
 
-      await order.save();
+        const machine = await Machine.findById(shift.machine).session(session);
+        const sp      = await ShiftPlan.findById(shift.shiftPlan).session(session);
+
+        if (!shift.machine?.orderRunning) {
+          throw new ErrorHandler("Machine has no running job", 400);
+        }
+
+        const job = await JobOrder.findById(shift.machine.orderRunning._id).session(session);
+        if (!job) throw new ErrorHandler("Job not found", 404);
+
+        // ── Update produced elastic quantities ─────────────────
+        const elasticProductionMap = {};
+        for (const head of (shift.machine.elastics || [])) {
+          const eid = head.elastic.toString();
+          elasticProductionMap[eid] = (elasticProductionMap[eid] || 0) + prodValue;
+        }
+
+        for (const [elasticId, qty] of Object.entries(elasticProductionMap)) {
+          const idx = job.producedElastic.findIndex(
+            (e) => e.elastic.toString() === elasticId
+          );
+          if (idx >= 0) {
+            job.producedElastic[idx].quantity += qty;
+          } else {
+            job.producedElastic.push({ elastic: elasticId, quantity: qty });
+          }
+        }
+
+        // Clamp — produced cannot exceed planned
+        job.elastics.forEach((e, i) => {
+          const planned  = e.quantity;
+          const produced = job.producedElastic[i]?.quantity ?? 0;
+          if (produced > planned && job.producedElastic[i]) {
+            job.producedElastic[i].quantity = planned;
+          }
+        });
+
+        // 🪪 Fingerprint pushed inline so it commits with the same .save()
+        const fp = buildFingerprint(ACTION_CODES.SHIFT_PRODUCTION_ENTERED, {
+          entityId: job._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            jobStage:         job.status,
+            shiftId:          shift._id.toString(),
+            shiftLabel:       shift.shift || null,
+            productionMeters: prodValue * (machine?.NoOfHead || 1),
+            production:       prodValue,
+            timer:            timer || null,
+            machineId:        machine?._id?.toString() || null,
+            machineName:      machine?.ID || null,
+            feedback:         feedback || undefined,
+          },
+        });
+        job.fingerprints.push(fp);
+        await job.save({ session });
+
+        // ── Update Order produced & pending ───────────────────
+        const order = await Order.findById(job.order).session(session);
+        if (order) {
+          for (const p of job.producedElastic) {
+            const orderItem = order.producedElastic.find(
+              (o) => o.elastic.toString() === p.elastic.toString()
+            );
+            if (orderItem) orderItem.quantity += p.quantity;
+          }
+
+          for (const p of order.pendingElastic) {
+            const produced = order.producedElastic.find(
+              (o) => o.elastic.toString() === p.elastic.toString()
+            );
+            const ordered = order.elasticOrdered.find(
+              (e) => e.elastic.toString() === p.elastic.toString()
+            );
+            if (produced && ordered) {
+              p.quantity = Math.max(0, ordered.quantity - produced.quantity);
+            }
+          }
+
+          await order.save({ session });
+        }
+
+        // ── Close shift detail ─────────────────────────────────
+        shift.productionMeters = prodValue * machine?.NoOfHead || prodValue;
+        shift.production       = prodValue;
+        shift.feedback         = feedback || "";
+        shift.timer            = timer    || 0;
+        shift.status           = "closed";
+        await shift.save({ session });
+
+        // ── Update shift plan total ────────────────────────────
+        if (sp) {
+          sp.totalProduction =
+            (sp.totalProduction || 0) + prodValue * (machine?.NoOfHead || 1);
+          await sp.save({ session });
+        }
+
+        resp = { shift, fingerprint: fp };
+      });
+      res.json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-
-    // ── Close shift detail ─────────────────────────────────
-    shift.productionMeters = prodValue*machine?.NoOfHead || prodValue; // FIX: was machine.NoOfHead (typo) → machine.NoOfHeads
-    shift.production       = prodValue;
-    shift.feedback         = feedback || "";
-    shift.timer            = timer    || 0;
-    shift.status           = "closed";
-
-    // FIX: was called twice — now only once
-    await shift.save();
-
-    // ── Update shift plan total ────────────────────────────
-    if (sp) {
-      // FIX: was machine.NoOfHead (typo) → machine.NoOfHeads
-      sp.totalProduction =
-        (sp.totalProduction || 0) + prodValue * (machine?.NoOfHead || 1);
-      await sp.save();
-    }
-
-    // 🪪 Fingerprint on the parent JobOrder. Action covers any
-    // weaving / finishing / checking shift entry — the job's stage
-    // is recorded in meta so the timeline can label it accurately.
-    const fp = buildFingerprint(ACTION_CODES.SHIFT_PRODUCTION_ENTERED, {
-      entityId: job._id,
-      actor:    actorFromRequest(req),
-      meta: {
-        jobStage:         job.status,
-        shiftId:          shift._id.toString(),
-        shiftLabel:       shift.shift || null,
-        productionMeters: shift.productionMeters,
-        production:       prodValue,
-        timer:            shift.timer || null,
-        machineId:        machine?._id?.toString() || null,
-        machineName:      machine?.ID || null,
-        feedback:         feedback || undefined,
-      },
-    });
-    await JobOrder.findByIdAndUpdate(job._id, { $push: { fingerprints: fp } });
-
-    res.json({ success: true, shift, fingerprint: fp });
   })
 );
 

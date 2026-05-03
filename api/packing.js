@@ -2,11 +2,13 @@
 
 const express  = require("express");
 const router   = express.Router();
+const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const Packing          = require("../models/Packing");
 const JobOrder         = require("../models/JobOrder");
+const Order            = require("../models/Order");
 const Employee         = require("../models/Employee");
 const Elastic          = require("../models/Elastic");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
@@ -183,68 +185,93 @@ router.post(
     if (!checkedBy) return next(new ErrorHandler("checkedBy is required", 400));
     if (!packedBy)  return next(new ErrorHandler("packedBy is required",  400));
 
-    // ── Validate references ────────────────────────────────
-    const [jobDoc, elasticDoc] = await Promise.all([
-      JobOrder.findById(job),
-      Elastic.findById(elastic),
-    ]);
-    if (!jobDoc)     return next(new ErrorHandler("Job not found",     404));
-    if (!elasticDoc) return next(new ErrorHandler("Elastic not found", 404));
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        // ── Validate references ────────────────────────────────
+        const [jobDoc, elasticDoc] = await Promise.all([
+          JobOrder.findById(job).session(session),
+          Elastic.findById(elastic).session(session),
+        ]);
+        if (!jobDoc)     throw new ErrorHandler("Job not found",     404);
+        if (!elasticDoc) throw new ErrorHandler("Elastic not found", 404);
 
-    // ── Create packing ─────────────────────────────────────
-    const packing = await Packing.create({
-      job,
-      elastic,
-      meter:       Number(meter),
-      joints:      Number(joints) || 0,
-      tareWeight:  Number(tareWeight),
-      netWeight:   Number(netWeight),
-      grossWeight: Number(grossWeight),
-      stretch:     stretch  || "",
-      size:        size     || "",
-      checkedBy,
-      packedBy,
-    });
+        // Packing.create with a session expects array-form input
+        const [packing] = await Packing.create([{
+          job,
+          elastic,
+          meter:       Number(meter),
+          joints:      Number(joints) || 0,
+          tareWeight:  Number(tareWeight),
+          netWeight:   Number(netWeight),
+          grossWeight: Number(grossWeight),
+          stretch:     stretch  || "",
+          size:        size     || "",
+          checkedBy,
+          packedBy,
+        }], { session });
 
-    // ── Update job.packedElastic ───────────────────────────
-    // FIX: was `e.id == req.body.elastic` (loose equality on ObjectId virtual)
-    //      Fixed to strict string comparison.
-    const idx = jobDoc.packedElastic.findIndex(
-      (e) => e.elastic.toString() === elastic.toString()
-    );
+        // ── Update job.packedElastic ───────────────────────────
+        const idx = jobDoc.packedElastic.findIndex(
+          (e) => e.elastic.toString() === elastic.toString()
+        );
+        if (idx >= 0) {
+          jobDoc.packedElastic[idx].quantity += Number(meter);
+        }
+        jobDoc.packingDetails.push(packing._id);
 
-    if (idx >= 0) {
-      jobDoc.packedElastic[idx].quantity += Number(meter);
+        const actor = actorFromRequest(req);
+        const fp = buildFingerprint(ACTION_CODES.PACKING_CREATED, {
+          entityId: jobDoc._id,
+          actor,
+          meta: {
+            packingId:   packing._id.toString(),
+            elasticId:   elastic.toString(),
+            elasticName: elasticDoc.name,
+            meter:       Number(meter),
+            joints:      Number(joints) || 0,
+            netWeight:   Number(netWeight),
+            grossWeight: Number(grossWeight),
+            size:        size || undefined,
+            stretch:     stretch || undefined,
+          },
+        });
+        jobDoc.fingerprints.push(fp);
+        await jobDoc.save({ session });
+
+        // 🪪 Mirror packing milestone onto parent Order timeline
+        if (jobDoc.order) {
+          const order = await Order.findById(jobDoc.order).session(session);
+          if (order) {
+            order.fingerprints.push(buildFingerprint(ACTION_CODES.PACKING_CREATED, {
+              entityId: order._id,
+              actor,
+              meta: {
+                jobId:          jobDoc._id.toString(),
+                jobOrderNo:     jobDoc.jobOrderNo,
+                elasticName:    elasticDoc.name,
+                meter:          Number(meter),
+                relatedHash:    fp.hash,
+                relatedShortId: fp.shortId,
+              },
+            }));
+            await order.save({ session });
+          }
+        }
+
+        console.log(
+          `[packing/create] Job #${jobDoc.jobOrderNo} | elastic ${elasticDoc.name} | ${meter}m`
+        );
+
+        resp = { packing, fingerprint: fp };
+      });
+      res.status(201).json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-    // If not found in packedElastic array it means this elastic wasn't tracked;
-    // don't crash — just log.
-
-    jobDoc.packingDetails.push(packing._id);
-
-    // 🪪 Fingerprint per packing record on the parent JobOrder
-    const fp = buildFingerprint(ACTION_CODES.PACKING_CREATED, {
-      entityId: jobDoc._id,
-      actor:    actorFromRequest(req),
-      meta: {
-        packingId:   packing._id.toString(),
-        elasticId:   elastic.toString(),
-        elasticName: elasticDoc.name,
-        meter:       Number(meter),
-        joints:      Number(joints) || 0,
-        netWeight:   Number(netWeight),
-        grossWeight: Number(grossWeight),
-        size:        size || undefined,
-        stretch:     stretch || undefined,
-      },
-    });
-    jobDoc.fingerprints.push(fp);
-    await jobDoc.save();
-
-    console.log(
-      `[packing/create] Job #${jobDoc.jobOrderNo} | elastic ${elasticDoc.name} | ${meter}m`
-    );
-
-    res.status(201).json({ success: true, packing, fingerprint: fp });
   })
 );
 

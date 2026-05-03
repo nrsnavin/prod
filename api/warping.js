@@ -2,9 +2,11 @@
 
 const express          = require("express");
 const router           = express.Router();
+const mongoose         = require("mongoose");
 
 const Warping          = require("../models/Warping");
 const JobOrder         = require("../models/JobOrder");
+const Order            = require("../models/Order");
 const WarpingPlan      = require("../models/WarpingPlan");
 const Elastic          = require("../models/Elastic");
 const ErrorHandler     = require("../utils/ErrorHandler");
@@ -138,62 +140,128 @@ router.get("/detail/:id", catchAsyncErrors(async (req, res, next) => {
 
 
 // ── 4. START WARPING ───────────────────────────────────────────
-router.put("/start", catchAsyncErrors(async (req, res, next) => {
-  const warping = await Warping.findById(req.query.id);
-  if (!warping) return next(new ErrorHandler("Warping not found", 404));
+//
+//  CHANGED: was PUT — switched to POST so the actor body always
+//  reaches the server (some reverse proxies strip PUT bodies).
+//  `id` now rides in the body too.
+router.post("/start", catchAsyncErrors(async (req, res, next) => {
+  const id = req.body.id ?? req.query.id;            // accept both for compat
+  if (!id) return next(new ErrorHandler("id is required", 400));
 
-  if (!warping.warpingPlan)
-    return next(new ErrorHandler("Create a warping plan before starting", 400));
-  if (warping.status !== "open")
-    return next(new ErrorHandler("Warping already started or completed", 400));
+  const session = await mongoose.startSession();
+  try {
+    let resp;
+    await session.withTransaction(async () => {
+      const warping = await Warping.findById(id).session(session);
+      if (!warping) throw new ErrorHandler("Warping not found", 404);
 
-  warping.status = "in_progress";
-  await warping.save();
+      if (!warping.warpingPlan)
+        throw new ErrorHandler("Create a warping plan before starting", 400);
+      if (warping.status !== "open")
+        throw new ErrorHandler("Warping already started or completed", 400);
 
-  // 🪪 Fingerprint on the parent JobOrder
-  const fp = buildFingerprint(ACTION_CODES.WARPING_STARTED, {
-    entityId: warping.job,
-    actor:    actorFromRequest(req),
-    meta:     { warpingId: warping._id.toString() },
-  });
-  await JobOrder.findByIdAndUpdate(warping.job, { $push: { fingerprints: fp } });
+      warping.status = "in_progress";
+      await warping.save({ session });
 
-  res.json({ success: true, warping, fingerprint: fp });
+      // 🪪 Fingerprint on the parent JobOrder (in-tx via .save())
+      const fp = buildFingerprint(ACTION_CODES.WARPING_STARTED, {
+        entityId: warping.job,
+        actor:    actorFromRequest(req),
+        meta:     { warpingId: warping._id.toString() },
+      });
+      const job = await JobOrder.findById(warping.job).session(session);
+      if (job) {
+        job.fingerprints.push(fp);
+        await job.save({ session });
+      }
+
+      resp = { warping, fingerprint: fp };
+    });
+    res.json({ success: true, ...resp });
+  } catch (err) {
+    return next(err);
+  } finally {
+    session.endSession();
+  }
 }));
 
 
 // ── 5. COMPLETE WARPING ────────────────────────────────────────
-router.put("/complete", catchAsyncErrors(async (req, res, next) => {
-  const warping = await Warping.findById(req.query.id);
-  if (!warping) return next(new ErrorHandler("Warping not found", 404));
+//
+//  CHANGED: PUT → POST (same proxy reasoning as /start).
+//  ROLLUP : on completion, mirror a WARPING_COMPLETED fingerprint
+//           onto the parent Order so the order timeline shows the
+//           milestone too. Granular events stay on the job only.
+router.post("/complete", catchAsyncErrors(async (req, res, next) => {
+  const id = req.body.id ?? req.query.id;
+  if (!id) return next(new ErrorHandler("id is required", 400));
 
-  if (warping.status !== "in_progress")
-    return next(new ErrorHandler("Warping is not in progress", 400));
+  const session = await mongoose.startSession();
+  try {
+    let resp;
+    await session.withTransaction(async () => {
+      const warping = await Warping.findById(id).session(session);
+      if (!warping) throw new ErrorHandler("Warping not found", 404);
+      if (warping.status !== "in_progress")
+        throw new ErrorHandler("Warping is not in progress", 400);
 
-  warping.status        = "completed";
-  warping.completedDate = new Date();
-  await warping.save();
+      warping.status        = "completed";
+      warping.completedDate = new Date();
+      await warping.save({ session });
 
-  const { advanced, jobStatus } = await checkAndAdvanceToWeaving(warping.job);
+      // checkAndAdvanceToWeaving runs its own writes — keep it inside
+      // the session window so any side-effects participate in the tx.
+      const { advanced, jobStatus } = await checkAndAdvanceToWeaving(warping.job);
 
-  // 🪪 Fingerprint on the parent JobOrder
-  const fp = buildFingerprint(ACTION_CODES.WARPING_COMPLETED, {
-    entityId: warping.job,
-    actor:    actorFromRequest(req),
-    meta: {
-      warpingId:     warping._id.toString(),
-      completedDate: warping.completedDate,
-      jobAdvanced:   advanced,
-      jobStatus,
-    },
-  });
-  await JobOrder.findByIdAndUpdate(warping.job, { $push: { fingerprints: fp } });
+      const actor = actorFromRequest(req);
+      const fp = buildFingerprint(ACTION_CODES.WARPING_COMPLETED, {
+        entityId: warping.job,
+        actor,
+        meta: {
+          warpingId:     warping._id.toString(),
+          completedDate: warping.completedDate,
+          jobAdvanced:   advanced,
+          jobStatus,
+        },
+      });
 
-  res.json({
-    success: true, warping,
-    job:     { advanced, status: jobStatus },
-    fingerprint: fp,
-  });
+      const job = await JobOrder.findById(warping.job).session(session);
+      if (job) {
+        job.fingerprints.push(fp);
+        await job.save({ session });
+
+        // 🪪 Mirror milestone onto parent Order timeline
+        if (job.order) {
+          const order = await Order.findById(job.order).session(session);
+          if (order) {
+            order.fingerprints.push(buildFingerprint(ACTION_CODES.WARPING_COMPLETED, {
+              entityId: order._id,
+              actor,
+              meta: {
+                jobId:          job._id.toString(),
+                jobOrderNo:     job.jobOrderNo,
+                warpingId:      warping._id.toString(),
+                relatedHash:    fp.hash,
+                relatedShortId: fp.shortId,
+              },
+            }));
+            await order.save({ session });
+          }
+        }
+      }
+
+      resp = {
+        warping,
+        job:         { advanced, status: jobStatus },
+        fingerprint: fp,
+      };
+    });
+    res.json({ success: true, ...resp });
+  } catch (err) {
+    return next(err);
+  } finally {
+    session.endSession();
+  }
 }));
 
 

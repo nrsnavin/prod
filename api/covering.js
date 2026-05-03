@@ -2,8 +2,10 @@
 
 const express           = require("express");
 const router            = express.Router();
+const mongoose          = require("mongoose");
 const Covering          = require("../models/Covering");
 const JobOrder          = require("../models/JobOrder");
+const Order             = require("../models/Order");
 const Elastic           = require("../models/Elastic");   // keeps model in registry for nested populate
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
@@ -119,29 +121,42 @@ router.post(
     const { id } = req.body;
     if (!id) return next(new ErrorHandler("Covering ID required", 400));
 
-    const covering = await Covering.findById(id);
-    if (!covering) return next(new ErrorHandler("Covering not found", 404));
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const covering = await Covering.findById(id).session(session);
+        if (!covering) throw new ErrorHandler("Covering not found", 404);
 
-    if (covering.status !== "open") {
-      return next(
-        new ErrorHandler(
-          `Only OPEN covering can be started (current: ${covering.status})`, 400
-        )
-      );
+        if (covering.status !== "open") {
+          throw new ErrorHandler(
+            `Only OPEN covering can be started (current: ${covering.status})`, 400
+          );
+        }
+
+        covering.status = "in_progress";
+        await covering.save({ session });
+
+        // 🪪 Fingerprint on the parent JobOrder (in-tx via .save())
+        const fp = buildFingerprint(ACTION_CODES.COVERING_STARTED, {
+          entityId: covering.job,
+          actor:    actorFromRequest(req),
+          meta:     { coveringId: covering._id.toString() },
+        });
+        const job = await JobOrder.findById(covering.job).session(session);
+        if (job) {
+          job.fingerprints.push(fp);
+          await job.save({ session });
+        }
+
+        resp = { covering, fingerprint: fp };
+      });
+      res.status(200).json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-
-    covering.status = "in_progress";
-    await covering.save();
-
-    // 🪪 Fingerprint on the parent JobOrder
-    const fp = buildFingerprint(ACTION_CODES.COVERING_STARTED, {
-      entityId: covering.job,
-      actor:    actorFromRequest(req),
-      meta:     { coveringId: covering._id.toString() },
-    });
-    await JobOrder.findByIdAndUpdate(covering.job, { $push: { fingerprints: fp } });
-
-    res.status(200).json({ success: true, covering, fingerprint: fp });
   })
 );
 
@@ -163,44 +178,76 @@ router.post(
     const { id, remarks } = req.body;
     if (!id) return next(new ErrorHandler("Covering ID required", 400));
 
-    const covering = await Covering.findById(id);
-    if (!covering) return next(new ErrorHandler("Covering not found", 404));
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const covering = await Covering.findById(id).session(session);
+        if (!covering) throw new ErrorHandler("Covering not found", 404);
 
-    if (covering.status !== "in_progress") {
-      return next(
-        new ErrorHandler(
-          `Only IN-PROGRESS covering can be completed (current: ${covering.status})`, 400
-        )
-      );
+        if (covering.status !== "in_progress") {
+          throw new ErrorHandler(
+            `Only IN-PROGRESS covering can be completed (current: ${covering.status})`, 400
+          );
+        }
+
+        covering.status        = "completed";
+        covering.completedDate = new Date();
+        if (remarks?.trim()) covering.remarks = remarks.trim();
+        await covering.save({ session });
+
+        // ── Auto-advance job to weaving if warping is also complete ────
+        const { advanced, jobStatus } = await checkAndAdvanceToWeaving(covering.job);
+
+        const actor = actorFromRequest(req);
+        const fp = buildFingerprint(ACTION_CODES.COVERING_COMPLETED, {
+          entityId: covering.job,
+          actor,
+          meta: {
+            coveringId:    covering._id.toString(),
+            completedDate: covering.completedDate,
+            jobAdvanced:   advanced,
+            jobStatus,
+          },
+        });
+
+        const job = await JobOrder.findById(covering.job).session(session);
+        if (job) {
+          job.fingerprints.push(fp);
+          await job.save({ session });
+
+          // 🪪 Mirror milestone onto parent Order timeline
+          if (job.order) {
+            const order = await Order.findById(job.order).session(session);
+            if (order) {
+              order.fingerprints.push(buildFingerprint(ACTION_CODES.COVERING_COMPLETED, {
+                entityId: order._id,
+                actor,
+                meta: {
+                  jobId:          job._id.toString(),
+                  jobOrderNo:     job.jobOrderNo,
+                  coveringId:     covering._id.toString(),
+                  relatedHash:    fp.hash,
+                  relatedShortId: fp.shortId,
+                },
+              }));
+              await order.save({ session });
+            }
+          }
+        }
+
+        resp = {
+          covering,
+          job: { advanced, status: jobStatus },
+          fingerprint: fp,
+        };
+      });
+      res.status(200).json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-
-    covering.status        = "completed";
-    covering.completedDate = new Date();
-    if (remarks?.trim()) covering.remarks = remarks.trim();
-    await covering.save();
-
-    // ── Auto-advance job to weaving if warping is also complete ────
-    const { advanced, jobStatus } = await checkAndAdvanceToWeaving(covering.job);
-
-    // 🪪 Fingerprint on the parent JobOrder
-    const fp = buildFingerprint(ACTION_CODES.COVERING_COMPLETED, {
-      entityId: covering.job,
-      actor:    actorFromRequest(req),
-      meta: {
-        coveringId:    covering._id.toString(),
-        completedDate: covering.completedDate,
-        jobAdvanced:   advanced,
-        jobStatus,
-      },
-    });
-    await JobOrder.findByIdAndUpdate(covering.job, { $push: { fingerprints: fp } });
-
-    res.status(200).json({
-      success:   true,
-      covering,
-      job: { advanced, status: jobStatus },
-      fingerprint: fp,
-    });
   })
 );
 
@@ -256,61 +303,72 @@ router.post(
       return next(new ErrorHandler("weight must be a positive number (kg)", 400));
     }
 
-    const covering = await Covering.findById(id);
-    if (!covering) return next(new ErrorHandler("Covering not found", 404));
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const covering = await Covering.findById(id).session(session);
+        if (!covering) throw new ErrorHandler("Covering not found", 404);
 
-    if (covering.status === "completed" || covering.status === "cancelled") {
-      return next(
-        new ErrorHandler(
-          `Cannot add beam entry to a ${covering.status} covering`, 400
-        )
-      );
+        if (covering.status === "completed" || covering.status === "cancelled") {
+          throw new ErrorHandler(
+            `Cannot add beam entry to a ${covering.status} covering`, 400
+          );
+        }
+
+        covering.beamEntries.push({
+          beamNo:    Number(beamNo),
+          weight:    w,
+          note:      note?.trim() || "",
+          enteredAt: new Date(),
+        });
+
+        covering.producedWeight = covering.beamEntries.reduce(
+          (sum, e) => sum + e.weight,
+          0
+        );
+
+        await covering.save({ session });
+
+        // 🪪 Beam entries are job-only (granular events shouldn't
+        //    flood the parent Order timeline; only milestones do).
+        const fp = buildFingerprint(ACTION_CODES.COVERING_BEAM_ENTRY, {
+          entityId: covering.job,
+          actor:    actorFromRequest(req),
+          meta: {
+            coveringId:     covering._id.toString(),
+            beamNo:         Number(beamNo),
+            weight:         w,
+            unit:           'kg',
+            producedWeight: covering.producedWeight,
+            totalBeams:     covering.beamEntries.length,
+            note:           note?.trim() || undefined,
+          },
+        });
+        const job = await JobOrder.findById(covering.job).session(session);
+        if (job) {
+          job.fingerprints.push(fp);
+          await job.save({ session });
+        }
+
+        console.log(
+          `[covering/beam-entry] Covering ${id}: beam ${beamNo} = ${w} kg ` +
+          `| total = ${covering.producedWeight.toFixed(3)} kg`
+        );
+
+        resp = {
+          beamEntry:      covering.beamEntries[covering.beamEntries.length - 1],
+          producedWeight: covering.producedWeight,
+          totalBeams:     covering.beamEntries.length,
+          fingerprint:    fp,
+        };
+      });
+      res.status(201).json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-
-    // Push entry
-    covering.beamEntries.push({
-      beamNo:    Number(beamNo),
-      weight:    w,
-      note:      note?.trim() || "",
-      enteredAt: new Date(),
-    });
-
-    // Recalculate total produced weight
-    covering.producedWeight = covering.beamEntries.reduce(
-      (sum, e) => sum + e.weight,
-      0
-    );
-
-    await covering.save();
-
-    console.log(
-      `[covering/beam-entry] Covering ${id}: beam ${beamNo} = ${w} kg ` +
-      `| total = ${covering.producedWeight.toFixed(3)} kg`
-    );
-
-    // 🪪 Fingerprint per beam entry (parent JobOrder timeline)
-    const fp = buildFingerprint(ACTION_CODES.COVERING_BEAM_ENTRY, {
-      entityId: covering.job,
-      actor:    actorFromRequest(req),
-      meta: {
-        coveringId:        covering._id.toString(),
-        beamNo:            Number(beamNo),
-        weight:            w,
-        unit:              'kg',
-        producedWeight:    covering.producedWeight,
-        totalBeams:        covering.beamEntries.length,
-        note:              note?.trim() || undefined,
-      },
-    });
-    await JobOrder.findByIdAndUpdate(covering.job, { $push: { fingerprints: fp } });
-
-    res.status(201).json({
-      success:        true,
-      beamEntry:      covering.beamEntries[covering.beamEntries.length - 1],
-      producedWeight: covering.producedWeight,
-      totalBeams:     covering.beamEntries.length,
-      fingerprint:    fp,
-    });
   })
 );
 
