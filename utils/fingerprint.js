@@ -46,6 +46,13 @@ const ACTION_CODES = Object.freeze({
   SHIFT_PRODUCTION_ENTERED: 'SHIFT_PRODUCTION_ENTERED',
   PACKING_CREATED:          'PACKING_CREATED',
   WASTAGE_RECORDED:         'WASTAGE_RECORDED',
+  // Delivery-Challan lifecycle
+  DC_CREATED:               'DC_CREATED',
+  DC_STATUS_UPDATED:        'DC_STATUS_UPDATED',
+  DC_DISPATCHED:            'DC_DISPATCHED',
+  DC_DELIVERED:             'DC_DELIVERED',
+  DC_CANCELLED:             'DC_CANCELLED',
+  DC_DELETED:               'DC_DELETED',
 });
 
 const ACTION_LABELS = Object.freeze({
@@ -67,6 +74,12 @@ const ACTION_LABELS = Object.freeze({
   SHIFT_PRODUCTION_ENTERED: 'Shift Production Entered',
   PACKING_CREATED:          'Packing Recorded',
   WASTAGE_RECORDED:         'Wastage Recorded',
+  DC_CREATED:               'Delivery Challan Created',
+  DC_STATUS_UPDATED:        'DC Status Updated',
+  DC_DISPATCHED:            'DC Dispatched',
+  DC_DELIVERED:             'DC Delivered',
+  DC_CANCELLED:             'DC Cancelled',
+  DC_DELETED:               'DC Deleted',
 });
 
 /**

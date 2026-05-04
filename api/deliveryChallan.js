@@ -1,11 +1,13 @@
-const express = require("express");
-const router  = express.Router();
+const express  = require("express");
+const router   = express.Router();
+const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 
 const DeliveryChallan = require("../models/Deliverychallan ");
 const Order           = require("../models/Order");
+const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS
@@ -114,30 +116,58 @@ router.post(
     const sequence      = await nextSeq(type, financialYear);
     const dcNumber      = buildDcNumber(type, financialYear, sequence);
 
-    const dc = await DeliveryChallan.create({
-      dcNumber,
-      type,
-      financialYear,
-      sequence,
-      order:           orderId   || undefined,
-      orderNo:         orderNo   || undefined,
-      customerName:    customerName.trim(),
-      customerPhone:   customerPhone   || "",
-      customerGstin:   customerGstin   || "",
-      customerAddress: customerAddress || "",
-      dispatchDate:    dispatchDate ? new Date(dispatchDate) : new Date(),
-      vehicleNo:       vehicleNo   || "",
-      driverName:      driverName  || "",
-      transporter:     transporter || "",
-      lrNumber:        lrNumber    || "",
-      items:           processedItems,
-      totalQuantity,
-      totalAmount,
-      remarks:         remarks || "",
-      status:          "draft",
-    });
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const [dc] = await DeliveryChallan.create([{
+          dcNumber,
+          type,
+          financialYear,
+          sequence,
+          order:           orderId   || undefined,
+          orderNo:         orderNo   || undefined,
+          customerName:    customerName.trim(),
+          customerPhone:   customerPhone   || "",
+          customerGstin:   customerGstin   || "",
+          customerAddress: customerAddress || "",
+          dispatchDate:    dispatchDate ? new Date(dispatchDate) : new Date(),
+          vehicleNo:       vehicleNo   || "",
+          driverName:      driverName  || "",
+          transporter:     transporter || "",
+          lrNumber:        lrNumber    || "",
+          items:           processedItems,
+          totalQuantity,
+          totalAmount,
+          remarks:         remarks || "",
+          status:          "draft",
+        }], { session });
 
-    res.status(201).json({ success: true, dc });
+        // 🪪 Fingerprint: DC_CREATED
+        const fp = buildFingerprint(ACTION_CODES.DC_CREATED, {
+          entityId: dc._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            dcNumber:      dc.dcNumber,
+            type:          dc.type,
+            customerName:  dc.customerName,
+            orderNo:       dc.orderNo  || null,
+            totalQuantity: dc.totalQuantity,
+            totalAmount:   dc.totalAmount,
+            itemCount:     processedItems.length,
+          },
+        });
+        dc.fingerprints.push(fp);
+        await dc.save({ session });
+
+        resp = { dc, fingerprint: fp };
+      });
+      res.status(201).json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
   })
 );
 
@@ -184,11 +214,17 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     const dc = await DeliveryChallan.findById(req.query.id)
       .populate("order",         "orderNo status")
-      .populate("items.elastic", "name weaveType");
+      .populate("items.elastic", "name weaveType")
+      .lean();
 
     if (!dc) return next(new ErrorHandler("Delivery Challan not found", 404));
 
-    res.json({ success: true, dc });
+    // 🪪 Newest-first feed for the timeline UI
+    const fingerprints = (dc.fingerprints || [])
+      .slice()
+      .sort((a, b) => new Date(b.at) - new Date(a.at));
+
+    res.json({ success: true, dc: { ...dc, fingerprints } });
   })
 );
 
@@ -204,11 +240,52 @@ router.patch(
     if (!valid.includes(status)) {
       return next(new ErrorHandler("Invalid status", 400));
     }
-    const dc = await DeliveryChallan.findByIdAndUpdate(
-      id, { status }, { new: true }
-    );
-    if (!dc) return next(new ErrorHandler("Delivery Challan not found", 404));
-    res.json({ success: true, dc });
+
+    // Specialised action code per terminal status — keeps the
+    // timeline scannable and lets the UI colour-code transitions.
+    const actionCode = {
+      dispatched: ACTION_CODES.DC_DISPATCHED,
+      delivered:  ACTION_CODES.DC_DELIVERED,
+      cancelled:  ACTION_CODES.DC_CANCELLED,
+    }[status] || ACTION_CODES.DC_STATUS_UPDATED;
+
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const dc = await DeliveryChallan.findById(id).session(session);
+        if (!dc) throw new ErrorHandler("Delivery Challan not found", 404);
+
+        const previousStatus = dc.status;
+        if (previousStatus === status) {
+          // No-op — still record an entry so the operator's intent
+          // is captured (e.g. retry click), but skip the write
+          throw new ErrorHandler(`DC is already ${status}`, 400);
+        }
+
+        dc.status = status;
+
+        // 🪪 Status-change fingerprint
+        const fp = buildFingerprint(actionCode, {
+          entityId: dc._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            dcNumber:       dc.dcNumber,
+            previousStatus,
+            newStatus:      status,
+          },
+        });
+        dc.fingerprints.push(fp);
+        await dc.save({ session });
+
+        resp = { dc, fingerprint: fp };
+      });
+      res.json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
   })
 );
 
@@ -224,8 +301,24 @@ router.delete(
     if (dc.status !== "draft") {
       return next(new ErrorHandler("Only draft challans can be deleted", 400));
     }
+
+    // 🪪 Record DC_DELETED before the doc is gone so the action
+    //    is preserved in server logs even though the embedded
+    //    timeline disappears with the document.
+    const fp = buildFingerprint(ACTION_CODES.DC_DELETED, {
+      entityId: dc._id,
+      actor:    actorFromRequest(req),
+      meta: {
+        dcNumber:     dc.dcNumber,
+        type:         dc.type,
+        customerName: dc.customerName,
+        status:       dc.status,
+      },
+    });
+    console.log(`[dc/delete] ${fp.shortId} ${fp.label} actor=${fp.actor?.name} dc=${dc.dcNumber}`);
+
     await dc.deleteOne();
-    res.json({ success: true, message: "Deleted" });
+    res.json({ success: true, message: "Deleted", fingerprint: fp });
   })
 );
 
