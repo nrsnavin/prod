@@ -13,6 +13,60 @@ const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/f
 
 
 // ════════════════════════════════════════════════════════════════
+//  SHARED — BOM EXPANSION
+//  Walks an elasticOrdered list and rolls up the raw-material
+//  weight requirement using each Elastic's BOM. Used by both
+//  /create-order (initial snapshot) and /update-order (recompute
+//  after items change).
+//
+//  Returns { rawMaterialRequired: [{ rawMaterial, name, requiredWeight, inStock }] }
+// ════════════════════════════════════════════════════════════════
+async function computeRawMaterialRequired(elasticOrdered) {
+  const elasticIds = elasticOrdered.map((e) => e.elastic);
+  const elastics = await Elastic.find({ _id: { $in: elasticIds } })
+    .populate("warpSpandex.id")
+    .populate("spandexCovering.id")
+    .populate("weftYarn.id")
+    .populate("warpYarn.id")
+    .lean();
+
+  const rawMap = new Map();
+  const addMaterial = (material, weightKg) => {
+    const key = material._id.toString();
+    if (!rawMap.has(key)) {
+      rawMap.set(key, {
+        rawMaterial:    material._id,
+        name:           material.name,
+        requiredWeight: 0,
+        inStock:        material.stock || 0,
+      });
+    }
+    rawMap.get(key).requiredWeight += weightKg;
+  };
+
+  elasticOrdered.forEach((orderItem) => {
+    const elastic = elastics.find(
+      (e) => e._id.toString() === orderItem.elastic.toString()
+    );
+    if (!elastic) return;
+    const qty = orderItem.quantity;
+
+    if (elastic.warpSpandex?.id)
+      addMaterial(elastic.warpSpandex.id, (elastic.warpSpandex.weight * qty) / 1000);
+    if (elastic.spandexCovering?.id)
+      addMaterial(elastic.spandexCovering.id, (elastic.spandexCovering.weight * qty) / 1000);
+    if (elastic.weftYarn?.id)
+      addMaterial(elastic.weftYarn.id, (elastic.weftYarn.weight * qty) / 1000);
+    (elastic.warpYarn || []).forEach((wy) => {
+      if (wy.id) addMaterial(wy.id, (wy.weight * qty) / 1000);
+    });
+  });
+
+  return Array.from(rawMap.values());
+}
+
+
+// ════════════════════════════════════════════════════════════════
 //  LIST ORDERS  (by status)
 // ════════════════════════════════════════════════════════════════
 router.get(
@@ -22,6 +76,9 @@ router.get(
     if (!status) {
       return next(new ErrorHandler("Status is required", 400));
     }
+    // Status is an exact match, so soft-deleted orders are naturally
+    // excluded from any non-"Deleted" status request. Pass status=Deleted
+    // explicitly to surface them.
     const orders = await Order.find({ status })
       .populate("customer",  "name")
       .populate("createdBy", "name role")
@@ -42,47 +99,7 @@ router.post(
       const { date, po, customer, supplyDate, description, elasticOrdered } =
         req.body;
 
-      const elasticIds = elasticOrdered.map((e) => e.elastic);
-      const elastics = await Elastic.find({ _id: { $in: elasticIds } })
-        .populate("warpSpandex.id")
-        .populate("spandexCovering.id")
-        .populate("weftYarn.id")
-        .populate("warpYarn.id")
-        .lean();
-
-      const rawMap = new Map();
-      const addMaterial = (material, weightKg) => {
-        const key = material._id.toString();
-        if (!rawMap.has(key)) {
-          rawMap.set(key, {
-            rawMaterial: material._id,
-            name: material.name,
-            requiredWeight: 0,
-            inStock: material.stock || 0,
-          });
-        }
-        rawMap.get(key).requiredWeight += weightKg;
-      };
-
-      elasticOrdered.forEach((orderItem) => {
-        const elastic = elastics.find(
-          (e) => e._id.toString() === orderItem.elastic
-        );
-        if (!elastic) return;
-        const qty = orderItem.quantity;
-
-        if (elastic.warpSpandex?.id)
-          addMaterial(elastic.warpSpandex.id, (elastic.warpSpandex.weight * qty) / 1000);
-        if (elastic.spandexCovering?.id)
-          addMaterial(elastic.spandexCovering.id, (elastic.spandexCovering.weight * qty) / 1000);
-        if (elastic.weftYarn?.id)
-          addMaterial(elastic.weftYarn.id, (elastic.weftYarn.weight * qty) / 1000);
-        elastic.warpYarn.forEach((wy) => {
-          if (wy.id) addMaterial(wy.id, (wy.weight * qty) / 1000);
-        });
-      });
-
-      const rawMaterialRequired = Array.from(rawMap.values());
+      const rawMaterialRequired = await computeRawMaterialRequired(elasticOrdered);
 
       const producedElastic = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
       const packedElastic   = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
@@ -424,6 +441,169 @@ router.post(
       status:  order.status,
       fingerprint: fp,
     });
+  })
+);
+
+
+// ════════════════════════════════════════════════════════════════
+//  UPDATE ORDER  (Open state only)
+//
+//  Edits header fields and/or items on an Open order. Item changes
+//  trigger a full recompute of pendingElastic + rawMaterialRequired
+//  (production has not started, so producedElastic / packedElastic
+//  stay at zero). Wrapped in a transaction matching /approve.
+// ════════════════════════════════════════════════════════════════
+router.post(
+  "/update-order",
+  catchAsyncErrors(async (req, res, next) => {
+    const {
+      orderId,
+      po, supplyDate, description, customer, elasticOrdered,
+    } = req.body;
+    if (!orderId) return next(new ErrorHandler("orderId is required", 400));
+
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const order = await Order.findById(orderId).session(session);
+        if (!order) throw new ErrorHandler("Order not found", 404);
+        if (order.status !== "Open") {
+          throw new ErrorHandler(
+            `Only Open orders can be edited (current: "${order.status}"). ` +
+            `Cancel and recreate to change an approved order.`,
+            400
+          );
+        }
+
+        // ── Diff header fields, build changedFields list ─────────
+        const changed = {};
+        const previousValues = {};
+        if (po !== undefined && po !== order.po) {
+          previousValues.po = order.po;          order.po          = po;          changed.po          = po;
+        }
+        if (supplyDate !== undefined && new Date(supplyDate).getTime() !== new Date(order.supplyDate).getTime()) {
+          previousValues.supplyDate = order.supplyDate; order.supplyDate = new Date(supplyDate); changed.supplyDate = supplyDate;
+        }
+        if (description !== undefined && description !== order.description) {
+          previousValues.description = order.description; order.description = description; changed.description = description;
+        }
+        if (customer !== undefined && String(customer) !== String(order.customer)) {
+          previousValues.customer = order.customer?.toString?.(); order.customer = customer; changed.customer = customer;
+        }
+
+        // ── Item / quantity recompute ────────────────────────────
+        if (Array.isArray(elasticOrdered) && elasticOrdered.length > 0) {
+          previousValues.elasticOrdered = order.elasticOrdered.map((e) => ({
+            elastic:  e.elastic.toString(),
+            quantity: e.quantity,
+          }));
+
+          const rawMaterialRequired = await computeRawMaterialRequired(elasticOrdered);
+
+          order.elasticOrdered      = elasticOrdered;
+          order.pendingElastic      = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: e.quantity }));
+          order.producedElastic     = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+          order.packedElastic       = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+          order.rawMaterialRequired = rawMaterialRequired;
+          order.updatedItemsAt      = new Date();
+          changed.elasticOrdered    = `${elasticOrdered.length} item(s)`;
+        }
+
+        if (Object.keys(changed).length === 0) {
+          throw new ErrorHandler("No editable fields supplied", 400);
+        }
+
+        // 🪪 Fingerprint: ORDER_UPDATED
+        const fp = buildFingerprint(ACTION_CODES.ORDER_UPDATED, {
+          entityId: order._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            changedFields: Object.keys(changed),
+            previousValues,
+            newValues:     changed,
+          },
+        });
+        order.fingerprints.push(fp);
+        await order.save({ session });
+
+        resp = { order, fingerprint: fp };
+      });
+      res.status(200).json({
+        success: true,
+        message: "Order updated",
+        order:   resp.order,
+        fingerprint: resp.fingerprint,
+      });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
+  })
+);
+
+
+// ════════════════════════════════════════════════════════════════
+//  DELETE ORDER  (soft-delete; Open state only, no jobs)
+//
+//  Sets status="Deleted" and stamps deletedBy/deletedAt. The
+//  document and its fingerprint timeline are preserved; list views
+//  exclude Deleted by default (see /list, /get-open-orders).
+// ════════════════════════════════════════════════════════════════
+router.post(
+  "/delete-order",
+  catchAsyncErrors(async (req, res, next) => {
+    const { orderId, reason } = req.body;
+    if (!orderId) return next(new ErrorHandler("orderId is required", 400));
+
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const order = await Order.findById(orderId).session(session);
+        if (!order) throw new ErrorHandler("Order not found", 404);
+        if (order.status !== "Open") {
+          throw new ErrorHandler(
+            `Only Open orders can be deleted (current: "${order.status}"). ` +
+            `Use cancel for approved/in-progress orders.`,
+            400
+          );
+        }
+        if ((order.jobs || []).length > 0) {
+          throw new ErrorHandler(
+            `Cannot delete an order with jobs (${order.jobs.length}). Cancel the jobs first.`,
+            400
+          );
+        }
+
+        const previousStatus = order.status;
+        order.status    = "Deleted";
+        order.deletedBy = req.user?._id || null;
+        order.deletedAt = new Date();
+
+        // 🪪 Fingerprint: ORDER_DELETED
+        const fp = buildFingerprint(ACTION_CODES.ORDER_DELETED, {
+          entityId: order._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            previousStatus,
+            newStatus: "Deleted",
+            reason:    reason || null,
+            orderNo:   order.orderNo,
+          },
+        });
+        order.fingerprints.push(fp);
+        await order.save({ session });
+
+        resp = { fingerprint: fp, orderId: order._id, status: order.status };
+      });
+      res.status(200).json({ success: true, message: "Order deleted", ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
   })
 );
 

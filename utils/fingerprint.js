@@ -28,6 +28,8 @@ const crypto = require('crypto');
 
 const ACTION_CODES = Object.freeze({
   ORDER_CREATED:            'ORDER_CREATED',
+  ORDER_UPDATED:            'ORDER_UPDATED',
+  ORDER_DELETED:            'ORDER_DELETED',
   ORDER_APPROVED:           'ORDER_APPROVED',
   RAW_MATERIAL_DEDUCTED:    'RAW_MATERIAL_DEDUCTED',
   ORDER_PRODUCTION_STARTED: 'ORDER_PRODUCTION_STARTED',
@@ -57,6 +59,8 @@ const ACTION_CODES = Object.freeze({
 
 const ACTION_LABELS = Object.freeze({
   ORDER_CREATED:            'Order Created',
+  ORDER_UPDATED:            'Order Updated',
+  ORDER_DELETED:            'Order Deleted',
   ORDER_APPROVED:           'Order Approved',
   RAW_MATERIAL_DEDUCTED:    'Raw Material Deducted',
   ORDER_PRODUCTION_STARTED: 'Production Started',

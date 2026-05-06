@@ -68,7 +68,7 @@ const OrderSchema = new mongoose.Schema(
 
     status: {
       type:    String,
-      enum:    ["Open", "Approved", "InProgress", "Completed", "Cancelled"],
+      enum:    ["Open", "Approved", "InProgress", "Completed", "Cancelled", "Deleted"],
       default: "Open",
     },
 
@@ -81,6 +81,9 @@ const OrderSchema = new mongoose.Schema(
     startedAt:   { type: Date },
     completedBy: { type: mongoose.Types.ObjectId, ref: "User" },
     completedAt: { type: Date },
+    deletedBy:   { type: mongoose.Types.ObjectId, ref: "User" },
+    deletedAt:   { type: Date },
+    updatedItemsAt: { type: Date },
 
     // 🪪 Full audit timeline — see FingerprintSchema above.
     fingerprints: {
