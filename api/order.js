@@ -157,6 +157,7 @@ router.get(
       .populate("cancelledBy","name role")
       .populate("startedBy",  "name role")
       .populate("completedBy","name role")
+      .populate("deletedBy",  "name role")
       .lean();
 
     if (!order) return next(new ErrorHandler("Order not found", 404));
@@ -227,6 +228,8 @@ router.get(
         startedAt:   order.startedAt  || null,
         completedBy: order.completedBy|| null,
         completedAt: order.completedAt|| null,
+        deletedBy:   order.deletedBy  || null,
+        deletedAt:   order.deletedAt  || null,
         // 🪪 Full audit timeline (newest-first)
         fingerprints,
       },
