@@ -26,6 +26,14 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    // Optional link to the Employee document. Set on User creation
+    // for any user that's also a workforce member, so the mobile
+    // employee app can look up their wastage / shift / payroll
+    // records via this id without an extra query.
+    employee: {
+      type: mongoose.Types.ObjectId,
+      ref: "Employee",
+    },
   },
   { timestamps: true }
 );
