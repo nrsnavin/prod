@@ -87,6 +87,37 @@ router.get(
 );
 
 
+// ─────────────────────────────────────────────────────────────
+//  GET /user/me
+//
+//  Bootstrap endpoint for the employee mobile app. Returns the
+//  current user (decoded from the JWT cookie) along with the
+//  linked Employee document. The employee app uses the returned
+//  `employee._id` to scope shift / wastage / payroll requests.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/me",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    const user = await User.findById(req.user.id)
+      .populate("employee", "name department phoneNumber role hourlyRate")
+      .lean();
+    if (!user) return next(new ErrorHandler("User not found", 404));
+
+    res.status(200).json({
+      success: true,
+      user: {
+        id:       user._id,
+        name:     user.name,
+        email:    user.email,
+        role:     user.role,
+        employee: user.employee || null,
+      },
+    });
+  })
+);
+
+
 router.get(
   "/all-users",
   isAuthenticated,
