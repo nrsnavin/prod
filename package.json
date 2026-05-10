@@ -32,7 +32,8 @@
     "mongoose": "^8.5.1",
     "mongoose-id-autoincrement": "^1.0.4",
     "mongoose-sequence": "^6.0.1",
-    "nodemon": "^3.1.14"
+    "nodemon": "^3.1.14",
+    "pdfkit": "^0.15.0"
   },
   "devDependencies": {
     "jest": "^30.3.0",

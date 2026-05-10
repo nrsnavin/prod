@@ -25,6 +25,7 @@ const BonusConfig      = require("../models/BonusConfig");
 const BonusRecord      = require("../models/BonusRecord");
 const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
+const PDFDocument      = require("pdfkit");
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS
@@ -270,6 +271,141 @@ router.get(
         pendingPayout: totalPayout - paidPayout,
       },
     });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  4b. ONE EMPLOYEE'S BONUS  —  GET /bonus/employee/:id?year=
+//
+//  Used by the Worker Portal so a worker only sees THEIR record,
+//  not coworkers' salaries. Returns the BonusRecord + the
+//  matching BonusConfig metadata (bonusLabel, bonusDate, status).
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/employee/:id",
+  catchAsyncErrors(async (req, res, next) => {
+    const year = parseInt(req.query.year) || currentYear();
+    const { id } = req.params;
+
+    const [record, config] = await Promise.all([
+      BonusRecord.findOne({ employee: id, year })
+        .populate("employee", "name department role hourlyRate"),
+      BonusConfig.findOne({ year }),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      year,
+      record: record || null,
+      config: config || null,
+    });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  4c. BONUS CERTIFICATE PDF  —  GET /bonus/employee/:id/pdf?year=
+//
+//  Streams a one-page A4 PDF certificate of the worker's yearly
+//  bonus. The Flutter app downloads the bytes and shares/saves
+//  via share_plus. 404 if no record exists for that year.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/employee/:id/pdf",
+  catchAsyncErrors(async (req, res, next) => {
+    const year = parseInt(req.query.year) || currentYear();
+    const { id } = req.params;
+
+    const [record, config] = await Promise.all([
+      BonusRecord.findOne({ employee: id, year })
+        .populate("employee", "name department role hourlyRate"),
+      BonusConfig.findOne({ year }),
+    ]);
+
+    if (!record) {
+      return next(new ErrorHandler(
+        `No bonus record for employee ${id} in ${year}`, 404
+      ));
+    }
+
+    const fileName = `bonus-${record.employee?.name?.replace(/\s+/g, "_") || "employee"}-${year}.pdf`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+    const doc = new PDFDocument({ size: "A4", margin: 50 });
+    doc.pipe(res);
+
+    // ── Header ───────────────────────────────────────────────
+    doc.fillColor("#0D1B2A").rect(0, 0, doc.page.width, 110).fill();
+    doc.fillColor("#FFFFFF")
+       .font("Helvetica-Bold").fontSize(22)
+       .text("Yearly Bonus Certificate", 50, 38);
+    doc.font("Helvetica").fontSize(11).fillColor("#A8C0E0")
+       .text(config?.bonusLabel || `Annual Bonus ${year}`, 50, 70);
+    if (config?.bonusDate) {
+      doc.text(
+        `Payout date: ${new Date(config.bonusDate).toLocaleDateString("en-IN", { day:"2-digit", month:"long", year:"numeric" })}`,
+        50, 86
+      );
+    }
+
+    // ── Employee block ───────────────────────────────────────
+    doc.moveDown(3);
+    doc.fillColor("#1B2B45").font("Helvetica-Bold").fontSize(13)
+       .text("EMPLOYEE", 50, 140);
+    doc.font("Helvetica").fontSize(12).fillColor("#0D1B2A")
+       .text(`Name        : ${record.employee?.name || "—"}`, 50, 160)
+       .text(`Department  : ${record.employee?.department || "—"}`)
+       .text(`Role        : ${record.employee?.role || "—"}`)
+       .text(`Year        : ${year}`);
+
+    // ── Bonus block ──────────────────────────────────────────
+    doc.moveDown(1.5);
+    doc.fillColor("#1B2B45").font("Helvetica-Bold").fontSize(13).text("BONUS DETAILS");
+    doc.moveDown(0.5);
+    const tableY = doc.y;
+    const rows = [
+      ["Hourly Rate",          `Rs. ${record.hourlyRate?.toFixed(2) || "0.00"}`],
+      ["Hours Worked",         `${record.hoursWorked || 0} hrs`],
+      ["Annual Earnings",      `Rs. ${record.annualEarnings?.toFixed(2) || "0.00"}`],
+      ["Bonus Percent",        `${record.bonusPercent || 0}%`],
+      ["Raw Bonus",            `Rs. ${record.rawBonusAmount?.toFixed(2) || "0.00"}`],
+      ["Attendance Days",      `${record.attendanceDays || 0} / ${record.totalWorkingDays || 0}`],
+      ["Attendance Rate",      `${record.attendanceRate?.toFixed(1) || 0}%`],
+      ["Attendance Tier",      `${record.attendanceTier || "C"} (x${record.multiplier || 0})`],
+    ];
+    doc.font("Helvetica").fontSize(11).fillColor("#0D1B2A");
+    rows.forEach((r, i) => {
+      const y = tableY + (i * 18);
+      doc.text(r[0], 60, y, { width: 200 });
+      doc.text(r[1], 280, y, { width: 250 });
+    });
+
+    // ── Final amount banner ──────────────────────────────────
+    const bannerY = tableY + (rows.length * 18) + 20;
+    doc.fillColor("#1D6FEB").rect(50, bannerY, doc.page.width - 100, 70).fill();
+    doc.fillColor("#FFFFFF").font("Helvetica").fontSize(12)
+       .text("FINAL BONUS PAYABLE", 70, bannerY + 12);
+    doc.font("Helvetica-Bold").fontSize(28)
+       .text(`Rs. ${record.bonusAmount?.toLocaleString("en-IN") || "0"}`, 70, bannerY + 30);
+
+    // ── Status & footer ──────────────────────────────────────
+    const statusY = bannerY + 90;
+    const statusColor = record.status === "paid" ? "#15803D" : "#D97706";
+    doc.fillColor(statusColor).font("Helvetica-Bold").fontSize(12)
+       .text(`Status: ${record.status?.toUpperCase() || "PENDING"}`, 50, statusY);
+    if (record.status === "paid" && record.paidAt) {
+      doc.fillColor("#475569").font("Helvetica").fontSize(10)
+         .text(`Paid on ${new Date(record.paidAt).toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"numeric" })}`,
+              50, statusY + 16);
+    }
+
+    doc.fillColor("#94A3B8").font("Helvetica").fontSize(9)
+       .text(
+         "This is a system-generated certificate. For queries contact your supervisor.",
+         50, doc.page.height - 70, { width: doc.page.width - 100, align: "center" }
+       );
+
+    doc.end();
   })
 );
 
