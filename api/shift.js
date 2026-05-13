@@ -672,18 +672,20 @@ router.get(
 
 
 // ─────────────────────────────────────────────────────────────
-//  13b. EMPLOYEE ACTIVE JOB
-//       GET /shift/active-job/:empId
+//  13b. EMPLOYEE ACTIVE JOBS
+//       GET /shift/active-jobs/:empId
 //
-//  Returns the worker's current open shift with the running
-//  JobOrder + fully populated elastics (every schema field except
-//  `costing`) and the head→elastic mapping. Raw-material refs
-//  inside each Elastic (warpSpandex, warpYarn[], spandexCovering,
-//  weftYarn) are populated to their `name` + `category` so the
-//  Worker Portal can render plain-English labels.
+//  Returns ALL of the worker's currently OPEN shifts (a worker
+//  may be running multiple machines / jobs simultaneously in
+//  one shift). Each shift is deep-populated: machine.elastics,
+//  machine.orderRunning (JobOrder + Order + Customer + elastic
+//  refs), shift.job.elastics, and every Elastic field except
+//  `costing`. Raw-material refs (warpSpandex / warpYarn[] /
+//  spandexCovering / weftYarn) are also populated to name +
+//  category for plain-English rendering.
 // ─────────────────────────────────────────────────────────────
 router.get(
-  "/active-job/:empId",
+  "/active-jobs/:empId",
   catchAsyncErrors(async (req, res, next) => {
     const { empId } = req.params;
     if (!empId) return next(new ErrorHandler("empId is required", 400));
@@ -698,9 +700,6 @@ router.get(
       "testingParameters quantityProduced stock " +
       "warpingPlanTemplate createdAt updatedAt";
 
-    // Raw-material populate spec re-used for each elastic
-    // (warpSpandex / spandexCovering / weftYarn are objects with
-    // an `id` ref; warpYarn is an array of objects).
     const elasticPopulate = [
       { path: "warpSpandex.id",     model: "RawMaterial", select: "name category" },
       { path: "warpYarn.id",        model: "RawMaterial", select: "name category" },
@@ -708,9 +707,10 @@ router.get(
       { path: "weftYarn.id",        model: "RawMaterial", select: "name category" },
     ];
 
-    const shift = await ShiftDetail.findOne({
+    const shifts = await ShiftDetail.find({
       status: "open", employee: empId,
     })
+      .sort({ createdAt: 1 })
       .populate("employee", "name department role")
       .populate({
         path: "machine",
@@ -741,6 +741,9 @@ router.get(
       .populate({
         path: "job",
         populate: [
+          { path: "customer", model: "Customer", select: "name" },
+          { path: "order",    model: "Order",
+            select: "po orderNo description supplyDate" },
           {
             path: "elastics.elastic",
             model: "Elastic",
@@ -756,15 +759,74 @@ router.get(
       })
       .lean();
 
-    if (!shift) {
-      return res.json({ success: true, shift: null });
-    }
-    res.json({ success: true, shift });
+    res.json({ success: true, count: shifts.length, shifts });
   })
 );
 
+// Back-compat alias: legacy callers of /active-job/:empId still get a
+// usable response (the first active shift, or null) so the Worker
+// Portal doesn't 404 during the staged rollout. New callers should
+// use /active-jobs/:empId.
+router.get(
+  "/active-job/:empId",
+  catchAsyncErrors(async (req, res, next) => {
+    const { empId } = req.params;
+    if (!empId) return next(new ErrorHandler("empId is required", 400));
 
+    const ELASTIC_FIELDS =
+      "name weaveType image " +
+      "warpSpandex warpYarn spandexCovering " +
+      "spandexEnds yarnEnds weftYarn " +
+      "pick noOfHook weight " +
+      "testingParameters quantityProduced stock " +
+      "warpingPlanTemplate createdAt updatedAt";
+    const elasticPopulate = [
+      { path: "warpSpandex.id",     model: "RawMaterial", select: "name category" },
+      { path: "warpYarn.id",        model: "RawMaterial", select: "name category" },
+      { path: "spandexCovering.id", model: "RawMaterial", select: "name category" },
+      { path: "weftYarn.id",        model: "RawMaterial", select: "name category" },
+    ];
 
+    const shift = await ShiftDetail.findOne({
+      status: "open", employee: empId,
+    })
+      .sort({ createdAt: 1 })
+      .populate("employee", "name department role")
+      .populate({
+        path: "machine",
+        populate: [
+          { path: "elastics.elastic", model: "Elastic",
+            select: ELASTIC_FIELDS, populate: elasticPopulate },
+          { path: "orderRunning",     model: "JobOrder",
+            populate: [
+              { path: "order",    model: "Order",
+                select: "po orderNo description supplyDate" },
+              { path: "customer", model: "Customer", select: "name" },
+              { path: "elastics.elastic", model: "Elastic",
+                select: ELASTIC_FIELDS, populate: elasticPopulate },
+            ]},
+        ],
+      })
+      .populate({
+        path: "job",
+        populate: [
+          { path: "customer", model: "Customer", select: "name" },
+          { path: "order",    model: "Order",
+            select: "po orderNo description supplyDate" },
+          { path: "elastics.elastic", model: "Elastic",
+            select: ELASTIC_FIELDS, populate: elasticPopulate },
+        ],
+      })
+      .populate({
+        path: "elastics.elastic",
+        select: ELASTIC_FIELDS,
+        populate: elasticPopulate,
+      })
+      .lean();
+
+    res.json({ success: true, shift: shift || null });
+  })
+);
 
 
 // ─────────────────────────────────────────────────────────────
