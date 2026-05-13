@@ -676,15 +676,37 @@ router.get(
 //       GET /shift/active-job/:empId
 //
 //  Returns the worker's current open shift with the running
-//  JobOrder + populated elastics (name, weaveType, weight) and
-//  the head→elastic mapping. Used by the Worker Portal's
-//  "Current Job" card on the Shift Production screen.
+//  JobOrder + fully populated elastics (every schema field except
+//  `costing`) and the head→elastic mapping. Raw-material refs
+//  inside each Elastic (warpSpandex, warpYarn[], spandexCovering,
+//  weftYarn) are populated to their `name` + `category` so the
+//  Worker Portal can render plain-English labels.
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/active-job/:empId",
   catchAsyncErrors(async (req, res, next) => {
     const { empId } = req.params;
     if (!empId) return next(new ErrorHandler("empId is required", 400));
+
+    // Fields surfaced to the Worker Portal. Excludes `costing`
+    // (financial info) by listing every other schema field.
+    const ELASTIC_FIELDS =
+      "name weaveType image " +
+      "warpSpandex warpYarn spandexCovering " +
+      "spandexEnds yarnEnds weftYarn " +
+      "pick noOfHook weight " +
+      "testingParameters quantityProduced stock " +
+      "warpingPlanTemplate createdAt updatedAt";
+
+    // Raw-material populate spec re-used for each elastic
+    // (warpSpandex / spandexCovering / weftYarn are objects with
+    // an `id` ref; warpYarn is an array of objects).
+    const elasticPopulate = [
+      { path: "warpSpandex.id",     model: "RawMaterial", select: "name category" },
+      { path: "warpYarn.id",        model: "RawMaterial", select: "name category" },
+      { path: "spandexCovering.id", model: "RawMaterial", select: "name category" },
+      { path: "weftYarn.id",        model: "RawMaterial", select: "name category" },
+    ];
 
     const shift = await ShiftDetail.findOne({
       status: "open", employee: empId,
@@ -693,25 +715,45 @@ router.get(
       .populate({
         path: "machine",
         populate: [
-          { path: "elastics.elastic", model: "Elastic",
-            select: "name weaveType weight pick noOfHook spandexEnds" },
-          { path: "orderRunning",     model: "JobOrder",
+          {
+            path: "elastics.elastic",
+            model: "Elastic",
+            select: ELASTIC_FIELDS,
+            populate: elasticPopulate,
+          },
+          {
+            path: "orderRunning",
+            model: "JobOrder",
             populate: [
-              { path: "order",    model: "Order",    select: "po orderNo description supplyDate" },
+              { path: "order",    model: "Order",
+                select: "po orderNo description supplyDate" },
               { path: "customer", model: "Customer", select: "name" },
-              { path: "elastics.elastic", model: "Elastic",
-                select: "name weaveType weight" },
-            ]},
+              {
+                path: "elastics.elastic",
+                model: "Elastic",
+                select: ELASTIC_FIELDS,
+                populate: elasticPopulate,
+              },
+            ],
+          },
         ],
       })
       .populate({
         path: "job",
         populate: [
-          { path: "elastics.elastic", model: "Elastic",
-            select: "name weaveType weight" },
+          {
+            path: "elastics.elastic",
+            model: "Elastic",
+            select: ELASTIC_FIELDS,
+            populate: elasticPopulate,
+          },
         ],
       })
-      .populate("elastics.elastic", "name weaveType weight pick")
+      .populate({
+        path: "elastics.elastic",
+        select: ELASTIC_FIELDS,
+        populate: elasticPopulate,
+      })
       .lean();
 
     if (!shift) {
