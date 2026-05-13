@@ -671,6 +671,57 @@ router.get(
 );
 
 
+// ─────────────────────────────────────────────────────────────
+//  13b. EMPLOYEE ACTIVE JOB
+//       GET /shift/active-job/:empId
+//
+//  Returns the worker's current open shift with the running
+//  JobOrder + populated elastics (name, weaveType, weight) and
+//  the head→elastic mapping. Used by the Worker Portal's
+//  "Current Job" card on the Shift Production screen.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/active-job/:empId",
+  catchAsyncErrors(async (req, res, next) => {
+    const { empId } = req.params;
+    if (!empId) return next(new ErrorHandler("empId is required", 400));
+
+    const shift = await ShiftDetail.findOne({
+      status: "open", employee: empId,
+    })
+      .populate("employee", "name department role")
+      .populate({
+        path: "machine",
+        populate: [
+          { path: "elastics.elastic", model: "Elastic",
+            select: "name weaveType weight pick noOfHook spandexEnds" },
+          { path: "orderRunning",     model: "JobOrder",
+            populate: [
+              { path: "order",    model: "Order",    select: "po orderNo description supplyDate" },
+              { path: "customer", model: "Customer", select: "name" },
+              { path: "elastics.elastic", model: "Elastic",
+                select: "name weaveType weight" },
+            ]},
+        ],
+      })
+      .populate({
+        path: "job",
+        populate: [
+          { path: "elastics.elastic", model: "Elastic",
+            select: "name weaveType weight" },
+        ],
+      })
+      .populate("elastics.elastic", "name weaveType weight pick")
+      .lean();
+
+    if (!shift) {
+      return res.json({ success: true, shift: null });
+    }
+    res.json({ success: true, shift });
+  })
+);
+
+
 
 
 
