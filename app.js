@@ -48,6 +48,7 @@ const leave       = require("./api/leave.js");
 const machineIssue = require("./api/machineIssue.js");
 const announcement = require("./api/announcement.js");
 const feedback     = require("./api/feedback.js");
+const dashboard    = require("./api/dashboard.js");
 
 const corsConfig = {
   origin: true,
@@ -89,6 +90,7 @@ app.use("/api/v2/leave", leave);
 app.use("/api/v2/machine-issue", machineIssue);
 app.use("/api/v2/announcement", announcement);
 app.use("/api/v2/feedback", feedback);
+app.use("/api/v2/dashboard", dashboard);
 
 
 app.use(ErrorHandler);
