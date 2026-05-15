@@ -3,13 +3,14 @@ const router  = express.Router();
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
 const Customer = require("../models/Customer");
 const Order    = require("../models/Order");
 
-// ─────────────────────────────────────────────────────────────
-//  POST /customer/create
-// ─────────────────────────────────────────────────────────────
+// All customer management routes are admin-only.
+router.use(isAuthenticated, isAdmin('admin'));
+
 router.post(
   "/create",
   catchAsyncErrors(async (req, res, next) => {
@@ -22,9 +23,6 @@ router.post(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  PUT /customer/update
-// ─────────────────────────────────────────────────────────────
 router.put(
   "/update",
   catchAsyncErrors(async (req, res, next) => {
@@ -38,9 +36,6 @@ router.put(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  GET /customer/all-customers
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/all-customers",
   catchAsyncErrors(async (req, res) => {
@@ -66,9 +61,6 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  GET /customer/customerDetail?id=<customerId>
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/customerDetail",
   catchAsyncErrors(async (req, res, next) => {
@@ -78,27 +70,6 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  GET /customer/orders?id=<customerId>&page=<n>&limit=<n>&type=running|past
-//
-//  Returns the customer's orders split into two buckets:
-//    running  → status NOT IN [Completed, Cancelled]
-//    past     → status IN    [Completed, Cancelled]
-//
-//  Each call returns ONE bucket (type param), paginated.
-//  The "running" bucket is never paginated (usually small).
-//  The "past" bucket is paginated.
-//
-//  Response:
-//  {
-//    success: true,
-//    running: [...],          // always returned (non-paginated)
-//    past:    [...],          // paginated
-//    pastTotal: <number>,     // total count of past orders
-//    page:    <number>,
-//    hasMore: <bool>
-//  }
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/orders",
   catchAsyncErrors(async (req, res, next) => {
@@ -112,19 +83,14 @@ router.get(
     const RUNNING_STATUSES = ["Open", "Approved", "InProgress"];
     const PAST_STATUSES    = ["Completed", "Cancelled"];
 
-    // Run both queries in parallel
     const [running, pastTotal, past] = await Promise.all([
-
-      // All active / in-progress orders — no pagination (usually < 10)
       Order.find({ customer: id, status: { $in: RUNNING_STATUSES } })
         .sort({ createdAt: -1 })
         .select("orderNo po status supplyDate createdAt elasticOrdered")
         .lean(),
 
-      // Count for pagination indicator
       Order.countDocuments({ customer: id, status: { $in: PAST_STATUSES } }),
 
-      // Paginated past orders
       Order.find({ customer: id, status: { $in: PAST_STATUSES } })
         .sort({ createdAt: -1 })
         .skip(skip)

@@ -7,6 +7,10 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
+
+// All employee management routes are admin-only.
+router.use(isAuthenticated, isAdmin('admin'));
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS
@@ -20,14 +24,6 @@ function clockToMinutes(timeStr) {
   return hours * 60 + minutes;
 }
 
-// ─────────────────────────────────────────────────────────────
-//  1.  CREATE EMPLOYEE
-//      POST /employee/create-employee
-//
-//  FIX: original had no field validation — all fields passed
-//       blindly to Employee.create(). Empty-name employees and
-//       invalid phone numbers could be stored.
-// ─────────────────────────────────────────────────────────────
 router.post(
   "/create-employee",
   catchAsyncErrors(async (req, res, next) => {
@@ -40,12 +36,10 @@ router.post(
       return next(new ErrorHandler("department is required", 400));
     }
 
-    // Optional phone validation
     if (phoneNumber && !/^\d{10}$/.test(phoneNumber)) {
       return next(new ErrorHandler("phoneNumber must be 10 digits", 400));
     }
 
-    // Duplicate check (same name + phone)
     if (phoneNumber) {
       const existing = await Employee.findOne({ phoneNumber });
       if (existing) {
@@ -72,13 +66,6 @@ router.post(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  2.  GET ALL EMPLOYEES
-//      GET /employee/get-employees
-//
-//  FIX: was returning 201 (Created) for a GET list → now 200.
-//  Added optional ?department= filter.
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/get-employees",
   catchAsyncErrors(async (req, res, next) => {
@@ -97,18 +84,6 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  3.  GET EMPLOYEE DETAIL + LAST 10 SHIFTS
-//      GET /employee/get-employee-detail?id=<_id>
-//
-//  FIX: original populate options ({ limit, sort }) were inside
-//       populate() which Mongoose doesn't reliably support →
-//       ALL shifts returned unsorted. Now sorted + sliced after
-//       populate.
-//  FIX: shift.employee could be null if employee was deleted →
-//       caused TypeError on .name access.
-//  FIX: efficiency could divide by zero when timer is "00:00:00".
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/get-employee-detail",
   catchAsyncErrors(async (req, res, next) => {
@@ -126,14 +101,12 @@ router.get(
 
     if (!employee) return next(new ErrorHandler("Employee not found", 404));
 
-    // FIX: sort + limit AFTER populate
     const latestShifts = [...employee.shifts]
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
       .slice(0, 10);
 
     const result = latestShifts.map((shift) => {
       const runtimeMinutes = clockToMinutes(shift.timer);
-      // FIX: avoid division by zero; efficiency capped at 100%
       const efficiency     = runtimeMinutes > 0
         ? Math.min(100, (runtimeMinutes / 720) * 100)
         : 0;
@@ -144,7 +117,6 @@ router.get(
         shift:          shift.shift,
         description:    shift.description || "",
         feedback:       shift.feedback    || "",
-        // FIX: machine may be null if deleted
         machine:        shift.machine?.ID ?? "—",
         runtimeMinutes,
         outputMeters:   shift.productionMeters || 0,
@@ -170,10 +142,6 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  4.  GET WEAVING EMPLOYEES  (for shift plan operator dropdown)
-//      GET /employee/get-employee-weave
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/get-employee-weave",
   catchAsyncErrors(async (req, res, next) => {
@@ -185,10 +153,6 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  5.  UPDATE EMPLOYEE
-//      PUT /employee/update?id=<_id>
-// ─────────────────────────────────────────────────────────────
 router.put(
   "/update",
   catchAsyncErrors(async (req, res, next) => {
@@ -211,13 +175,6 @@ router.put(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  6.  UPDATE PERFORMANCE SCORE
-//      PATCH /employee/performance
-//
-//  Called by other services (e.g. after closing a shift) to
-//  recalculate the employee's overall performance rating.
-// ─────────────────────────────────────────────────────────────
 router.patch(
   "/performance",
   catchAsyncErrors(async (req, res, next) => {

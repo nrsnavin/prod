@@ -1,17 +1,14 @@
 // ══════════════════════════════════════════════════════════════
 //  ATTENDANCE ROUTES
-//  File: routes/attendance.js
+//  Mount: app.use('/api/v2/attendance', require('./api/attendence.js'));
 //
-//  Mount in app.js:
-//    app.use('/api/v2/attendance', require('./routes/attendance'));
-//
-//  Endpoints:
-//    POST   /mark              — bulk upsert attendance for a shift
-//    PUT    /:id               — edit a single attendance record
-//    GET    /date              — all employees for a date+shift
-//    GET    /employee/:empId   — attendance history for one employee
-//    GET    /summary           — aggregated stats for a date range
-//    GET    /monthly/:empId    — day-by-day calendar for one month
+//  Endpoints (AUTH = login required; ADMIN = role 'admin'):
+//    POST   /mark              — bulk upsert attendance (ADMIN)
+//    PUT    /:id               — edit a single record (ADMIN)
+//    GET    /date              — all employees for date+shift (ADMIN)
+//    GET    /employee/:empId   — attendance history (AUTH)
+//    GET    /summary           — aggregated stats (ADMIN)
+//    GET    /monthly/:empId    — day-by-day calendar (AUTH)
 // ══════════════════════════════════════════════════════════════
 'use strict';
 
@@ -20,10 +17,10 @@ const router     = express.Router();
 const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
 const ShiftDetail= require('../models/ShiftDetail');
+const { isAuthenticated, isAdmin } = require('../middleware/auth');
 
-// ─────────────────────────────────────────────────────────────
-//  HELPERS
-// ─────────────────────────────────────────────────────────────
+router.use(isAuthenticated);
+
 function toISODate(d) {
   return new Date(d).toISOString().split('T')[0];
 }
@@ -43,8 +40,6 @@ function parseDateParam(s, h, m, sec, ms) {
 function startOfDay(s)  { return parseDateParam(s,  0,  0,  0,   0); }
 function endOfDay(s)    { return parseDateParam(s, 23, 59, 59, 999); }
 
-// BUG FIX helper: compute shiftHours and hoursWorked for a given status.
-// Needed because Mongoose pre-save hooks do NOT fire for bulkWrite ops.
 function computeHours(shiftType, status, lateMinutes) {
   const baseHours = shiftType === 'DAY' ? 12 : 8;
   let hoursWorked;
@@ -59,7 +54,6 @@ function computeHours(shiftType, status, lateMinutes) {
   return { shiftHours: baseHours, hoursWorked };
 }
 
-// ── Summarise one attendance record ────────────────────────────────────
 function fmtRecord(a) {
   return {
     id:           a._id,
@@ -84,11 +78,7 @@ function fmtRecord(a) {
   };
 }
 
-
-// ══════════════════════════════════════════════════════════════
-//  POST /mark
-// ══════════════════════════════════════════════════════════════
-router.post('/mark', async (req, res) => {
+router.post('/mark', isAdmin('admin'), async (req, res) => {
   try {
     const { date, shift, records = [], markedBy = 'admin' } = req.body;
 
@@ -102,9 +92,6 @@ router.post('/mark', async (req, res) => {
     const dateObj  = startOfDay(date);
     const shiftUp  = shift.toUpperCase();
 
-    // BUG FIX: Mongoose pre-save hooks do NOT fire for bulkWrite operations.
-    // Manually compute shiftHours and hoursWorked here so these fields are
-    // correctly set on every upserted document.
     const ops = records.map(r => {
       const status     = r.status || 'present';
       const lateMinutes = r.lateMinutes || 0;
@@ -112,11 +99,7 @@ router.post('/mark', async (req, res) => {
 
       return {
         updateOne: {
-          filter: {
-            employee: r.employeeId,
-            date:     dateObj,
-            shift:    shiftUp,
-          },
+          filter: { employee: r.employeeId, date: dateObj, shift: shiftUp },
           update: {
             $set: {
               status,
@@ -150,11 +133,7 @@ router.post('/mark', async (req, res) => {
   }
 });
 
-
-// ══════════════════════════════════════════════════════════════
-//  PUT /:id   — edit a single attendance record
-// ══════════════════════════════════════════════════════════════
-router.put('/:id', async (req, res) => {
+router.put('/:id', isAdmin('admin'), async (req, res) => {
   try {
     const { id } = req.params;
     const allowed = ['status','checkIn','checkOut','lateMinutes','leaveType','notes','markedBy'];
@@ -178,19 +157,13 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-
-// ══════════════════════════════════════════════════════════════
-//  GET /date
-// ══════════════════════════════════════════════════════════════
-router.get('/date', async (req, res) => {
+router.get('/date', isAdmin('admin'), async (req, res) => {
   try {
     const { date, shift = 'all' } = req.query;
     if (!date)
       return res.status(400).json({ success: false, message: 'date required.' });
 
-    const filter = {
-      date: { $gte: startOfDay(date), $lte: endOfDay(date) },
-    };
+    const filter = { date: { $gte: startOfDay(date), $lte: endOfDay(date) } };
     if (shift !== 'all') filter.shift = shift.toUpperCase();
 
     const records = await Attendance.find(filter)
@@ -225,10 +198,6 @@ router.get('/date', async (req, res) => {
   }
 });
 
-
-// ══════════════════════════════════════════════════════════════
-//  GET /employee/:empId
-// ══════════════════════════════════════════════════════════════
 router.get('/employee/:empId', async (req, res) => {
   try {
     const { empId } = req.params;
@@ -290,19 +259,13 @@ router.get('/employee/:empId', async (req, res) => {
   }
 });
 
-
-// ══════════════════════════════════════════════════════════════
-//  GET /summary
-// ══════════════════════════════════════════════════════════════
-router.get('/summary', async (req, res) => {
+router.get('/summary', isAdmin('admin'), async (req, res) => {
   try {
     const { startDate, endDate, shift = 'all' } = req.query;
     if (!startDate || !endDate)
       return res.status(400).json({ success: false, message: 'startDate and endDate required.' });
 
-    const filter = {
-      date: { $gte: startOfDay(startDate), $lte: endOfDay(endDate) },
-    };
+    const filter = { date: { $gte: startOfDay(startDate), $lte: endOfDay(endDate) } };
     if (shift !== 'all') filter.shift = shift.toUpperCase();
 
     const records = await Attendance.find(filter)
@@ -315,8 +278,7 @@ router.get('/summary', async (req, res) => {
       const name = r.employee?.name ?? '–';
       if (!empMap.has(id)) {
         empMap.set(id, {
-          employeeId:  id,
-          name,
+          employeeId:  id, name,
           department:  r.employee?.department ?? '–',
           skill:       r.employee?.skill ?? '',
           role:        r.employee?.role ?? '',
@@ -332,10 +294,7 @@ router.get('/summary', async (req, res) => {
 
     const list = [...empMap.values()].map(e => {
       const effective = e.present + e.late + e.halfDay * 0.5;
-      return {
-        ...e,
-        attendancePct: e.total > 0 ? Math.round(effective / e.total * 100) : 0,
-      };
+      return { ...e, attendancePct: e.total > 0 ? Math.round(effective / e.total * 100) : 0 };
     }).sort((a,b) => a.attendancePct - b.attendancePct);
 
     const totalShifts  = records.length;
@@ -362,10 +321,6 @@ router.get('/summary', async (req, res) => {
   }
 });
 
-
-// ══════════════════════════════════════════════════════════════
-//  GET /monthly/:empId
-// ══════════════════════════════════════════════════════════════
 router.get('/monthly/:empId', async (req, res) => {
   try {
     const { empId } = req.params;
@@ -389,12 +344,9 @@ router.get('/monthly/:empId', async (req, res) => {
     for (let d = 1; d <= daysInMonth; d++) {
       const key = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
       dayMap[key] = {
-        date:     key,
-        day:      d,
+        date: key, day: d,
         dayOfWeek: new Date(year, month-1, d).toLocaleDateString('en-IN',{weekday:'short'}),
-        dayShift:  null,
-        nightShift:null,
-        summary:  'untracked',
+        dayShift: null, nightShift: null, summary: 'untracked',
       };
     }
 
@@ -402,13 +354,8 @@ router.get('/monthly/:empId', async (req, res) => {
       const key = toISODate(r.date);
       if (!dayMap[key]) continue;
       const slot = {
-        id:          r._id,
-        status:      r.status,
-        checkIn:     r.checkIn,
-        checkOut:    r.checkOut,
-        lateMinutes: r.lateMinutes,
-        leaveType:   r.leaveType,
-        notes:       r.notes,
+        id: r._id, status: r.status, checkIn: r.checkIn, checkOut: r.checkOut,
+        lateMinutes: r.lateMinutes, leaveType: r.leaveType, notes: r.notes,
       };
       if (r.shift === 'DAY')   dayMap[key].dayShift   = slot;
       if (r.shift === 'NIGHT') dayMap[key].nightShift = slot;
@@ -425,21 +372,19 @@ router.get('/monthly/:empId', async (req, res) => {
 
     const allSlots = records;
     const stats = {
-      total:       allSlots.length,
-      present:     allSlots.filter(r=>r.status==='present').length,
-      late:        allSlots.filter(r=>r.status==='late').length,
-      halfDay:     allSlots.filter(r=>r.status==='half_day').length,
-      absent:      allSlots.filter(r=>r.status==='absent').length,
-      onLeave:     allSlots.filter(r=>r.status==='on_leave').length,
-      totalLateMin:allSlots.reduce((s,r)=>s+(r.lateMinutes||0),0),
+      total: allSlots.length,
+      present: allSlots.filter(r=>r.status==='present').length,
+      late:    allSlots.filter(r=>r.status==='late').length,
+      halfDay: allSlots.filter(r=>r.status==='half_day').length,
+      absent:  allSlots.filter(r=>r.status==='absent').length,
+      onLeave: allSlots.filter(r=>r.status==='on_leave').length,
+      totalLateMin: allSlots.reduce((s,r)=>s+(r.lateMinutes||0),0),
     };
 
     return res.json({
       success:  true,
       employee: { id:employee._id, name:employee.name, department:employee.department },
-      year, month,
-      daysInMonth,
-      stats,
+      year, month, daysInMonth, stats,
       calendar: Object.values(dayMap),
     });
 
@@ -448,6 +393,5 @@ router.get('/monthly/:empId', async (req, res) => {
     return res.status(500).json({ success:false, message:err.message });
   }
 });
-
 
 module.exports = router;

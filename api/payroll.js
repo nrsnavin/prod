@@ -1,36 +1,10 @@
 // ══════════════════════════════════════════════════════════════
 //  PAYROLL ROUTE  v3
-//  File: routes/payroll.js
+//  Mount: app.use('/api/v2/payroll', require('./api/payroll.js'));
 //
-//  Mount: app.use('/api/v2/payroll', require('./routes/payroll'));
-//
-//  New in v3:
-//    • Fixed approved-leave deduction bug (was double-checking flag)
-//    • Advance salary: request / approve / reject / deduct in payroll
-//    • Yearly bonus: 10% of total annual salary, compute + pay
-//    • Analytics: per-employee attendance + pay performance
-//
-//  Endpoints:
-//    GET  /settings
-//    POST /settings
-//    GET  /employees
-//    POST /employees/:id/rate
-//    POST /generate
-//    GET  /dashboard?year=&month=
-//    GET  /slip/:empId?year=&month=
-//    PUT  /:id/finalize
-//    PUT  /:id/pay
-//
-//    GET  /advance?employeeId=&status=
-//    POST /advance                          { employeeId, amount, reason }
-//    PUT  /advance/:id/approve              { deductMonth, deductYear, adminNotes }
-//    PUT  /advance/:id/reject               { adminNotes }
-//
-//    POST /yearly-bonus/compute?year=       compute all employees
-//    GET  /yearly-bonus?year=               list
-//    PUT  /yearly-bonus/:id/pay             { paidBy, paymentNote }
-//
-//    GET  /analytics?year=&month=           attendance + pay performance
+//  Auth (AUTH = login required; ADMIN = role 'admin'):
+//    Worker-facing (AUTH): GET /slip/:empId, POST /advance
+//    Everything else        ADMIN
 // ══════════════════════════════════════════════════════════════
 'use strict';
 
@@ -42,14 +16,14 @@ const Payroll          = require('../models/Payroll');
 const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
 const YearlyBonus      = require('../models/YearlyBonus');
+const { isAuthenticated, isAdmin } = require('../middleware/auth');
+
+router.use(isAuthenticated);
 
 const SHIFT_HOURS = { DAY: 12, NIGHT: 8 };
 const r2 = (n) => Math.round(n * 100) / 100;
 const shiftHours = (s) => SHIFT_HOURS[s] ?? 8;
 
-// ─────────────────────────────────────────────────────────────
-//  PAYROLL ENGINE
-// ─────────────────────────────────────────────────────────────
 async function computePayroll(empId, year, month) {
 
   const emp = await Employee.findById(empId, 'name department hourlyRate').lean();
@@ -93,10 +67,6 @@ async function computePayroll(empId, year, month) {
     const fullPay = hourlyRate * sh;
     const dateStr = new Date(rec.date).toISOString().slice(0, 10);
 
-    // ── APPROVED LEAVE: full shift pay credited, no deduction ──
-    // BUG FIX: was rec.approvedLeave but the Attendance model stores this
-    // field as isApprovedLeave — approved leaves were never detected and
-    // employees lost a full shift's pay on every approved leave day.
     if (rec.isApprovedLeave === true) {
       approvedLeaveShifts++;
       const pay = fullPay;
@@ -110,7 +80,6 @@ async function computePayroll(empId, year, month) {
       continue;
     }
 
-    // ── UNAPPROVED ABSENT / UNAPPROVED ON_LEAVE ─────────────────
     if (rec.status === 'absent' || rec.status === 'on_leave') {
       unapprovedAbsents++;
       lineItems.push({
@@ -121,7 +90,6 @@ async function computePayroll(empId, year, month) {
       continue;
     }
 
-    // ── HALF DAY ────────────────────────────────────────────
     if (rec.status === 'half_day') {
       halfDayShifts++;
       const pay = fullPay / 2;
@@ -131,7 +99,6 @@ async function computePayroll(empId, year, month) {
       continue;
     }
 
-    // ── PRESENT / LATE ────────────────────────────────────────
     presentShifts++;
     let pay = fullPay;
     const lateMins     = rec.lateMinutes ?? 0;
@@ -158,7 +125,6 @@ async function computePayroll(empId, year, month) {
 
   const grossEarnings = r2(dayShiftEarnings + nightShiftEarnings);
 
-  // Excess absent penalty
   const excessAbsents = Math.max(0, unapprovedAbsents - leaveQuota);
   const excessPenalty = excessAbsents * settings.penaltyPerExcessAbsent;
   if (excessAbsents > 0) {
@@ -172,7 +138,6 @@ async function computePayroll(empId, year, month) {
   let lateDeductions   = r2(lateDeductionTotal);
   let totalDeductions  = r2(lateDeductionTotal + excessPenalty);
 
-  // Bonuses
   let noLeaveBonusAmt       = 0;
   let perfectAttBonusAmt    = 0;
   let streakBonusTotal      = 0;
@@ -190,7 +155,6 @@ async function computePayroll(empId, year, month) {
     lineItems.push({ label: '🏆 Perfect Attendance Bonus', amount: perfectAttBonusAmt, type: 'bonus' });
   }
 
-  // Streak bonus — count consecutive calendar days with any attendance
   const presentDates = new Set(
     records
       .filter(r => ['present','late','half_day'].includes(r.status) || r.isApprovedLeave)
@@ -216,7 +180,6 @@ async function computePayroll(empId, year, month) {
 
   const bonusBeforeAdvance = r2(noLeaveBonusAmt + perfectAttBonusAmt + streakBonusTotal);
 
-  // ── ADVANCE DEDUCTION ────────────────────────────────────────
   const advances = await AdvanceRequest.find({
     employee:          empId,
     status:            'approved',
@@ -263,17 +226,14 @@ async function computePayroll(empId, year, month) {
   };
 }
 
-// ══════════════════════════════════════════════════════════════
-//  SETTINGS
-// ══════════════════════════════════════════════════════════════
-router.get('/settings', async (req, res) => {
+router.get('/settings', isAdmin('admin'), async (req, res) => {
   try {
     const s = await PayrollSettings.findOne({}).lean() ?? {};
     res.json({ success: true, data: s });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.post('/settings', async (req, res) => {
+router.post('/settings', isAdmin('admin'), async (req, res) => {
   try {
     const allowed = ['casualLeavesPerMonth','sickLeavesPerMonth','lateGracePeriodMinutes',
                      'penaltyPerExcessAbsent','noLeaveBonus','perfectAttendanceBonus','streakBonusPer7Shifts'];
@@ -284,10 +244,7 @@ router.post('/settings', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════
-//  EMPLOYEES
-// ══════════════════════════════════════════════════════════════
-router.get('/employees', async (req, res) => {
+router.get('/employees', isAdmin('admin'), async (req, res) => {
   try {
     const emps = await Employee.find({})
       .select('name department role skill hourlyRate').sort({ name: 1 }).lean();
@@ -304,7 +261,7 @@ router.get('/employees', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.post('/employees/:id/rate', async (req, res) => {
+router.post('/employees/:id/rate', isAdmin('admin'), async (req, res) => {
   try {
     const rate = Number(req.body.hourlyRate);
     if (isNaN(rate) || rate < 0)
@@ -323,10 +280,7 @@ router.post('/employees/:id/rate', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════
-//  GENERATE
-// ══════════════════════════════════════════════════════════════
-router.post('/generate', async (req, res) => {
+router.post('/generate', isAdmin('admin'), async (req, res) => {
   try {
     const { year, month, employeeId } = req.body;
     if (!year || !month)
@@ -376,10 +330,7 @@ router.post('/generate', async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════════
-//  DASHBOARD
-// ══════════════════════════════════════════════════════════════
-router.get('/dashboard', async (req, res) => {
+router.get('/dashboard', isAdmin('admin'), async (req, res) => {
   try {
     const year  = +(req.query.year  || new Date().getFullYear());
     const month = +(req.query.month || new Date().getMonth() + 1);
@@ -425,9 +376,7 @@ router.get('/dashboard', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════
-//  PAYSLIP
-// ══════════════════════════════════════════════════════════════
+// Worker-facing — employees view their own payslip.
 router.get('/slip/:empId', async (req, res) => {
   try {
     const year  = +(req.query.year  || new Date().getFullYear());
@@ -439,7 +388,7 @@ router.get('/slip/:empId', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/:id/finalize', async (req, res) => {
+router.put('/:id/finalize', isAdmin('admin'), async (req, res) => {
   try {
     const p = await Payroll.findByIdAndUpdate(req.params.id,
       { $set: { status: 'finalized', finalizedAt: new Date() } }, { new: true })
@@ -449,7 +398,7 @@ router.put('/:id/finalize', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/:id/pay', async (req, res) => {
+router.put('/:id/pay', isAdmin('admin'), async (req, res) => {
   try {
     const { paidBy = 'admin', paymentNote = '' } = req.body;
     const p = await Payroll.findByIdAndUpdate(req.params.id,
@@ -460,11 +409,7 @@ router.put('/:id/pay', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════
-//  ADVANCE SALARY
-// ══════════════════════════════════════════════════════════════
-
-router.get('/advance', async (req, res) => {
+router.get('/advance', isAdmin('admin'), async (req, res) => {
   try {
     const filter = {};
     if (req.query.employeeId) filter.employee = req.query.employeeId;
@@ -478,6 +423,7 @@ router.get('/advance', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
+// Worker-facing — any authenticated employee can request an advance.
 router.post('/advance', async (req, res) => {
   try {
     const { employeeId, amount, reason = '' } = req.body;
@@ -491,7 +437,7 @@ router.post('/advance', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/advance/:id/approve', async (req, res) => {
+router.put('/advance/:id/approve', isAdmin('admin'), async (req, res) => {
   try {
     const { deductMonth, deductYear, adminNotes = '', approvedBy = 'admin' } = req.body;
     if (!deductMonth || !deductYear)
@@ -507,7 +453,7 @@ router.put('/advance/:id/approve', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/advance/:id/reject', async (req, res) => {
+router.put('/advance/:id/reject', isAdmin('admin'), async (req, res) => {
   try {
     const adv = await AdvanceRequest.findByIdAndUpdate(req.params.id, {
       $set: { status: 'rejected', adminNotes: req.body.adminNotes || '' },
@@ -517,11 +463,7 @@ router.put('/advance/:id/reject', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════
-//  YEARLY BONUS  (10% of total annual salary)
-// ══════════════════════════════════════════════════════════════
-
-router.post('/yearly-bonus/compute', async (req, res) => {
+router.post('/yearly-bonus/compute', isAdmin('admin'), async (req, res) => {
   try {
     const year = +(req.query.year || req.body.year || new Date().getFullYear());
     const payrolls = await Payroll.find({ year, status: { $in: ['finalized','paid'] } }).lean();
@@ -560,7 +502,7 @@ router.post('/yearly-bonus/compute', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.get('/yearly-bonus', async (req, res) => {
+router.get('/yearly-bonus', isAdmin('admin'), async (req, res) => {
   try {
     const year = +(req.query.year || new Date().getFullYear());
     const docs = await YearlyBonus.find({ year })
@@ -569,7 +511,7 @@ router.get('/yearly-bonus', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/yearly-bonus/:id/pay', async (req, res) => {
+router.put('/yearly-bonus/:id/pay', isAdmin('admin'), async (req, res) => {
   try {
     const { paidBy = 'admin', paymentNote = '' } = req.body;
     const doc = await YearlyBonus.findByIdAndUpdate(req.params.id,
@@ -581,11 +523,7 @@ router.put('/yearly-bonus/:id/pay', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════
-//  ANALYTICS
-//  GET /analytics?year=&month=
-// ══════════════════════════════════════════════════════════════
-router.get('/analytics', async (req, res) => {
+router.get('/analytics', isAdmin('admin'), async (req, res) => {
   try {
     const year  = +(req.query.year  || new Date().getFullYear());
     const month = req.query.month ? +req.query.month : null;
@@ -651,11 +589,7 @@ router.get('/analytics', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// ══════════════════════════════════════════════════════════════
-//  DAILY ATTENDANCE  (for payslip calendar view)
-//  GET /payroll/attendance?employeeId=&year=&month=
-// ══════════════════════════════════════════════════════════════
-router.get('/attendance', async (req, res) => {
+router.get('/attendance', isAdmin('admin'), async (req, res) => {
   try {
     const { employeeId, year, month } = req.query;
     if (!employeeId || !year || !month)

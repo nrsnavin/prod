@@ -24,6 +24,7 @@ const cookieParser = require("cookie-parser");
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const { setUserContext } = require("./middleware/userContext.js");
+const { isAuthenticated, isAdmin } = require("./middleware/auth.js");
 
 const user     = require("./api/user.js");
 const machine  = require("./api/machine.js");
@@ -67,30 +68,43 @@ app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 app.use(setUserContext);
 
 
+// Mount-level admin gate for the all-ADMIN router groups. Doing this here
+// (instead of inside every router file) means: one place to audit, no chance
+// of forgetting to add the middleware to a freshly added route, and the
+// router files stay focused on business logic.
+//
+// Mixed-auth routers (attendance, payroll, bonus, shift, packing, wastage,
+// machine-issue) wire isAuthenticated + per-route isAdmin('admin') inside
+// the router itself — they're NOT in this admin block.
+//
+// Per-route auth routers (user, announcement, feedback, leave, dashboard)
+// also handle their own middleware to allow login + employee-facing reads.
+const ADMIN_GATE = [isAuthenticated, isAdmin('admin')];
+
 app.use("/api/v2/user", user);
-app.use("/api/v2/machine", machine);
-app.use("/api/v2/shift", shift);
-app.use("/api/v2/customer", customer);
-app.use("/api/v2/employee", employee);
-app.use("/api/v2/elastic", elastic);
-app.use("/api/v2/dc", deliveryChallanRouter);
-app.use("/api/v2/supplier", supplier);
-app.use("/api/v2/bonus", bonus);
-app.use("/api/v2/order", order);
-app.use("/api/v2/materials", material);
-app.use("/api/v2/warping", warping);
-app.use("/api/v2/wastage", wastage);
-app.use("/api/v2/attendance", attendence);
-app.use("/api/v2/covering", covering);
-app.use("/api/v2/job", job);
-app.use("/api/v2/packing", packing);
-app.use("/api/v2/production", production);
-app.use("/api/v2/payroll", payroll);
-app.use("/api/v2/leave", leave);
+app.use("/api/v2/machine",     ADMIN_GATE, machine);
+app.use("/api/v2/shift",       shift);
+app.use("/api/v2/customer",    ADMIN_GATE, customer);
+app.use("/api/v2/employee",    ADMIN_GATE, employee);
+app.use("/api/v2/elastic",     ADMIN_GATE, elastic);
+app.use("/api/v2/dc",          ADMIN_GATE, deliveryChallanRouter);
+app.use("/api/v2/supplier",    ADMIN_GATE, supplier);
+app.use("/api/v2/bonus",       bonus);
+app.use("/api/v2/order",       ADMIN_GATE, order);
+app.use("/api/v2/materials",   ADMIN_GATE, material);
+app.use("/api/v2/warping",     ADMIN_GATE, warping);
+app.use("/api/v2/wastage",     wastage);
+app.use("/api/v2/attendance",  attendence);
+app.use("/api/v2/covering",    ADMIN_GATE, covering);
+app.use("/api/v2/job",         ADMIN_GATE, job);
+app.use("/api/v2/packing",     packing);
+app.use("/api/v2/production",  ADMIN_GATE, production);
+app.use("/api/v2/payroll",     payroll);
+app.use("/api/v2/leave",       leave);
 app.use("/api/v2/machine-issue", machineIssue);
 app.use("/api/v2/announcement", announcement);
-app.use("/api/v2/feedback", feedback);
-app.use("/api/v2/dashboard", dashboard);
+app.use("/api/v2/feedback",    feedback);
+app.use("/api/v2/dashboard",   dashboard);
 
 
 app.use(ErrorHandler);

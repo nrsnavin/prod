@@ -4,12 +4,12 @@
 //  Mount: app.use('/api/v2/machine-issue', require('./api/machineIssue'));
 //
 //  Endpoints:
-//    POST  /                  — worker reports a machine issue
-//    GET   /employee/:empId   — list issues raised by one worker
-//    GET   /                  — admin list (filter by status / machine)
-//    GET   /:id               — single issue detail
-//    PUT   /:id/status        — admin updates status / resolution
-//    DELETE /:id              — worker withdraws an open issue
+//    POST  /                  — worker reports a machine issue (AUTH)
+//    GET   /employee/:empId   — list issues raised by one worker (AUTH)
+//    GET   /                  — admin list (ADMIN)
+//    GET   /:id               — single issue detail (AUTH)
+//    PUT   /:id/status        — admin updates status / resolution (ADMIN)
+//    DELETE /:id              — worker withdraws an open issue (AUTH)
 // ══════════════════════════════════════════════════════════════
 "use strict";
 
@@ -21,15 +21,15 @@ const Employee       = require("../models/Employee");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
-// Severity validation (mirrors the schema enum so we 400 with a
-// meaningful message instead of a 500 from Mongoose validation).
+// Every machine-issue route requires login. Admin-only routes
+// additionally chain isAdmin('admin') in-line below.
+router.use(isAuthenticated);
+
 const SEVERITIES = ["low", "medium", "high", "critical"];
 const STATUSES   = ["open", "acknowledged", "in_progress", "resolved", "rejected"];
 
-// ─────────────────────────────────────────────────────────────
-// POST /          — worker reports an issue
-// ─────────────────────────────────────────────────────────────
 router.post(
   "/",
   catchAsyncErrors(async (req, res, next) => {
@@ -71,9 +71,6 @@ router.post(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-// GET /employee/:empId   — worker's own history
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/employee/:empId",
   catchAsyncErrors(async (req, res, next) => {
@@ -87,11 +84,9 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-// GET /          — admin list (filter by status / machine)
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const { status, machineId } = req.query;
     const filter = {};
@@ -108,9 +103,6 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-// GET /:id
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/:id",
   catchAsyncErrors(async (req, res, next) => {
@@ -123,13 +115,11 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-// PUT /:id/status   — admin updates status / resolution
-// ─────────────────────────────────────────────────────────────
 router.put(
   "/:id/status",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
-    const { status, resolutionNotes = "", resolvedBy } = req.body;
+    const { status, resolutionNotes = "" } = req.body;
     if (!STATUSES.includes(status)) {
       return next(new ErrorHandler(
         `status must be one of: ${STATUSES.join(", ")}`, 400));
@@ -138,7 +128,7 @@ router.put(
     const update = { status, resolutionNotes };
     if (status === "resolved" || status === "rejected") {
       update.resolvedAt = new Date();
-      if (resolvedBy) update.resolvedBy = resolvedBy;
+      update.resolvedBy = req.user._id;
     }
 
     const issue = await MachineIssue.findByIdAndUpdate(
@@ -151,9 +141,6 @@ router.put(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-// DELETE /:id   — worker withdraws an OPEN issue
-// ─────────────────────────────────────────────────────────────
 router.delete(
   "/:id",
   catchAsyncErrors(async (req, res, next) => {
