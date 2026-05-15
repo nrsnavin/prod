@@ -8,7 +8,11 @@ const { isAuthenticated, isAdmin } = require("../middleware/auth");
 var jwt = require('jsonwebtoken');
 
 
-router.post("/sign-up", catchAsyncErrors(async (req, res, next) => {
+// Sign-up is admin-only — accepting `role` from req.body otherwise lets
+// any visitor create themselves an admin account (privilege escalation).
+router.post("/sign-up",
+  isAuthenticated, isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
   const user = await User.create(req.body);
   try {
     res.status(200).json({
@@ -120,7 +124,7 @@ router.get(
 
 router.get(
   "/all-users",
-  isAuthenticated,
+  isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     try {
       const users = await User.find({ role: "admin" });

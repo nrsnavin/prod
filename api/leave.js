@@ -3,12 +3,12 @@
 //  File: routes/leave.js
 //  Mount: app.use('/api/v2/leave', require('./routes/leave'));
 //
-//  POST   /request          — employee submits leave request
-//  GET    /pending          — all pending requests (admin)
-//  GET    /employee/:empId  — leave history for one employee
-//  PUT    /:id/approve      — admin approves
-//  PUT    /:id/reject       — admin rejects
-//  DELETE /:id              — employee cancels pending request
+//  POST   /request          — employee submits leave request (AUTH)
+//  GET    /pending          — all pending requests (ADMIN)
+//  GET    /employee/:empId  — leave history for one employee (AUTH)
+//  PUT    /:id/approve      — admin approves (ADMIN)
+//  PUT    /:id/reject       — admin rejects (ADMIN)
+//  DELETE /:id              — employee cancels pending request (AUTH)
 // ══════════════════════════════════════════════════════════════
 'use strict';
 const express      = require('express');
@@ -16,6 +16,7 @@ const router       = express.Router();
 const LeaveRequest = require('../models/LeaveRequest');
 const Attendance   = require('../models/Attendence.js');
 const Employee     = require('../models/Employee');
+const { isAuthenticated, isAdmin } = require('../middleware/auth');
 
 function toISODate(d)   { return new Date(d).toISOString().split('T')[0]; }
 function toDateLabel(d) {
@@ -47,7 +48,7 @@ function fmtLeave(l) {
 // ─────────────────────────────────────────────────────────────
 // POST /request
 // ─────────────────────────────────────────────────────────────
-router.post('/request', async (req, res) => {
+router.post('/request', isAuthenticated, async (req, res) => {
   try {
     const { employeeId, date, shift='DAY', leaveType, reason, documentUrl='' } = req.body;
     if (!employeeId || !date || !leaveType || !reason)
@@ -84,7 +85,7 @@ router.post('/request', async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // GET /pending
 // ─────────────────────────────────────────────────────────────
-router.get('/pending', async (req, res) => {
+router.get('/pending', isAuthenticated, isAdmin('admin'), async (req, res) => {
   try {
     const leaves = await LeaveRequest.find({ status:'pending' })
       .populate('employee','name department skill role')
@@ -99,7 +100,7 @@ router.get('/pending', async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // GET /employee/:empId
 // ─────────────────────────────────────────────────────────────
-router.get('/employee/:empId', async (req, res) => {
+router.get('/employee/:empId', isAuthenticated, async (req, res) => {
   try {
     const { empId } = req.params;
     const { year, month } = req.query;
@@ -122,9 +123,9 @@ router.get('/employee/:empId', async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // PUT /:id/approve
 // ─────────────────────────────────────────────────────────────
-router.put('/:id/approve', async (req, res) => {
+router.put('/:id/approve', isAuthenticated, isAdmin('admin'), async (req, res) => {
   try {
-    const { reviewedBy='admin', reviewNotes='' } = req.body;
+    const { reviewNotes='' } = req.body;
     const leave = await LeaveRequest.findById(req.params.id)
       .populate('employee','name department');
     if (!leave) return res.status(404).json({ success:false, message:'Leave request not found.' });
@@ -132,7 +133,8 @@ router.put('/:id/approve', async (req, res) => {
       return res.status(400).json({ success:false, message:`Request already ${leave.status}.` });
 
     leave.status     = 'approved';
-    leave.reviewedBy = reviewedBy;
+    // Server-trusted reviewer — drop the body-supplied default to prevent spoofing.
+    leave.reviewedBy = req.user._id;
     leave.reviewedAt = new Date();
     leave.reviewNotes= reviewNotes;
     await leave.save();
@@ -163,9 +165,9 @@ router.put('/:id/approve', async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // PUT /:id/reject
 // ─────────────────────────────────────────────────────────────
-router.put('/:id/reject', async (req, res) => {
+router.put('/:id/reject', isAuthenticated, isAdmin('admin'), async (req, res) => {
   try {
-    const { reviewedBy='admin', reviewNotes='' } = req.body;
+    const { reviewNotes='' } = req.body;
     const leave = await LeaveRequest.findById(req.params.id)
       .populate('employee','name department');
     if (!leave) return res.status(404).json({ success:false, message:'Leave request not found.' });
@@ -173,7 +175,7 @@ router.put('/:id/reject', async (req, res) => {
       return res.status(400).json({ success:false, message:`Request already ${leave.status}.` });
 
     leave.status     = 'rejected';
-    leave.reviewedBy = reviewedBy;
+    leave.reviewedBy = req.user._id;
     leave.reviewedAt = new Date();
     leave.reviewNotes= reviewNotes;
     await leave.save();
@@ -188,7 +190,7 @@ router.put('/:id/reject', async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // DELETE /:id  — employee cancels pending request
 // ─────────────────────────────────────────────────────────────
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', isAuthenticated, async (req, res) => {
   try {
     const leave = await LeaveRequest.findById(req.params.id);
     if (!leave) return res.status(404).json({ success:false, message:'Not found.' });

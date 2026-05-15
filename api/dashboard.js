@@ -20,6 +20,7 @@ const RawMaterial  = require("../models/RawMaterial");
 const Employee     = require("../models/Employee");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
 const ACTIVE_JOB_STATUSES = [
   "preparatory", "weaving", "finishing", "checking", "packing",
@@ -32,6 +33,7 @@ const ACTIVE_JOB_STATUSES = [
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/kpis",
+  isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res) => {
     const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
     const endOfToday   = new Date(); endOfToday.setHours(23, 59, 59, 999);
