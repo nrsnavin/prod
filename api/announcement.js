@@ -4,11 +4,11 @@
 //  Mount: app.use('/api/v2/announcement', require('./api/announcement'));
 //
 //  Endpoints:
-//    GET   /active?dept=     — workers fetch active notices
-//    GET   /                 — admin lists all
-//    POST  /                 — admin creates
-//    PUT   /:id              — admin edits
-//    DELETE /:id             — admin deletes (soft via isActive)
+//    GET   /active?dept=     — workers fetch active notices (AUTH)
+//    GET   /                 — admin lists all (ADMIN)
+//    POST  /                 — admin creates (ADMIN)
+//    PUT   /:id              — admin edits (ADMIN)
+//    DELETE /:id             — admin deletes (soft via isActive) (ADMIN)
 // ══════════════════════════════════════════════════════════════
 "use strict";
 
@@ -18,6 +18,7 @@ const Announcement = require("../models/Announcement");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
 const TYPES = ["info", "warning", "safety", "policy", "celebration"];
 
@@ -28,6 +29,7 @@ const TYPES = ["info", "warning", "safety", "policy", "celebration"];
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/active",
+  isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const { dept } = req.query;
     const now = new Date();
@@ -57,6 +59,7 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/",
+  isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const items = await Announcement.find()
       .sort({ isPinned: -1, createdAt: -1 })
@@ -70,6 +73,7 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 router.post(
   "/",
+  isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const {
       title, body,
@@ -114,6 +118,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 router.put(
   "/:id",
+  isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const allowed = [
       "title", "body", "type", "audience", "department",
@@ -139,6 +144,7 @@ router.put(
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/:id",
+  isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const doc = await Announcement.findByIdAndUpdate(
       req.params.id, { $set: { isActive: false } }, { new: true });

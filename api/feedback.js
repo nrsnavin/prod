@@ -4,11 +4,11 @@
 //  Mount: app.use('/api/v2/feedback', require('./api/feedback'));
 //
 //  Endpoints:
-//    POST   /                 — worker files complaint / suggestion
-//    GET    /employee/:empId  — worker history
-//    GET    /                 — admin list (filter by status/type)
-//    PUT    /:id/respond      — admin replies + sets status
-//    DELETE /:id              — worker withdraws an OPEN entry
+//    POST   /                 — worker files complaint / suggestion (AUTH)
+//    GET    /employee/:empId  — worker history (AUTH)
+//    GET    /                 — admin list (ADMIN)
+//    PUT    /:id/respond      — admin replies + sets status (ADMIN)
+//    DELETE /:id              — worker withdraws an OPEN entry (AUTH)
 // ══════════════════════════════════════════════════════════════
 "use strict";
 
@@ -19,6 +19,7 @@ const Employee  = require("../models/Employee");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
 const TYPES      = ["complaint", "suggestion"];
 const CATEGORIES = ["machine", "safety", "management", "facilities", "payroll", "other"];
@@ -29,6 +30,7 @@ const STATUSES   = ["open", "in_review", "resolved", "rejected", "closed"];
 // ─────────────────────────────────────────────────────────────
 router.post(
   "/",
+  isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const {
       employeeId,
@@ -71,6 +73,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/employee/:empId",
+  isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const items = await Feedback.find({ employee: req.params.empId })
       .sort({ createdAt: -1 })
@@ -84,6 +87,7 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/",
+  isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const { status, type, category } = req.query;
     const filter = {};
@@ -105,16 +109,21 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 router.put(
   "/:id/respond",
+  isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
-    const { response = "", status, respondedBy } = req.body;
+    const { response = "", status } = req.body;
     if (status && !STATUSES.includes(status)) {
       return next(new ErrorHandler(
         `status must be one of: ${STATUSES.join(", ")}`, 400));
     }
 
-    const update = { response, respondedAt: new Date() };
+    // Trust the server, not the client: respondedBy comes from req.user.
+    const update = {
+      response,
+      respondedAt: new Date(),
+      respondedBy: req.user._id,
+    };
     if (status) update.status = status;
-    if (respondedBy) update.respondedBy = respondedBy;
 
     const doc = await Feedback.findByIdAndUpdate(
       req.params.id, { $set: update }, { new: true })
@@ -129,6 +138,7 @@ router.put(
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/:id",
+  isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const fb = await Feedback.findById(req.params.id);
     if (!fb) return next(new ErrorHandler("Feedback not found", 404));
