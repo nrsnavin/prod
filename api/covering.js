@@ -12,14 +12,6 @@ const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
-// ══════════════════════════════════════════════════════════════
-//  1.  LIST COVERINGS
-//      GET /covering/list
-//      ?status=open|in_progress|completed|cancelled
-//      ?search=<jobOrderNo>
-//      ?page=<n>&limit=<n>
-// ══════════════════════════════════════════════════════════════
-
 router.get(
   "/list",
   catchAsyncErrors(async (req, res, next) => {
@@ -73,11 +65,11 @@ router.get(
   })
 );
 
-// ══════════════════════════════════════════════════════════════
-//  2.  COVERING DETAIL
-//      GET /covering/detail?id=<coveringId>
-// ══════════════════════════════════════════════════════════════
-
+// ═════════════════════════════════════════════════════════════
+//  COVERING DETAIL
+//  Populates beamEntries.enteredBy.name so the admin app can print
+//  the operator on each beam label.
+// ═════════════════════════════════════════════════════════════
 router.get(
   "/detail",
   catchAsyncErrors(async (req, res, next) => {
@@ -99,6 +91,10 @@ router.get(
           { path: "spandexCovering.id", model: "RawMaterial", select: "name category" },
         ],
       })
+      .populate({
+        path:   "beamEntries.enteredBy",
+        select: "name role",
+      })
       .lean();
 
     if (!covering) {
@@ -108,12 +104,6 @@ router.get(
     res.status(200).json({ success: true, covering });
   })
 );
-
-// ══════════════════════════════════════════════════════════════
-//  3.  START COVERING
-//      POST /covering/start
-//      body: { id }
-// ══════════════════════════════════════════════════════════════
 
 router.post(
   "/start",
@@ -137,7 +127,6 @@ router.post(
         covering.status = "in_progress";
         await covering.save({ session });
 
-        // 🪪 Fingerprint on the parent JobOrder (in-tx via .save())
         const fp = buildFingerprint(ACTION_CODES.COVERING_STARTED, {
           entityId: covering.job,
           actor:    actorFromRequest(req),
@@ -159,18 +148,6 @@ router.post(
     }
   })
 );
-
-// ══════════════════════════════════════════════════════════════
-//  4.  COMPLETE COVERING
-//      POST /covering/complete
-//      body: { id, remarks? }
-//
-//  KEY CHANGE: after marking covering as completed, we call
-//  checkAndAdvanceToWeaving() which checks if the job's warping
-//  is also complete. If both are done, the job automatically
-//  transitions from "preparatory" → "weaving", making it ready
-//  for machine assignment on the frontend.
-// ══════════════════════════════════════════════════════════════
 
 router.post(
   "/complete",
@@ -196,7 +173,6 @@ router.post(
         if (remarks?.trim()) covering.remarks = remarks.trim();
         await covering.save({ session });
 
-        // ── Auto-advance job to weaving if warping is also complete ────
         const { advanced, jobStatus } = await checkAndAdvanceToWeaving(covering.job);
 
         const actor = actorFromRequest(req);
@@ -216,7 +192,6 @@ router.post(
           job.fingerprints.push(fp);
           await job.save({ session });
 
-          // 🪪 Mirror milestone onto parent Order timeline
           if (job.order) {
             const order = await Order.findById(job.order).session(session);
             if (order) {
@@ -251,12 +226,6 @@ router.post(
   })
 );
 
-// ══════════════════════════════════════════════════════════════
-//  5.  CANCEL COVERING
-//      POST /covering/cancel
-//      body: { id, remarks? }
-// ══════════════════════════════════════════════════════════════
-
 router.post(
   "/cancel",
   catchAsyncErrors(async (req, res, next) => {
@@ -280,16 +249,12 @@ router.post(
   })
 );
 
-// ══════════════════════════════════════════════════════════════
-//  6.  ADD BEAM ENTRY
-//      POST /covering/beam-entry
-//      body: { id, beamNo, weight, note? }
-//
-//  • Pushes a new beam entry into covering.beamEntries
-//  • Recalculates covering.producedWeight as sum of all entry weights
-//  • Returns the updated covering (with beamEntries + producedWeight)
-// ══════════════════════════════════════════════════════════════
-
+// ═════════════════════════════════════════════════════════════
+//  ADD BEAM ENTRY
+//  Stores enteredBy = req.user._id so the printed beam label can
+//  show the operator's name. Returns the new entry with enteredBy
+//  populated so the admin app doesn't need a second round-trip.
+// ═════════════════════════════════════════════════════════════
 router.post(
   "/beam-entry",
   catchAsyncErrors(async (req, res, next) => {
@@ -321,6 +286,9 @@ router.post(
           weight:    w,
           note:      note?.trim() || "",
           enteredAt: new Date(),
+          // Server-trusted operator from the auth gate. Admins printing
+          // the label want to see who actually weighed the beam.
+          enteredBy: req.user?._id || undefined,
         });
 
         covering.producedWeight = covering.beamEntries.reduce(
@@ -330,8 +298,6 @@ router.post(
 
         await covering.save({ session });
 
-        // 🪪 Beam entries are job-only (granular events shouldn't
-        //    flood the parent Order timeline; only milestones do).
         const fp = buildFingerprint(ACTION_CODES.COVERING_BEAM_ENTRY, {
           entityId: covering.job,
           actor:    actorFromRequest(req),
@@ -356,8 +322,16 @@ router.post(
           `| total = ${covering.producedWeight.toFixed(3)} kg`
         );
 
+        // Hydrate the new entry's enteredBy so the response carries
+        // the operator name without a second round-trip.
+        const refreshed = await Covering.findById(covering._id)
+          .populate({ path: "beamEntries.enteredBy", select: "name role" })
+          .session(session)
+          .lean();
+        const newest = refreshed.beamEntries[refreshed.beamEntries.length - 1];
+
         resp = {
-          beamEntry:      covering.beamEntries[covering.beamEntries.length - 1],
+          beamEntry:      newest,
           producedWeight: covering.producedWeight,
           totalBeams:     covering.beamEntries.length,
           fingerprint:    fp,
@@ -371,14 +345,6 @@ router.post(
     }
   })
 );
-
-// ══════════════════════════════════════════════════════════════
-//  7.  DELETE BEAM ENTRY
-//      DELETE /covering/beam-entry?coveringId=<id>&entryId=<id>
-//
-//  Removes a single beam entry by its _id and recalculates
-//  producedWeight. Only allowed on open / in_progress coverings.
-// ══════════════════════════════════════════════════════════════
 
 router.delete(
   "/beam-entry",

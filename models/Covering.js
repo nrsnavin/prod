@@ -23,6 +23,8 @@ const ElasticQtySchema = new mongoose.Schema(
  * 🔹 Beam Entry Sub-Schema
  *    Records each individual beam produced during covering.
  *    weight is in kg. note is optional.
+ *    enteredBy is the User who recorded the entry — used for the
+ *    printable beam label ("Entered by: <name>").
  */
 const BeamEntrySchema = new mongoose.Schema(
   {
@@ -42,6 +44,10 @@ const BeamEntrySchema = new mongoose.Schema(
     enteredAt: {
       type: Date,
       default: Date.now,
+    },
+    enteredBy: {
+      type: mongoose.Types.ObjectId,
+      ref: "User",
     },
   },
   { timestamps: false }
