@@ -2,19 +2,12 @@ const express = require("express");
 const mongoose = require("mongoose");
 const path = require("path");
 
-// Resolve config/.env relative to THIS file, not process.cwd().
-// nodemon (and `node index.js`) sometimes runs from a parent directory,
-// in which case a bare "config/.env" path silently misses the file and
-// PORT / MONGO_URL come back undefined.
 if (process.env.NODE_ENV !== "PRODUCTION") {
   require("dotenv").config({
     path: path.resolve(__dirname, "config/.env"),
   });
 }
 
-// Register the global audit-fields plugin BEFORE any model is required.
-// This adds createdBy/updatedBy + auto-populating pre-save hooks to every
-// schema, so every action is fingerprinted to the authenticated user.
 const auditFields = require("./models/plugins/auditFields.js");
 mongoose.plugin(auditFields);
 
@@ -62,20 +55,16 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 
-// Optional auth: when the request has a valid JWT cookie, attach req.user
-// AND run downstream middleware in a user-context store so schema hooks
-// can stamp createdBy/updatedBy automatically. Doesn't block unauth routes.
 app.use(setUserContext);
 
 
-// Mount-level admin gate for the all-ADMIN router groups. Doing this here
-// (instead of inside every router file) means: one place to audit, no chance
-// of forgetting to add the middleware to a freshly added route, and the
-// router files stay focused on business logic.
+// Mount-level admin gate for the all-ADMIN router groups.
 //
 // Mixed-auth routers (attendance, payroll, bonus, shift, packing, wastage,
-// machine-issue) wire isAuthenticated + per-route isAdmin('admin') inside
-// the router itself — they're NOT in this admin block.
+// machine-issue, warping, covering) wire isAuthenticated + per-route
+// isAdmin('admin') inside the router itself — they're NOT in this admin
+// block. Warping and covering have employee-facing GETs (list, detail,
+// warpingPlan, plan-context) so workers can see their assigned jobs.
 //
 // Per-route auth routers (user, announcement, feedback, leave, dashboard)
 // also handle their own middleware to allow login + employee-facing reads.
@@ -92,10 +81,10 @@ app.use("/api/v2/supplier",    ADMIN_GATE, supplier);
 app.use("/api/v2/bonus",       bonus);
 app.use("/api/v2/order",       ADMIN_GATE, order);
 app.use("/api/v2/materials",   ADMIN_GATE, material);
-app.use("/api/v2/warping",     ADMIN_GATE, warping);
+app.use("/api/v2/warping",     warping);
 app.use("/api/v2/wastage",     wastage);
 app.use("/api/v2/attendance",  attendence);
-app.use("/api/v2/covering",    ADMIN_GATE, covering);
+app.use("/api/v2/covering",    covering);
 app.use("/api/v2/job",         ADMIN_GATE, job);
 app.use("/api/v2/packing",     packing);
 app.use("/api/v2/production",  ADMIN_GATE, production);
