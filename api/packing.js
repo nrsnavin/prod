@@ -31,9 +31,11 @@ function packingDetailQuery(query) {
     });
 }
 
+// Packing operators need this to populate the job dropdown on their
+// entry form. AUTH is enough — row content is non-sensitive (job # +
+// elastic name only).
 router.get(
   "/jobs-packing",
-  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const jobs = await JobOrder.find({
           status: { $in: ["weaving", "finishing", "checking"] },
@@ -97,7 +99,6 @@ router.get(
   })
 );
 
-// Floor entry — packers (employees) record their own work.
 router.post(
   "/create-packing",
   catchAsyncErrors(async (req, res, next) => {
@@ -207,9 +208,10 @@ router.post(
   })
 );
 
+// Operators need this to pick checkedBy / packedBy from their
+// department. Returns only id + name — no sensitive fields.
 router.get(
   "/employees-by-department/:dept",
-  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const employees = await Employee.find({
       department: req.params.dept,

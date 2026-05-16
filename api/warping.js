@@ -13,15 +13,14 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
+// All warping routes require login. Workers in the `warping` department
+// need to read /list, /detail, /warpingPlan and /plan-context to monitor
+// their assigned jobs in the employee app. Mutations stay admin-only.
+router.use(isAuthenticated);
 
-// ── 1. CREATE WARPING ──────────────────────────────────────────
-//  After creating the Warping doc, looks at every elastic in the
-//  job for a warpingPlanTemplate. The FIRST elastic that has one
-//  wins — its template is used to auto-create the WarpingPlan.
-//  This is non-fatal: if no template is found, or creation fails,
-//  the warping is still returned without a plan.
-router.post("/create", catchAsyncErrors(async (req, res, next) => {
+router.post("/create", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
   const { jobId, elasticOrdered } = req.body;
   if (!jobId) return next(new ErrorHandler("Job ID is required", 400));
 
@@ -36,10 +35,8 @@ router.post("/create", catchAsyncErrors(async (req, res, next) => {
   job.warping = warping._id;
   await job.save();
 
-  // ── Auto-create WarpingPlan from elastic template ────────────
   let autoPlan = null;
   try {
-    // Re-fetch job populated with elastic → warpingPlanTemplate
     const jobFull = await JobOrder.findById(jobId).populate({
       path:   "elastics.elastic",
       select: "warpingPlanTemplate",
@@ -62,19 +59,16 @@ router.post("/create", catchAsyncErrors(async (req, res, next) => {
         });
         warping.warpingPlan = autoPlan._id;
         await warping.save();
-        break; // first-wins
+        break;
       }
     }
   } catch (planErr) {
-    // Non-fatal — operator can create plan manually
     console.warn("Auto warping plan creation failed:", planErr.message);
   }
 
   res.status(201).json({ success: true, warping, autoPlan });
 }));
 
-
-// ── 2. LIST WARPINGS ───────────────────────────────────────────
 router.get("/list", catchAsyncErrors(async (req, res, next) => {
   const { status = "open", search = "", page = 1, limit = 20 } = req.query;
   const skip = (Number(page) - 1) * Number(limit);
@@ -115,8 +109,6 @@ router.get("/list", catchAsyncErrors(async (req, res, next) => {
   });
 }));
 
-
-// ── 3. GET WARPING DETAIL ──────────────────────────────────────
 router.get("/detail/:id", catchAsyncErrors(async (req, res, next) => {
   const warping = await Warping.findById(req.params.id)
     .populate({ path: "job", select: "jobOrderNo status date" })
@@ -138,14 +130,8 @@ router.get("/detail/:id", catchAsyncErrors(async (req, res, next) => {
   res.json({ success: true, warping });
 }));
 
-
-// ── 4. START WARPING ───────────────────────────────────────────
-//
-//  CHANGED: was PUT — switched to POST so the actor body always
-//  reaches the server (some reverse proxies strip PUT bodies).
-//  `id` now rides in the body too.
-router.post("/start", catchAsyncErrors(async (req, res, next) => {
-  const id = req.body.id ?? req.query.id;            // accept both for compat
+router.post("/start", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+  const id = req.body.id ?? req.query.id;
   if (!id) return next(new ErrorHandler("id is required", 400));
 
   const session = await mongoose.startSession();
@@ -163,7 +149,6 @@ router.post("/start", catchAsyncErrors(async (req, res, next) => {
       warping.status = "in_progress";
       await warping.save({ session });
 
-      // 🪪 Fingerprint on the parent JobOrder (in-tx via .save())
       const fp = buildFingerprint(ACTION_CODES.WARPING_STARTED, {
         entityId: warping.job,
         actor:    actorFromRequest(req),
@@ -185,14 +170,7 @@ router.post("/start", catchAsyncErrors(async (req, res, next) => {
   }
 }));
 
-
-// ── 5. COMPLETE WARPING ────────────────────────────────────────
-//
-//  CHANGED: PUT → POST (same proxy reasoning as /start).
-//  ROLLUP : on completion, mirror a WARPING_COMPLETED fingerprint
-//           onto the parent Order so the order timeline shows the
-//           milestone too. Granular events stay on the job only.
-router.post("/complete", catchAsyncErrors(async (req, res, next) => {
+router.post("/complete", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
   const id = req.body.id ?? req.query.id;
   if (!id) return next(new ErrorHandler("id is required", 400));
 
@@ -209,8 +187,6 @@ router.post("/complete", catchAsyncErrors(async (req, res, next) => {
       warping.completedDate = new Date();
       await warping.save({ session });
 
-      // checkAndAdvanceToWeaving runs its own writes — keep it inside
-      // the session window so any side-effects participate in the tx.
       const { advanced, jobStatus } = await checkAndAdvanceToWeaving(warping.job);
 
       const actor = actorFromRequest(req);
@@ -230,7 +206,6 @@ router.post("/complete", catchAsyncErrors(async (req, res, next) => {
         job.fingerprints.push(fp);
         await job.save({ session });
 
-        // 🪪 Mirror milestone onto parent Order timeline
         if (job.order) {
           const order = await Order.findById(job.order).session(session);
           if (order) {
@@ -264,9 +239,7 @@ router.post("/complete", catchAsyncErrors(async (req, res, next) => {
   }
 }));
 
-
-// ── 6. CANCEL WARPING ──────────────────────────────────────────
-router.patch("/cancel/:id", catchAsyncErrors(async (req, res, next) => {
+router.patch("/cancel/:id", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
   const warping = await Warping.findById(req.params.id);
   if (!warping) return next(new ErrorHandler("Warping not found", 404));
   warping.status = "cancelled";
@@ -274,8 +247,6 @@ router.patch("/cancel/:id", catchAsyncErrors(async (req, res, next) => {
   res.json({ success: true, warping });
 }));
 
-
-// ── 7. GET WARPING PLAN BY WARPING ID ─────────────────────────
 router.get("/warpingPlan", catchAsyncErrors(async (req, res, next) => {
   if (!req.query.id) return next(new ErrorHandler("id is required", 400));
 
@@ -287,9 +258,7 @@ router.get("/warpingPlan", catchAsyncErrors(async (req, res, next) => {
   res.json({ exists: true, plan });
 }));
 
-
-// ── 8. CREATE WARPING PLAN (manual) ───────────────────────────
-router.post("/warpingPlan/create", catchAsyncErrors(async (req, res, next) => {
+router.post("/warpingPlan/create", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
   const { warpingId, beams, remarks } = req.body;
   if (!warpingId)     return next(new ErrorHandler("warpingId is required", 400));
   if (!beams?.length) return next(new ErrorHandler("At least one beam is required", 400));
@@ -316,8 +285,6 @@ router.post("/warpingPlan/create", catchAsyncErrors(async (req, res, next) => {
   res.status(201).json({ success: true, plan: populated });
 }));
 
-
-// ── 9. PLAN CONTEXT — WARP YARNS + PREFILL TEMPLATE FOR JOB ──
 router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
   const job = await JobOrder.findById(req.params.jobId)
     .populate({
@@ -334,7 +301,6 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
 
   if (!job) return next(new ErrorHandler("Job not found", 404));
 
-  // ── Collect all unique warp yarns across all elastics ──────
   const warpMap = new Map();
   job.elastics.forEach((e) => {
     if (!e.elastic) return;
@@ -347,7 +313,6 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
     });
   });
 
-  // ── Normalise helper ───────────────────────────────────────
   const normaliseBeams = (tpl, warpMap) => {
     return (tpl.beams || []).map((beam) => ({
       beamNo:    beam.beamNo,
@@ -366,7 +331,6 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
     })).filter((b) => b.sections.length > 0);
   };
 
-  // ── Collect per-elastic templates (ALL elastics that have one) ─
   const elasticTemplates = [];
   for (const entry of (job.elastics || [])) {
     const elastic = entry?.elastic;
@@ -382,17 +346,15 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
     });
   }
 
-  // First elastic template also used as the auto-prefill
   const prefillTemplate = elasticTemplates.length > 0 ? elasticTemplates[0] : null;
 
   res.json({
     success:          true,
     jobId:            job._id,
     warpYarns:        Array.from(warpMap.values()),
-    prefillTemplate,   // first elastic's template — used to auto-fill on page open
-    elasticTemplates,  // all elastic templates — used for per-elastic copy buttons
+    prefillTemplate,
+    elasticTemplates,
   });
 }));
-
 
 module.exports = router;

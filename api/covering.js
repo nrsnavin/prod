@@ -6,11 +6,18 @@ const mongoose          = require("mongoose");
 const Covering          = require("../models/Covering");
 const JobOrder          = require("../models/JobOrder");
 const Order             = require("../models/Order");
-const Elastic           = require("../models/Elastic");   // keeps model in registry for nested populate
+const Elastic           = require("../models/Elastic");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
+
+// All covering routes require login. Workers in the `covering` (and
+// `warping`) departments need to read /list and /detail to monitor
+// their jobs; covering operators also POST /beam-entry to record their
+// own work. Mutations stay admin-only.
+router.use(isAuthenticated);
 
 router.get(
   "/list",
@@ -65,11 +72,6 @@ router.get(
   })
 );
 
-// ═════════════════════════════════════════════════════════════
-//  COVERING DETAIL
-//  Populates beamEntries.enteredBy.name so the admin app can print
-//  the operator on each beam label.
-// ═════════════════════════════════════════════════════════════
 router.get(
   "/detail",
   catchAsyncErrors(async (req, res, next) => {
@@ -107,6 +109,7 @@ router.get(
 
 router.post(
   "/start",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.body;
     if (!id) return next(new ErrorHandler("Covering ID required", 400));
@@ -151,6 +154,7 @@ router.post(
 
 router.post(
   "/complete",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const { id, remarks } = req.body;
     if (!id) return next(new ErrorHandler("Covering ID required", 400));
@@ -228,6 +232,7 @@ router.post(
 
 router.post(
   "/cancel",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const { id, remarks } = req.body;
     if (!id) return next(new ErrorHandler("Covering ID required", 400));
@@ -249,12 +254,7 @@ router.post(
   })
 );
 
-// ═════════════════════════════════════════════════════════════
-//  ADD BEAM ENTRY
-//  Stores enteredBy = req.user._id so the printed beam label can
-//  show the operator's name. Returns the new entry with enteredBy
-//  populated so the admin app doesn't need a second round-trip.
-// ═════════════════════════════════════════════════════════════
+// Operators in the covering department record their own beam weights.
 router.post(
   "/beam-entry",
   catchAsyncErrors(async (req, res, next) => {
@@ -286,8 +286,6 @@ router.post(
           weight:    w,
           note:      note?.trim() || "",
           enteredAt: new Date(),
-          // Server-trusted operator from the auth gate. Admins printing
-          // the label want to see who actually weighed the beam.
           enteredBy: req.user?._id || undefined,
         });
 
@@ -322,8 +320,6 @@ router.post(
           `| total = ${covering.producedWeight.toFixed(3)} kg`
         );
 
-        // Hydrate the new entry's enteredBy so the response carries
-        // the operator name without a second round-trip.
         const refreshed = await Covering.findById(covering._id)
           .populate({ path: "beamEntries.enteredBy", select: "name role" })
           .session(session)
@@ -348,6 +344,7 @@ router.post(
 
 router.delete(
   "/beam-entry",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const { coveringId, entryId } = req.query;
 
