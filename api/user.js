@@ -1,5 +1,7 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const User = require("../models/User.js");
+const Employee = require("../models/Employee.js");
 const router = express.Router();
 const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -116,6 +118,103 @@ router.get(
         email:    user.email,
         role:     user.role,
         employee: user.employee || null,
+      },
+    });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  PATCH /user/me
+//
+//  Lets the authenticated user edit their own profile from the
+//  employee mobile app's "Edit Profile" sheet. Accepts:
+//    - name         → updates User.name AND linked Employee.name
+//    - email        → updates User.email (validated + uniqueness checked)
+//    - phoneNumber  → updates linked Employee.phoneNumber
+//
+//  All writes run inside a mongoose session so the User and the
+//  linked Employee stay in sync (no half-updated state on crash).
+//  Returns the same shape as GET /me so the client can hydrate
+//  LoginController.user directly off the response.
+// ─────────────────────────────────────────────────────────────
+router.patch(
+  "/me",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res, next) => {
+    const { name, email, phoneNumber } = req.body || {};
+
+    // Trim now so downstream uniqueness / regex checks see the
+    // canonical form the user will actually be saved with.
+    const cleanName  = typeof name === "string" ? name.trim() : undefined;
+    const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : undefined;
+    const cleanPhone = typeof phoneNumber === "string" ? phoneNumber.trim() : undefined;
+
+    if (cleanEmail !== undefined) {
+      // Simple but strict enough: requires user@host.tld, no spaces.
+      const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRe.test(cleanEmail)) {
+        return next(new ErrorHandler("Invalid email format", 400));
+      }
+      // Reject if another User already owns this email. We exclude
+      // the current user so a no-op email submit still succeeds.
+      const existing = await User.findOne({
+        email: cleanEmail,
+        _id: { $ne: req.user.id },
+      }).lean();
+      if (existing) {
+        return next(new ErrorHandler("Email already in use", 409));
+      }
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const userUpdate = {};
+        if (cleanName  !== undefined) userUpdate.name  = cleanName;
+        if (cleanEmail !== undefined) userUpdate.email = cleanEmail;
+        if (Object.keys(userUpdate).length) {
+          await User.updateOne(
+            { _id: req.user.id },
+            { $set: userUpdate },
+            { session, runValidators: true },
+          );
+        }
+
+        // Mirror name + phone onto the linked Employee so that
+        // payroll / shift screens (which key off Employee) show
+        // the new values too.
+        const user = await User.findById(req.user.id).select("employee").lean();
+        if (user && user.employee) {
+          const empUpdate = {};
+          if (cleanName  !== undefined) empUpdate.name        = cleanName;
+          if (cleanPhone !== undefined) empUpdate.phoneNumber = cleanPhone;
+          if (Object.keys(empUpdate).length) {
+            await Employee.updateOne(
+              { _id: user.employee },
+              { $set: empUpdate },
+              { session, runValidators: true },
+            );
+          }
+        }
+      });
+    } finally {
+      session.endSession();
+    }
+
+    // Return the canonical /me shape so the client can swap state.
+    const fresh = await User.findById(req.user.id)
+      .populate("employee", "name department phoneNumber role hourlyRate")
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      user: {
+        id:       fresh._id,
+        name:     fresh.name,
+        email:    fresh.email,
+        role:     fresh.role,
+        employee: fresh.employee || null,
       },
     });
   })
