@@ -7,9 +7,10 @@ const moment           = require("moment");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 
-const Wastage   = require("../models/Wastage");
-const JobOrder  = require("../models/JobOrder");
-const Employee  = require("../models/Employee");
+const Wastage     = require("../models/Wastage");
+const JobOrder    = require("../models/JobOrder");
+const Employee    = require("../models/Employee");
+const ShiftDetail = require("../models/ShiftDetail");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
 router.use(isAuthenticated);
@@ -92,6 +93,37 @@ router.get(
       .sort({ createdAt: -1 });
 
     res.json({ success: true, jobs });
+  })
+);
+
+// ═════════════════════════════════════════════════════════════
+//  JOB OPERATORS  — GET /wastage/job-operators?id=<jobId>
+//
+//  Returns the distinct list of operators who worked on this job
+//  (based on ShiftDetail.employee). Mirrors /api/v2/job/job-operators
+//  but lives on the wastage router so the checking-dept worker (who
+//  doesn't have access to the admin job router) can populate the
+//  operator dropdown when logging wastage on someone else's work.
+// ═════════════════════════════════════════════════════════════
+router.get(
+  "/job-operators",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.query;
+    if (!id) return next(new ErrorHandler("Job ID is required", 400));
+
+    const shifts = await ShiftDetail.find({ job: id })
+      .populate("employee", "name department");
+
+    const seen = new Set();
+    const operators = [];
+    for (const s of shifts) {
+      if (s.employee && !seen.has(s.employee._id.toString())) {
+        seen.add(s.employee._id.toString());
+        operators.push(s.employee);
+      }
+    }
+
+    res.json({ success: true, operators });
   })
 );
 
