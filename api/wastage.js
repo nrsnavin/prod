@@ -2,6 +2,7 @@
 
 const express          = require("express");
 const router           = express.Router();
+const mongoose         = require("mongoose");
 const moment           = require("moment");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -12,6 +13,7 @@ const JobOrder    = require("../models/JobOrder");
 const Employee    = require("../models/Employee");
 const ShiftDetail = require("../models/ShiftDetail");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { applyMovement } = require("../utils/elasticStock");
 
 router.use(isAuthenticated);
 
@@ -28,56 +30,81 @@ router.post(
     if (typeof quantity !== "number" || quantity <= 0)
       return next(new ErrorHandler("quantity must be a positive number", 400));
 
-    const [job, employee] = await Promise.all([
-      JobOrder.findById(jobId),
-      Employee.findById(employeeId),
-    ]);
+    const session = await mongoose.startSession();
+    try {
+      let wastageId;
+      await session.withTransaction(async () => {
+        const [job, employee] = await Promise.all([
+          JobOrder.findById(jobId).session(session),
+          Employee.findById(employeeId).session(session),
+        ]);
 
-    if (!job)      return next(new ErrorHandler("Job not found", 404));
-    if (!employee) return next(new ErrorHandler("Employee not found", 404));
+        if (!job)      throw new ErrorHandler("Job not found", 404);
+        if (!employee) throw new ErrorHandler("Employee not found", 404);
 
-    if (!["weaving", "finishing", "checking"].includes(job.status)) {
-      return next(new ErrorHandler(
-        `Wastage can only be recorded during weaving, finishing, or checking (current: "${job.status}")`,
-        400
-      ));
+        if (!["weaving", "finishing", "checking"].includes(job.status)) {
+          throw new ErrorHandler(
+            `Wastage can only be recorded during weaving, finishing, or checking (current: "${job.status}")`,
+            400
+          );
+        }
+
+        const idx = job.wastageElastic.findIndex(
+          (x) => x.elastic.toString() === elasticId.toString()
+        );
+        if (idx === -1) {
+          throw new ErrorHandler("Elastic is not part of this job", 400);
+        }
+
+        const [wastage] = await Wastage.create([{
+          job: jobId, elastic: elasticId, employee: employeeId,
+          quantity, penalty: penalty || 0, reason: reason.trim(),
+        }], { session });
+
+        job.wastageElastic[idx].quantity += quantity;
+        job.wastages.push(wastage._id);
+        await job.save({ session });
+
+        // ── Stock OUT — wastage reduces on-hand stock ─────────
+        await applyMovement(session, {
+          elasticId,
+          type:     "WASTAGE_OUT",
+          quantity: -Number(quantity),
+          refType:  "Wastage",
+          refId:    wastage._id,
+          reason:   reason.trim(),
+          by:       req.user?._id,
+        });
+
+        wastageId = wastage._id;
+      });
+
+      // Performance recompute — kept outside the transaction since
+      // it's a derived figure across the whole employee history.
+      const employee = await Employee.findById(employeeId);
+      const [totalWastage] = await Promise.all([
+        Wastage.aggregate([
+          { $match: { employee: employee._id } },
+          { $group: { _id: null, total: { $sum: "$quantity" } } },
+        ]),
+      ]);
+      const tw = totalWastage[0]?.total || 0;
+      if (employee.performance !== undefined && tw > 0) {
+        employee.performance = Math.round(tw * 10) / 10;
+        await employee.save();
+      }
+
+      const populated = await Wastage.findById(wastageId)
+        .populate("job",      "jobOrderNo status")
+        .populate("elastic",  "name")
+        .populate("employee", "name department");
+
+      res.status(201).json({ success: true, wastage: populated });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-
-    const idx = job.wastageElastic.findIndex(
-      (x) => x.elastic.toString() === elasticId.toString()
-    );
-    if (idx === -1) {
-      return next(new ErrorHandler("Elastic is not part of this job", 400));
-    }
-
-    const wastage = await Wastage.create({
-      job: jobId, elastic: elasticId, employee: employeeId,
-      quantity, penalty: penalty || 0, reason: reason.trim(),
-    });
-
-    job.wastageElastic[idx].quantity += quantity;
-    job.wastages.push(wastage._id);
-    await job.save();
-
-    const [totalWastage] = await Promise.all([
-      Wastage.aggregate([
-        { $match: { employee: employee._id } },
-        { $group: { _id: null, total: { $sum: "$quantity" } } },
-      ]),
-    ]);
-
-    const tw = totalWastage[0]?.total || 0;
-    if (employee.performance !== undefined && tw > 0) {
-      employee.performance = Math.round(tw * 10) / 10;
-      await employee.save();
-    }
-
-    const populated = await Wastage.findById(wastage._id)
-      .populate("job",      "jobOrderNo status")
-      .populate("elastic",  "name")
-      .populate("employee", "name department");
-
-    res.status(201).json({ success: true, wastage: populated });
   })
 );
 
