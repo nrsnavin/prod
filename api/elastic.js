@@ -1,12 +1,22 @@
-const express = require("express");
-const router = express.Router();
+const express  = require("express");
+const router   = express.Router();
+const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const ErrorHandler = require("../utils/ErrorHandler");
+const ErrorHandler     = require("../utils/ErrorHandler");
 
 const Elastic  = require("../models/Elastic");
 const Costing  = require("../models/Costing");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { applyMovement } = require("../utils/elasticStock");
+const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+
+// Mixed-auth router. Mount in app.js without ADMIN_GATE — we
+// require isAuthenticated for everything here and add isAdmin
+// per-route on writes. Mirrors the warping/covering/packing/shift
+// pattern in this same backend.
+router.use(isAuthenticated);
 
 // ── Helper: full populate for elastic ─────────────────────────
 const _populate = (q) =>
@@ -45,6 +55,7 @@ function _normalisePlan(template) {
 // ────────────────────────────────────────────────────────────────
 router.post(
   "/create-elastic",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     try {
       const elasticData = req.body;
@@ -129,11 +140,160 @@ router.get(
 
 
 // ────────────────────────────────────────────────────────────────
+//  STOCK MAP — admin overview of every elastic's stock
+//  GET /api/v2/elastic/stock-summary
+//
+//  IMPORTANT: must appear before /:id/stock so '/stock-summary'
+//  is not captured as an :id.
+// ────────────────────────────────────────────────────────────────
+router.get(
+  "/stock-summary",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const elastics = await Elastic.find()
+      .select("name stock quantityProduced stockMovements")
+      .lean();
+
+    const summary = elastics.map((e) => {
+      const moves = e.stockMovements || [];
+      const last  = moves.length > 0 ? moves[moves.length - 1] : null;
+      return {
+        elasticId:        e._id,
+        name:             e.name,
+        stock:            Number(e.stock) || 0,
+        quantityProduced: Number(e.quantityProduced) || 0,
+        lastMovementAt:   last ? last.date : null,
+        lastMovementType: last ? last.type : null,
+      };
+    });
+
+    summary.sort((a, b) => (b.stock || 0) - (a.stock || 0));
+    res.json({ success: true, count: summary.length, summary });
+  })
+);
+
+
+// ────────────────────────────────────────────────────────────────
+//  STOCK DETAIL — current stock + paginated movement ledger
+//  GET /api/v2/elastic/:id/stock?page=&limit=
+//
+//  AUTH (not ADMIN) so worker portals can render a stock screen.
+// ────────────────────────────────────────────────────────────────
+router.get(
+  "/:id/stock",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid elastic id", 400));
+    }
+
+    const page  = Math.max(1, Number(req.query.page)  || 1);
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+
+    const elastic = await Elastic.findById(id)
+      .select("name stock quantityProduced stockMovements")
+      .lean();
+    if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
+
+    const allMoves = (elastic.stockMovements || [])
+      .slice()
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    const total      = allMoves.length;
+    const start      = (page - 1) * limit;
+    const movements  = allMoves.slice(start, start + limit);
+
+    res.json({
+      success: true,
+      elastic: {
+        _id:              elastic._id,
+        name:             elastic.name,
+        stock:            Number(elastic.stock) || 0,
+        quantityProduced: Number(elastic.quantityProduced) || 0,
+      },
+      stock:            Number(elastic.stock) || 0,
+      quantityProduced: Number(elastic.quantityProduced) || 0,
+      movements,
+      page,
+      limit,
+      total,
+    });
+  })
+);
+
+
+// ────────────────────────────────────────────────────────────────
+//  MANUAL ADJUST — admin correction / opening balance / theft
+//  POST /api/v2/elastic/:id/adjust-stock   { delta, reason }
+// ────────────────────────────────────────────────────────────────
+router.post(
+  "/:id/adjust-stock",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    const { delta, reason } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid elastic id", 400));
+    }
+    const deltaNum = Number(delta);
+    if (!Number.isFinite(deltaNum) || deltaNum === 0) {
+      return next(new ErrorHandler("delta must be a non-zero number", 400));
+    }
+    if (!reason || !String(reason).trim()) {
+      return next(new ErrorHandler("reason is required", 400));
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const { elastic, movement } = await applyMovement(session, {
+          elasticId: id,
+          type:      "MANUAL_ADJUST",
+          quantity:  deltaNum,
+          refType:   "ManualAdjust",
+          reason:    String(reason).trim(),
+          by:        req.user?._id,
+        });
+
+        const fp = buildFingerprint(ACTION_CODES.ELASTIC_STOCK_ADJUST, {
+          entityId: elastic._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            elasticName: elastic.name,
+            requestedDelta: deltaNum,
+            appliedDelta:   movement.quantity,
+            balance:        movement.balance,
+            reason:         String(reason).trim(),
+          },
+        });
+
+        resp = {
+          elasticId: elastic._id,
+          name:      elastic.name,
+          stock:     elastic.stock,
+          movement,
+          fingerprint: fp,
+        };
+      });
+      res.json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
+  })
+);
+
+
+// ────────────────────────────────────────────────────────────────
 //  UPDATE ELASTIC
 //  Also accepts warpingPlanTemplate — pass null/empty to clear.
 // ────────────────────────────────────────────────────────────────
 router.put(
   "/update-elastic",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     try {
       const elasticData = req.body;
@@ -212,13 +372,10 @@ router.put(
 // ────────────────────────────────────────────────────────────────
 //  ADD / UPDATE WARPING PLAN TEMPLATE  (standalone — called from
 //  elastic detail page when plan was skipped at creation time)
-//
-//  PUT /elastic/warping-plan-template
-//  Body: { elasticId, template: { noOfBeams, beams: [...] } }
-//        Pass template: null to clear.
 // ────────────────────────────────────────────────────────────────
 router.put(
   "/warping-plan-template",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const { elasticId, template } = req.body;
     if (!elasticId) return next(new ErrorHandler("elasticId is required", 400));
@@ -241,20 +398,10 @@ router.put(
 
 // ────────────────────────────────────────────────────────────────
 //  RECALCULATE COST  (manual trigger from detail page)
-//
-//  POST /elastic/recalculate-elastic-cost
-//  Body: { elasticId, conversionCost? }
-//
-//  Changes vs original:
-//  • Uses _populate() so raw material prices are always fresh from DB
-//  • Accepts an optional conversionCost override from the client
-//    (allows the user to change conversion cost inline)
-//  • Updates costing.date to now (tracks when last recalculated)
-//  • Returns the full updated costing object so Flutter can
-//    update the UI without a second fetch
 // ────────────────────────────────────────────────────────────────
 router.post(
   "/recalculate-elastic-cost",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const { elasticId, conversionCost: convCostOverride } = req.body;
 
@@ -262,8 +409,6 @@ router.post(
       return next(new ErrorHandler("elasticId is required", 400));
     }
 
-    // ── Load with full population so calculateElasticCosting
-    //    receives populated raw material objects (with current price)
     const elastic = await _populate(Elastic.findById(elasticId));
     if (!elastic) {
       return res.status(404).json({ success: false, message: "Elastic not found" });
@@ -273,10 +418,6 @@ router.post(
       const { materialCost, details } =
         await calculateElasticCosting(elastic.toObject());
 
-      // Determine conversion cost:
-      //   1. Use override from request body if supplied
-      //   2. Fall back to existing costing value
-      //   3. Default to 1.25
       const existingCosting = elastic.costing
         ? await Costing.findById(
             typeof elastic.costing === "object"
@@ -295,7 +436,6 @@ router.post(
       let updatedCosting;
 
       if (existingCosting) {
-        // Update in place
         updatedCosting = await Costing.findByIdAndUpdate(
           existingCosting._id,
           {
@@ -304,13 +444,12 @@ router.post(
               conversionCost,
               details,
               totalCost,
-              date: new Date(),   // mark when last recalculated
+              date: new Date(),
             },
           },
           { new: true }
         );
       } else {
-        // No costing document yet — create one
         updatedCosting = await Costing.create({
           date: new Date(),
           elastic: elastic._id,
@@ -323,8 +462,6 @@ router.post(
         elastic.costing = updatedCosting._id;
         await elastic.save();
       }
-
-    
 
       res.json({ success: true, costing: updatedCosting });
     } catch (err) {
@@ -340,6 +477,7 @@ router.post(
 // ────────────────────────────────────────────────────────────────
 router.delete(
   "/delete-elastic",
+  isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const elastic = await Elastic.findById(req.query.id);
     if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
