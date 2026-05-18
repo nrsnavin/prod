@@ -38,9 +38,13 @@ const ShiftDetailSchema = new mongoose.Schema(
     },
 
     // 🔄 STATUS
+    //   open                 – created, no submission yet
+    //   running              – legacy in-progress
+    //   pending_verification – worker submitted; awaiting admin verify
+    //   closed               – admin verified; canonical numbers cascaded
     status: {
       type: String,
-      enum: ["open", "running", "closed"],
+      enum: ["open", "running", "pending_verification", "closed"],
       default: "open",
     },
 
@@ -58,10 +62,29 @@ const ShiftDetailSchema = new mongoose.Schema(
       default: "00:00:00",
     },
 
-    // 📏 TOTAL PRODUCTION (METERS)
+    // 📏 TOTAL PRODUCTION (METERS) — admin-blessed canonical value
     productionMeters: {
       type: Number,
       default: 0,
+    },
+
+    // ── Worker's submitted (pending) values ──────────────────
+    // Captured at worker submit time but NOT cascaded into
+    // JobOrder/Order/ShiftPlan until an admin verifies.
+    submittedProductionMeters: { type: Number },
+    submittedTimer:            { type: String },
+    submittedFeedback:         { type: String },
+    submittedAt:               { type: Date   },
+    submittedBy: {
+      type: mongoose.Types.ObjectId,
+      ref: "User",
+    },
+
+    // ── Admin verification audit ─────────────────────────────
+    verifiedAt: { type: Date },
+    verifiedBy: {
+      type: mongoose.Types.ObjectId,
+      ref: "User",
     },
 
     // 🧵 HEAD → ELASTIC MAP (IMPORTANT)
