@@ -23,6 +23,104 @@ function normDate(raw) {
   return new Date(new Date(raw).setHours(0, 0, 0, 0));
 }
 
+// ────────────────────────────────────────────────────────────────
+//  applyProductionCascade
+//
+//  Shared helper for cascading admin-verified shift production
+//  numbers into JobOrder.producedElastic / Order.producedElastic
+//  / Order.pendingElastic / ShiftPlan.totalProduction.
+//
+//  Worker write paths now ONLY land submitted* values and flip the
+//  status to 'pending_verification' — they do not call this. Only
+//  the admin verify endpoint cascades, using the admin's final
+//  numbers.
+// ────────────────────────────────────────────────────────────────
+async function applyProductionCascade(
+  session,
+  { shift, machine, productionMeters, timer, feedback, req }
+) {
+  // `productionMeters` here is the per-head value the admin entered.
+  // The historical cascade multiplies by `machine.NoOfHead` for the
+  // job/order/plan totals, mirroring the original /enter-shift-production.
+  const prodValue = Number(productionMeters);
+  if (!Number.isFinite(prodValue) || prodValue < 0) {
+    throw new ErrorHandler("productionMeters must be a non-negative number", 400);
+  }
+
+  const machineDoc = machine
+    ? machine
+    : await Machine.findById(shift.machine).session(session);
+
+  if (!machineDoc?.orderRunning) {
+    throw new ErrorHandler("Machine has no running job", 400);
+  }
+
+  const job = await JobOrder.findById(machineDoc.orderRunning._id || machineDoc.orderRunning).session(session);
+  if (!job) throw new ErrorHandler("Job not found", 404);
+
+  const elasticProductionMap = {};
+  for (const head of (machineDoc.elastics || [])) {
+    const eid = head.elastic.toString();
+    elasticProductionMap[eid] = (elasticProductionMap[eid] || 0) + prodValue;
+  }
+
+  for (const [elasticId, qty] of Object.entries(elasticProductionMap)) {
+    const idx = job.producedElastic.findIndex((e) => e.elastic.toString() === elasticId);
+    if (idx >= 0) job.producedElastic[idx].quantity += qty;
+    else job.producedElastic.push({ elastic: elasticId, quantity: qty });
+  }
+
+  job.elastics.forEach((e, i) => {
+    const planned  = e.quantity;
+    const produced = job.producedElastic[i]?.quantity ?? 0;
+    if (produced > planned && job.producedElastic[i]) job.producedElastic[i].quantity = planned;
+  });
+
+  const fp = buildFingerprint(ACTION_CODES.SHIFT_PRODUCTION_VERIFIED, {
+    entityId: job._id,
+    actor:    actorFromRequest(req),
+    meta: {
+      jobStage: job.status,
+      shiftId: shift._id.toString(),
+      shiftLabel: shift.shift || null,
+      productionMeters: prodValue * (machineDoc?.NoOfHead || 1),
+      production: prodValue,
+      timer: timer || null,
+      machineId: machineDoc?._id?.toString() || null,
+      machineName: machineDoc?.ID || null,
+      feedback: feedback || undefined,
+    },
+  });
+  job.fingerprints.push(fp);
+  await job.save({ session });
+
+  const order = await Order.findById(job.order).session(session);
+  if (order) {
+    for (const p of job.producedElastic) {
+      const orderItem = order.producedElastic.find((o) => o.elastic.toString() === p.elastic.toString());
+      if (orderItem) orderItem.quantity += p.quantity;
+    }
+
+    for (const p of order.pendingElastic) {
+      const produced = order.producedElastic.find((o) => o.elastic.toString() === p.elastic.toString());
+      const ordered  = order.elasticOrdered.find((e) => e.elastic.toString() === p.elastic.toString());
+      if (produced && ordered) {
+        p.quantity = Math.max(0, ordered.quantity - produced.quantity);
+      }
+    }
+
+    await order.save({ session });
+  }
+
+  const sp = await ShiftPlan.findById(shift.shiftPlan).session(session);
+  if (sp) {
+    sp.totalProduction = (sp.totalProduction || 0) + prodValue * (machineDoc?.NoOfHead || 1);
+    await sp.save({ session });
+  }
+
+  return { job, fingerprint: fp, machine: machineDoc };
+}
+
 router.get(
   "/today",
   isAdmin('admin'),
@@ -169,6 +267,13 @@ router.get(
   })
 );
 
+// ────────────────────────────────────────────────────────────────
+//  BULK ENTER PRODUCTION (worker bulk path)
+//
+//  Now sets each shift to 'pending_verification' with submitted*
+//  values only — admin must verify each row before the totals
+//  cascade into JobOrder / Order / ShiftPlan.
+// ────────────────────────────────────────────────────────────────
 router.post('/bulk-enter-production', async (req, res) => {
   try {
     const { entries } = req.body;
@@ -192,7 +297,6 @@ router.post('/bulk-enter-production', async (req, res) => {
 
     const saved   = [];
     const skipped = [];
-    const affectedPlanIds = new Set();
 
     for (const entry of entries) {
       const { id, production, timer = '00:00:00', feedback = '' } = entry;
@@ -204,18 +308,17 @@ router.post('/bulk-enter-production', async (req, res) => {
       if (sd.status === 'closed') { skipped.push({ id, reason: 'Already closed' }); continue; }
 
       await ShiftDetail.findByIdAndUpdate(id, {
-        $set: { productionMeters: prodNum, timer, feedback, status: 'closed' },
+        $set: {
+          submittedProductionMeters: prodNum,
+          submittedTimer:            timer,
+          submittedFeedback:         feedback,
+          submittedAt:               new Date(),
+          submittedBy:               req.user?._id,
+          status:                    'pending_verification',
+        },
       });
 
-      if (sd.shiftPlan) affectedPlanIds.add(sd.shiftPlan.toString());
-
-      saved.push({ id, production: prodNum, status: 'saved' });
-    }
-
-    for (const planId of affectedPlanIds) {
-      const allDetails = await ShiftDetail.find({ shiftPlan: planId }).select('productionMeters').lean();
-      const newTotal = allDetails.reduce((sum, d) => sum + (d.productionMeters || 0), 0);
-      await ShiftPlan.findByIdAndUpdate(planId, { $set: { totalProduction: newTotal } });
+      saved.push({ id, production: prodNum, status: 'pending_verification' });
     }
 
     return res.json({
@@ -282,6 +385,14 @@ router.get(
   })
 );
 
+// ────────────────────────────────────────────────────────────────
+//  WORKER SUBMIT (verification gated)
+//
+//  Worker submits production. We capture the values in submitted*
+//  fields and flip status to 'pending_verification'. Nothing
+//  cascades yet — that happens in /verify-production when an
+//  admin reviews and types the final number.
+// ────────────────────────────────────────────────────────────────
 router.post(
   "/enter-shift-production",
   catchAsyncErrors(async (req, res, next) => {
@@ -295,101 +406,32 @@ router.post(
       return next(new ErrorHandler("production must be a non-negative number", 400));
     }
 
-    const session = await mongoose.startSession();
-    try {
-      let resp;
-      await session.withTransaction(async () => {
-        const shift = await ShiftDetail.findById(id)
-          .populate("machine")
-          .populate({ path: "machine", populate: { path: "orderRunning" } })
-          .session(session);
-
-        if (!shift) throw new ErrorHandler("Shift detail not found", 404);
-        if (shift.status === "closed") throw new ErrorHandler("Shift is already closed", 400);
-
-        const machine = await Machine.findById(shift.machine).session(session);
-        const sp      = await ShiftPlan.findById(shift.shiftPlan).session(session);
-
-        if (!shift.machine?.orderRunning) throw new ErrorHandler("Machine has no running job", 400);
-
-        const job = await JobOrder.findById(shift.machine.orderRunning._id).session(session);
-        if (!job) throw new ErrorHandler("Job not found", 404);
-
-        const elasticProductionMap = {};
-        for (const head of (shift.machine.elastics || [])) {
-          const eid = head.elastic.toString();
-          elasticProductionMap[eid] = (elasticProductionMap[eid] || 0) + prodValue;
-        }
-
-        for (const [elasticId, qty] of Object.entries(elasticProductionMap)) {
-          const idx = job.producedElastic.findIndex((e) => e.elastic.toString() === elasticId);
-          if (idx >= 0) job.producedElastic[idx].quantity += qty;
-          else job.producedElastic.push({ elastic: elasticId, quantity: qty });
-        }
-
-        job.elastics.forEach((e, i) => {
-          const planned  = e.quantity;
-          const produced = job.producedElastic[i]?.quantity ?? 0;
-          if (produced > planned && job.producedElastic[i]) job.producedElastic[i].quantity = planned;
-        });
-
-        const fp = buildFingerprint(ACTION_CODES.SHIFT_PRODUCTION_ENTERED, {
-          entityId: job._id,
-          actor:    actorFromRequest(req),
-          meta: {
-            jobStage: job.status,
-            shiftId: shift._id.toString(), shiftLabel: shift.shift || null,
-            productionMeters: prodValue * (machine?.NoOfHead || 1),
-            production: prodValue, timer: timer || null,
-            machineId: machine?._id?.toString() || null,
-            machineName: machine?.ID || null,
-            feedback: feedback || undefined,
-          },
-        });
-        job.fingerprints.push(fp);
-        await job.save({ session });
-
-        const order = await Order.findById(job.order).session(session);
-        if (order) {
-          for (const p of job.producedElastic) {
-            const orderItem = order.producedElastic.find((o) => o.elastic.toString() === p.elastic.toString());
-            if (orderItem) orderItem.quantity += p.quantity;
-          }
-
-          for (const p of order.pendingElastic) {
-            const produced = order.producedElastic.find((o) => o.elastic.toString() === p.elastic.toString());
-            const ordered = order.elasticOrdered.find((e) => e.elastic.toString() === p.elastic.toString());
-            if (produced && ordered) {
-              p.quantity = Math.max(0, ordered.quantity - produced.quantity);
-            }
-          }
-
-          await order.save({ session });
-        }
-
-        shift.productionMeters = prodValue * machine?.NoOfHead || prodValue;
-        shift.production       = prodValue;
-        shift.feedback         = feedback || "";
-        shift.timer            = timer    || 0;
-        shift.status           = "closed";
-        await shift.save({ session });
-
-        if (sp) {
-          sp.totalProduction = (sp.totalProduction || 0) + prodValue * (machine?.NoOfHead || 1);
-          await sp.save({ session });
-        }
-
-        resp = { shift, fingerprint: fp };
-      });
-      res.json({ success: true, ...resp });
-    } catch (err) {
-      return next(err);
-    } finally {
-      session.endSession();
+    const shift = await ShiftDetail.findById(id);
+    if (!shift) return next(new ErrorHandler("Shift detail not found", 404));
+    if (shift.status === "closed") {
+      return next(new ErrorHandler("Shift is already closed", 400));
     }
+
+    shift.submittedProductionMeters = prodValue;
+    shift.submittedTimer            = timer    || "00:00:00";
+    shift.submittedFeedback         = feedback || "";
+    shift.submittedAt               = new Date();
+    shift.submittedBy               = req.user?._id;
+    shift.status                    = "pending_verification";
+    await shift.save();
+
+    res.json({ success: true, shift });
   })
 );
 
+// ────────────────────────────────────────────────────────────────
+//  WORKER UPDATE (verification gated)
+//
+//  Allowed when status is 'open' or 'pending_verification'.
+//  Behaves like /enter-shift-production: lands values in
+//  submitted* fields, sets status to pending_verification, does
+//  NOT cascade.
+// ────────────────────────────────────────────────────────────────
 router.post(
   "/update",
   catchAsyncErrors(async (req, res, next) => {
@@ -398,14 +440,133 @@ router.post(
 
     const shift = await ShiftDetail.findById(shiftId);
     if (!shift) return next(new ErrorHandler("Shift not found", 404));
+    if (!["open", "pending_verification"].includes(shift.status)) {
+      return next(new ErrorHandler(
+        `Shift cannot be updated in status '${shift.status}'`, 400
+      ));
+    }
 
-    shift.production = production ?? shift.production;
-    shift.timer      = timer      ?? shift.timer;
-    shift.feedback   = feedback   ?? shift.feedback;
-    shift.status     = "closed";
+    if (production != null) {
+      const prodValue = Number(production);
+      if (isNaN(prodValue) || prodValue < 0) {
+        return next(new ErrorHandler("production must be a non-negative number", 400));
+      }
+      shift.submittedProductionMeters = prodValue;
+    }
+    if (timer    !== undefined) shift.submittedTimer    = timer;
+    if (feedback !== undefined) shift.submittedFeedback = feedback;
+    shift.submittedAt = new Date();
+    shift.submittedBy = req.user?._id;
+    shift.status      = "pending_verification";
 
     await shift.save();
     res.json({ success: true, shift });
+  })
+);
+
+// ────────────────────────────────────────────────────────────────
+//  ADMIN — list shifts awaiting verification
+// ────────────────────────────────────────────────────────────────
+router.get(
+  "/pending-verification",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const shifts = await ShiftDetail.find({ status: "pending_verification" })
+      .populate("employee", "name department role")
+      .populate({
+        path: "machine",
+        populate: { path: "orderRunning", model: "JobOrder",
+          populate: [
+            { path: "customer", select: "name" },
+            { path: "order",    select: "po orderNo" },
+          ],
+        },
+      })
+      .populate("shiftPlan", "date shift")
+      .populate({
+        path: "job",
+        populate: [
+          { path: "customer", select: "name" },
+          { path: "order",    select: "po orderNo" },
+        ],
+      })
+      .sort({ submittedAt: 1 });
+
+    res.json({ success: true, count: shifts.length, shifts });
+  })
+);
+
+// ────────────────────────────────────────────────────────────────
+//  ADMIN — verify a worker's submitted shift production
+//
+//  Body: { shiftId, productionMeters, timer?, feedback?, note? }
+//
+//  Sets the canonical productionMeters / timer / feedback to the
+//  admin's values (which may differ from what the worker typed),
+//  flips status to 'closed', records verifiedAt/By, then runs
+//  applyProductionCascade so JobOrder/Order/ShiftPlan all reflect
+//  the admin-blessed numbers.
+// ────────────────────────────────────────────────────────────────
+router.post(
+  "/verify-production",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { shiftId, productionMeters, timer, feedback, note } = req.body;
+
+    if (!shiftId)                  return next(new ErrorHandler("shiftId is required", 400));
+    if (productionMeters == null)  return next(new ErrorHandler("productionMeters is required", 400));
+
+    const prodValue = Number(productionMeters);
+    if (isNaN(prodValue) || prodValue < 0) {
+      return next(new ErrorHandler("productionMeters must be a non-negative number", 400));
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const shift = await ShiftDetail.findById(shiftId)
+          .populate({ path: "machine", populate: { path: "orderRunning" } })
+          .session(session);
+
+        if (!shift) throw new ErrorHandler("Shift detail not found", 404);
+        if (shift.status === "closed") {
+          throw new ErrorHandler("Shift is already closed", 400);
+        }
+
+        const machine = await Machine.findById(shift.machine).session(session);
+
+        // Canonical (admin-blessed) values overwrite whatever the
+        // worker had typed.
+        const finalTimer    = timer    != null ? timer    : (shift.submittedTimer    || "00:00:00");
+        const finalFeedback = feedback != null ? feedback : (shift.submittedFeedback || "");
+
+        shift.productionMeters = prodValue * (machine?.NoOfHead || 1);
+        shift.timer            = finalTimer;
+        shift.feedback         = finalFeedback;
+        shift.status           = "closed";
+        shift.verifiedAt       = new Date();
+        shift.verifiedBy       = req.user?._id;
+        if (note) shift.description = note;
+        await shift.save({ session });
+
+        const { fingerprint } = await applyProductionCascade(session, {
+          shift,
+          machine,
+          productionMeters: prodValue,
+          timer:            finalTimer,
+          feedback:         finalFeedback,
+          req,
+        });
+
+        resp = { shift, fingerprint };
+      });
+      res.json({ success: true, ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
   })
 );
 
@@ -466,7 +627,10 @@ router.get(
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));
 
-    const shifts = await ShiftDetail.find({ status: "open", employee: id })
+    const shifts = await ShiftDetail.find({
+      status: { $in: ["open", "pending_verification"] },
+      employee: id,
+    })
       .populate("employee")
       .populate("machine")
       .populate("job")
