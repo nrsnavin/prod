@@ -8,6 +8,7 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const DeliveryChallan = require("../models/Deliverychallan ");
 const Order           = require("../models/Order");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+const { applyMovement } = require("../utils/elasticStock");
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS
@@ -76,6 +77,9 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 //  CREATE DC
 //  POST /api/v2/dc/create
+//
+//  Deducts elastic stock immediately (DC_OUT) — the inventory is
+//  considered committed the moment a DC is entered (any status).
 // ─────────────────────────────────────────────────────────────
 router.post(
   "/create",
@@ -160,6 +164,23 @@ router.post(
         dc.fingerprints.push(fp);
         await dc.save({ session });
 
+        // ── Stock OUT — deduct one row per item ───────────────
+        //    Only meaningful for elastic DCs (machine_part DCs
+        //    have no Elastic reference). Skip cleanly if missing.
+        if (dc.type === "elastic") {
+          for (const item of processedItems) {
+            if (!item.elastic) continue;
+            await applyMovement(session, {
+              elasticId: item.elastic,
+              type:      "DC_OUT",
+              quantity:  -Number(item.quantity || 0),
+              refType:   "DeliveryChallan",
+              refId:     dc._id,
+              by:        req.user?._id,
+            });
+          }
+        }
+
         resp = { dc, fingerprint: fp };
       });
       res.status(201).json({ success: true, ...resp });
@@ -231,6 +252,11 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 //  UPDATE STATUS
 //  PATCH /api/v2/dc/update-status  { id, status }
+//
+//  Transitioning *into* 'cancelled' from a non-cancelled state
+//  posts an inverse DC_CANCEL_RETURN movement per item, returning
+//  the previously deducted stock. Idempotent — re-cancelling a
+//  cancelled DC short-circuits before any write.
 // ─────────────────────────────────────────────────────────────
 router.patch(
   "/update-status",
@@ -277,6 +303,26 @@ router.patch(
         });
         dc.fingerprints.push(fp);
         await dc.save({ session });
+
+        // ── Stock RETURN — only when transitioning into
+        //    'cancelled' from a non-cancelled state (idempotent).
+        if (
+          status === "cancelled" &&
+          previousStatus !== "cancelled" &&
+          dc.type === "elastic"
+        ) {
+          for (const item of (dc.items || [])) {
+            if (!item.elastic) continue;
+            await applyMovement(session, {
+              elasticId: item.elastic,
+              type:      "DC_CANCEL_RETURN",
+              quantity:  +Number(item.quantity || 0),
+              refType:   "DeliveryChallan",
+              refId:     dc._id,
+              by:        req.user?._id,
+            });
+          }
+        }
 
         resp = { dc, fingerprint: fp };
       });
