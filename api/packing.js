@@ -13,6 +13,7 @@ const Employee         = require("../models/Employee");
 const Elastic          = require("../models/Elastic");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { applyMovement } = require("../utils/elasticStock");
 
 router.use(isAuthenticated);
 
@@ -193,6 +194,16 @@ router.post(
           }
         }
 
+        // ── Stock IN — packing increases on-hand stock ─────────
+        await applyMovement(session, {
+          elasticId: elastic,
+          type:      "PACKING_INWARD",
+          quantity:  +Number(meter),
+          refType:   "Packing",
+          refId:     packing._id,
+          by:        req.user?._id,
+        });
+
         console.log(
           `[packing/create] Job #${jobDoc.jobOrderNo} | elastic ${elasticDoc.name} | ${meter}m`
         );
@@ -242,28 +253,48 @@ router.delete(
   "/:id",
   isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
-    const packing = await Packing.findById(req.params.id);
-    if (!packing) {
-      return next(new ErrorHandler("Packing record not found", 404));
+    const session = await mongoose.startSession();
+    try {
+      let packingId;
+      await session.withTransaction(async () => {
+        const packing = await Packing.findById(req.params.id).session(session);
+        if (!packing) {
+          throw new ErrorHandler("Packing record not found", 404);
+        }
+        packingId = packing._id;
+
+        const job = await JobOrder.findById(packing.job).session(session);
+        if (job) {
+          const idx = job.packedElastic.findIndex(
+            (e) => e.elastic.toString() === packing.elastic.toString()
+          );
+          if (idx >= 0 && job.packedElastic[idx].quantity >= packing.meter) {
+            job.packedElastic[idx].quantity -= packing.meter;
+          }
+          job.packingDetails = job.packingDetails.filter(
+            (id) => id.toString() !== packing._id.toString()
+          );
+          await job.save({ session });
+        }
+
+        // ── Reverse the inward stock movement ──────────────────
+        await applyMovement(session, {
+          elasticId: packing.elastic,
+          type:      "PACKING_REVERSE",
+          quantity:  -Number(packing.meter),
+          refType:   "Packing",
+          refId:     packing._id,
+          by:        req.user?._id,
+        });
+
+        await packing.deleteOne({ session });
+      });
+      res.status(200).json({ success: true, message: "Packing record deleted", id: packingId });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-
-    const job = await JobOrder.findById(packing.job);
-    if (job) {
-      const idx = job.packedElastic.findIndex(
-        (e) => e.elastic.toString() === packing.elastic.toString()
-      );
-      if (idx >= 0 && job.packedElastic[idx].quantity >= packing.meter) {
-        job.packedElastic[idx].quantity -= packing.meter;
-      }
-      job.packingDetails = job.packingDetails.filter(
-        (id) => id.toString() !== packing._id.toString()
-      );
-      await job.save();
-    }
-
-    await packing.deleteOne();
-
-    res.status(200).json({ success: true, message: "Packing record deleted" });
   })
 );
 

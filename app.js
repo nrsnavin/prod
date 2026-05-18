@@ -61,10 +61,10 @@ app.use(setUserContext);
 // Mount-level admin gate for the all-ADMIN router groups.
 //
 // Mixed-auth routers (attendance, payroll, bonus, shift, packing, wastage,
-// machine-issue, warping, covering) wire isAuthenticated + per-route
-// isAdmin('admin') inside the router itself — they're NOT in this admin
-// block. Warping and covering have employee-facing GETs (list, detail,
-// warpingPlan, plan-context) so workers can see their assigned jobs.
+// machine-issue, warping, covering, elastic, dc) wire isAuthenticated +
+// per-route isAdmin('admin') inside the router itself — they're NOT in
+// this admin block. Elastic needs a worker-facing GET /:id/stock for the
+// stock screen; DC defers admin gating per-route as well.
 //
 // Per-route auth routers (user, announcement, feedback, leave, dashboard)
 // also handle their own middleware to allow login + employee-facing reads.
@@ -75,7 +75,7 @@ app.use("/api/v2/machine",     ADMIN_GATE, machine);
 app.use("/api/v2/shift",       shift);
 app.use("/api/v2/customer",    ADMIN_GATE, customer);
 app.use("/api/v2/employee",    ADMIN_GATE, employee);
-app.use("/api/v2/elastic",     ADMIN_GATE, elastic);
+app.use("/api/v2/elastic",     elastic);
 app.use("/api/v2/dc",          ADMIN_GATE, deliveryChallanRouter);
 app.use("/api/v2/supplier",    ADMIN_GATE, supplier);
 app.use("/api/v2/bonus",       bonus);

@@ -27,6 +27,36 @@ const PlanBeamSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// ── Stock movement ledger ─────────────────────────────────────
+// Mirrors RawMaterial.stockMovements. Every change to Elastic.stock
+// appends one row here so we have a full audit trail.
+const ElasticMovementSchema = new mongoose.Schema(
+  {
+    date:     { type: Date, default: Date.now },
+    type:     {
+      type: String,
+      enum: [
+        "PACKING_INWARD",
+        "PACKING_REVERSE",
+        "DC_OUT",
+        "DC_CANCEL_RETURN",
+        "WASTAGE_OUT",
+        "MANUAL_ADJUST",
+      ],
+      required: true,
+    },
+    // signed: + inward / − outward.
+    quantity: { type: Number, required: true },
+    // resulting stock value after this movement (post-clamp).
+    balance:  { type: Number, required: true },
+    refType:  { type: String }, // 'Packing' | 'Wastage' | 'DeliveryChallan' | null
+    refId:    { type: mongoose.Types.ObjectId },
+    reason:   { type: String }, // free text for MANUAL_ADJUST etc.
+    by:       { type: mongoose.Types.ObjectId, ref: "User" },
+  },
+  { _id: true, timestamps: false }
+);
+
 // ── Main elastic schema ────────────────────────────────────────
 const ElasticSchema = new mongoose.Schema(
   {
@@ -80,6 +110,12 @@ const ElasticSchema = new mongoose.Schema(
     costing: { type: mongoose.Types.ObjectId, ref: "Costing" },
 
     stock: { type: Number, default: 0 },
+
+    // Running stock movement ledger (newest pushed to the end).
+    stockMovements: {
+      type: [ElasticMovementSchema],
+      default: [],
+    },
 
     status: { type: mongoose.Types.ObjectId, ref: "Order" },
 
