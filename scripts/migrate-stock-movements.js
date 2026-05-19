@@ -6,8 +6,12 @@
 //  Elastic.quantityProduced from PACKING_INWARD history, and
 //  report per-elastic drift between stored stock and ledger sum.
 //
-//  Idempotent — elastics that already have rows in StockMovement
-//  are skipped. Re-running the script is safe.
+//  Idempotent and resumable:
+//   • Per-elastic insert uses { ordered: false }, so we tolerate
+//     duplicate-key errors from rows that were inserted by a
+//     previous (possibly crashed) run.
+//   • Drift / quantityProduced are recomputed from the embedded
+//     source data every run, so they're always correct on retry.
 //
 //  Run from the repo root once MONGO_URI (or DB_URL) is set:
 //    node scripts/migrate-stock-movements.js
@@ -35,20 +39,25 @@ async function main() {
     .lean();
   console.log(`Scanning ${elastics.length} elastics.`);
 
-  let migrated = 0;
-  let skipped  = 0;
-  let totalRows = 0;
-  const drifts = [];
+  let migrated   = 0;
+  let resumed    = 0;
+  let skipped    = 0;
+  let totalNew   = 0;
+  let totalDup   = 0;
+  const drifts   = [];
 
   for (const e of elastics) {
-    const existing = await StockMovement.countDocuments({ elastic: e._id });
-    if (existing > 0) { skipped++; continue; }
-
     const rows = (e.stockMovements || [])
       .slice()
       .sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    if (rows.length === 0) { skipped++; continue; }
+    if (rows.length === 0) {
+      skipped++;
+      continue;
+    }
+
+    const existing = await StockMovement.countDocuments({ elastic: e._id });
+    const isResume = existing > 0 && existing < rows.length;
 
     const docs = rows.map((m) => ({
       _id:       m._id,
@@ -64,11 +73,54 @@ async function main() {
       by:        m.by,
     }));
 
-    await StockMovement.insertMany(docs, { ordered: true });
-    totalRows += docs.length;
-    migrated++;
+    let insertedCount = 0;
+    let duplicateCount = 0;
 
-    // Backfill quantityProduced from PACKING_INWARD rows only.
+    try {
+      const res = await StockMovement.insertMany(docs, {
+        ordered: false,
+        rawResult: true,
+      });
+      // rawResult shape: { acknowledged, insertedCount, insertedIds }
+      insertedCount = res.insertedCount || 0;
+    } catch (err) {
+      // BulkWriteError: some rows duplicate-keyed (already migrated
+      // by a previous run). Mongo still inserts the rest.
+      const writeErrors = (err && err.writeErrors) || [];
+      duplicateCount = writeErrors.filter((w) => w.code === 11000).length;
+      const nonDup = writeErrors.filter((w) => w.code !== 11000);
+      if (nonDup.length > 0) {
+        console.error(
+          `  [${e.name}] aborting — non-duplicate write errors:`,
+          nonDup.map((w) => w.errmsg)
+        );
+        throw err;
+      }
+      // BulkWriteError reports insertedCount on err.result.nInserted
+      insertedCount = (err.result && err.result.nInserted) || 0;
+    }
+
+    if (insertedCount > 0) {
+      totalNew += insertedCount;
+      if (isResume) {
+        resumed++;
+      } else {
+        migrated++;
+      }
+    } else {
+      // All docs were duplicates of an already-migrated set.
+      skipped++;
+    }
+    totalDup += duplicateCount;
+
+    if (duplicateCount > 0) {
+      console.log(
+        `  [${e.name}] inserted ${insertedCount} new, skipped ${duplicateCount} already-migrated rows.`
+      );
+    }
+
+    // Always recompute quantityProduced and drift from the embedded
+    // source (idempotent — same result every run).
     const produced = rows
       .filter((r) => r.type === "PACKING_INWARD")
       .reduce((s, r) => s + (Number(r.quantity) || 0), 0);
@@ -92,8 +144,9 @@ async function main() {
   }
 
   console.log(
-    `\nMigrated ${migrated} elastics (${totalRows} rows). Skipped ${skipped}.`
+    `\nMigrated ${migrated} elastics (+${resumed} resumed). Skipped ${skipped}.`
   );
+  console.log(`Inserted ${totalNew} new rows, tolerated ${totalDup} duplicates.`);
 
   if (drifts.length > 0) {
     console.log("\nElastics with stock vs ledger drift:");
