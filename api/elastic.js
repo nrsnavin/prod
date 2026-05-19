@@ -210,7 +210,7 @@ router.get(
       const moveCount = l ? l.count : 0;
       const drift     = stock - ledgerSum;
 
-      if (drift !== 0 || (stock !== 0 && moveCount === 0)) {
+      if (drift !== 0) {
         drifts.push({
           elasticId: e._id,
           name:      e.name,
@@ -358,12 +358,6 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 //  SET MIN STOCK (lightweight)
 //  PATCH /api/v2/elastic/:id/min-stock   { minStock }
-//
-//  Bypasses the full /update-elastic flow so that changing the
-//  low-stock threshold doesn't trigger a costing recompute on a
-//  partial payload — which would otherwise reset the Costing
-//  snapshot's materialCost to 0 because the costing calculator
-//  can't run without warp/weft refs.
 // ─────────────────────────────────────────────────────────────
 router.patch(
   "/:id/min-stock",
@@ -444,10 +438,6 @@ router.put(
 
       await elastic.save();
 
-      // Only recompute costing when the caller actually supplied a
-      // costing-relevant field. A partial update that only carries
-      // book-keeping fields (minStock, name, testingParameters …)
-      // must NOT zero out the materialCost on the existing Costing.
       const costingFields = [
         "weight", "pick", "noOfHook", "spandexEnds",
         "warpSpandex", "warpYarn", "spandexCovering", "weftYarn",
@@ -596,7 +586,8 @@ router.post(
 //
 //  Refuses to delete when stock > 0 or any movements are on
 //  record. Pass ?force=true to override (admin escape hatch for
-//  test data only — logs the override in the response).
+//  test data only — cascades to remove the StockMovement rows
+//  so the collection doesn't grow with invisible orphans).
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/delete-elastic",
@@ -607,6 +598,8 @@ router.delete(
 
     const force = String(req.query.force || "").toLowerCase() === "true";
 
+    let moveCount = 0;
+
     if (!force) {
       const currentStock = Number(elastic.stock) || 0;
       if (currentStock !== 0) {
@@ -615,26 +608,37 @@ router.delete(
           400
         ));
       }
-      const moveCount = await StockMovement.countDocuments({ elastic: elastic._id });
+      moveCount = await StockMovement.countDocuments({ elastic: elastic._id });
       if (moveCount > 0) {
         return next(new ErrorHandler(
           `Refusing to delete: ${moveCount} stock movement(s) on record. Pass force=true to override.`,
           400
         ));
       }
+    } else {
+      moveCount = await StockMovement.countDocuments({ elastic: elastic._id });
     }
+
+    // P1-3: cascade StockMovement so force-delete doesn't leave
+    // orphan ledger rows that are invisible to /reconcile but
+    // still consume storage. The non-force path's invariant is
+    // moveCount === 0, so deleteMany is effectively a no-op there.
+    const deletedMoves = await StockMovement.deleteMany({ elastic: elastic._id });
 
     if (elastic.costing) await Costing.findByIdAndDelete(elastic.costing);
     await elastic.deleteOne();
 
     if (force) {
-      console.warn(`[elastic/delete] FORCED delete of ${elastic._id} (${elastic.name}) by user=${req.user?._id}`);
+      console.warn(
+        `[elastic/delete] FORCED delete of ${elastic._id} (${elastic.name}) by user=${req.user?._id} — cascaded ${deletedMoves.deletedCount || 0} StockMovement row(s).`
+      );
     }
 
     res.json({
-      success: true,
-      message: "Elastic deleted successfully",
-      forced:  force,
+      success:               true,
+      message:               "Elastic deleted successfully",
+      forced:                force,
+      cascadedMoves:         deletedMoves.deletedCount || 0,
     });
   })
 );
