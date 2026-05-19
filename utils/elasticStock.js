@@ -23,8 +23,7 @@
 //
 //  Magnitude guard: |quantity| > MAX_ABS_QUANTITY is rejected so a
 //  rogue caller (UI typo, malformed payload) can't blow up the
-//  ledger. Manual corrections that genuinely need a larger jump
-//  should be split or applied directly by an operator.
+//  ledger.
 // ─────────────────────────────────────────────────────────────
 "use strict";
 
@@ -106,6 +105,20 @@ async function applyMovement(session, opts) {
     const current = await Elastic.findById(elasticId).session(session);
     if (!current) {
       throw new Error(`applyMovement: Elastic ${elasticId} not found`);
+    }
+
+    // Legacy guard: docs created before the `stock` field existed
+    // have stock === undefined. The CAS filter below uses an exact
+    // match, and Mongo will not match `{ stock: 0 }` against a doc
+    // with the field missing, so the retry loop would spin until
+    // exhausted. Backfill once here so subsequent attempts succeed.
+    if (current.stock === undefined || current.stock === null) {
+      await Elastic.updateOne(
+        { _id: elasticId, stock: { $exists: false } },
+        { $set: { stock: 0 } },
+        { session }
+      );
+      current.stock = 0;
     }
 
     const currentStock = Number(current.stock) || 0;
