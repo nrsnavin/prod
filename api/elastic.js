@@ -13,13 +13,8 @@ const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
-// Mixed-auth router. Mount in app.js without ADMIN_GATE — we
-// require isAuthenticated for everything here and add isAdmin
-// per-route on writes. Mirrors the warping/covering/packing/shift
-// pattern in this same backend.
 router.use(isAuthenticated);
 
-// ── Helper: full populate for elastic ─────────────────
 const _populate = (q) =>
   q
     .populate("warpSpandex.id")
@@ -29,7 +24,6 @@ const _populate = (q) =>
     .populate("costing")
     .populate("warpingPlanTemplate.beams.sections.warpYarn", "name category");
 
-// ── Helper: normalise + compute totalEnds per beam ─────────
 function _normalisePlan(template) {
   const beams = (template.beams || []).map((b, i) => {
     const sections = (b.sections || [])
@@ -52,7 +46,6 @@ function _normalisePlan(template) {
 
 // ─────────────────────────────────────────────────────────────
 //  CREATE ELASTIC
-//  Accepts optional warpingPlanTemplate in body.
 // ─────────────────────────────────────────────────────────────
 router.post(
   "/create-elastic",
@@ -62,13 +55,11 @@ router.post(
       const elasticData = req.body;
       console.log("Received elastic data:", JSON.stringify(elasticData, null, 2));
 
-      // Pull out the plan so Elastic.create() doesn't choke on it
       const planTemplate = elasticData.warpingPlanTemplate ?? null;
       delete elasticData.warpingPlanTemplate;
 
       const elastic = await Elastic.create(elasticData);
 
-      // Attach validated plan if supplied
       if (
         planTemplate &&
         Array.isArray(planTemplate.beams) &&
@@ -104,9 +95,7 @@ router.post(
 );
 
 
-// ─────────────────────────────────────────────────────────────
-//  LIST ELASTICS
-// ─────────────────────────────────────────────────────────────
+// ── LIST ELASTICS ────────────────────────────────
 router.get(
   "/get-elastics",
   catchAsyncErrors(async (req, res) => {
@@ -127,9 +116,7 @@ router.get(
 );
 
 
-// ─────────────────────────────────────────────────────────────
-//  GET ELASTIC DETAIL
-// ─────────────────────────────────────────────────────────────
+// ── GET ELASTIC DETAIL ──────────────────────────
 router.get(
   "/get-elastic-detail",
   catchAsyncErrors(async (req, res, next) => {
@@ -141,11 +128,8 @@ router.get(
 
 
 // ─────────────────────────────────────────────────────────────
-//  STOCK MAP — admin overview of every elastic's stock
+//  STOCK MAP
 //  GET /api/v2/elastic/stock-summary
-//
-//  IMPORTANT: must appear before /:id/stock so '/stock-summary'
-//  is not captured as an :id.
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/stock-summary",
@@ -155,7 +139,6 @@ router.get(
       .select("name stock quantityProduced minStock reservedStock")
       .lean();
 
-    // One round-trip for the latest movement per elastic.
     const ids = elastics.map((e) => e._id);
     const lastMoves = ids.length
       ? await StockMovement.aggregate([
@@ -196,10 +179,69 @@ router.get(
 
 
 // ─────────────────────────────────────────────────────────────
+//  RECONCILE — admin diagnostic: stock vs ledger sum drift
+//  GET /api/v2/elastic/reconcile
+//
+//  For each elastic, sums StockMovement.applied and compares with
+//  Elastic.stock. Returns the drift list so an admin can hunt
+//  down any rows where the two diverged (a sign of a bug, a
+//  manual DB edit, or an aborted migration). Read-only.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/reconcile",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const elastics = await Elastic.find().select("name stock").lean();
+    if (elastics.length === 0) {
+      return res.json({ success: true, elasticCount: 0, driftCount: 0, drifts: [] });
+    }
+
+    const ids = elastics.map((e) => e._id);
+    const ledgers = await StockMovement.aggregate([
+      { $match: { elastic: { $in: ids } } },
+      { $group: {
+          _id:   "$elastic",
+          sum:   { $sum: "$applied" },
+          count: { $sum: 1 },
+      }},
+    ]);
+    const ledgerMap = new Map(ledgers.map((l) => [String(l._id), l]));
+
+    const drifts = [];
+    for (const e of elastics) {
+      const l         = ledgerMap.get(String(e._id));
+      const stock     = Number(e.stock) || 0;
+      const ledgerSum = l ? Number(l.sum) || 0 : 0;
+      const moveCount = l ? l.count : 0;
+      const drift     = stock - ledgerSum;
+
+      // Flag if numbers disagree, OR if stock exists without any
+      // history (which means the elastic predates the ledger).
+      if (drift !== 0 || (stock !== 0 && moveCount === 0)) {
+        drifts.push({
+          elasticId: e._id,
+          name:      e.name,
+          stock,
+          ledgerSum,
+          drift,
+          moveCount,
+        });
+      }
+    }
+
+    res.json({
+      success:      true,
+      elasticCount: elastics.length,
+      driftCount:   drifts.length,
+      drifts,
+    });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
 //  STOCK DETAIL — current stock + paginated movement ledger
 //  GET /api/v2/elastic/:id/stock?page=&limit=
-//
-//  AUTH (not ADMIN) so worker portals can render a stock screen.
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/:id/stock",
@@ -256,7 +298,7 @@ router.get(
 
 
 // ─────────────────────────────────────────────────────────────
-//  MANUAL ADJUST — admin correction / opening balance / theft
+//  MANUAL ADJUST
 //  POST /api/v2/elastic/:id/adjust-stock   { delta, reason }
 // ─────────────────────────────────────────────────────────────
 router.post(
@@ -320,10 +362,7 @@ router.post(
 );
 
 
-// ─────────────────────────────────────────────────────────────
-//  UPDATE ELASTIC
-//  Also accepts warpingPlanTemplate — pass null/empty to clear.
-// ─────────────────────────────────────────────────────────────
+// ── UPDATE ELASTIC ─────────────────────────────
 router.put(
   "/update-elastic",
   isAdmin('admin'),
@@ -338,7 +377,6 @@ router.put(
       if (!elastic)
         return next(new ErrorHandler("Elastic not found", 404));
 
-      // ── 1. Core fields ───────────────────────────
       const fieldsToCopy = [
         "name", "weaveType", "pick", "noOfHook", "weight",
         "spandexEnds", "warpSpandex", "weftYarn", "spandexCovering",
@@ -353,7 +391,6 @@ router.put(
       if (elasticData.spandexEnds !== undefined) elastic.spandexEnds = Number(elasticData.spandexEnds);
       if (elasticData.minStock    !== undefined) elastic.minStock    = Math.max(0, Number(elasticData.minStock) || 0);
 
-      // ── 2. Warping plan template (optional) ───────────────
       if ("warpingPlanTemplate" in elasticData) {
         const tpl = elasticData.warpingPlanTemplate;
         if (tpl && Array.isArray(tpl.beams) && tpl.beams.length > 0) {
@@ -365,7 +402,6 @@ router.put(
 
       await elastic.save();
 
-      // ── 3. Recalculate costing ────────────────────────
       let materialCost = 0, details = [];
       try {
         ({ materialCost, details } = await calculateElasticCosting(elasticData));
@@ -403,10 +439,6 @@ router.put(
 );
 
 
-// ─────────────────────────────────────────────────────────────
-//  ADD / UPDATE WARPING PLAN TEMPLATE  (standalone — called from
-//  elastic detail page when plan was skipped at creation time)
-// ─────────────────────────────────────────────────────────────
 router.put(
   "/warping-plan-template",
   isAdmin('admin'),
@@ -430,9 +462,6 @@ router.put(
 );
 
 
-// ─────────────────────────────────────────────────────────────
-//  RECALCULATE COST  (manual trigger from detail page)
-// ─────────────────────────────────────────────────────────────
 router.post(
   "/recalculate-elastic-cost",
   isAdmin('admin'),
@@ -508,6 +537,10 @@ router.post(
 
 // ─────────────────────────────────────────────────────────────
 //  DELETE ELASTIC
+//
+//  Refuses to delete when stock > 0 or any movements are on
+//  record. Pass ?force=true to override (admin escape hatch for
+//  test data only — logs the override in the response).
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/delete-elastic",
@@ -516,10 +549,37 @@ router.delete(
     const elastic = await Elastic.findById(req.query.id);
     if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
 
+    const force = String(req.query.force || "").toLowerCase() === "true";
+
+    if (!force) {
+      const currentStock = Number(elastic.stock) || 0;
+      if (currentStock !== 0) {
+        return next(new ErrorHandler(
+          `Refusing to delete: stock is ${currentStock}. Adjust to zero first, or pass force=true.`,
+          400
+        ));
+      }
+      const moveCount = await StockMovement.countDocuments({ elastic: elastic._id });
+      if (moveCount > 0) {
+        return next(new ErrorHandler(
+          `Refusing to delete: ${moveCount} stock movement(s) on record. Pass force=true to override.`,
+          400
+        ));
+      }
+    }
+
     if (elastic.costing) await Costing.findByIdAndDelete(elastic.costing);
     await elastic.deleteOne();
 
-    res.json({ success: true, message: "Elastic deleted successfully" });
+    if (force) {
+      console.warn(`[elastic/delete] FORCED delete of ${elastic._id} (${elastic.name}) by user=${req.user?._id}`);
+    }
+
+    res.json({
+      success: true,
+      message: "Elastic deleted successfully",
+      forced:  force,
+    });
   })
 );
 

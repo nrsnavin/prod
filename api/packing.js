@@ -32,9 +32,6 @@ function packingDetailQuery(query) {
     });
 }
 
-// Packing operators need this to populate the job dropdown on their
-// entry form. AUTH is enough — row content is non-sensitive (job # +
-// elastic name only).
 router.get(
   "/jobs-packing",
   catchAsyncErrors(async (req, res, next) => {
@@ -194,14 +191,16 @@ router.post(
           }
         }
 
-        // ── Stock IN — packing increases on-hand stock ─────────
+        // ── Stock IN — packing increases on-hand stock and the
+        //    cumulative quantityProduced counter (same delta).
         await applyMovement(session, {
-          elasticId: elastic,
-          type:      "PACKING_INWARD",
-          quantity:  +Number(meter),
-          refType:   "Packing",
-          refId:     packing._id,
-          by:        req.user?._id,
+          elasticId:       elastic,
+          type:            "PACKING_INWARD",
+          quantity:        +Number(meter),
+          refType:         "Packing",
+          refId:           packing._id,
+          by:              req.user?._id,
+          alsoIncProduced: true,
         });
 
         console.log(
@@ -219,8 +218,6 @@ router.post(
   })
 );
 
-// Operators need this to pick checkedBy / packedBy from their
-// department. Returns only id + name — no sensitive fields.
 router.get(
   "/employees-by-department/:dept",
   catchAsyncErrors(async (req, res, next) => {
@@ -277,14 +274,15 @@ router.delete(
           await job.save({ session });
         }
 
-        // ── Reverse the inward stock movement ──────────────────
+        // Reverse the inward stock movement and the produced counter.
         await applyMovement(session, {
-          elasticId: packing.elastic,
-          type:      "PACKING_REVERSE",
-          quantity:  -Number(packing.meter),
-          refType:   "Packing",
-          refId:     packing._id,
-          by:        req.user?._id,
+          elasticId:       packing.elastic,
+          type:            "PACKING_REVERSE",
+          quantity:        -Number(packing.meter),
+          refType:         "Packing",
+          refId:           packing._id,
+          by:              req.user?._id,
+          alsoIncProduced: true,
         });
 
         await packing.deleteOne({ session });

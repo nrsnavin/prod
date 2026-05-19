@@ -65,7 +65,6 @@ router.post(
         job.wastages.push(wastage._id);
         await job.save({ session });
 
-        // ── Stock OUT — wastage reduces on-hand stock ─────────
         await applyMovement(session, {
           elasticId,
           type:     "WASTAGE_OUT",
@@ -79,8 +78,6 @@ router.post(
         wastageId = wastage._id;
       });
 
-      // Performance recompute — kept outside the transaction since
-      // it's a derived figure across the whole employee history.
       const employee = await Employee.findById(employeeId);
       const [totalWastage] = await Promise.all([
         Wastage.aggregate([
@@ -108,6 +105,73 @@ router.post(
   })
 );
 
+// ═══════════════════════════════════════════════════════════
+//  DELETE WASTAGE — admin-only undo flow
+//  DELETE /api/v2/wastage/:id
+//
+//  Reverses the original WASTAGE_OUT by posting a WASTAGE_RETURN
+//  with the same magnitude, rolls back the job-level wastage
+//  counter, and removes the Wastage record. Wrapped in a session
+//  so a failure in any step leaves nothing partially undone.
+// ═══════════════════════════════════════════════════════════
+router.delete(
+  "/:id",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid wastage id", 400));
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      let wastageId;
+      await session.withTransaction(async () => {
+        const wastage = await Wastage.findById(id).session(session);
+        if (!wastage) throw new ErrorHandler("Wastage record not found", 404);
+        wastageId = wastage._id;
+
+        const job = await JobOrder.findById(wastage.job).session(session);
+        if (job) {
+          const idx = job.wastageElastic.findIndex(
+            (x) => x.elastic.toString() === wastage.elastic.toString()
+          );
+          if (idx >= 0) {
+            const next = (job.wastageElastic[idx].quantity || 0) - Number(wastage.quantity || 0);
+            job.wastageElastic[idx].quantity = Math.max(0, next);
+          }
+          job.wastages = (job.wastages || []).filter(
+            (w) => w.toString() !== wastage._id.toString()
+          );
+          await job.save({ session });
+        }
+
+        await applyMovement(session, {
+          elasticId: wastage.elastic,
+          type:      "WASTAGE_RETURN",
+          quantity:  +Number(wastage.quantity || 0),
+          refType:   "Wastage",
+          refId:     wastage._id,
+          reason:    "Wastage record deleted",
+          by:        req.user?._id,
+        });
+
+        await wastage.deleteOne({ session });
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Wastage record deleted",
+        id:      wastageId,
+      });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
+  })
+);
+
 router.get(
   "/jobs-for-wastage",
   catchAsyncErrors(async (req, res, next) => {
@@ -123,15 +187,6 @@ router.get(
   })
 );
 
-// ═════════════════════════════════════════════════════════════
-//  JOB OPERATORS  — GET /wastage/job-operators?id=<jobId>
-//
-//  Returns the distinct list of operators who worked on this job
-//  (based on ShiftDetail.employee). Mirrors /api/v2/job/job-operators
-//  but lives on the wastage router so the checking-dept worker (who
-//  doesn't have access to the admin job router) can populate the
-//  operator dropdown when logging wastage on someone else's work.
-// ═════════════════════════════════════════════════════════════
 router.get(
   "/job-operators",
   catchAsyncErrors(async (req, res, next) => {

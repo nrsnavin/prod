@@ -11,6 +11,10 @@
 //  RESERVATION_HOLD / RESERVATION_RELEASE are info-only rows. They
 //  do not modify Elastic.stock — they sit on the ledger so the
 //  reservation lifecycle is visible in the audit trail.
+//
+//  WASTAGE_RETURN is the symmetric reversal of WASTAGE_OUT (admin
+//  un-doing a wastage entry); kept distinct from WASTAGE_OUT so
+//  type-grouped reports don't conflate the two directions.
 // ─────────────────────────────────────────────────────────────
 "use strict";
 
@@ -33,6 +37,7 @@ const StockMovementSchema = new mongoose.Schema(
         "DC_OUT",
         "DC_CANCEL_RETURN",
         "WASTAGE_OUT",
+        "WASTAGE_RETURN",
         "MANUAL_ADJUST",
         "RESERVATION_HOLD",
         "RESERVATION_RELEASE",
@@ -40,18 +45,13 @@ const StockMovementSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-    // Signed delta requested by the caller (+ inward / − outward).
     requested: { type: Number, required: true },
-    // Signed delta actually applied to Elastic.stock. Equals
-    // `requested` except when clamped at the zero floor. Always 0
-    // for info-only types (RESERVATION_HOLD / RESERVATION_RELEASE).
-    applied: { type: Number, required: true },
-    // Resulting Elastic.stock value after this row.
-    balance: { type: Number, required: true },
-    refType: { type: String },
-    refId:   { type: mongoose.Types.ObjectId, index: true },
-    reason:  { type: String },
-    by:      { type: mongoose.Types.ObjectId, ref: "User" },
+    applied:   { type: Number, required: true },
+    balance:   { type: Number, required: true },
+    refType:   { type: String },
+    refId:     { type: mongoose.Types.ObjectId, index: true },
+    reason:    { type: String },
+    by:        { type: mongoose.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }
 );

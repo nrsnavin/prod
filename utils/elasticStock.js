@@ -19,7 +19,12 @@
 //
 //  RESERVATION_HOLD / RESERVATION_RELEASE rows skip the stock
 //  mutation entirely — they're info-only audit entries used by
-//  the order-reservation flow (PR B).
+//  the order-reservation flow.
+//
+//  Magnitude guard: |quantity| > MAX_ABS_QUANTITY is rejected so a
+//  rogue caller (UI typo, malformed payload) can't blow up the
+//  ledger. Manual corrections that genuinely need a larger jump
+//  should be split or applied directly by an operator.
 // ─────────────────────────────────────────────────────────────
 "use strict";
 
@@ -32,6 +37,7 @@ const VALID_TYPES = [
   "DC_OUT",
   "DC_CANCEL_RETURN",
   "WASTAGE_OUT",
+  "WASTAGE_RETURN",
   "MANUAL_ADJUST",
   "RESERVATION_HOLD",
   "RESERVATION_RELEASE",
@@ -39,24 +45,9 @@ const VALID_TYPES = [
 
 const INFO_ONLY_TYPES = new Set(["RESERVATION_HOLD", "RESERVATION_RELEASE"]);
 
-const MAX_RETRIES = 5;
+const MAX_RETRIES      = 5;
+const MAX_ABS_QUANTITY = 1e7;
 
-/**
- * Apply a signed stock movement to an Elastic and persist it on
- * the StockMovement ledger.
- *
- * @param {mongoose.ClientSession} session  active transaction session
- * @param {object} opts
- * @param {string|ObjectId} opts.elasticId        target Elastic _id
- * @param {string}          opts.type             one of VALID_TYPES
- * @param {number}          opts.quantity         signed delta (+ inward / − outward)
- * @param {string}         [opts.refType]         e.g. 'Packing'|'DeliveryChallan'
- * @param {ObjectId|string}[opts.refId]           source document id
- * @param {string}         [opts.reason]          human note
- * @param {ObjectId|string}[opts.by]              acting user id
- * @param {boolean}        [opts.alsoIncProduced] PACKING_INWARD bumps Elastic.quantityProduced
- * @returns {Promise<{elastic, movement}>}
- */
 async function applyMovement(session, opts) {
   const {
     elasticId,
@@ -80,8 +71,12 @@ async function applyMovement(session, opts) {
   if (!Number.isFinite(requested)) {
     throw new Error("applyMovement: quantity must be a finite number");
   }
+  if (Math.abs(requested) > MAX_ABS_QUANTITY) {
+    throw new Error(
+      `applyMovement: |quantity| ${Math.abs(requested)} exceeds safety cap ${MAX_ABS_QUANTITY}`
+    );
+  }
 
-  // Info-only rows: no stock mutation, just log.
   if (INFO_ONLY_TYPES.has(type)) {
     const elastic = await Elastic.findById(elasticId).session(session);
     if (!elastic) {
@@ -107,7 +102,6 @@ async function applyMovement(session, opts) {
     return { elastic, movement: persisted };
   }
 
-  // Stock-mutating types — compare-and-swap with retry.
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const current = await Elastic.findById(elasticId).session(session);
     if (!current) {
@@ -128,7 +122,6 @@ async function applyMovement(session, opts) {
       { new: true, session }
     );
 
-    // Compare-and-swap lost the race — another writer changed stock.
     if (!updated) continue;
 
     const [persisted] = await StockMovement.create(
@@ -157,4 +150,4 @@ async function applyMovement(session, opts) {
   );
 }
 
-module.exports = { applyMovement, VALID_TYPES };
+module.exports = { applyMovement, VALID_TYPES, MAX_ABS_QUANTITY };
