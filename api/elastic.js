@@ -181,11 +181,6 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 //  RECONCILE — admin diagnostic: stock vs ledger sum drift
 //  GET /api/v2/elastic/reconcile
-//
-//  For each elastic, sums StockMovement.applied and compares with
-//  Elastic.stock. Returns the drift list so an admin can hunt
-//  down any rows where the two diverged (a sign of a bug, a
-//  manual DB edit, or an aborted migration). Read-only.
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/reconcile",
@@ -215,8 +210,6 @@ router.get(
       const moveCount = l ? l.count : 0;
       const drift     = stock - ledgerSum;
 
-      // Flag if numbers disagree, OR if stock exists without any
-      // history (which means the elastic predates the ledger).
       if (drift !== 0 || (stock !== 0 && moveCount === 0)) {
         drifts.push({
           elasticId: e._id,
@@ -362,6 +355,55 @@ router.post(
 );
 
 
+// ─────────────────────────────────────────────────────────────
+//  SET MIN STOCK (lightweight)
+//  PATCH /api/v2/elastic/:id/min-stock   { minStock }
+//
+//  Bypasses the full /update-elastic flow so that changing the
+//  low-stock threshold doesn't trigger a costing recompute on a
+//  partial payload — which would otherwise reset the Costing
+//  snapshot's materialCost to 0 because the costing calculator
+//  can't run without warp/weft refs.
+// ─────────────────────────────────────────────────────────────
+router.patch(
+  "/:id/min-stock",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid elastic id", 400));
+    }
+    const v = Number(req.body?.minStock);
+    if (!Number.isFinite(v) || v < 0) {
+      return next(new ErrorHandler("minStock must be a non-negative number", 400));
+    }
+
+    const elastic = await Elastic.findByIdAndUpdate(
+      id,
+      { $set: { minStock: v } },
+      { new: true }
+    ).select("_id name stock minStock reservedStock");
+
+    if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
+
+    const stock    = Number(elastic.stock)    || 0;
+    const minStock = Number(elastic.minStock) || 0;
+    const reserved = Number(elastic.reservedStock) || 0;
+
+    res.json({
+      success:       true,
+      elasticId:     elastic._id,
+      name:          elastic.name,
+      stock,
+      minStock,
+      reservedStock: reserved,
+      available:     Math.max(0, stock - reserved),
+      isLowStock:    minStock > 0 && stock <= minStock,
+    });
+  })
+);
+
+
 // ── UPDATE ELASTIC ─────────────────────────────
 router.put(
   "/update-elastic",
@@ -402,31 +444,45 @@ router.put(
 
       await elastic.save();
 
-      let materialCost = 0, details = [];
-      try {
-        ({ materialCost, details } = await calculateElasticCosting(elasticData));
-      } catch (costErr) {
-        console.warn("Costing recalculation warning:", costErr.message);
-      }
+      // Only recompute costing when the caller actually supplied a
+      // costing-relevant field. A partial update that only carries
+      // book-keeping fields (minStock, name, testingParameters …)
+      // must NOT zero out the materialCost on the existing Costing.
+      const costingFields = [
+        "weight", "pick", "noOfHook", "spandexEnds",
+        "warpSpandex", "warpYarn", "spandexCovering", "weftYarn",
+      ];
+      const costingDirty = costingFields.some((f) =>
+        Object.prototype.hasOwnProperty.call(elasticData, f)
+      );
 
-      if (elastic.costing) {
-        const existingCosting = await Costing.findById(elastic.costing);
-        const conversionCost  = existingCosting?.conversionCost ?? 1.25;
-        await Costing.findByIdAndUpdate(elastic.costing, {
-          materialCost, details,
-          totalCost: materialCost + conversionCost,
-          status: "Draft",
-        });
-      } else {
-        const conversionCost = 1.25;
-        const costing = await Costing.create({
-          date: new Date(), elastic: elastic._id,
-          conversionCost, materialCost, details,
-          totalCost: materialCost + conversionCost,
-          status: "Draft",
-        });
-        elastic.costing = costing._id;
-        await elastic.save();
+      if (costingDirty) {
+        let materialCost = 0, details = [];
+        try {
+          ({ materialCost, details } = await calculateElasticCosting(elasticData));
+        } catch (costErr) {
+          console.warn("Costing recalculation warning:", costErr.message);
+        }
+
+        if (elastic.costing) {
+          const existingCosting = await Costing.findById(elastic.costing);
+          const conversionCost  = existingCosting?.conversionCost ?? 1.25;
+          await Costing.findByIdAndUpdate(elastic.costing, {
+            materialCost, details,
+            totalCost: materialCost + conversionCost,
+            status: "Draft",
+          });
+        } else {
+          const conversionCost = 1.25;
+          const costing = await Costing.create({
+            date: new Date(), elastic: elastic._id,
+            conversionCost, materialCost, details,
+            totalCost: materialCost + conversionCost,
+            status: "Draft",
+          });
+          elastic.costing = costing._id;
+          await elastic.save();
+        }
       }
 
       const updated = await _populate(Elastic.findById(elastic._id));
