@@ -11,6 +11,7 @@ const JobOrder         = require("../models/JobOrder");
 const Order            = require("../models/Order");
 const Employee         = require("../models/Employee");
 const Elastic          = require("../models/Elastic");
+const StockMovement    = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
@@ -193,6 +194,9 @@ router.post(
 
         // ── Stock IN — packing increases on-hand stock and the
         //    cumulative quantityProduced counter (same delta).
+        //    Inward packing can never clamp (stock can only go up),
+        //    so applied === requested === meter; safe to bump
+        //    quantityProduced by the same amount.
         await applyMovement(session, {
           elasticId:       elastic,
           type:            "PACKING_INWARD",
@@ -246,6 +250,19 @@ router.get(
   })
 );
 
+// ═══════════════════════════════════════════════════════════
+//  DELETE PACKING — admin undo
+//
+//  P0-3: split the stock reversal from the quantityProduced
+//  decrement. The clamped `applied` on PACKING_REVERSE is correct
+//  for stock (max -current), but quantityProduced should reflect
+//  the full original production — so we decrement it by the
+//  source PACKING_INWARD's `applied` independent of the clamp.
+//
+//  Without this split, deleting a 10 m packing against a current
+//  stock of 5 would only knock 5 off quantityProduced, leaving
+//  the counter 5 above truth.
+// ═══════════════════════════════════════════════════════════
 router.delete(
   "/:id",
   isAdmin('admin'),
@@ -274,16 +291,45 @@ router.delete(
           await job.save({ session });
         }
 
-        // Reverse the inward stock movement and the produced counter.
+        // Look up the original PACKING_INWARD so we know how much
+        // production was originally credited. quantityProduced is
+        // decremented by THAT, not by the (possibly clamped) stock
+        // delta of this reversal.
+        const original = await StockMovement.findOne({
+          refType: "Packing",
+          refId:   packing._id,
+          elastic: packing.elastic,
+          type:    "PACKING_INWARD",
+        }).session(session);
+
+        // Reverse the stock side. alsoIncProduced is OFF here —
+        // the produced counter is corrected below independently.
         await applyMovement(session, {
-          elasticId:       packing.elastic,
-          type:            "PACKING_REVERSE",
-          quantity:        -Number(packing.meter),
-          refType:         "Packing",
-          refId:           packing._id,
-          by:              req.user?._id,
-          alsoIncProduced: true,
+          elasticId: packing.elastic,
+          type:      "PACKING_REVERSE",
+          quantity:  -Number(packing.meter),
+          refType:   "Packing",
+          refId:     packing._id,
+          reason:    original
+            ? `reversal of PACKING_INWARD ${original._id}`
+            : "reversal (no source PACKING_INWARD found)",
+          by:        req.user?._id,
         });
+
+        // Correct quantityProduced by the full original inward
+        // amount. Falls back to `packing.meter` for legacy packings
+        // that predate the ledger.
+        const producedDelta = original
+          ? Number(original.applied || 0)
+          : Number(packing.meter || 0);
+
+        if (producedDelta > 0) {
+          await Elastic.updateOne(
+            { _id: packing.elastic },
+            { $inc: { quantityProduced: -producedDelta } },
+            { session }
+          );
+        }
 
         await packing.deleteOne({ session });
       });
