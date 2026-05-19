@@ -7,6 +7,7 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 
 const DeliveryChallan = require("../models/Deliverychallan ");
 const Order           = require("../models/Order");
+const StockMovement   = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { applyMovement } = require("../utils/elasticStock");
 
@@ -30,6 +31,53 @@ async function nextSeq(type, financialYear) {
 function buildDcNumber(type, financialYear, sequence) {
   const prefix = type === "elastic" ? "E" : "M";
   return `${prefix}-${financialYear}-${String(sequence).padStart(4, "0")}`;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Reverse the source DC_OUT movements for one DC item.
+//
+//  P0-1: The cancel and delete paths used to refund `item.quantity`
+//  (the full ordered amount). If the original DC_OUT was clamped
+//  at the zero floor, that invented stock. Now we look up the
+//  source movement(s) and refund the sum of `applied`.
+//
+//  Returns null on success, or the (skipped) reason string when
+//  no source DC_OUT exists for this item (legacy DC predating the
+//  ledger, or non-elastic item).
+// ─────────────────────────────────────────────────────────────
+async function _refundDcItem(session, dc, item, reasonContext, userId) {
+  if (!item.elastic) return "no elastic on item";
+
+  const originals = await StockMovement.find({
+    refType: "DeliveryChallan",
+    refId:   dc._id,
+    elastic: item.elastic,
+    type:    "DC_OUT",
+  }).session(session);
+
+  if (originals.length === 0) {
+    console.warn(
+      `[dc] no DC_OUT found for DC=${dc._id} elastic=${item.elastic}; skipping refund (DC may predate the ledger).`
+    );
+    return "no source DC_OUT";
+  }
+
+  const refund = -originals.reduce(
+    (s, m) => s + Number(m.applied || 0),
+    0
+  );
+  if (refund <= 0) return "zero refund";
+
+  await applyMovement(session, {
+    elasticId: item.elastic,
+    type:      "DC_CANCEL_RETURN",
+    quantity:  +refund,
+    refType:   "DeliveryChallan",
+    refId:     dc._id,
+    reason:    `${reasonContext}; reversal of ${originals.map((m) => m._id).join(",")}`,
+    by:        userId,
+  });
+  return null;
 }
 
 router.get(
@@ -262,15 +310,13 @@ router.patch(
           dc.type === "elastic"
         ) {
           for (const item of (dc.items || [])) {
-            if (!item.elastic) continue;
-            await applyMovement(session, {
-              elasticId: item.elastic,
-              type:      "DC_CANCEL_RETURN",
-              quantity:  +Number(item.quantity || 0),
-              refType:   "DeliveryChallan",
-              refId:     dc._id,
-              by:        req.user?._id,
-            });
+            await _refundDcItem(
+              session,
+              dc,
+              item,
+              `DC ${dc.dcNumber} cancelled`,
+              req.user?._id
+            );
           }
         }
 
@@ -288,11 +334,10 @@ router.patch(
 // ─────────────────────────────────────────────────────────────
 //  DELETE DC  (draft only)
 //
-//  Bug fix: prior to this commit the draft delete didn't reverse
-//  the DC_OUT that /create posted, so deleting a freshly-entered
-//  draft would silently strand the deducted stock. Now wrapped in
-//  a session that returns the stock via DC_CANCEL_RETURN before
-//  the document is removed.
+//  Reverses the original DC_OUT(s) — refund equals the sum of
+//  `applied` from the source movements, NOT the item.quantity.
+//  Prevents over-crediting when the original deduction was
+//  clamped at the zero floor.
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/delete",
@@ -307,21 +352,15 @@ router.delete(
           throw new ErrorHandler("Only draft challans can be deleted", 400);
         }
 
-        // Drafts always carry an outstanding DC_OUT from create.
-        // Reverse it before the doc disappears so the ledger
-        // stays consistent.
         if (dc.type === "elastic") {
           for (const item of (dc.items || [])) {
-            if (!item.elastic) continue;
-            await applyMovement(session, {
-              elasticId: item.elastic,
-              type:      "DC_CANCEL_RETURN",
-              quantity:  +Number(item.quantity || 0),
-              refType:   "DeliveryChallan",
-              refId:     dc._id,
-              reason:    "Draft DC deleted",
-              by:        req.user?._id,
-            });
+            await _refundDcItem(
+              session,
+              dc,
+              item,
+              `Draft DC ${dc.dcNumber} deleted`,
+              req.user?._id
+            );
           }
         }
 
