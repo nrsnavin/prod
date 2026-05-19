@@ -44,9 +44,6 @@ function _normalisePlan(template) {
 }
 
 
-// ─────────────────────────────────────────────────────────────
-//  CREATE ELASTIC
-// ─────────────────────────────────────────────────────────────
 router.post(
   "/create-elastic",
   isAdmin('admin'),
@@ -95,28 +92,21 @@ router.post(
 );
 
 
-// ── LIST ELASTICS ────────────────────────────────
 router.get(
   "/get-elastics",
   catchAsyncErrors(async (req, res) => {
     const { search = "", page = 1, limit = 20 } = req.query;
-
-    const filter = search
-      ? { name: { $regex: search, $options: "i" } }
-      : {};
-
+    const filter = search ? { name: { $regex: search, $options: "i" } } : {};
     const elastics = await Elastic.find(filter)
       .skip((page - 1) * limit)
       .limit(search ? 0 : Number(limit))
       .sort({ createdAt: -1 });
-
     const total = await Elastic.countDocuments(filter);
     res.json({ success: true, elastics, total, page: Number(page) });
   })
 );
 
 
-// ── GET ELASTIC DETAIL ──────────────────────────
 router.get(
   "/get-elastic-detail",
   catchAsyncErrors(async (req, res, next) => {
@@ -127,10 +117,6 @@ router.get(
 );
 
 
-// ─────────────────────────────────────────────────────────────
-//  STOCK MAP
-//  GET /api/v2/elastic/stock-summary
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/stock-summary",
   isAdmin('admin'),
@@ -178,10 +164,6 @@ router.get(
 );
 
 
-// ─────────────────────────────────────────────────────────────
-//  RECONCILE — admin diagnostic: stock vs ledger sum drift
-//  GET /api/v2/elastic/reconcile
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/reconcile",
   isAdmin('admin'),
@@ -232,10 +214,6 @@ router.get(
 );
 
 
-// ─────────────────────────────────────────────────────────────
-//  STOCK DETAIL — current stock + paginated movement ledger
-//  GET /api/v2/elastic/:id/stock?page=&limit=
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/:id/stock",
   catchAsyncErrors(async (req, res, next) => {
@@ -292,14 +270,18 @@ router.get(
 
 // ─────────────────────────────────────────────────────────────
 //  MANUAL ADJUST
-//  POST /api/v2/elastic/:id/adjust-stock   { delta, reason }
+//  POST /api/v2/elastic/:id/adjust-stock { delta, reason, force? }
+//
+//  PR E P1-4: rejects |delta| > max(100, 0.5 * currentStock)
+//  unless body has force: true. Error includes the threshold so
+//  the UI can prompt a second confirm before retrying with force.
 // ─────────────────────────────────────────────────────────────
 router.post(
   "/:id/adjust-stock",
   isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.params;
-    const { delta, reason } = req.body;
+    const { delta, reason, force } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return next(new ErrorHandler("Invalid elastic id", 400));
@@ -310,6 +292,19 @@ router.post(
     }
     if (!reason || !String(reason).trim()) {
       return next(new ErrorHandler("reason is required", 400));
+    }
+
+    // Percentage cap — checked before opening the transaction so
+    // the UI gets a clean 400 with the threshold value.
+    const peek = await Elastic.findById(id).select("stock").lean();
+    if (!peek) return next(new ErrorHandler("Elastic not found", 404));
+    const currentStock = Number(peek.stock) || 0;
+    const threshold    = Math.max(100, 0.5 * currentStock);
+    if (Math.abs(deltaNum) > threshold && force !== true) {
+      return next(new ErrorHandler(
+        `Magnitude ${Math.abs(deltaNum)} exceeds ${threshold.toFixed(0)} (50% of ${currentStock} on hand, floor 100). Pass force:true to override.`,
+        400
+      ));
     }
 
     const session = await mongoose.startSession();
@@ -334,6 +329,7 @@ router.post(
             appliedDelta:   movement.applied,
             balance:        movement.balance,
             reason:         String(reason).trim(),
+            forced:         force === true,
           },
         });
 
@@ -343,6 +339,7 @@ router.post(
           stock:     elastic.stock,
           movement,
           fingerprint: fp,
+          forced:    force === true,
         };
       });
       res.json({ success: true, ...resp });
@@ -398,7 +395,6 @@ router.patch(
 );
 
 
-// ── UPDATE ELASTIC ─────────────────────────────
 router.put(
   "/update-elastic",
   isAdmin('admin'),
@@ -584,10 +580,9 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 //  DELETE ELASTIC
 //
-//  Refuses to delete when stock > 0 or any movements are on
-//  record. Pass ?force=true to override (admin escape hatch for
-//  test data only — cascades to remove the StockMovement rows
-//  so the collection doesn't grow with invisible orphans).
+//  Refuses to delete when stock > 0, reservedStock > 0, or any
+//  movements are on record. ?force=true overrides (admin escape
+//  hatch for test data only — cascades StockMovement deletion).
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/delete-elastic",
@@ -598,8 +593,6 @@ router.delete(
 
     const force = String(req.query.force || "").toLowerCase() === "true";
 
-    let moveCount = 0;
-
     if (!force) {
       const currentStock = Number(elastic.stock) || 0;
       if (currentStock !== 0) {
@@ -608,21 +601,22 @@ router.delete(
           400
         ));
       }
-      moveCount = await StockMovement.countDocuments({ elastic: elastic._id });
+      const reserved = Number(elastic.reservedStock) || 0;
+      if (reserved !== 0) {
+        return next(new ErrorHandler(
+          `Refusing to delete: ${reserved} unit(s) reserved against active orders. Cancel/complete those orders first, or pass force=true.`,
+          400
+        ));
+      }
+      const moveCount = await StockMovement.countDocuments({ elastic: elastic._id });
       if (moveCount > 0) {
         return next(new ErrorHandler(
           `Refusing to delete: ${moveCount} stock movement(s) on record. Pass force=true to override.`,
           400
         ));
       }
-    } else {
-      moveCount = await StockMovement.countDocuments({ elastic: elastic._id });
     }
 
-    // P1-3: cascade StockMovement so force-delete doesn't leave
-    // orphan ledger rows that are invisible to /reconcile but
-    // still consume storage. The non-force path's invariant is
-    // moveCount === 0, so deleteMany is effectively a no-op there.
     const deletedMoves = await StockMovement.deleteMany({ elastic: elastic._id });
 
     if (elastic.costing) await Costing.findByIdAndDelete(elastic.costing);
