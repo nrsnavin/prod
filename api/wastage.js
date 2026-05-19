@@ -8,15 +8,25 @@ const moment           = require("moment");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 
-const Wastage     = require("../models/Wastage");
-const JobOrder    = require("../models/JobOrder");
-const Employee    = require("../models/Employee");
-const ShiftDetail = require("../models/ShiftDetail");
+const Wastage       = require("../models/Wastage");
+const JobOrder      = require("../models/JobOrder");
+const Employee      = require("../models/Employee");
+const ShiftDetail   = require("../models/ShiftDetail");
+const StockMovement = require("../models/StockMovement");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
 
 router.use(isAuthenticated);
 
+// ═══════════════════════════════════════════════════════════
+//  ADD WASTAGE — P0-4: wastage no longer deducts elastic stock.
+//
+//  Wastage is loom-stage on partially-formed elastic, not on the
+//  finished stock that the Elastic.stock counter tracks. Per the
+//  user-confirmed rule, this route now updates only the job-level
+//  counter; the StockMovement ledger is not touched. Historical
+//  WASTAGE_OUT rows remain in the ledger for audit.
+// ═══════════════════════════════════════════════════════════
 router.post(
   "/add-wastage",
   catchAsyncErrors(async (req, res, next) => {
@@ -65,22 +75,9 @@ router.post(
         job.wastages.push(wastage._id);
         await job.save({ session });
 
-        // ── Stock OUT — wastage reduces on-hand stock ─────────
-        await applyMovement(session, {
-          elasticId,
-          type:     "WASTAGE_OUT",
-          quantity: -Number(quantity),
-          refType:  "Wastage",
-          refId:    wastage._id,
-          reason:   reason.trim(),
-          by:       req.user?._id,
-        });
-
         wastageId = wastage._id;
       });
 
-      // Performance recompute — kept outside the transaction since
-      // it's a derived figure across the whole employee history.
       const employee = await Employee.findById(employeeId);
       const [totalWastage] = await Promise.all([
         Wastage.aggregate([
@@ -108,6 +105,93 @@ router.post(
   })
 );
 
+// ═══════════════════════════════════════════════════════════
+//  DELETE WASTAGE — admin undo
+//
+//  P0-2: reverses by `applied`, not by `quantity`. If the original
+//  WASTAGE_OUT was clamped at the zero floor, refunding the full
+//  `quantity` would invent stock that never left.
+//
+//  Coexists with P0-4: new wastage records don't have a paired
+//  WASTAGE_OUT row, so the reversal step is a no-op for them.
+//  Legacy records (pre-P0-4) still get cleaned up via this path.
+// ═══════════════════════════════════════════════════════════
+router.delete(
+  "/:id",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid wastage id", 400));
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      let wastageId;
+      await session.withTransaction(async () => {
+        const wastage = await Wastage.findById(id).session(session);
+        if (!wastage) throw new ErrorHandler("Wastage record not found", 404);
+        wastageId = wastage._id;
+
+        const job = await JobOrder.findById(wastage.job).session(session);
+        if (job) {
+          const idx = job.wastageElastic.findIndex(
+            (x) => x.elastic.toString() === wastage.elastic.toString()
+          );
+          if (idx >= 0) {
+            const next = (job.wastageElastic[idx].quantity || 0) - Number(wastage.quantity || 0);
+            job.wastageElastic[idx].quantity = Math.max(0, next);
+          }
+          job.wastages = (job.wastages || []).filter(
+            (w) => w.toString() !== wastage._id.toString()
+          );
+          await job.save({ session });
+        }
+
+        // Look up the original WASTAGE_OUT row(s) — only present for
+        // legacy wastage entries created before P0-4 dropped the
+        // stock deduction. Reverse exactly the applied amount.
+        const originals = await StockMovement.find({
+          refType: "Wastage",
+          refId:   wastage._id,
+          elastic: wastage.elastic,
+          type:    "WASTAGE_OUT",
+        }).session(session);
+
+        if (originals.length > 0) {
+          const refund = -originals.reduce(
+            (s, m) => s + Number(m.applied || 0),
+            0
+          );
+          if (refund > 0) {
+            await applyMovement(session, {
+              elasticId: wastage.elastic,
+              type:      "WASTAGE_RETURN",
+              quantity:  +refund,
+              refType:   "Wastage",
+              refId:     wastage._id,
+              reason:    `reversal of legacy WASTAGE_OUT (${originals.map((m) => m._id).join(",")})`,
+              by:        req.user?._id,
+            });
+          }
+        }
+
+        await wastage.deleteOne({ session });
+      });
+
+      res.status(200).json({
+        success: true,
+        message: "Wastage record deleted",
+        id:      wastageId,
+      });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
+  })
+);
+
 router.get(
   "/jobs-for-wastage",
   catchAsyncErrors(async (req, res, next) => {
@@ -123,15 +207,6 @@ router.get(
   })
 );
 
-// ═════════════════════════════════════════════════════════════
-//  JOB OPERATORS  — GET /wastage/job-operators?id=<jobId>
-//
-//  Returns the distinct list of operators who worked on this job
-//  (based on ShiftDetail.employee). Mirrors /api/v2/job/job-operators
-//  but lives on the wastage router so the checking-dept worker (who
-//  doesn't have access to the admin job router) can populate the
-//  operator dropdown when logging wastage on someone else's work.
-// ═════════════════════════════════════════════════════════════
 router.get(
   "/job-operators",
   catchAsyncErrors(async (req, res, next) => {

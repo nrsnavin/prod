@@ -7,23 +7,19 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 
 const DeliveryChallan = require("../models/Deliverychallan ");
 const Order           = require("../models/Order");
+const Elastic         = require("../models/Elastic");
+const StockMovement   = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { applyMovement } = require("../utils/elasticStock");
 
-// ─────────────────────────────────────────────────────────────
-//  HELPERS
-// ─────────────────────────────────────────────────────────────
-
-/** Returns "24/25" for April 2024 – March 2025, etc. */
 function currentFinancialYear() {
   const now     = new Date();
-  const month   = now.getMonth(); // 0-indexed; April = 3
+  const month   = now.getMonth();
   const year    = now.getFullYear();
   const fyStart = month >= 3 ? year : year - 1;
   return `${String(fyStart).slice(-2)}/${String(fyStart + 1).slice(-2)}`;
 }
 
-/** Next available sequence number for this type + FY combination. */
 async function nextSeq(type, financialYear) {
   const last = await DeliveryChallan
     .findOne({ type, financialYear })
@@ -33,16 +29,100 @@ async function nextSeq(type, financialYear) {
   return (last?.sequence ?? 0) + 1;
 }
 
-/** E-24/25-0001  or  M-24/25-0001 */
 function buildDcNumber(type, financialYear, sequence) {
   const prefix = type === "elastic" ? "E" : "M";
   return `${prefix}-${financialYear}-${String(sequence).padStart(4, "0")}`;
 }
 
 // ─────────────────────────────────────────────────────────────
-//  GET ORDER INFO (pre-fill helper for Flutter form)
-//  GET /api/v2/dc/order-info?id=<orderId>
+//  Reverse the source DC_OUT movements for one DC item.
+//
+//  P0-1: refund equals SUM(source DC_OUT.applied), not item.quantity.
+//  Skipped silently when no DC_OUT exists (DC predates the ledger).
 // ─────────────────────────────────────────────────────────────
+async function _refundDcItem(session, dc, item, reasonContext, userId) {
+  if (!item.elastic) return "no elastic on item";
+
+  const originals = await StockMovement.find({
+    refType: "DeliveryChallan",
+    refId:   dc._id,
+    elastic: item.elastic,
+    type:    "DC_OUT",
+  }).session(session);
+
+  if (originals.length === 0) {
+    return "no source DC_OUT";
+  }
+
+  const refund = -originals.reduce(
+    (s, m) => s + Number(m.applied || 0),
+    0
+  );
+  if (refund <= 0) return "zero refund";
+
+  await applyMovement(session, {
+    elasticId: item.elastic,
+    type:      "DC_CANCEL_RETURN",
+    quantity:  +refund,
+    refType:   "DeliveryChallan",
+    refId:     dc._id,
+    reason:    `${reasonContext}; reversal of ${originals.map((m) => m._id).join(",")}`,
+    by:        userId,
+  });
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Restore a reservation that was consumed by this DC item.
+//  PR E: paired with _refundDcItem on cancel / delete.
+// ─────────────────────────────────────────────────────────────
+async function _restoreReservation(session, dc, item, reasonContext, userId) {
+  if (!item.elastic) return null;
+  const qty = Number(item.consumedFromReservation || 0);
+  if (qty <= 0) return null;
+  if (!dc.order) return null;
+
+  const order = await Order.findById(dc.order).session(session);
+  if (!order) {
+    console.warn(
+      `[dc] cannot restore reservation — order ${dc.order} not found for DC ${dc._id}`
+    );
+    return null;
+  }
+
+  // Bump the elastic's reservedStock back up.
+  const elasticDoc = await Elastic.findById(item.elastic).session(session);
+  if (elasticDoc) {
+    elasticDoc.reservedStock = (Number(elasticDoc.reservedStock) || 0) + qty;
+    await elasticDoc.save({ session });
+  }
+
+  // Top up the matching reservation entry on the order, or push a
+  // new one if it had been pruned.
+  const entry = (order.reservations || []).find(
+    (r) => r.elastic.toString() === item.elastic.toString()
+  );
+  if (entry) {
+    entry.quantity = (Number(entry.quantity) || 0) + qty;
+  } else {
+    order.reservations.push({ elastic: item.elastic, quantity: qty });
+  }
+  await order.save({ session });
+
+  // Info-row on the ledger so the timeline shows the restore.
+  await applyMovement(session, {
+    elasticId: item.elastic,
+    type:      "RESERVATION_HOLD",
+    quantity:  +qty,
+    refType:   "Order",
+    refId:     order._id,
+    reason:    `${reasonContext}; reservation restored`,
+    by:        userId,
+  });
+
+  return { elastic: item.elastic, quantity: qty };
+}
+
 router.get(
   "/order-info",
   catchAsyncErrors(async (req, res, next) => {
@@ -76,10 +156,23 @@ router.get(
 
 // ─────────────────────────────────────────────────────────────
 //  CREATE DC
-//  POST /api/v2/dc/create
 //
-//  Deducts elastic stock immediately (DC_OUT) — the inventory is
-//  considered committed the moment a DC is entered (any status).
+//  PR E: when the DC is linked to an Approved/InProgress order
+//  AND that order has matching reservations, split each item:
+//    consumeFromReservation = min(item.quantity, reservedQty)
+//    consumeFromStock        = item.quantity − consumeFromReservation
+//
+//  Stock-side DC_OUT is posted for the stock portion only. The
+//  reservation portion decrements Elastic.reservedStock + the
+//  Order.reservations entry and posts a RESERVATION_RELEASE info-row.
+//  Both numbers are stored on each item for traceability and so the
+//  cancel/delete paths can correctly restore reservations.
+//
+//  Falls back to the pre-PR-E behaviour (entire quantity deducted
+//  from free stock) when:
+//    • DC has no order ref, or
+//    • the order is not in Approved/InProgress, or
+//    • the order has no reservation entry for this elastic.
 // ─────────────────────────────────────────────────────────────
 router.post(
   "/create",
@@ -94,7 +187,6 @@ router.post(
       remarks,
     } = req.body;
 
-    // ── Basic validation ──────────────────────────────────────
     if (!type || !["elastic", "machine_part"].includes(type)) {
       return next(new ErrorHandler("type must be 'elastic' or 'machine_part'", 400));
     }
@@ -105,17 +197,19 @@ router.post(
       return next(new ErrorHandler("At least one item is required", 400));
     }
 
-    // ── Compute amounts ───────────────────────────────────────
     const processedItems = items.map((item) => ({
       ...item,
       quantity: Number(item.quantity) || 0,
       rate:     Number(item.rate)     || 0,
       amount:   (Number(item.quantity) || 0) * (Number(item.rate) || 0),
+      // Default both split fields to zero; the create transaction
+      // populates them when the parent order has reservations.
+      consumedFromReservation: 0,
+      consumedFromStock:       0,
     }));
     const totalQuantity = processedItems.reduce((s, i) => s + i.quantity, 0);
     const totalAmount   = processedItems.reduce((s, i) => s + i.amount,   0);
 
-    // ── Generate DC number (atomic-safe for single instance) ──
     const financialYear = currentFinancialYear();
     const sequence      = await nextSeq(type, financialYear);
     const dcNumber      = buildDcNumber(type, financialYear, sequence);
@@ -147,7 +241,6 @@ router.post(
           status:          "draft",
         }], { session });
 
-        // 🪪 Fingerprint: DC_CREATED
         const fp = buildFingerprint(ACTION_CODES.DC_CREATED, {
           entityId: dc._id,
           actor:    actorFromRequest(req),
@@ -162,25 +255,93 @@ router.post(
           },
         });
         dc.fingerprints.push(fp);
-        await dc.save({ session });
 
-        // ── Stock OUT — deduct one row per item ───────────────
-        //    Only meaningful for elastic DCs (machine_part DCs
-        //    have no Elastic reference). Skip cleanly if missing.
         if (dc.type === "elastic") {
-          for (const item of processedItems) {
+          // Resolve the parent order once. Only Approved/InProgress
+          // orders participate in reservation consumption — per
+          // user-confirmed scope decision.
+          let orderDoc = null;
+          if (dc.order) {
+            orderDoc = await Order.findById(dc.order).session(session);
+            if (orderDoc && !["Approved", "InProgress"].includes(orderDoc.status)) {
+              orderDoc = null; // ignore reservations on closed orders
+            }
+          }
+
+          for (let i = 0; i < dc.items.length; i++) {
+            const item = dc.items[i];
             if (!item.elastic) continue;
-            await applyMovement(session, {
-              elasticId: item.elastic,
-              type:      "DC_OUT",
-              quantity:  -Number(item.quantity || 0),
-              refType:   "DeliveryChallan",
-              refId:     dc._id,
-              by:        req.user?._id,
-            });
+
+            // Compute the reservation split if applicable.
+            let consumeFromReservation = 0;
+            if (orderDoc) {
+              const entry = (orderDoc.reservations || []).find(
+                (r) => r.elastic.toString() === item.elastic.toString()
+              );
+              const reservedQty = entry ? Number(entry.quantity) || 0 : 0;
+              consumeFromReservation = Math.min(
+                Number(item.quantity) || 0,
+                reservedQty
+              );
+            }
+            const consumeFromStock =
+              Math.max(0, Number(item.quantity || 0) - consumeFromReservation);
+
+            // Stock portion via the helper (with clamp).
+            if (consumeFromStock > 0) {
+              await applyMovement(session, {
+                elasticId: item.elastic,
+                type:      "DC_OUT",
+                quantity:  -consumeFromStock,
+                refType:   "DeliveryChallan",
+                refId:     dc._id,
+                by:        req.user?._id,
+              });
+            }
+
+            // Reservation portion: decrement reservedStock + the
+            // matching order entry; emit RESERVATION_RELEASE.
+            if (consumeFromReservation > 0 && orderDoc) {
+              const elasticDoc = await Elastic.findById(item.elastic).session(session);
+              if (elasticDoc) {
+                const current = Number(elasticDoc.reservedStock) || 0;
+                elasticDoc.reservedStock = Math.max(0, current - consumeFromReservation);
+                await elasticDoc.save({ session });
+              }
+
+              const entry = (orderDoc.reservations || []).find(
+                (r) => r.elastic.toString() === item.elastic.toString()
+              );
+              if (entry) {
+                entry.quantity = Math.max(0, (Number(entry.quantity) || 0) - consumeFromReservation);
+              }
+
+              await applyMovement(session, {
+                elasticId: item.elastic,
+                type:      "RESERVATION_RELEASE",
+                quantity:  +consumeFromReservation,
+                refType:   "Order",
+                refId:     orderDoc._id,
+                reason:    `DC ${dc.dcNumber} consumed reservation`,
+                by:        req.user?._id,
+              });
+            }
+
+            // Persist the split on the item.
+            dc.items[i].consumedFromReservation = consumeFromReservation;
+            dc.items[i].consumedFromStock       = consumeFromStock;
+          }
+
+          if (orderDoc) {
+            // Prune zero-quantity reservation entries.
+            orderDoc.reservations = (orderDoc.reservations || []).filter(
+              (r) => Number(r.quantity || 0) > 0
+            );
+            await orderDoc.save({ session });
           }
         }
 
+        await dc.save({ session });
         resp = { dc, fingerprint: fp };
       });
       res.status(201).json({ success: true, ...resp });
@@ -192,10 +353,6 @@ router.post(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  LIST DCs
-//  GET /api/v2/dc/list?type=&status=&search=&page=&limit=
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/list",
   catchAsyncErrors(async (req, res) => {
@@ -218,7 +375,7 @@ router.get(
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(search ? 0 : Number(limit))
-        .select("-items"), // omit items in list view
+        .select("-items"),
       DeliveryChallan.countDocuments(filter),
     ]);
 
@@ -226,10 +383,6 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  GET DC DETAIL
-//  GET /api/v2/dc/detail?id=
-// ─────────────────────────────────────────────────────────────
 router.get(
   "/detail",
   catchAsyncErrors(async (req, res, next) => {
@@ -240,7 +393,6 @@ router.get(
 
     if (!dc) return next(new ErrorHandler("Delivery Challan not found", 404));
 
-    // 🪪 Newest-first feed for the timeline UI
     const fingerprints = (dc.fingerprints || [])
       .slice()
       .sort((a, b) => new Date(b.at) - new Date(a.at));
@@ -249,15 +401,6 @@ router.get(
   })
 );
 
-// ─────────────────────────────────────────────────────────────
-//  UPDATE STATUS
-//  PATCH /api/v2/dc/update-status  { id, status }
-//
-//  Transitioning *into* 'cancelled' from a non-cancelled state
-//  posts an inverse DC_CANCEL_RETURN movement per item, returning
-//  the previously deducted stock. Idempotent — re-cancelling a
-//  cancelled DC short-circuits before any write.
-// ─────────────────────────────────────────────────────────────
 router.patch(
   "/update-status",
   catchAsyncErrors(async (req, res, next) => {
@@ -267,8 +410,6 @@ router.patch(
       return next(new ErrorHandler("Invalid status", 400));
     }
 
-    // Specialised action code per terminal status — keeps the
-    // timeline scannable and lets the UI colour-code transitions.
     const actionCode = {
       dispatched: ACTION_CODES.DC_DISPATCHED,
       delivered:  ACTION_CODES.DC_DELIVERED,
@@ -284,14 +425,11 @@ router.patch(
 
         const previousStatus = dc.status;
         if (previousStatus === status) {
-          // No-op — still record an entry so the operator's intent
-          // is captured (e.g. retry click), but skip the write
           throw new ErrorHandler(`DC is already ${status}`, 400);
         }
 
         dc.status = status;
 
-        // 🪪 Status-change fingerprint
         const fp = buildFingerprint(actionCode, {
           entityId: dc._id,
           actor:    actorFromRequest(req),
@@ -304,23 +442,28 @@ router.patch(
         dc.fingerprints.push(fp);
         await dc.save({ session });
 
-        // ── Stock RETURN — only when transitioning into
-        //    'cancelled' from a non-cancelled state (idempotent).
         if (
           status === "cancelled" &&
           previousStatus !== "cancelled" &&
           dc.type === "elastic"
         ) {
           for (const item of (dc.items || [])) {
-            if (!item.elastic) continue;
-            await applyMovement(session, {
-              elasticId: item.elastic,
-              type:      "DC_CANCEL_RETURN",
-              quantity:  +Number(item.quantity || 0),
-              refType:   "DeliveryChallan",
-              refId:     dc._id,
-              by:        req.user?._id,
-            });
+            // Stock-side refund (P0-1: applied, not requested).
+            await _refundDcItem(
+              session,
+              dc,
+              item,
+              `DC ${dc.dcNumber} cancelled`,
+              req.user?._id
+            );
+            // Restore the reservation portion if any.
+            await _restoreReservation(
+              session,
+              dc,
+              item,
+              `DC ${dc.dcNumber} cancelled`,
+              req.user?._id
+            );
           }
         }
 
@@ -337,34 +480,65 @@ router.patch(
 
 // ─────────────────────────────────────────────────────────────
 //  DELETE DC  (draft only)
-//  DELETE /api/v2/dc/delete?id=
+//
+//  Reverses the original DC_OUT(s) by applied amount, and restores
+//  any reservation that was consumed at create time.
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/delete",
   catchAsyncErrors(async (req, res, next) => {
-    const dc = await DeliveryChallan.findById(req.query.id);
-    if (!dc) return next(new ErrorHandler("Delivery Challan not found", 404));
-    if (dc.status !== "draft") {
-      return next(new ErrorHandler("Only draft challans can be deleted", 400));
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const dc = await DeliveryChallan.findById(req.query.id).session(session);
+        if (!dc) throw new ErrorHandler("Delivery Challan not found", 404);
+        if (dc.status !== "draft") {
+          throw new ErrorHandler("Only draft challans can be deleted", 400);
+        }
+
+        if (dc.type === "elastic") {
+          for (const item of (dc.items || [])) {
+            await _refundDcItem(
+              session,
+              dc,
+              item,
+              `Draft DC ${dc.dcNumber} deleted`,
+              req.user?._id
+            );
+            await _restoreReservation(
+              session,
+              dc,
+              item,
+              `Draft DC ${dc.dcNumber} deleted`,
+              req.user?._id
+            );
+          }
+        }
+
+        const fp = buildFingerprint(ACTION_CODES.DC_DELETED, {
+          entityId: dc._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            dcNumber:     dc.dcNumber,
+            type:         dc.type,
+            customerName: dc.customerName,
+            status:       dc.status,
+          },
+        });
+        console.log(
+          `[dc/delete] ${fp.shortId} ${fp.label} actor=${fp.actor?.name} dc=${dc.dcNumber}`
+        );
+
+        await dc.deleteOne({ session });
+        resp = { fingerprint: fp };
+      });
+      res.json({ success: true, message: "Deleted", ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-
-    // 🪪 Record DC_DELETED before the doc is gone so the action
-    //    is preserved in server logs even though the embedded
-    //    timeline disappears with the document.
-    const fp = buildFingerprint(ACTION_CODES.DC_DELETED, {
-      entityId: dc._id,
-      actor:    actorFromRequest(req),
-      meta: {
-        dcNumber:     dc.dcNumber,
-        type:         dc.type,
-        customerName: dc.customerName,
-        status:       dc.status,
-      },
-    });
-    console.log(`[dc/delete] ${fp.shortId} ${fp.label} actor=${fp.actor?.name} dc=${dc.dcNumber}`);
-
-    await dc.deleteOne();
-    res.json({ success: true, message: "Deleted", fingerprint: fp });
   })
 );
 
