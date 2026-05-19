@@ -50,6 +50,9 @@ const ACTION_CODES = Object.freeze({
   PACKING_CREATED:          'PACKING_CREATED',
   WASTAGE_RECORDED:         'WASTAGE_RECORDED',
   ELASTIC_STOCK_ADJUST:     'ELASTIC_STOCK_ADJUST',
+  // Elastic reservation lifecycle (Order ↔ Elastic.reservedStock)
+  STOCK_RESERVED:           'STOCK_RESERVED',
+  STOCK_RELEASED:           'STOCK_RELEASED',
   // Delivery-Challan lifecycle
   DC_CREATED:               'DC_CREATED',
   DC_STATUS_UPDATED:        'DC_STATUS_UPDATED',
@@ -82,6 +85,8 @@ const ACTION_LABELS = Object.freeze({
   PACKING_CREATED:          'Packing Recorded',
   WASTAGE_RECORDED:         'Wastage Recorded',
   ELASTIC_STOCK_ADJUST:     'Elastic Stock Adjusted',
+  STOCK_RESERVED:           'Stock Reserved',
+  STOCK_RELEASED:           'Stock Released',
   DC_CREATED:               'Delivery Challan Created',
   DC_STATUS_UPDATED:        'DC Status Updated',
   DC_DISPATCHED:            'DC Dispatched',
