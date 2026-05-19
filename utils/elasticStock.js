@@ -1,21 +1,30 @@
 // utils/elasticStock.js
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  Elastic stock-movement helper.
 //
 //  Every change to Elastic.stock must go through applyMovement so
-//  the ledger and the running balance stay in lock-step. Always
-//  called with an active mongoose session — callers wrap their own
-//  domain mutation (packing, DC, wastage, manual adjust) and the
-//  stock update in the same `session.withTransaction(...)`.
+//  the ledger and the running balance stay in lock-step.
 //
-//  Clamping: stock never goes negative. If `quantity` would drive
-//  the balance below zero, the recorded `quantity` is reduced to
-//  the actually-applied delta so the ledger sum still equals the
-//  current `balance`.
-// ────────────────────────────────────────────────────────────────
+//  Atomicity model:
+//   1. Read current stock from Elastic.
+//   2. Compute the clamped delta (stock floor = 0).
+//   3. findOneAndUpdate with { _id, stock: <observed> } so the
+//      write only lands if no concurrent writer changed stock in
+//      between. On miss we retry up to MAX_RETRIES times.
+//   4. Insert the matching StockMovement row.
+//
+//  Both the Elastic update and the StockMovement insert run inside
+//  the caller-supplied session, so they commit or roll back as a
+//  single unit.
+//
+//  RESERVATION_HOLD / RESERVATION_RELEASE rows skip the stock
+//  mutation entirely — they're info-only audit entries used by
+//  the order-reservation flow (PR B).
+// ─────────────────────────────────────────────────────────────
 "use strict";
 
-const Elastic = require("../models/Elastic");
+const Elastic       = require("../models/Elastic");
+const StockMovement = require("../models/StockMovement");
 
 const VALID_TYPES = [
   "PACKING_INWARD",
@@ -24,65 +33,128 @@ const VALID_TYPES = [
   "DC_CANCEL_RETURN",
   "WASTAGE_OUT",
   "MANUAL_ADJUST",
+  "RESERVATION_HOLD",
+  "RESERVATION_RELEASE",
 ];
+
+const INFO_ONLY_TYPES = new Set(["RESERVATION_HOLD", "RESERVATION_RELEASE"]);
+
+const MAX_RETRIES = 5;
 
 /**
  * Apply a signed stock movement to an Elastic and persist it on
- * the running ledger.
+ * the StockMovement ledger.
  *
- * @param {mongoose.ClientSession} session   active transaction session
+ * @param {mongoose.ClientSession} session  active transaction session
  * @param {object} opts
- * @param {string|ObjectId} opts.elasticId   target Elastic _id
- * @param {string}          opts.type        one of VALID_TYPES
- * @param {number}          opts.quantity    signed delta (+ inward / − outward)
- * @param {string}         [opts.refType]    e.g. 'Packing'|'Wastage'|'DeliveryChallan'
- * @param {ObjectId|string}[opts.refId]      source document id
- * @param {string}         [opts.reason]     human note (MANUAL_ADJUST etc.)
- * @param {ObjectId|string}[opts.by]         acting user id
+ * @param {string|ObjectId} opts.elasticId        target Elastic _id
+ * @param {string}          opts.type             one of VALID_TYPES
+ * @param {number}          opts.quantity         signed delta (+ inward / − outward)
+ * @param {string}         [opts.refType]         e.g. 'Packing'|'DeliveryChallan'
+ * @param {ObjectId|string}[opts.refId]           source document id
+ * @param {string}         [opts.reason]          human note
+ * @param {ObjectId|string}[opts.by]              acting user id
+ * @param {boolean}        [opts.alsoIncProduced] PACKING_INWARD bumps Elastic.quantityProduced
  * @returns {Promise<{elastic, movement}>}
  */
 async function applyMovement(session, opts) {
-  const { elasticId, type, quantity, refType, refId, reason, by } = opts || {};
+  const {
+    elasticId,
+    type,
+    quantity,
+    refType,
+    refId,
+    reason,
+    by,
+    alsoIncProduced = false,
+  } = opts || {};
 
-  if (!elasticId)               throw new Error("applyMovement: elasticId is required");
+  if (!elasticId) {
+    throw new Error("applyMovement: elasticId is required");
+  }
   if (!VALID_TYPES.includes(type)) {
     throw new Error(`applyMovement: invalid type '${type}'`);
   }
-  if (typeof quantity !== "number" || !Number.isFinite(quantity)) {
+
+  const requested = Number(quantity);
+  if (!Number.isFinite(requested)) {
     throw new Error("applyMovement: quantity must be a finite number");
   }
 
-  const elastic = await Elastic.findById(elasticId).session(session);
-  if (!elastic) throw new Error(`applyMovement: Elastic ${elasticId} not found`);
+  // Info-only rows: no stock mutation, just log.
+  if (INFO_ONLY_TYPES.has(type)) {
+    const elastic = await Elastic.findById(elasticId).session(session);
+    if (!elastic) {
+      throw new Error(`applyMovement: Elastic ${elasticId} not found`);
+    }
+    const [persisted] = await StockMovement.create(
+      [
+        {
+          elastic:   elastic._id,
+          date:      new Date(),
+          type,
+          requested,
+          applied:   0,
+          balance:   Number(elastic.stock) || 0,
+          refType:   refType || undefined,
+          refId:     refId || undefined,
+          reason:    reason || undefined,
+          by:        by || undefined,
+        },
+      ],
+      { session }
+    );
+    return { elastic, movement: persisted };
+  }
 
-  const currentStock = Number(elastic.stock) || 0;
-  const requested    = quantity;
+  // Stock-mutating types — compare-and-swap with retry.
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const current = await Elastic.findById(elasticId).session(session);
+    if (!current) {
+      throw new Error(`applyMovement: Elastic ${elasticId} not found`);
+    }
 
-  // Clamp to ≥ 0 — record the actually-applied delta.
-  const desired = currentStock + requested;
-  const newStock = Math.max(0, desired);
-  const appliedDelta = newStock - currentStock;
+    const currentStock = Number(current.stock) || 0;
+    const desired      = currentStock + requested;
+    const newStock     = Math.max(0, desired);
+    const applied      = newStock - currentStock;
 
-  elastic.stock = newStock;
+    const inc = { stock: applied };
+    if (alsoIncProduced) inc.quantityProduced = applied;
 
-  const movement = {
-    date:     new Date(),
-    type,
-    quantity: appliedDelta,
-    balance:  newStock,
-    refType:  refType || undefined,
-    refId:    refId   || undefined,
-    reason:   reason  || undefined,
-    by:       by      || undefined,
-  };
+    const updated = await Elastic.findOneAndUpdate(
+      { _id: elasticId, stock: currentStock },
+      { $inc: inc },
+      { new: true, session }
+    );
 
-  elastic.stockMovements.push(movement);
-  await elastic.save({ session });
+    // Compare-and-swap lost the race — another writer changed stock.
+    if (!updated) continue;
 
-  // The last pushed sub-doc carries its assigned _id post-save.
-  const persisted = elastic.stockMovements[elastic.stockMovements.length - 1];
+    const [persisted] = await StockMovement.create(
+      [
+        {
+          elastic:   updated._id,
+          date:      new Date(),
+          type,
+          requested,
+          applied,
+          balance:   Number(updated.stock) || 0,
+          refType:   refType || undefined,
+          refId:     refId || undefined,
+          reason:    reason || undefined,
+          by:        by || undefined,
+        },
+      ],
+      { session }
+    );
 
-  return { elastic, movement: persisted };
+    return { elastic: updated, movement: persisted };
+  }
+
+  throw new Error(
+    `applyMovement: contention on Elastic ${elasticId} after ${MAX_RETRIES} retries`
+  );
 }
 
 module.exports = { applyMovement, VALID_TYPES };

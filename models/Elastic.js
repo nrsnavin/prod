@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 
-// ── Warping plan template sub-schemas ─────────────────────────
+// ── Warping plan template sub-schemas ──────────────────
 // Embedded on the Elastic doc so any Warping created for a job
 // containing this elastic can auto-build a WarpingPlan from it.
 
@@ -27,9 +27,12 @@ const PlanBeamSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// ── Stock movement ledger ─────────────────────────────────────
-// Mirrors RawMaterial.stockMovements. Every change to Elastic.stock
-// appends one row here so we have a full audit trail.
+// ── Stock movement ledger (legacy embedded form) ───────────
+// Retained as a fallback during the migration window to the
+// standalone StockMovement collection. No new rows are written
+// here — utils/elasticStock.js writes to StockMovement instead.
+// A follow-up PR drops this field once the new collection is
+// verified across all environments.
 const ElasticMovementSchema = new mongoose.Schema(
   {
     date:     { type: Date, default: Date.now },
@@ -45,19 +48,17 @@ const ElasticMovementSchema = new mongoose.Schema(
       ],
       required: true,
     },
-    // signed: + inward / − outward.
     quantity: { type: Number, required: true },
-    // resulting stock value after this movement (post-clamp).
     balance:  { type: Number, required: true },
-    refType:  { type: String }, // 'Packing' | 'Wastage' | 'DeliveryChallan' | null
+    refType:  { type: String },
     refId:    { type: mongoose.Types.ObjectId },
-    reason:   { type: String }, // free text for MANUAL_ADJUST etc.
+    reason:   { type: String },
     by:       { type: mongoose.Types.ObjectId, ref: "User" },
   },
   { _id: true, timestamps: false }
 );
 
-// ── Main elastic schema ────────────────────────────────────────
+// ── Main elastic schema ───────────────────────────
 const ElasticSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -111,7 +112,19 @@ const ElasticSchema = new mongoose.Schema(
 
     stock: { type: Number, default: 0 },
 
-    // Running stock movement ledger (newest pushed to the end).
+    // Low-stock threshold. When stock <= minStock (and minStock > 0)
+    // the admin UI flags this elastic as LOW.
+    minStock: { type: Number, default: 0 },
+
+    // Units committed to approved orders but not yet dispatched.
+    // Available = stock − reservedStock. Maintained by the order
+    // reservation routes (PR B) and consumed first when a DC is
+    // dispatched against the same order.
+    reservedStock: { type: Number, default: 0 },
+
+    // Legacy embedded ledger — kept read-only during the migration
+    // window. Writers use StockMovement (the standalone collection)
+    // via utils/elasticStock.js. Removed in a follow-up PR.
     stockMovements: {
       type: [ElasticMovementSchema],
       default: [],
@@ -119,7 +132,7 @@ const ElasticSchema = new mongoose.Schema(
 
     status: { type: mongoose.Types.ObjectId, ref: "Order" },
 
-    // ── WARPING PLAN TEMPLATE ──────────────────────────────
+    // ── WARPING PLAN TEMPLATE ──────────────────
     // Optional. Auto-used when Warping is created for a job
     // that includes this elastic.
     warpingPlanTemplate: {

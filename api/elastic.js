@@ -5,8 +5,9 @@ const mongoose = require("mongoose");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 
-const Elastic  = require("../models/Elastic");
-const Costing  = require("../models/Costing");
+const Elastic       = require("../models/Elastic");
+const Costing       = require("../models/Costing");
+const StockMovement = require("../models/StockMovement");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
@@ -18,7 +19,7 @@ const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/f
 // pattern in this same backend.
 router.use(isAuthenticated);
 
-// ── Helper: full populate for elastic ─────────────────────────
+// ── Helper: full populate for elastic ─────────────────
 const _populate = (q) =>
   q
     .populate("warpSpandex.id")
@@ -28,7 +29,7 @@ const _populate = (q) =>
     .populate("costing")
     .populate("warpingPlanTemplate.beams.sections.warpYarn", "name category");
 
-// ── Helper: normalise + compute totalEnds per beam ─────────────
+// ── Helper: normalise + compute totalEnds per beam ─────────
 function _normalisePlan(template) {
   const beams = (template.beams || []).map((b, i) => {
     const sections = (b.sections || [])
@@ -49,10 +50,10 @@ function _normalisePlan(template) {
 }
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  CREATE ELASTIC
 //  Accepts optional warpingPlanTemplate in body.
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.post(
   "/create-elastic",
   isAdmin('admin'),
@@ -103,9 +104,9 @@ router.post(
 );
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  LIST ELASTICS
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.get(
   "/get-elastics",
   catchAsyncErrors(async (req, res) => {
@@ -126,9 +127,9 @@ router.get(
 );
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  GET ELASTIC DETAIL
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.get(
   "/get-elastic-detail",
   catchAsyncErrors(async (req, res, next) => {
@@ -139,31 +140,52 @@ router.get(
 );
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  STOCK MAP — admin overview of every elastic's stock
 //  GET /api/v2/elastic/stock-summary
 //
 //  IMPORTANT: must appear before /:id/stock so '/stock-summary'
 //  is not captured as an :id.
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.get(
   "/stock-summary",
   isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
     const elastics = await Elastic.find()
-      .select("name stock quantityProduced stockMovements")
+      .select("name stock quantityProduced minStock reservedStock")
       .lean();
 
+    // One round-trip for the latest movement per elastic.
+    const ids = elastics.map((e) => e._id);
+    const lastMoves = ids.length
+      ? await StockMovement.aggregate([
+          { $match: { elastic: { $in: ids } } },
+          { $sort:  { elastic: 1, date: -1, _id: -1 } },
+          { $group: {
+              _id:      "$elastic",
+              lastDate: { $first: "$date" },
+              lastType: { $first: "$type" },
+          }},
+        ])
+      : [];
+    const lastByElastic = new Map(lastMoves.map((m) => [String(m._id), m]));
+
     const summary = elastics.map((e) => {
-      const moves = e.stockMovements || [];
-      const last  = moves.length > 0 ? moves[moves.length - 1] : null;
+      const last     = lastByElastic.get(String(e._id));
+      const stock    = Number(e.stock) || 0;
+      const reserved = Number(e.reservedStock) || 0;
+      const minStock = Number(e.minStock) || 0;
       return {
         elasticId:        e._id,
         name:             e.name,
-        stock:            Number(e.stock) || 0,
+        stock,
+        reservedStock:    reserved,
+        available:        Math.max(0, stock - reserved),
+        minStock,
+        isLowStock:       minStock > 0 && stock <= minStock,
         quantityProduced: Number(e.quantityProduced) || 0,
-        lastMovementAt:   last ? last.date : null,
-        lastMovementType: last ? last.type : null,
+        lastMovementAt:   last ? last.lastDate : null,
+        lastMovementType: last ? last.lastType : null,
       };
     });
 
@@ -173,12 +195,12 @@ router.get(
 );
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  STOCK DETAIL — current stock + paginated movement ledger
 //  GET /api/v2/elastic/:id/stock?page=&limit=
 //
 //  AUTH (not ADMIN) so worker portals can render a stock screen.
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.get(
   "/:id/stock",
   catchAsyncErrors(async (req, res, next) => {
@@ -191,27 +213,38 @@ router.get(
     const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
 
     const elastic = await Elastic.findById(id)
-      .select("name stock quantityProduced stockMovements")
+      .select("name stock quantityProduced minStock reservedStock")
       .lean();
     if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
 
-    const allMoves = (elastic.stockMovements || [])
-      .slice()
-      .sort((a, b) => new Date(b.date) - new Date(a.date));
+    const filter = { elastic: elastic._id };
+    const total     = await StockMovement.countDocuments(filter);
+    const movements = await StockMovement.find(filter)
+      .sort({ date: -1, _id: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
 
-    const total      = allMoves.length;
-    const start      = (page - 1) * limit;
-    const movements  = allMoves.slice(start, start + limit);
+    const stock    = Number(elastic.stock) || 0;
+    const reserved = Number(elastic.reservedStock) || 0;
+    const minStock = Number(elastic.minStock) || 0;
 
     res.json({
       success: true,
       elastic: {
         _id:              elastic._id,
         name:             elastic.name,
-        stock:            Number(elastic.stock) || 0,
+        stock,
+        reservedStock:    reserved,
+        available:        Math.max(0, stock - reserved),
+        minStock,
+        isLowStock:       minStock > 0 && stock <= minStock,
         quantityProduced: Number(elastic.quantityProduced) || 0,
       },
-      stock:            Number(elastic.stock) || 0,
+      stock,
+      reservedStock:    reserved,
+      available:        Math.max(0, stock - reserved),
+      minStock,
       quantityProduced: Number(elastic.quantityProduced) || 0,
       movements,
       page,
@@ -222,10 +255,10 @@ router.get(
 );
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  MANUAL ADJUST — admin correction / opening balance / theft
 //  POST /api/v2/elastic/:id/adjust-stock   { delta, reason }
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.post(
   "/:id/adjust-stock",
   isAdmin('admin'),
@@ -261,9 +294,9 @@ router.post(
           entityId: elastic._id,
           actor:    actorFromRequest(req),
           meta: {
-            elasticName: elastic.name,
+            elasticName:    elastic.name,
             requestedDelta: deltaNum,
-            appliedDelta:   movement.quantity,
+            appliedDelta:   movement.applied,
             balance:        movement.balance,
             reason:         String(reason).trim(),
           },
@@ -287,10 +320,10 @@ router.post(
 );
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  UPDATE ELASTIC
 //  Also accepts warpingPlanTemplate — pass null/empty to clear.
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.put(
   "/update-elastic",
   isAdmin('admin'),
@@ -305,11 +338,11 @@ router.put(
       if (!elastic)
         return next(new ErrorHandler("Elastic not found", 404));
 
-      // ── 1. Core fields ────────────────────────────────────────
+      // ── 1. Core fields ───────────────────────────
       const fieldsToCopy = [
         "name", "weaveType", "pick", "noOfHook", "weight",
         "spandexEnds", "warpSpandex", "weftYarn", "spandexCovering",
-        "warpYarn", "testingParameters",
+        "warpYarn", "testingParameters", "minStock",
       ];
       for (const field of fieldsToCopy) {
         if (elasticData[field] !== undefined) elastic[field] = elasticData[field];
@@ -318,8 +351,9 @@ router.put(
       if (elasticData.noOfHook    !== undefined) elastic.noOfHook    = Number(elasticData.noOfHook);
       if (elasticData.weight      !== undefined) elastic.weight      = Number(elasticData.weight);
       if (elasticData.spandexEnds !== undefined) elastic.spandexEnds = Number(elasticData.spandexEnds);
+      if (elasticData.minStock    !== undefined) elastic.minStock    = Math.max(0, Number(elasticData.minStock) || 0);
 
-      // ── 2. Warping plan template (optional) ───────────────────
+      // ── 2. Warping plan template (optional) ───────────────
       if ("warpingPlanTemplate" in elasticData) {
         const tpl = elasticData.warpingPlanTemplate;
         if (tpl && Array.isArray(tpl.beams) && tpl.beams.length > 0) {
@@ -331,7 +365,7 @@ router.put(
 
       await elastic.save();
 
-      // ── 3. Recalculate costing ────────────────────────────────
+      // ── 3. Recalculate costing ────────────────────────
       let materialCost = 0, details = [];
       try {
         ({ materialCost, details } = await calculateElasticCosting(elasticData));
@@ -369,10 +403,10 @@ router.put(
 );
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  ADD / UPDATE WARPING PLAN TEMPLATE  (standalone — called from
 //  elastic detail page when plan was skipped at creation time)
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.put(
   "/warping-plan-template",
   isAdmin('admin'),
@@ -396,9 +430,9 @@ router.put(
 );
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  RECALCULATE COST  (manual trigger from detail page)
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.post(
   "/recalculate-elastic-cost",
   isAdmin('admin'),
@@ -472,9 +506,9 @@ router.post(
 );
 
 
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  DELETE ELASTIC
-// ────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 router.delete(
   "/delete-elastic",
   isAdmin('admin'),
