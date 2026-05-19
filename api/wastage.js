@@ -8,15 +8,25 @@ const moment           = require("moment");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 
-const Wastage     = require("../models/Wastage");
-const JobOrder    = require("../models/JobOrder");
-const Employee    = require("../models/Employee");
-const ShiftDetail = require("../models/ShiftDetail");
+const Wastage       = require("../models/Wastage");
+const JobOrder      = require("../models/JobOrder");
+const Employee      = require("../models/Employee");
+const ShiftDetail   = require("../models/ShiftDetail");
+const StockMovement = require("../models/StockMovement");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
 
 router.use(isAuthenticated);
 
+// ═══════════════════════════════════════════════════════════
+//  ADD WASTAGE — P0-4: wastage no longer deducts elastic stock.
+//
+//  Wastage is loom-stage on partially-formed elastic, not on the
+//  finished stock that the Elastic.stock counter tracks. Per the
+//  user-confirmed rule, this route now updates only the job-level
+//  counter; the StockMovement ledger is not touched. Historical
+//  WASTAGE_OUT rows remain in the ledger for audit.
+// ═══════════════════════════════════════════════════════════
 router.post(
   "/add-wastage",
   catchAsyncErrors(async (req, res, next) => {
@@ -65,16 +75,6 @@ router.post(
         job.wastages.push(wastage._id);
         await job.save({ session });
 
-        await applyMovement(session, {
-          elasticId,
-          type:     "WASTAGE_OUT",
-          quantity: -Number(quantity),
-          refType:  "Wastage",
-          refId:    wastage._id,
-          reason:   reason.trim(),
-          by:       req.user?._id,
-        });
-
         wastageId = wastage._id;
       });
 
@@ -106,13 +106,15 @@ router.post(
 );
 
 // ═══════════════════════════════════════════════════════════
-//  DELETE WASTAGE — admin-only undo flow
-//  DELETE /api/v2/wastage/:id
+//  DELETE WASTAGE — admin undo
 //
-//  Reverses the original WASTAGE_OUT by posting a WASTAGE_RETURN
-//  with the same magnitude, rolls back the job-level wastage
-//  counter, and removes the Wastage record. Wrapped in a session
-//  so a failure in any step leaves nothing partially undone.
+//  P0-2: reverses by `applied`, not by `quantity`. If the original
+//  WASTAGE_OUT was clamped at the zero floor, refunding the full
+//  `quantity` would invent stock that never left.
+//
+//  Coexists with P0-4: new wastage records don't have a paired
+//  WASTAGE_OUT row, so the reversal step is a no-op for them.
+//  Legacy records (pre-P0-4) still get cleaned up via this path.
 // ═══════════════════════════════════════════════════════════
 router.delete(
   "/:id",
@@ -146,15 +148,33 @@ router.delete(
           await job.save({ session });
         }
 
-        await applyMovement(session, {
-          elasticId: wastage.elastic,
-          type:      "WASTAGE_RETURN",
-          quantity:  +Number(wastage.quantity || 0),
-          refType:   "Wastage",
-          refId:     wastage._id,
-          reason:    "Wastage record deleted",
-          by:        req.user?._id,
-        });
+        // Look up the original WASTAGE_OUT row(s) — only present for
+        // legacy wastage entries created before P0-4 dropped the
+        // stock deduction. Reverse exactly the applied amount.
+        const originals = await StockMovement.find({
+          refType: "Wastage",
+          refId:   wastage._id,
+          elastic: wastage.elastic,
+          type:    "WASTAGE_OUT",
+        }).session(session);
+
+        if (originals.length > 0) {
+          const refund = -originals.reduce(
+            (s, m) => s + Number(m.applied || 0),
+            0
+          );
+          if (refund > 0) {
+            await applyMovement(session, {
+              elasticId: wastage.elastic,
+              type:      "WASTAGE_RETURN",
+              quantity:  +refund,
+              refType:   "Wastage",
+              refId:     wastage._id,
+              reason:    `reversal of legacy WASTAGE_OUT (${originals.map((m) => m._id).join(",")})`,
+              by:        req.user?._id,
+            });
+          }
+        }
 
         await wastage.deleteOne({ session });
       });
