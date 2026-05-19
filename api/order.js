@@ -10,16 +10,11 @@ const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
+const { applyMovement } = require("../utils/elasticStock.js");
 
 
 // ════════════════════════════════════════════════════════════════
 //  SHARED — BOM EXPANSION
-//  Walks an elasticOrdered list and rolls up the raw-material
-//  weight requirement using each Elastic's BOM. Used by both
-//  /create-order (initial snapshot) and /update-order (recompute
-//  after items change).
-//
-//  Returns { rawMaterialRequired: [{ rawMaterial, name, requiredWeight, inStock }] }
 // ════════════════════════════════════════════════════════════════
 async function computeRawMaterialRequired(elasticOrdered) {
   const elasticIds = elasticOrdered.map((e) => e.elastic);
@@ -67,6 +62,61 @@ async function computeRawMaterialRequired(elasticOrdered) {
 
 
 // ════════════════════════════════════════════════════════════════
+//  SHARED — RELEASE ALL REMAINING RESERVATIONS
+//
+//  Called from /cancel and /complete. For each entry in
+//  order.reservations: $inc reservedStock down on the elastic and
+//  emit a RESERVATION_RELEASE info-row. Clears the array on the
+//  order. Fingerprints (STOCK_RELEASED) appended to the order so
+//  the timeline shows the release event.
+// ════════════════════════════════════════════════════════════════
+async function _releaseAllReservations(session, order, actor, context) {
+  if (!order.reservations || order.reservations.length === 0) return [];
+  const released = [];
+
+  for (const r of order.reservations) {
+    const qty = Number(r.quantity || 0);
+    if (qty <= 0) continue;
+
+    // Decrement reservedStock on the elastic (clamped to 0).
+    const elasticDoc = await Elastic.findById(r.elastic).session(session);
+    if (elasticDoc) {
+      const current = Number(elasticDoc.reservedStock) || 0;
+      const next    = Math.max(0, current - qty);
+      elasticDoc.reservedStock = next;
+      await elasticDoc.save({ session });
+    }
+
+    // Info-only ledger row.
+    await applyMovement(session, {
+      elasticId: r.elastic,
+      type:      "RESERVATION_RELEASE",
+      quantity:  +qty,
+      refType:   "Order",
+      refId:     order._id,
+      reason:    `${context} (order ${order.orderNo ?? order._id})`,
+      by:        actor?.id,
+    });
+
+    const fp = buildFingerprint(ACTION_CODES.STOCK_RELEASED, {
+      entityId: order._id,
+      actor,
+      meta: {
+        elasticId: r.elastic.toString(),
+        quantity:  qty,
+        context,
+      },
+    });
+    order.fingerprints.push(fp);
+    released.push({ elastic: r.elastic, quantity: qty, fingerprint: fp });
+  }
+
+  order.reservations = [];
+  return released;
+}
+
+
+// ════════════════════════════════════════════════════════════════
 //  LIST ORDERS  (by status)
 // ════════════════════════════════════════════════════════════════
 router.get(
@@ -76,9 +126,6 @@ router.get(
     if (!status) {
       return next(new ErrorHandler("Status is required", 400));
     }
-    // Status is an exact match, so soft-deleted orders are naturally
-    // excluded from any non-"Deleted" status request. Pass status=Deleted
-    // explicitly to surface them.
     const orders = await Order.find({ status })
       .populate("customer",  "name")
       .populate("createdBy", "name role")
@@ -111,7 +158,6 @@ router.post(
         pendingElastic, rawMaterialRequired, status: "Open",
       });
 
-      // 🪪 Fingerprint: ORDER_CREATED
       const fp = buildFingerprint(ACTION_CODES.ORDER_CREATED, {
         entityId: order._id,
         actor:    actorFromRequest(req),
@@ -166,11 +212,13 @@ router.get(
       const produced = order.producedElastic.find((p) => p.elastic.equals(e.elastic._id))?.quantity || 0;
       const packed   = order.packedElastic.find((p)   => p.elastic.equals(e.elastic._id))?.quantity || 0;
       const pending  = order.pendingElastic.find((p)  => p.elastic.equals(e.elastic._id))?.quantity ?? e.quantity;
+      const reserved = (order.reservations || []).find((p) => p.elastic.equals(e.elastic._id))?.quantity ?? 0;
       return {
         id:       e.elastic._id,
         name:     e.elastic.name,
         ordered:  e.quantity,
         produced, packed, pending,
+        reserved,
       };
     });
 
@@ -195,7 +243,6 @@ router.get(
       ? liveRawMaterials.every((m) => m.stockSufficient)
       : undefined;
 
-    // 🪪 Newest-first fingerprint feed for the UI timeline
     const fingerprints = (order.fingerprints || [])
       .slice()
       .sort((a, b) => new Date(b.at) - new Date(a.at));
@@ -215,7 +262,6 @@ router.get(
         jobs:        order.jobs,
         rawMaterialRequired: liveRawMaterials,
         canApprove,
-        // ── Per-state audit pointers ──
         createdBy:   order.createdBy  || null,
         createdAt:   order.createdAt  || null,
         updatedBy:   order.updatedBy  || null,
@@ -230,7 +276,6 @@ router.get(
         completedAt: order.completedAt|| null,
         deletedBy:   order.deletedBy  || null,
         deletedAt:   order.deletedAt  || null,
-        // 🪪 Full audit timeline (newest-first)
         fingerprints,
       },
     });
@@ -239,7 +284,15 @@ router.get(
 
 
 // ════════════════════════════════════════════════════════════════
-//  APPROVE ORDER  (deducts stock — uses transaction)
+//  APPROVE ORDER  (deducts raw stock; reserves elastic stock)
+//
+//  PR E: in addition to the existing raw-material deduction, the
+//  approve route now reserves elastic units against the order.
+//  For each elasticOrdered line:
+//    1. $inc Elastic.reservedStock by the ordered quantity.
+//    2. Push a {elastic, quantity} entry onto Order.reservations.
+//    3. Emit a RESERVATION_HOLD info-row on the StockMovement
+//       ledger and a STOCK_RESERVED fingerprint on the order.
 // ════════════════════════════════════════════════════════════════
 router.post(
   "/approve",
@@ -281,7 +334,6 @@ router.post(
           remarks:     `Order #${order.orderNo ?? ""} approval`,
         }], { session });
 
-        // 🪪 Fingerprint per raw-material deduction
         const deductFp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_DEDUCTED, {
           entityId: order._id,
           actor,
@@ -297,7 +349,44 @@ router.post(
         deductionFingerprints.push(deductFp);
       }
 
-      // 🪪 ORDER_APPROVED summary fingerprint
+      // ── Reserve elastic units against this order ───────────
+      const reservationFingerprints = [];
+      for (const line of order.elasticOrdered) {
+        const qty = Number(line.quantity || 0);
+        if (qty <= 0) continue;
+
+        const elasticDoc = await Elastic.findById(line.elastic).session(session);
+        if (!elasticDoc) {
+          throw new ErrorHandler(`Elastic ${line.elastic} not found`, 404);
+        }
+        elasticDoc.reservedStock = (Number(elasticDoc.reservedStock) || 0) + qty;
+        await elasticDoc.save({ session });
+
+        order.reservations.push({ elastic: line.elastic, quantity: qty });
+
+        await applyMovement(session, {
+          elasticId: line.elastic,
+          type:      "RESERVATION_HOLD",
+          quantity:  +qty,
+          refType:   "Order",
+          refId:     order._id,
+          reason:    `Order ${order.orderNo ?? order._id} approved`,
+          by:        req.user?._id,
+        });
+
+        const resFp = buildFingerprint(ACTION_CODES.STOCK_RESERVED, {
+          entityId: order._id,
+          actor,
+          meta: {
+            elasticId:   line.elastic.toString(),
+            elasticName: elasticDoc.name,
+            quantity:    qty,
+          },
+        });
+        order.fingerprints.push(resFp);
+        reservationFingerprints.push(resFp);
+      }
+
       const approveFp = buildFingerprint(ACTION_CODES.ORDER_APPROVED, {
         entityId: order._id,
         actor,
@@ -305,6 +394,7 @@ router.post(
           previousStatus:    "Open",
           newStatus:         "Approved",
           materialsDeducted: deductionFingerprints.length,
+          elasticsReserved:  reservationFingerprints.length,
         },
       });
       order.fingerprints.push(approveFp);
@@ -317,10 +407,11 @@ router.post(
       session.endSession();
 
       res.status(200).json({
-        success:               true,
-        message:               "Order approved and stock deducted",
-        fingerprint:           approveFp,
+        success:                 true,
+        message:                 "Order approved, raw stock deducted, elastic stock reserved",
+        fingerprint:             approveFp,
         deductionFingerprints,
+        reservationFingerprints,
       });
     } catch (error) {
       await session.abortTransaction();
@@ -333,6 +424,9 @@ router.post(
 
 // ════════════════════════════════════════════════════════════════
 //  CANCEL ORDER
+//
+//  PR E: releases any remaining elastic reservations. Raw material
+//  refund is out of scope (already-deducted raw stock stays out).
 // ════════════════════════════════════════════════════════════════
 router.post(
   "/cancel",
@@ -340,34 +434,60 @@ router.post(
     const { orderId } = req.body;
     if (!orderId) return next(new ErrorHandler("Order ID is required", 400));
 
-    const order = await Order.findById(orderId);
-    if (!order) return next(new ErrorHandler("Order not found", 404));
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const order = await Order.findById(orderId).session(session);
+        if (!order) throw new ErrorHandler("Order not found", 404);
 
-    if (!["Open", "Approved"].includes(order.status)) {
-      return next(new ErrorHandler(`Cannot cancel an order with status "${order.status}"`, 400));
+        if (!["Open", "Approved", "InProgress"].includes(order.status)) {
+          throw new ErrorHandler(
+            `Cannot cancel an order with status "${order.status}"`,
+            400
+          );
+        }
+
+        const previousStatus = order.status;
+        const actor = actorFromRequest(req);
+
+        const released = await _releaseAllReservations(
+          session,
+          order,
+          actor,
+          "order cancelled"
+        );
+
+        order.status      = "Cancelled";
+        order.cancelledBy = req.user?._id || null;
+        order.cancelledAt = new Date();
+
+        const fp = buildFingerprint(ACTION_CODES.ORDER_CANCELLED, {
+          entityId: order._id,
+          actor,
+          meta: {
+            previousStatus,
+            newStatus: "Cancelled",
+            releasedReservations: released.length,
+          },
+        });
+        order.fingerprints.push(fp);
+        await order.save({ session });
+
+        resp = {
+          orderId: order._id,
+          status:  order.status,
+          fingerprint: fp,
+          releasedReservations: released,
+        };
+      });
+
+      res.status(200).json({ success: true, message: "Order cancelled", ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-
-    const previousStatus = order.status;
-    order.status      = "Cancelled";
-    order.cancelledBy = req.user?._id || null;
-    order.cancelledAt = new Date();
-
-    // 🪪 Fingerprint: ORDER_CANCELLED
-    const fp = buildFingerprint(ACTION_CODES.ORDER_CANCELLED, {
-      entityId: order._id,
-      actor:    actorFromRequest(req),
-      meta:     { previousStatus, newStatus: "Cancelled" },
-    });
-    order.fingerprints.push(fp);
-    await order.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Order cancelled",
-      orderId: order._id,
-      status:  order.status,
-      fingerprint: fp,
-    });
   })
 );
 
@@ -392,7 +512,6 @@ router.post(
     order.startedBy = req.user?._id || null;
     order.startedAt = new Date();
 
-    // 🪪 Fingerprint: ORDER_PRODUCTION_STARTED
     const fp = buildFingerprint(ACTION_CODES.ORDER_PRODUCTION_STARTED, {
       entityId: order._id,
       actor:    actorFromRequest(req),
@@ -413,48 +532,71 @@ router.post(
 
 // ════════════════════════════════════════════════════════════════
 //  COMPLETE ORDER
+//
+//  PR E: releases any remaining elastic reservations. Useful when
+//  a customer accepts a partial delivery and the order is closed
+//  with un-dispatched units still reserved.
 // ════════════════════════════════════════════════════════════════
 router.post(
   "/complete",
   catchAsyncErrors(async (req, res, next) => {
     const { orderId } = req.body;
-    const order = await Order.findById(orderId);
-    if (!order) return next(new ErrorHandler("Order not found", 404));
+    if (!orderId) return next(new ErrorHandler("Order ID is required", 400));
 
-    if (order.status !== "InProgress") {
-      return next(new ErrorHandler("Only InProgress orders can be completed", 400));
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const order = await Order.findById(orderId).session(session);
+        if (!order) throw new ErrorHandler("Order not found", 404);
+
+        if (order.status !== "InProgress") {
+          throw new ErrorHandler("Only InProgress orders can be completed", 400);
+        }
+
+        const actor = actorFromRequest(req);
+        const released = await _releaseAllReservations(
+          session,
+          order,
+          actor,
+          "order completed"
+        );
+
+        order.status      = "Completed";
+        order.completedBy = req.user?._id || null;
+        order.completedAt = new Date();
+
+        const fp = buildFingerprint(ACTION_CODES.ORDER_COMPLETED, {
+          entityId: order._id,
+          actor,
+          meta: {
+            previousStatus: "InProgress",
+            newStatus:      "Completed",
+            releasedReservations: released.length,
+          },
+        });
+        order.fingerprints.push(fp);
+        await order.save({ session });
+
+        resp = {
+          status: order.status,
+          fingerprint: fp,
+          releasedReservations: released,
+        };
+      });
+
+      res.status(200).json({ success: true, message: "Order completed", ...resp });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
     }
-
-    order.status      = "Completed";
-    order.completedBy = req.user?._id || null;
-    order.completedAt = new Date();
-
-    // 🪪 Fingerprint: ORDER_COMPLETED
-    const fp = buildFingerprint(ACTION_CODES.ORDER_COMPLETED, {
-      entityId: order._id,
-      actor:    actorFromRequest(req),
-      meta:     { previousStatus: "InProgress", newStatus: "Completed" },
-    });
-    order.fingerprints.push(fp);
-    await order.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Order completed",
-      status:  order.status,
-      fingerprint: fp,
-    });
   })
 );
 
 
 // ════════════════════════════════════════════════════════════════
 //  UPDATE ORDER  (Open state only)
-//
-//  Edits header fields and/or items on an Open order. Item changes
-//  trigger a full recompute of pendingElastic + rawMaterialRequired
-//  (production has not started, so producedElastic / packedElastic
-//  stay at zero). Wrapped in a transaction matching /approve.
 // ════════════════════════════════════════════════════════════════
 router.post(
   "/update-order",
@@ -479,7 +621,6 @@ router.post(
           );
         }
 
-        // ── Diff header fields, build changedFields list ─────────
         const changed = {};
         const previousValues = {};
         if (po !== undefined && po !== order.po) {
@@ -495,7 +636,6 @@ router.post(
           previousValues.customer = order.customer?.toString?.(); order.customer = customer; changed.customer = customer;
         }
 
-        // ── Item / quantity recompute ────────────────────────────
         if (Array.isArray(elasticOrdered) && elasticOrdered.length > 0) {
           previousValues.elasticOrdered = order.elasticOrdered.map((e) => ({
             elastic:  e.elastic.toString(),
@@ -517,7 +657,6 @@ router.post(
           throw new ErrorHandler("No editable fields supplied", 400);
         }
 
-        // 🪪 Fingerprint: ORDER_UPDATED
         const fp = buildFingerprint(ACTION_CODES.ORDER_UPDATED, {
           entityId: order._id,
           actor:    actorFromRequest(req),
@@ -549,10 +688,6 @@ router.post(
 
 // ════════════════════════════════════════════════════════════════
 //  DELETE ORDER  (soft-delete; Open state only, no jobs)
-//
-//  Sets status="Deleted" and stamps deletedBy/deletedAt. The
-//  document and its fingerprint timeline are preserved; list views
-//  exclude Deleted by default (see /list, /get-open-orders).
 // ════════════════════════════════════════════════════════════════
 router.post(
   "/delete-order",
@@ -585,7 +720,6 @@ router.post(
         order.deletedBy = req.user?._id || null;
         order.deletedAt = new Date();
 
-        // 🪪 Fingerprint: ORDER_DELETED
         const fp = buildFingerprint(ACTION_CODES.ORDER_DELETED, {
           entityId: order._id,
           actor:    actorFromRequest(req),
