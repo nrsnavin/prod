@@ -177,7 +177,13 @@ router.post(
         if (remarks?.trim()) covering.remarks = remarks.trim();
         await covering.save({ session });
 
-        const { advanced, jobStatus } = await checkAndAdvanceToWeaving(covering.job);
+        // FIX: pass the session so the helper sees the just-written
+        // covering.status = "completed". Without this, the helper
+        // reads the pre-write snapshot and the job never advances.
+        const { advanced, jobStatus } = await checkAndAdvanceToWeaving(
+          covering.job,
+          session
+        );
 
         const actor = actorFromRequest(req);
         const fp = buildFingerprint(ACTION_CODES.COVERING_COMPLETED, {

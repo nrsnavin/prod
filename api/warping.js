@@ -187,7 +187,13 @@ router.post("/complete", isAdmin('admin'), catchAsyncErrors(async (req, res, nex
       warping.completedDate = new Date();
       await warping.save({ session });
 
-      const { advanced, jobStatus } = await checkAndAdvanceToWeaving(warping.job);
+      // FIX: pass the session so the helper sees the just-written
+      // warping.status = "completed". Without this, the helper
+      // reads the pre-write snapshot and the job never advances.
+      const { advanced, jobStatus } = await checkAndAdvanceToWeaving(
+        warping.job,
+        session
+      );
 
       const actor = actorFromRequest(req);
       const fp = buildFingerprint(ACTION_CODES.WARPING_COMPLETED, {
