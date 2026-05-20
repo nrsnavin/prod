@@ -97,9 +97,10 @@ router.get(
   catchAsyncErrors(async (req, res) => {
     const { search = "", page = 1, limit = 20 } = req.query;
     const filter = search ? { name: { $regex: search, $options: "i" } } : {};
+    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 200);
     const elastics = await Elastic.find(filter)
-      .skip((page - 1) * limit)
-      .limit(search ? 0 : Number(limit))
+      .skip((page - 1) * safeLimit)
+      .limit(safeLimit)
       .sort({ createdAt: -1 });
     const total = await Elastic.countDocuments(filter);
     res.json({ success: true, elastics, total, page: Number(page) });

@@ -369,12 +369,13 @@ router.get(
       ].filter((c) => Object.values(c)[0] !== undefined);
     }
 
-    const skip  = (Number(page) - 1) * Number(limit);
+    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 200);
+    const skip  = (Number(page) - 1) * safeLimit;
     const [dcs, total] = await Promise.all([
       DeliveryChallan.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(search ? 0 : Number(limit))
+        .limit(safeLimit)
         .select("-items"),
       DeliveryChallan.countDocuments(filter),
     ]);
