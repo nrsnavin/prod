@@ -40,7 +40,7 @@ router.get(
   "/all-customers",
   catchAsyncErrors(async (req, res) => {
     const page   = Number(req.query.page)  || 1;
-    const limit  = Number(req.query.limit) || 20;
+    const limit  = Math.min(Number(req.query.limit) || 20, 200);
     const search = req.query.search        || "";
     const skip   = (page - 1) * limit;
 
@@ -55,7 +55,7 @@ router.get(
     const customers = await Customer.find(query)
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(search ? 0 : limit);
+      .limit(limit);
 
     res.status(200).json({ success: true, customers });
   })

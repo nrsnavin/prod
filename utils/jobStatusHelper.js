@@ -86,17 +86,30 @@ async function checkAndAdvanceToWeaving(jobId, session = null) {
   }
 
   // Both done — advance to weaving (still inside the same session
-  // so the write is part of the same atomic commit).
+  // so the write is part of the same atomic commit). The filter
+  // re-asserts `status: "preparatory"` so a concurrent transition
+  // (e.g. the sibling warping/covering /complete arriving moments
+  // later) can't overwrite a status that has already moved past
+  // weaving — the second call no-ops.
   const updated = await withSession(
-    JobOrder.findByIdAndUpdate(
-      jobId,
+    JobOrder.findOneAndUpdate(
+      { _id: jobId, status: "preparatory" },
       { status: "weaving" },
       { new: true, select: "status" }
     )
   );
 
+  if (!updated) {
+    // Someone else won the race — the job is no longer preparatory.
+    // Re-read the current status so callers see truth.
+    const current = await withSession(
+      JobOrder.findById(jobId).select("status")
+    ).lean();
+    return { advanced: false, jobStatus: current?.status ?? "unknown" };
+  }
+
   console.info(`[jobStatusHelper] Job ${jobId} advanced → weaving`);
-  return { advanced: true, jobStatus: updated?.status ?? "weaving" };
+  return { advanced: true, jobStatus: updated.status };
 }
 
 module.exports = { checkAndAdvanceToWeaving };
