@@ -22,7 +22,15 @@ const RawMaterial    = require("../models/RawMaterial");   // ← added for stoc
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
-// const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { isAuthenticated } = require("../middleware/auth");
+
+// Every supplier / PO / material-inward route requires a logged-in
+// user. Auth was previously commented out, leaving these endpoints
+// reachable anonymously — including the inward-stock route that
+// mutates RawMaterial.stock. isAdmin gating is deliberately not
+// applied at the router level because the admin Flutter app's
+// staff roles (accounts, purchasing) also reach these routes.
+router.use(isAuthenticated);
 
 
 // ─────────────────────────────────────────────────────────────────────────
