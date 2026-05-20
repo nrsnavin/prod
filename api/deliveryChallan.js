@@ -5,7 +5,7 @@ const mongoose = require("mongoose");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 
-const DeliveryChallan = require("../models/Deliverychallan ");
+const DeliveryChallan = require("../models/DeliveryChallan");
 const Order           = require("../models/Order");
 const Elastic         = require("../models/Elastic");
 const StockMovement   = require("../models/StockMovement");

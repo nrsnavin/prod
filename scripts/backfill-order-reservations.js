@@ -31,7 +31,7 @@ const mongoose = require("mongoose");
 
 const Order           = require("../models/Order");
 const Elastic         = require("../models/Elastic");
-const DeliveryChallan = require("../models/Deliverychallan ");
+const DeliveryChallan = require("../models/DeliveryChallan");
 const { applyMovement } = require("../utils/elasticStock");
 const { buildFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 
