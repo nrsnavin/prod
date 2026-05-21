@@ -23,17 +23,51 @@ router.use(isAuthenticated);
 router.post("/create", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
   const { jobId, elasticOrdered } = req.body;
   if (!jobId) return next(new ErrorHandler("Job ID is required", 400));
+  if (!mongoose.Types.ObjectId.isValid(jobId)) {
+    return next(new ErrorHandler("Invalid job id", 400));
+  }
 
-  const job = await JobOrder.findById(jobId);
-  if (!job) return next(new ErrorHandler("Job not found", 404));
+  // Atomic claim: create the Warping and link it on the JobOrder in
+  // the same transaction. The findOneAndUpdate filter `warping: null`
+  // makes the link a CAS — two parallel POSTs on the same jobId can't
+  // both create + link; the loser sees no matching JobOrder and rolls
+  // back so we don't strand an orphan Warping doc.
+  const session = await mongoose.startSession();
+  let warping;
+  let job;
+  try {
+    await session.withTransaction(async () => {
+      const peek = await JobOrder.findById(jobId).session(session);
+      if (!peek) throw new ErrorHandler("Job not found", 404);
+      if (peek.warping) {
+        throw new ErrorHandler(
+          "Job already has a warping linked", 409
+        );
+      }
+      const [created] = await Warping.create([{
+        job:            jobId,
+        elasticOrdered: elasticOrdered || peek.elastics,
+      }], { session });
+      warping = created;
 
-  const warping = await Warping.create({
-    job:            jobId,
-    elasticOrdered: elasticOrdered || job.elastics,
-  });
-
-  job.warping = warping._id;
-  await job.save();
+      const claimed = await JobOrder.findOneAndUpdate(
+        { _id: jobId, warping: null },
+        { warping: warping._id },
+        { new: true, session }
+      );
+      if (!claimed) {
+        // Another request linked a Warping between our peek and CAS.
+        // Throw to roll the transaction back so the new Warping doc
+        // doesn't survive as an orphan.
+        throw new ErrorHandler(
+          "Job already has a warping linked", 409
+        );
+      }
+      job = claimed;
+    });
+  } finally {
+    await session.endSession();
+  }
 
   let autoPlan = null;
   try {

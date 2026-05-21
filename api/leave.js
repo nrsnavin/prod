@@ -16,7 +16,7 @@ const router       = express.Router();
 const LeaveRequest = require('../models/LeaveRequest');
 const Attendance   = require('../models/Attendence.js');
 const Employee     = require('../models/Employee');
-const { isAuthenticated, isAdmin } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 
 function toISODate(d)   { return new Date(d).toISOString().split('T')[0]; }
 function toDateLabel(d) {
@@ -104,7 +104,9 @@ router.get('/pending', isAuthenticated, isAdmin('admin'), async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // GET /employee/:empId
 // ─────────────────────────────────────────────────────────────
-router.get('/employee/:empId', isAuthenticated, async (req, res) => {
+// selfOrAdmin: a worker could otherwise read another worker's
+// leave history by swapping :empId.
+router.get('/employee/:empId', isAuthenticated, selfOrAdmin, async (req, res) => {
   try {
     const { empId } = req.params;
     const { year, month } = req.query;

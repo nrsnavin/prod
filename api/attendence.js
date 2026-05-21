@@ -18,7 +18,7 @@ const router     = express.Router();
 const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
 const ShiftDetail= require('../models/ShiftDetail');
-const { isAuthenticated, isAdmin } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 
 router.use(isAuthenticated);
 
@@ -212,7 +212,8 @@ router.get('/date', isAdmin('admin'), async (req, res) => {
   }
 });
 
-router.get('/employee/:empId', async (req, res) => {
+// selfOrAdmin: workers can only fetch their own attendance.
+router.get('/employee/:empId', selfOrAdmin, async (req, res) => {
   try {
     const { empId } = req.params;
     const { startDate, endDate, shift = 'all' } = req.query;
@@ -335,7 +336,7 @@ router.get('/summary', isAdmin('admin'), async (req, res) => {
   }
 });
 
-router.get('/monthly/:empId', async (req, res) => {
+router.get('/monthly/:empId', selfOrAdmin, async (req, res) => {
   try {
     const { empId } = req.params;
     const year  = parseInt(req.query.year,  10) || new Date().getFullYear();
