@@ -304,10 +304,19 @@ router.post(
     session.startTransaction();
     try {
       const { orderId } = req.body;
+      if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+        throw new ErrorHandler("Valid orderId is required", 400);
+      }
       const order = await Order.findById(orderId).session(session);
       if (!order) throw new ErrorHandler("Order not found", 404);
       if (order.status !== "Open")
         throw new ErrorHandler("Only Open orders can be approved", 400);
+      if (!Array.isArray(order.elasticOrdered) ||
+          order.elasticOrdered.length === 0) {
+        throw new ErrorHandler(
+          "Order has no elastic lines — cannot approve", 400
+        );
+      }
 
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);

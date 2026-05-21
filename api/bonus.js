@@ -245,6 +245,9 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     const year = parseInt(req.query.year) || currentYear();
     const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid employee id", 400));
+    }
 
     const [record, config] = await Promise.all([
       BonusRecord.findOne({ employee: id, year })

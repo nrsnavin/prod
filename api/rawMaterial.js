@@ -228,6 +228,12 @@ router.post(
         new ErrorHandler("rawMaterialId, purchaseOrderId and quantity are required", 400)
       );
     }
+    const qtyNum = Number(quantity);
+    if (!Number.isFinite(qtyNum) || qtyNum <= 0) {
+      return next(
+        new ErrorHandler("quantity must be a positive number", 400)
+      );
+    }
 
     const [material, po] = await Promise.all([
       RawMaterial.findById(rawMaterialId),
@@ -237,11 +243,11 @@ router.post(
     if (!material) return next(new ErrorHandler("Raw material not found", 404));
     if (!po)       return next(new ErrorHandler("Purchase order not found", 404));
 
-    material.stock += Number(quantity);
+    material.stock += qtyNum;
     material.stockMovements.push({
       date:     new Date(),
       type:     "PO_INWARD",
-      quantity: Number(quantity),
+      quantity: qtyNum,
       balance:  material.stock,
     });
     await material.save();
@@ -315,10 +321,19 @@ router.post(
     const updated = [];
     const errors  = [];
 
+    // Batch-fetch every material up front instead of issuing one
+    // findById per item in parallel — the old loop fired N round
+    // trips per request.
+    const ids = toProcess
+      .map((a) => a._id)
+      .filter((id) => mongoose.Types.ObjectId.isValid(id));
+    const materials = await RawMaterial.find({ _id: { $in: ids } });
+    const byId = new Map(materials.map((m) => [m._id.toString(), m]));
+
     await Promise.all(
       toProcess.map(async (item) => {
         try {
-          const material = await RawMaterial.findById(item._id);
+          const material = byId.get(String(item._id));
           if (!material) {
             errors.push({ id: item._id, error: "Not found" });
             return;
@@ -342,17 +357,22 @@ router.post(
 
           // Create proper ledger record
           if (item.adjustment > 0) {
-            // Positive adjustment → inward
-            await MaterialInward.create({
-              rawMaterial:   material._id,
-              // Stock adjustments have no PO — use a sentinel value or
-              // omit purchaseOrder if it's not required on your schema.
-              // Since the schema requires purchaseOrder, store a note in remarks.
-              purchaseOrder: item.purchaseOrderId || undefined,
-              quantity:      item.adjustment,
-              inwardDate:    new Date(),
-              remarks:       `Stock adjustment: ${reason}`,
-            }).catch(() => {}); // non-fatal if purchaseOrder is required
+            // Positive adjustment → inward. Audit row creation is
+            // non-fatal (schema may require purchaseOrder), but we
+            // log so silent drops don't go unnoticed.
+            try {
+              await MaterialInward.create({
+                rawMaterial:   material._id,
+                purchaseOrder: item.purchaseOrderId || undefined,
+                quantity:      item.adjustment,
+                inwardDate:    new Date(),
+                remarks:       `Stock adjustment: ${reason}`,
+              });
+            } catch (inwardErr) {
+              console.warn(
+                `[bulk-adjust] MaterialInward audit row failed for ${material._id}: ${inwardErr.message}`
+              );
+            }
           } else {
             // Negative adjustment → outward
             await MaterialOutward.create({

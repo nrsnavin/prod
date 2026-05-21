@@ -1,5 +1,6 @@
-const express = require("express");
-const router  = express.Router();
+const express  = require("express");
+const mongoose = require("mongoose");
+const router   = express.Router();
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
@@ -26,8 +27,13 @@ router.post(
 router.put(
   "/update",
   catchAsyncErrors(async (req, res, next) => {
+    const id = req.body?._id;
+    if (!id) return next(new ErrorHandler("_id is required", 400));
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid customer id", 400));
+    }
     const customer = await Customer.findByIdAndUpdate(
-      req.body._id,
+      id,
       req.body,
       { new: true, runValidators: true }
     );
