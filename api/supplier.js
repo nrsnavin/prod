@@ -53,8 +53,22 @@ function deriveStatus(items) {
 router.post(
   "/create-supplier",
   catchAsyncErrors(async (req, res, next) => {
+    const { name, phoneNumber, email, address, gstin } = req.body || {};
+    if (!name || !String(name).trim()) {
+      return next(new ErrorHandler("name is required", 400));
+    }
+    if (![phoneNumber, email].some((v) => v && String(v).trim())) {
+      return next(new ErrorHandler(
+        "at least one of phoneNumber or email is required", 400));
+    }
     try {
-      const supplier = await Supplier.create(req.body);
+      const supplier = await Supplier.create({
+        name:        String(name).trim(),
+        phoneNumber: phoneNumber ? String(phoneNumber).trim() : undefined,
+        email:       email       ? String(email).trim()       : undefined,
+        address:     address     ? String(address).trim()     : undefined,
+        gstin:       gstin       ? String(gstin).trim()       : undefined,
+      });
       res.status(201).json({ success: true, supplier });
     } catch (error) {
       return next(new ErrorHandler(error.message, 400));
@@ -74,8 +88,22 @@ router.post(
       const { supplier, items } = req.body;
       if (!supplier)
         return next(new ErrorHandler("Supplier is required", 400));
-      if (!items || items.length === 0)
+      if (!Array.isArray(items) || items.length === 0)
         return next(new ErrorHandler("At least one item is required", 400));
+
+      // Reject zero/negative line quantities so the PO doesn't carry
+      // dead rows that confuse receipt + status derivation.
+      for (const [idx, item] of items.entries()) {
+        if (!item || !item.rawMaterial) {
+          return next(new ErrorHandler(
+            `items[${idx}].rawMaterial is required`, 400));
+        }
+        const q = Number(item.quantity);
+        if (!Number.isFinite(q) || q <= 0) {
+          return next(new ErrorHandler(
+            `items[${idx}].quantity must be a positive number`, 400));
+        }
+      }
 
       const last     = await PurchaseOrder.findOne({}, { poNo: 1 }).sort({ poNo: -1 });
       const nextPoNo = last ? (last.poNo || 1000) + 1 : 1001;

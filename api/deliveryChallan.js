@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { isAuthenticated } = require("../middleware/auth");
 
 const DeliveryChallan = require("../models/DeliveryChallan");
 const Order           = require("../models/Order");
@@ -11,6 +12,11 @@ const Elastic         = require("../models/Elastic");
 const StockMovement   = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { applyMovement } = require("../utils/elasticStock");
+
+// Every DC route requires a logged-in user. isAdmin gating is left
+// per-route at the admin app's call sites' discretion — accounts /
+// dispatch staff also create DCs.
+router.use(isAuthenticated);
 
 function currentFinancialYear() {
   const now     = new Date();
