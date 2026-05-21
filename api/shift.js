@@ -58,8 +58,18 @@ async function applyProductionCascade(
   const job = await JobOrder.findById(machineDoc.orderRunning._id || machineDoc.orderRunning).session(session);
   if (!job) throw new ErrorHandler("Job not found", 404);
 
+  // The cascade fans production across every elastic head on the
+  // running machine. An empty heads array means nothing was actually
+  // produced this shift — fail loudly instead of silently writing zero.
+  if (!Array.isArray(machineDoc.elastics) || machineDoc.elastics.length === 0) {
+    throw new ErrorHandler(
+      "Machine has no elastics configured — cannot record production",
+      400
+    );
+  }
+
   const elasticProductionMap = {};
-  for (const head of (machineDoc.elastics || [])) {
+  for (const head of machineDoc.elastics) {
     const eid = head.elastic.toString();
     elasticProductionMap[eid] = (elasticProductionMap[eid] || 0) + prodValue;
   }
