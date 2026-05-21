@@ -59,6 +59,10 @@ router.post('/request', isAuthenticated, async (req, res) => {
     if (!emp) return res.status(404).json({ success:false, message:'Employee not found.' });
 
     const dateObj = new Date(date);
+    if (Number.isNaN(dateObj.getTime())) {
+      return res.status(400).json({ success:false,
+        message:'date is not a valid date.' });
+    }
     dateObj.setHours(0,0,0,0);
 
     const leave = await LeaveRequest.create({

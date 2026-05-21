@@ -514,10 +514,13 @@ router.post(
     if (!elasticId) {
       return next(new ErrorHandler("elasticId is required", 400));
     }
+    if (!mongoose.Types.ObjectId.isValid(elasticId)) {
+      return next(new ErrorHandler("Invalid elastic id", 400));
+    }
 
     const elastic = await _populate(Elastic.findById(elasticId));
     if (!elastic) {
-      return res.status(404).json({ success: false, message: "Elastic not found" });
+      return next(new ErrorHandler("Elastic not found", 404));
     }
 
     try {

@@ -97,6 +97,24 @@ router.post(
         "department is required when audience is 'department'", 400));
     }
 
+    // Parse and validate dates up front so Mongo never stores an
+    // Invalid Date that silently breaks `$lte: now` comparisons.
+    const parseDate = (raw, field) => {
+      if (raw === undefined || raw === null || raw === "") return undefined;
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) {
+        throw new ErrorHandler(`${field} is not a valid date`, 400);
+      }
+      return d;
+    };
+    let validFromDate, validUntilDate;
+    try {
+      validFromDate  = parseDate(validFrom,  "validFrom");
+      validUntilDate = parseDate(validUntil, "validUntil");
+    } catch (err) {
+      return next(err);
+    }
+
     const a = await Announcement.create({
       title:      title.trim(),
       body:       body.trim(),
@@ -104,8 +122,8 @@ router.post(
       audience,
       department: department.trim(),
       isPinned,
-      validFrom:  validFrom  ? new Date(validFrom)  : undefined,
-      validUntil: validUntil ? new Date(validUntil) : undefined,
+      validFrom:  validFromDate,
+      validUntil: validUntilDate,
       attachmentUrl,
     });
 

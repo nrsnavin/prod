@@ -18,7 +18,7 @@ const router         = express.Router();
 
 const Supplier       = require("../models/Supplier");
 const PurchaseOrder  = require("../models/PurchaseOrder");
-const MaterialInward = require("../models/Materialnward.js");
+const MaterialInward = require("../models/MaterialInward.js");
 const RawMaterial    = require("../models/RawMaterial");   // ← added for stock update
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
