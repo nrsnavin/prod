@@ -50,21 +50,37 @@ router.post(
     }
 
     // ── Duplicate check ────────────────────────────────────
-    const existing = await Machine.findOne({ ID: ID.trim().toUpperCase() });
+    // Friendly pre-check; the unique index on Machine.ID is the
+    // actual race-free guarantee (Mongo rejects the duplicate
+    // insert with E11000 even if two concurrent requests both
+    // pass this lookup).
+    const normalizedId = ID.trim().toUpperCase();
+    const existing = await Machine.findOne({ ID: normalizedId });
     if (existing) {
       return next(
         new ErrorHandler(`Machine with ID "${ID}" already exists`, 409)
       );
     }
 
-    const machine = await Machine.create({
-      ID:           ID.trim().toUpperCase(),
-      manufacturer: manufacturer.trim(),
-      NoOfHead:     Number(NoOfHead),
-      NoOfHooks:    Number(NoOfHooks),
-      DateOfPurchase: req.body.DateOfPurchase || null,
-      status:       "free",
-    });
+    let machine;
+    try {
+      machine = await Machine.create({
+        ID:           normalizedId,
+        manufacturer: manufacturer.trim(),
+        NoOfHead:     Number(NoOfHead),
+        NoOfHooks:    Number(NoOfHooks),
+        DateOfPurchase: req.body.DateOfPurchase || null,
+        status:       "free",
+      });
+    } catch (err) {
+      // Concurrent insert won the race — surface a clean 409.
+      if (err && err.code === 11000) {
+        return next(
+          new ErrorHandler(`Machine with ID "${ID}" already exists`, 409)
+        );
+      }
+      throw err;
+    }
 
     console.log(`[machine/create] Machine ${machine.ID} registered`);
 

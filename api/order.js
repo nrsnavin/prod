@@ -177,7 +177,7 @@ router.post(
         fingerprint: fp,
       });
     } catch (error) {
-      console.error(error);
+      // ErrorHandler already logs; no duplicate console.error.
       return next(new ErrorHandler(error.message, 500));
     }
   })
