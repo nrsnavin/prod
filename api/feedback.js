@@ -13,6 +13,7 @@
 "use strict";
 
 const express   = require("express");
+const mongoose  = require("mongoose");
 const router    = express.Router();
 const Feedback  = require("../models/EmployeeFeedback");
 const Employee  = require("../models/Employee");
@@ -111,6 +112,9 @@ router.put(
   "/:id/respond",
   isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler("Invalid feedback id", 400));
+    }
     const { response = "", status } = req.body;
     if (status && !STATUSES.includes(status)) {
       return next(new ErrorHandler(
@@ -140,6 +144,9 @@ router.delete(
   "/:id",
   isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler("Invalid feedback id", 400));
+    }
     const fb = await Feedback.findById(req.params.id);
     if (!fb) return next(new ErrorHandler("Feedback not found", 404));
     if (fb.status !== "open") {

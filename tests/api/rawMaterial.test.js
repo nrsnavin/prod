@@ -2,7 +2,7 @@
 
 jest.mock("../../models/RawMaterial");
 jest.mock("../../models/PurchaseOrder");
-jest.mock("../../models/Materialnward");
+jest.mock("../../models/MaterialInward");
 jest.mock("../../models/MaterialOut.cjs");
 jest.mock("../../models/Supplier");
 
@@ -10,7 +10,7 @@ const request = require("supertest");
 const app = require("../../app");
 const RawMaterial = require("../../models/RawMaterial");
 const PurchaseOrder = require("../../models/PurchaseOrder");
-const MaterialInward = require("../../models/Materialnward");
+const MaterialInward = require("../../models/MaterialInward");
 const Supplier = require("../../models/Supplier");
 
 const fakeMaterial = (overrides = {}) => ({

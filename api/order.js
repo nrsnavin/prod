@@ -192,6 +192,9 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("Order ID is required", 400));
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid order id", 400));
+    }
 
     const order = await Order.findById(id)
       .populate("customer",  "name gstin")

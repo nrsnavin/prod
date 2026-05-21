@@ -362,11 +362,15 @@ router.get(
     if (type)   filter.type   = type;
     if (status) filter.status = status;
     if (search.trim()) {
-      filter.$or = [
+      const or = [
         { dcNumber:     { $regex: search, $options: "i" } },
         { customerName: { $regex: search, $options: "i" } },
-        { orderNo:      !isNaN(search) ? Number(search) : undefined },
-      ].filter((c) => Object.values(c)[0] !== undefined);
+      ];
+      const asNum = Number(search);
+      if (Number.isFinite(asNum)) {
+        or.push({ orderNo: asNum });
+      }
+      filter.$or = or;
     }
 
     const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 200);
