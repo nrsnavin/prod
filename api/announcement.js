@@ -13,6 +13,7 @@
 "use strict";
 
 const express      = require("express");
+const mongoose     = require("mongoose");
 const router       = express.Router();
 const Announcement = require("../models/Announcement");
 
@@ -149,6 +150,32 @@ router.put(
     if (update.type && !TYPES.includes(update.type)) {
       return next(new ErrorHandler(
         `type must be one of: ${TYPES.join(", ")}`, 400));
+    }
+
+    // Mirror POST validation: dates must parse, audience=='department'
+    // requires a non-empty department.
+    const parseDate = (raw, field) => {
+      if (raw === undefined || raw === null || raw === '') return undefined;
+      const d = new Date(raw);
+      if (Number.isNaN(d.getTime())) {
+        throw new ErrorHandler(`${field} is not a valid date`, 400);
+      }
+      return d;
+    };
+    try {
+      if ('validFrom'  in update) update.validFrom  = parseDate(update.validFrom,  'validFrom');
+      if ('validUntil' in update) update.validUntil = parseDate(update.validUntil, 'validUntil');
+    } catch (err) {
+      return next(err);
+    }
+    if (update.audience === 'department' &&
+        (!update.department || !String(update.department).trim())) {
+      return next(new ErrorHandler(
+        "department is required when audience is 'department'", 400));
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler("Invalid announcement id", 400));
     }
     const doc = await Announcement.findByIdAndUpdate(
       req.params.id, { $set: update }, { new: true });
