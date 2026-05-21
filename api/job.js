@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const ErrorHandler     = require('../utils/ErrorHandler');
+const { isAuthenticated } = require('../middleware/auth');
 
 const JobOrder    = require('../models/JobOrder');
 const Order       = require('../models/Order');
@@ -16,6 +17,12 @@ const Machine     = require('../models/Machine');
 const ShiftDetail = require('../models/ShiftDetail');
 
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
+
+// Every job route requires a logged-in user. The previous setup left
+// the whole router anonymous, including the alternate `/:jobId`
+// detail at the bottom of the file and the machine-assign / stage-
+// transition mutations.
+router.use(isAuthenticated);
 
 const JOB_STATUSES = [
   'preparatory', 'weaving', 'finishing', 'checking', 'packing', 'completed', 'cancelled',

@@ -109,8 +109,16 @@ router.post(
 
     if (!job)        return next(new ErrorHandler("job is required",     400));
     if (!elastic)    return next(new ErrorHandler("elastic is required", 400));
+    // Cap at 50000 m — a single packing record well beyond the
+    // weaving capacity of any machine in a shift. Without this a
+    // typo (999999999) silently lands and corrupts stock + ledger.
+    const PACKING_METER_MAX = 50000;
     if (!meter || isNaN(Number(meter)) || Number(meter) <= 0) {
       return next(new ErrorHandler("meter must be a positive number",    400));
+    }
+    if (Number(meter) > PACKING_METER_MAX) {
+      return next(new ErrorHandler(
+        `meter ${meter} exceeds ${PACKING_METER_MAX}m per record`, 400));
     }
     if (!netWeight   || isNaN(Number(netWeight)))   {
       return next(new ErrorHandler("netWeight is required",   400));
