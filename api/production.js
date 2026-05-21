@@ -20,6 +20,12 @@ const express    = require('express');
 const router     = express.Router();
 const ShiftPlan  = require('../models/ShiftPlan');
 const ShiftDetail= require('../models/ShiftDetail');
+const { isAuthenticated } = require('../middleware/auth');
+
+// Every production-analytics route requires login. Was previously
+// reachable anonymously; admin Flutter callers already route through
+// ApiClient so no client change needed.
+router.use(isAuthenticated);
 
 // ─────────────────────────────────────────────────────────────
 //  UTILITY FUNCTIONS
