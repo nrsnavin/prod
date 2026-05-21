@@ -40,13 +40,14 @@ router.post(
 
       const user = await User.findOne({ email }).select("+password");
 
-      if (!user) {
-        return next(new ErrorHandler("User doesn't exists!", 400));
-      }
-
-      const isPasswordValid = await user.comparePassword(password);
-      if (!isPasswordValid) {
-        return next(new ErrorHandler("Invalid credentials!", 401));
+      // Unify the "user not found" and "bad password" paths into one
+      // generic 401. Distinguishing them lets attackers enumerate
+      // registered emails via the response code.
+      const isPasswordValid = user
+        ? await user.comparePassword(password)
+        : false;
+      if (!user || !isPasswordValid) {
+        return next(new ErrorHandler("Invalid email or password", 401));
       }
 
       const token = generateToken(user);

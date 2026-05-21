@@ -17,7 +17,7 @@ const Payroll          = require('../models/Payroll');
 const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
 const YearlyBonus      = require('../models/YearlyBonus');
-const { isAuthenticated, isAdmin } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 
 router.use(isAuthenticated);
 
@@ -395,7 +395,8 @@ router.get('/dashboard', isAdmin('admin'), async (req, res) => {
 });
 
 // Worker-facing — employees view their own payslip.
-router.get('/slip/:empId', async (req, res) => {
+// selfOrAdmin blocks one worker from reading another's slip by id swap.
+router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
   try {
     const year  = +(req.query.year  || new Date().getFullYear());
     const month = +(req.query.month || new Date().getMonth() + 1);

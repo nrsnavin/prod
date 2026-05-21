@@ -34,3 +34,25 @@ exports.isAdmin = (...roles) => {
         next();
     }
 }
+
+// Per-employee ownership guard. Use after isAuthenticated on routes
+// whose path/query carries an :empId — admins pass through, but a
+// worker can only access their own employee record. Closes the
+// privacy gap where any logged-in worker could read another's
+// payslip / leave history / attendance / bonus by swapping the id.
+//
+// Resolves the requested employee id from (in order):
+//   req.params.empId / req.params.id / req.query.empId / req.query.id
+// Compares with `req.user.employee` (the Employee ObjectId linked
+// to the requesting User account).
+exports.selfOrAdmin = (req, res, next) => {
+    if (req.user?.role === 'admin') return next();
+    const wantEmp =
+        req.params?.empId ??
+        req.params?.id    ??
+        req.query?.empId  ??
+        req.query?.id;
+    const myEmp = req.user?.employee?.toString();
+    if (myEmp && wantEmp && myEmp === String(wantEmp)) return next();
+    return next(new ErrorHandler("Forbidden — you can only access your own records", 403));
+};

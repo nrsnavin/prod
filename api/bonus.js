@@ -29,7 +29,7 @@ const BonusRecord      = require("../models/BonusRecord");
 const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
 const PDFDocument      = require("pdfkit");
-const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 
 router.use(isAuthenticated);
 
@@ -242,6 +242,7 @@ router.get(
 
 router.get(
   "/employee/:id",
+  selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
     const year = parseInt(req.query.year) || currentYear();
     const { id } = req.params;
@@ -265,6 +266,7 @@ router.get(
 
 router.get(
   "/employee/:id/pdf",
+  selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
     const year = parseInt(req.query.year) || currentYear();
     const { id } = req.params;

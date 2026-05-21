@@ -357,38 +357,62 @@ router.delete(
     if (!coveringId) return next(new ErrorHandler("coveringId is required", 400));
     if (!entryId)    return next(new ErrorHandler("entryId is required", 400));
 
-    const covering = await Covering.findById(coveringId);
-    if (!covering) return next(new ErrorHandler("Covering not found", 404));
-
-    if (covering.status === "completed" || covering.status === "cancelled") {
+    // Status check before opening a session — cheap pre-condition.
+    const peek = await Covering.findById(coveringId).select("status").lean();
+    if (!peek) return next(new ErrorHandler("Covering not found", 404));
+    if (peek.status === "completed" || peek.status === "cancelled") {
       return next(
         new ErrorHandler(
-          `Cannot remove beam entry from a ${covering.status} covering`, 400
+          `Cannot remove beam entry from a ${peek.status} covering`, 400
         )
       );
     }
 
-    const before = covering.beamEntries.length;
-    covering.beamEntries = covering.beamEntries.filter(
-      (e) => e._id.toString() !== entryId
-    );
+    // Atomic $pull so two concurrent deletes of different entryIds
+    // can't race on a stale in-memory `beamEntries` array. The
+    // findOneAndUpdate returns the post-pull doc so we can recompute
+    // producedWeight in the same transaction.
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const updated = await Covering.findOneAndUpdate(
+          { _id: coveringId, status: { $nin: ["completed", "cancelled"] } },
+          { $pull: { beamEntries: { _id: entryId } } },
+          { new: true, session }
+        );
+        if (!updated) {
+          throw new ErrorHandler(
+            "Covering changed status before delete could apply", 409
+          );
+        }
+        // $pull returns the post-update doc unchanged when nothing
+        // matched; detect missing entry by post-check.
+        const stillHasEntry = updated.beamEntries.find(
+          (e) => e._id.toString() === entryId
+        );
+        if (stillHasEntry) {
+          throw new ErrorHandler("Beam entry not found", 404);
+        }
 
-    if (covering.beamEntries.length === before) {
-      return next(new ErrorHandler("Beam entry not found", 404));
+        updated.producedWeight = updated.beamEntries.reduce(
+          (sum, e) => sum + (e.weight || 0),
+          0
+        );
+        await updated.save({ session });
+
+        resp = {
+          success:        true,
+          producedWeight: updated.producedWeight,
+          totalBeams:     updated.beamEntries.length,
+        };
+      });
+      res.status(200).json(resp);
+    } catch (err) {
+      return next(err);
+    } finally {
+      await session.endSession();
     }
-
-    covering.producedWeight = covering.beamEntries.reduce(
-      (sum, e) => sum + e.weight,
-      0
-    );
-
-    await covering.save();
-
-    res.status(200).json({
-      success:        true,
-      producedWeight: covering.producedWeight,
-      totalBeams:     covering.beamEntries.length,
-    });
   })
 );
 
