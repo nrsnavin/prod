@@ -134,7 +134,7 @@ router.put('/:id/approve', isAuthenticated, isAdmin('admin'), async (req, res) =
 
     leave.status     = 'approved';
     // Server-trusted reviewer — drop the body-supplied default to prevent spoofing.
-    leave.reviewedBy = req.user._id;
+    leave.reviewedBy = req.user?._id || null;
     leave.reviewedAt = new Date();
     leave.reviewNotes= reviewNotes;
     await leave.save();
@@ -175,7 +175,7 @@ router.put('/:id/reject', isAuthenticated, isAdmin('admin'), async (req, res) =>
       return res.status(400).json({ success:false, message:`Request already ${leave.status}.` });
 
     leave.status     = 'rejected';
-    leave.reviewedBy = req.user._id;
+    leave.reviewedBy = req.user?._id || null;
     leave.reviewedAt = new Date();
     leave.reviewNotes= reviewNotes;
     await leave.save();
