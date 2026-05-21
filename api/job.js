@@ -301,34 +301,59 @@ router.post(
     if (job.status === 'weaving' && job.machine)
       return next(new ErrorHandler('Job already has a machine assigned.', 400));
 
-    const machine = await Machine.findById(machineId);
-    if (!machine) return next(new ErrorHandler('Machine not found', 404));
-    if (machine.status !== 'free')
-      return next(new ErrorHandler(`Machine is not free (current: "${machine.status}")`, 400));
+    // Machine claim + job status flip must be atomic. Without a
+    // transaction two concurrent /plan-weaving requests could both
+    // see machine.status === 'free' and both claim it, leaving the
+    // loser with a half-applied job state.
+    const session = await mongoose.startSession();
+    let machine;
+    try {
+      await session.withTransaction(async () => {
+        // Atomic claim: only flip free → running, so the second
+        // racing request gets null and bails cleanly.
+        machine = await Machine.findOneAndUpdate(
+          { _id: machineId, status: 'free' },
+          {
+            $set: {
+              status:       'running',
+              orderRunning: job._id,
+              elastics:     Object.entries(headElasticMap).map(
+                ([head, elastic]) => ({ head: Number(head) + 1, elastic })
+              ),
+            },
+          },
+          { new: true, session }
+        );
+        if (!machine) {
+          // Disambiguate the failure for the caller.
+          const fresh = await Machine.findById(machineId).session(session);
+          if (!fresh) throw new ErrorHandler('Machine not found', 404);
+          throw new ErrorHandler(
+            `Machine is not free (current: "${fresh.status}")`, 400
+          );
+        }
 
-    machine.status       = 'running';
-    machine.orderRunning = job._id;
-    machine.elastics     = Object.entries(headElasticMap).map(([head, elastic]) => ({ head: Number(head) + 1, elastic }));
-    await machine.save();
-
-    if (job.status === 'preparatory') {
-      job.status = 'weaving';
-      stampStage(job, 'weaving', req.user?._id);
-      // 🪪 Fingerprint: JOB_STAGE_UPDATED (preparatory → weaving)
-      job.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
-        entityId: job._id,
-        actor:    actorFromRequest(req),
-        meta:     {
-          previousStage: 'preparatory',
-          newStage:      'weaving',
-          jobOrderNo:    job.jobOrderNo,
-          machineId:     machine._id.toString(),
-          machineName:   machine.ID,
-        },
-      }));
+        if (job.status === 'preparatory') {
+          job.status = 'weaving';
+          stampStage(job, 'weaving', req.user?._id);
+          job.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
+            entityId: job._id,
+            actor:    actorFromRequest(req),
+            meta:     {
+              previousStage: 'preparatory',
+              newStage:      'weaving',
+              jobOrderNo:    job.jobOrderNo,
+              machineId:     machine._id.toString(),
+              machineName:   machine.ID,
+            },
+          }));
+        }
+        job.machine = machine._id;
+        await job.save({ session });
+      });
+    } finally {
+      await session.endSession();
     }
-    job.machine = machine._id;
-    await job.save();
 
     res.json({
       success: true,

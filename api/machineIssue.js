@@ -128,7 +128,7 @@ router.put(
     const update = { status, resolutionNotes };
     if (status === "resolved" || status === "rejected") {
       update.resolvedAt = new Date();
-      update.resolvedBy = req.user._id;
+      update.resolvedBy = req.user?._id || null;
     }
 
     const issue = await MachineIssue.findByIdAndUpdate(

@@ -70,11 +70,20 @@ async function applyProductionCascade(
     else job.producedElastic.push({ elastic: elasticId, quantity: qty });
   }
 
-  job.elastics.forEach((e, i) => {
-    const planned  = e.quantity;
-    const produced = job.producedElastic[i]?.quantity ?? 0;
-    if (produced > planned && job.producedElastic[i]) job.producedElastic[i].quantity = planned;
-  });
+  // Cap each elastic's produced count at its planned quantity. Match
+  // by elastic id, not by array index — producedElastic and elastics
+  // can be in different orders (and producedElastic can have entries
+  // pushed onto it above without a matching elastics slot).
+  for (const e of job.elastics) {
+    const planned    = e.quantity;
+    const elasticId  = e.elastic.toString();
+    const producedRow = job.producedElastic.find(
+      (p) => p.elastic.toString() === elasticId
+    );
+    if (producedRow && producedRow.quantity > planned) {
+      producedRow.quantity = planned;
+    }
+  }
 
   const fp = buildFingerprint(ACTION_CODES.SHIFT_PRODUCTION_VERIFIED, {
     entityId: job._id,

@@ -13,6 +13,7 @@
 'use strict';
 
 const express    = require('express');
+const mongoose   = require('mongoose');
 const router     = express.Router();
 const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
@@ -118,7 +119,20 @@ router.post('/mark', isAdmin('admin'), async (req, res) => {
       };
     });
 
-    const result = await Attendance.bulkWrite(ops);
+    // Atomic upsert: every row lands or none does. ordered:false
+    // lets Mongo continue past benign per-row failures (duplicate
+    // key etc.) so a single bad record doesn't poison the whole
+    // batch — but everything still rolls back if the transaction
+    // itself aborts.
+    const session = await mongoose.startSession();
+    let result;
+    try {
+      await session.withTransaction(async () => {
+        result = await Attendance.bulkWrite(ops, { session, ordered: false });
+      });
+    } finally {
+      await session.endSession();
+    }
 
     return res.json({
       success:  true,

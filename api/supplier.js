@@ -13,6 +13,7 @@
 // ══════════════════════════════════════════════════════════════════════════
 
 const express        = require("express");
+const mongoose       = require("mongoose");
 const router         = express.Router();
 
 const Supplier       = require("../models/Supplier");
@@ -377,15 +378,22 @@ router.post(
         });
       }
 
-      // Save PO with new receivedQuantity values and derived status
-      po.status = deriveStatus(po.items);
-      await po.save();
-
-      // Increment stock on all affected raw materials in one round-trip
-      await RawMaterial.bulkWrite(bulkOps);
-
-      // Bulk-insert inward records
-      const created = await MaterialInward.insertMany(inwardDocs);
+      // All three writes (PO, RawMaterial stock, MaterialInward audit
+      // rows) must land or roll back together. Without a transaction
+      // a failing insertMany used to leave stock credited but no audit
+      // trail, or vice versa.
+      const session = await mongoose.startSession();
+      let created;
+      try {
+        await session.withTransaction(async () => {
+          po.status = deriveStatus(po.items);
+          await po.save({ session });
+          await RawMaterial.bulkWrite(bulkOps, { session });
+          created = await MaterialInward.insertMany(inwardDocs, { session });
+        });
+      } finally {
+        await session.endSession();
+      }
 
       return res.status(201).json({
         success:       true,

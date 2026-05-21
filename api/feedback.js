@@ -121,7 +121,7 @@ router.put(
     const update = {
       response,
       respondedAt: new Date(),
-      respondedBy: req.user._id,
+      respondedBy: req.user?._id || null,
     };
     if (status) update.status = status;
 
