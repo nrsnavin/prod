@@ -14,6 +14,7 @@
 "use strict";
 
 const express        = require("express");
+const mongoose       = require("mongoose");
 const router         = express.Router();
 const MachineIssue   = require("../models/MachineIssue");
 const Machine        = require("../models/Machine");
@@ -144,12 +145,27 @@ router.put(
 router.delete(
   "/:id",
   catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler("Invalid issue id", 400));
+    }
     const issue = await MachineIssue.findById(req.params.id);
     if (!issue) return next(new ErrorHandler("Issue not found", 404));
     if (issue.status !== "open") {
       return next(new ErrorHandler(
         "Only open issues can be withdrawn", 400));
     }
+
+    // Workers can only withdraw their own issues; admins can withdraw
+    // any. Without this check the route's router-level isAuthenticated
+    // let any logged-in worker delete other workers' complaints.
+    const isOwner = req.user?.employee?.toString() ===
+      issue.employee?.toString();
+    const isAdminRole = req.user?.role === 'admin';
+    if (!isOwner && !isAdminRole) {
+      return next(new ErrorHandler(
+        "You can only withdraw your own issues", 403));
+    }
+
     await issue.deleteOne();
     res.json({ success: true, message: "Issue withdrawn" });
   })

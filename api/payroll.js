@@ -9,6 +9,7 @@
 'use strict';
 
 const express          = require('express');
+const mongoose         = require('mongoose');
 const router           = express.Router();
 const Attendance       = require('../models/Attendence');
 const Employee         = require('../models/Employee');
@@ -295,27 +296,39 @@ router.post('/generate', isAdmin('admin'), async (req, res) => {
 
     const results = [], errors = [];
     for (const id of empIds) {
+      const session = await mongoose.startSession();
       try {
-        const data       = await computePayroll(id, +year, +month);
-        const advIds     = data._advanceIds || [];
-        delete data._advanceIds;
+        // Payroll upsert + advance flip must land or roll back as one
+        // unit. Without a transaction, two parallel /generate calls
+        // could each see the same advance unflagged and deduct it
+        // twice. The advance flip filter additionally re-asserts
+        // `deductedInPayroll: { $ne: true }` so a stale read on this
+        // side becomes a no-op instead of a double write.
+        await session.withTransaction(async () => {
+          const data   = await computePayroll(id, +year, +month);
+          const advIds = data._advanceIds || [];
+          delete data._advanceIds;
 
-        await Payroll.findOneAndUpdate(
-          { employee: id, year: +year, month: +month },
-          { $set: data },
-          { upsert: true, new: true }
-        ).populate('employee', 'name department');
-
-        if (advIds.length) {
-          await AdvanceRequest.updateMany(
-            { _id: { $in: advIds } },
-            { $set: { deductedInPayroll: true } }
+          await Payroll.findOneAndUpdate(
+            { employee: id, year: +year, month: +month },
+            { $set: data },
+            { upsert: true, new: true, session }
           );
-        }
 
-        results.push({ employeeId: id, netPay: data.netPay, status: data.status });
+          if (advIds.length) {
+            await AdvanceRequest.updateMany(
+              { _id: { $in: advIds }, deductedInPayroll: { $ne: true } },
+              { $set: { deductedInPayroll: true } },
+              { session }
+            );
+          }
+
+          results.push({ employeeId: id, netPay: data.netPay, status: data.status });
+        });
       } catch (err) {
         errors.push({ employeeId: id, error: err.message });
+      } finally {
+        await session.endSession();
       }
     }
 
@@ -337,10 +350,15 @@ router.get('/dashboard', isAdmin('admin'), async (req, res) => {
     const payrolls = await Payroll.find({ year, month })
       .populate('employee', 'name department hourlyRate').lean();
 
-    const totalNetPay     = payrolls.reduce((s,p) => s + p.netPay,        0);
-    const totalGross      = payrolls.reduce((s,p) => s + p.grossEarnings, 0);
-    const totalDeductions = payrolls.reduce((s,p) => s + p.totalDeductions,0);
-    const totalBonuses    = payrolls.reduce((s,p) => s + p.totalBonuses,  0);
+    // One corrupt row used to poison every total via NaN propagation;
+    // skip any field that isn't a finite number.
+    const sum = (key) => payrolls.reduce(
+      (s, p) => s + (Number.isFinite(p[key]) ? p[key] : 0), 0
+    );
+    const totalNetPay     = sum('netPay');
+    const totalGross      = sum('grossEarnings');
+    const totalDeductions = sum('totalDeductions');
+    const totalBonuses    = sum('totalBonuses');
 
     res.json({
       success: true, year, month,

@@ -1,7 +1,8 @@
 "use strict";
 
-const express = require("express");
-const router  = express.Router();
+const express  = require("express");
+const mongoose = require("mongoose");
+const router   = express.Router();
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
@@ -89,6 +90,9 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid employee id", 400));
+    }
 
     const employee = await Employee.findById(id)
       .populate({
@@ -158,6 +162,9 @@ router.put(
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid employee id", 400));
+    }
 
     const employee = await Employee.findById(id);
     if (!employee) return next(new ErrorHandler("Employee not found", 404));
@@ -181,6 +188,9 @@ router.patch(
     const { id, performance } = req.body;
 
     if (!id)              return next(new ErrorHandler("id is required", 400));
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid employee id", 400));
+    }
     if (performance == null) {
       return next(new ErrorHandler("performance value is required", 400));
     }
