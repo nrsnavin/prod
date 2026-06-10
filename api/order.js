@@ -117,6 +117,92 @@ async function _releaseAllReservations(session, order, actor, context) {
 
 
 // ════════════════════════════════════════════════════════════════
+//  SHARED — REFUND RAW MATERIALS ON CANCEL
+//
+//  Walks every MaterialOutward this order's APPROVAL emitted and
+//  credits each material's stock back by exactly the quantity that
+//  was actually drawn (not requiredWeight — under force-approval
+//  these can differ). Records a paired ORDER_CANCEL_REFUND row in
+//  stockMovements, marks the MaterialOutward as reversed, and
+//  pushes a RAW_MATERIAL_RESTORED fingerprint per refunded row so
+//  the timeline shows the credit clearly.
+//
+//  Returns the list of `{materialId, quantity, balanceAfter}` so
+//  the cancel route can include a summary in its response.
+//
+//  Safe to call on Open orders (returns an empty list — no
+//  approval has been recorded for them yet).
+// ════════════════════════════════════════════════════════════════
+async function _refundRawMaterialsForOrder(session, order, actor) {
+  const refunded = [];
+
+  // Only reverse outwards that haven't been reversed yet — protects
+  // against any future code path that might call this helper twice.
+  const outwards = await MaterialOutward.find({
+    order:    order._id,
+    type:     "ORDER_APPROVAL",
+    reversed: { $ne: true },
+  }).session(session);
+
+  if (outwards.length === 0) return refunded;
+
+  for (const ow of outwards) {
+    const qty = Number(ow.quantity || 0);
+    if (qty <= 0) continue;
+
+    const material = await RawMaterial.findById(ow.rawMaterial).session(session);
+    if (!material) continue;
+
+    material.stock = (Number(material.stock) || 0) + qty;
+    material.totalConsumption = Math.max(
+      0,
+      (Number(material.totalConsumption) || 0) - qty
+    );
+    material.stockMovements?.push({
+      date:     new Date(),
+      type:     "ORDER_CANCEL_REFUND",
+      order:    order._id,
+      quantity: qty,
+      balance:  material.stock,
+    });
+    await material.save({ session });
+
+    // Mark the outward row as reversed so audit + the dedupe filter
+    // above stay self-consistent. The original outward stays in
+    // place for history; no MaterialInward is created because this
+    // wasn't a true receipt.
+    ow.reversed   = true;
+    ow.reversedAt = new Date();
+    if (actor?.id) ow.reversedBy = actor.id;
+    await ow.save({ session });
+
+    const fp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_RESTORED, {
+      entityId: order._id,
+      actor,
+      meta: {
+        rawMaterialId:   ow.rawMaterial.toString(),
+        rawMaterialName: material.name,
+        quantity:        qty,
+        unit:            "kg",
+        balanceAfter:    material.stock,
+        reversedFrom:    ow._id.toString(),
+      },
+    });
+    order.fingerprints.push(fp);
+
+    refunded.push({
+      materialId:   ow.rawMaterial.toString(),
+      materialName: material.name,
+      quantity:     qty,
+      balanceAfter: material.stock,
+    });
+  }
+
+  return refunded;
+}
+
+
+// ════════════════════════════════════════════════════════════════
 //  LIST ORDERS  (by status)
 // ════════════════════════════════════════════════════════════════
 router.get(
@@ -511,8 +597,12 @@ router.post(
 // ════════════════════════════════════════════════════════════════
 //  CANCEL ORDER
 //
-//  PR E: releases any remaining elastic reservations. Raw material
-//  refund is out of scope (already-deducted raw stock stays out).
+//  Releases any remaining elastic reservations AND refunds raw
+//  materials previously deducted during /approve. The refund walks
+//  the order's MaterialOutward records (which carry the actually-
+//  applied quantity — correct under force-approval where less than
+//  requiredWeight was drawn). Refund only happens for Approved /
+//  InProgress orders; Open orders never deducted anything.
 // ════════════════════════════════════════════════════════════════
 router.post(
   "/cancel",
@@ -544,6 +634,13 @@ router.post(
           "order cancelled"
         );
 
+        // Refund only if the order had been approved (Open orders
+        // never touched stock). The helper short-circuits on Open
+        // anyway, but skipping the call keeps the response cleaner.
+        const refunded = previousStatus === "Open"
+          ? []
+          : await _refundRawMaterialsForOrder(session, order, actor);
+
         order.status      = "Cancelled";
         order.cancelledBy = req.user?._id || null;
         order.cancelledAt = new Date();
@@ -555,6 +652,7 @@ router.post(
             previousStatus,
             newStatus: "Cancelled",
             releasedReservations: released.length,
+            refundedMaterials:    refunded.length,
           },
         });
         order.fingerprints.push(fp);
@@ -565,6 +663,7 @@ router.post(
           status:  order.status,
           fingerprint: fp,
           releasedReservations: released,
+          refundedMaterials:    refunded,
         };
       });
 
