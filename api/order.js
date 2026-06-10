@@ -353,11 +353,14 @@ router.post(
           });
         }
       }
-      if (force) {
+      // Reason is only demanded when the force flag actually
+      // overrides something — a force=true call against healthy
+      // stock behaves like a normal approval.
+      if (force && shortfalls.length > 0) {
         const reason = String(forceReason || "").trim();
         if (reason.length < 8) {
           throw new ErrorHandler(
-            "forceReason must be at least 8 characters when force=true",
+            "forceReason must be at least 8 characters when forcing through a shortfall",
             400
           );
         }
@@ -392,19 +395,25 @@ router.post(
         const applied = Math.min(rm.requiredWeight, material.stock);
         material.stock = Math.max(0, material.stock - rm.requiredWeight);
         material.totalConsumption = (material.totalConsumption || 0) + applied;
+        // Ledger rows record what ACTUALLY moved (`applied`) so the
+        // movement sums reconcile with stock after a clamped forced
+        // approval. The requested amount lives in the deduction
+        // fingerprint + force fingerprint shortfalls.
         material.stockMovements?.push({
           date: new Date(), type: "ORDER_APPROVAL", order: order._id,
-          quantity: rm.requiredWeight, balance: material.stock,
+          quantity: applied, balance: material.stock,
         });
         await material.save({ session });
         await MaterialOutward.create([{
           rawMaterial: rm.rawMaterial,
-          quantity:    rm.requiredWeight,
+          quantity:    applied,
           order:       order._id,
           type:        "ORDER_APPROVAL",
           outwardDate: new Date(),
           unitPrice:   material.price ?? 0,
-          remarks:     `Order #${order.orderNo ?? ""} approval`,
+          remarks:     applied < rm.requiredWeight
+            ? `Order #${order.orderNo ?? ""} approval (forced — requested ${rm.requiredWeight}, short ${rm.requiredWeight - applied})`
+            : `Order #${order.orderNo ?? ""} approval`,
         }], { session });
 
         const deductFp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_DEDUCTED, {
@@ -413,7 +422,8 @@ router.post(
           meta: {
             rawMaterialId:   rm.rawMaterial.toString(),
             rawMaterialName: material.name,
-            quantity:        rm.requiredWeight,
+            requested:       rm.requiredWeight,
+            applied,
             unit:            "kg",
             balanceAfter:    material.stock,
           },
