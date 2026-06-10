@@ -57,6 +57,13 @@ app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 
 app.use(setUserContext);
 
+// Unauthenticated liveness probe for load balancers / uptime checks.
+// Deliberately mounted before the routers so it never touches auth
+// or the database.
+app.get("/api/v2/health", (req, res) =>
+  res.json({ status: "ok", uptime: process.uptime() })
+);
+
 
 // Mount-level admin gate for the all-ADMIN router groups.
 //

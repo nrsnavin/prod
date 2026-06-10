@@ -326,6 +326,9 @@ router.post("/warpingPlan/create", isAdmin('admin'), catchAsyncErrors(async (req
 }));
 
 router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.jobId)) {
+    return next(new ErrorHandler("Invalid job id", 400));
+  }
   const job = await JobOrder.findById(req.params.jobId)
     .populate({
       path: "elastics.elastic",

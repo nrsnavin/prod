@@ -4,7 +4,9 @@ const AutoIncrement = require("mongoose-sequence")(mongoose);
 const ElasticQtySchema = new mongoose.Schema(
   {
     elastic:  { type: mongoose.Types.ObjectId, ref: "Elastic", required: true },
-    quantity: { type: Number, required: true, default: 0 },
+    // min: 0 — negative ordered/produced/packed quantities corrupt
+    // the production math and stock counters downstream.
+    quantity: { type: Number, required: true, default: 0, min: 0 },
   },
   { _id: false }
 );
