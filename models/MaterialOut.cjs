@@ -51,12 +51,26 @@ const materialOutwardSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+
+    // ── Reversal bookkeeping ─────────────────────────────
+    // Set when /order/cancel walks the outward log to refund
+    // raw stock back. The original row stays in place for
+    // history; the dedupe filter in _refundRawMaterialsForOrder
+    // uses `reversed: { $ne: true }` so the same approval can't
+    // be refunded twice.
+    reversed: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    reversedAt: { type: Date },
+    reversedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true }
 );
 
 materialOutwardSchema.index({ rawMaterial: 1, outwardDate: -1 });
-materialOutwardSchema.index({ order: 1 });
+materialOutwardSchema.index({ order: 1, reversed: 1 });
 materialOutwardSchema.index({ job:   1 });
 
 module.exports = mongoose.model('MaterialOutward', materialOutwardSchema);
