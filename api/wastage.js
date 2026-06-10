@@ -195,13 +195,18 @@ router.delete(
 router.get(
   "/jobs-for-wastage",
   catchAsyncErrors(async (req, res, next) => {
+    // Cap the fan-out — large factories with hundreds of in-flight
+    // jobs would otherwise dump the entire list (each with populated
+    // elastics + customer) on a single round-trip.
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
     const jobs = await JobOrder.find({
       status: { $in: ["weaving", "finishing", "checking"] },
     })
       .populate("customer", "name")
       .populate("elastics.elastic", "name")
       .select("_id jobOrderNo elastics customer date status")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .limit(limit);
 
     res.json({ success: true, jobs });
   })
@@ -384,12 +389,23 @@ router.get(
   "/get-in-range",
   isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
+    // Validate the date params before they reach moment — invalid
+    // strings produce Invalid Date silently and `$gte/$lte` then
+    // matches nothing, which masks a typo as "no data".
+    const start = moment(req.query.start, "YYYY-MM-DD", true);
+    const end   = moment(req.query.less,  "YYYY-MM-DD", true);
+    if (!start.isValid()) {
+      return next(new ErrorHandler("start must be a YYYY-MM-DD date", 400));
+    }
+    if (!end.isValid()) {
+      return next(new ErrorHandler("less must be a YYYY-MM-DD date", 400));
+    }
     const wastages = await Wastage.find({
       createdAt: {
-        $gte: moment(req.query.start, "YYYY-MM-DD").toDate(),
-        $lte: moment(req.query.less,  "YYYY-MM-DD").add(1, "days").toDate(),
+        $gte: start.toDate(),
+        $lte: end.add(1, "days").toDate(),
       },
-    });
+    }).limit(5000);
 
     const p = new Map();
     wastages.forEach((e) => {
