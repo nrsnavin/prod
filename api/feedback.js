@@ -43,6 +43,9 @@ router.post(
     } = req.body;
 
     if (!employeeId)        return next(new ErrorHandler("employeeId is required", 400));
+    if (!mongoose.Types.ObjectId.isValid(employeeId)) {
+      return next(new ErrorHandler("Invalid employee id", 400));
+    }
     if (!TYPES.includes(type)) {
       return next(new ErrorHandler(
         `type must be one of: ${TYPES.join(", ")}`, 400));

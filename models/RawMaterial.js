@@ -37,13 +37,15 @@ const RawMaterialSchema = new mongoose.Schema(
       default:"697e40c4e79c50e10e17ab61"
     },
 
-    price:    { type: Number, default: 0 },  // per kg — current price
+    // min: 0 — schema-level floor so a stray negative from a missed
+    // route validation can never persist into money / stock math.
+    price:    { type: Number, default: 0, min: 0 },  // per kg — current price
 
 
-    stock:            { type: Number, default: 0 },
-    minStock:         { type: Number, default: 0 },
+    stock:            { type: Number, default: 0, min: 0 },
+    minStock:         { type: Number, default: 0, min: 0 },
 
-    totalConsumption: { type: Number, default: 0 },
+    totalConsumption: { type: Number, default: 0, min: 0 },
 
     // ── Price history (appended on every price change) ────────
     priceHistory: {

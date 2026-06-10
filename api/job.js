@@ -872,7 +872,11 @@ router.get('/:jobId', async (req, res) => {
     });
   } catch (err) {
     console.error('[GET /jobs/:jobId]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    // Generic message — raw err.message can leak internals (driver
+    // errors, paths) to the client.
+    return res
+      .status(500)
+      .json({ success: false, message: 'Failed to load job detail' });
   }
 });
 
