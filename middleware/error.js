@@ -4,6 +4,12 @@ module.exports = (err, req, res, next) => {
   err.statusCode = err.statusCode || 500;
   err.message = err.message || "Internal server Error";
 
+  // Preserve route-supplied diagnostic fields so the frontend can
+  // branch on them (e.g. INSUFFICIENT_STOCK → show force-approve
+  // dialog) before any of the recreating branches below swap `err`.
+  const routeCode     = err.code;
+  const routeShortfall = err.shortfall;
+
   // wrong mongodb id error
   if (err.name === "CastError") {
     const message = `Resources not found with this id.. Invalid ${err.path}`;
@@ -28,8 +34,15 @@ module.exports = (err, req, res, next) => {
     err = new ErrorHandler(message, 400);
   }
 
-  res.status(err.statusCode).json({
+  // Surface diagnostic fields only when the route attached them via
+  // a string `code` (Mongo's 11000 is numeric and is already mapped
+  // above). Keeps the response shape clean for typical errors.
+  const payload = {
     success: false,
     message: err.message,
-  });
+  };
+  if (typeof routeCode === "string") payload.code = routeCode;
+  if (routeShortfall) payload.shortfall = routeShortfall;
+
+  res.status(err.statusCode).json(payload);
 };

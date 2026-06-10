@@ -303,7 +303,7 @@ router.post(
     const session = await mongoose.startSession();
     session.startTransaction();
     try {
-      const { orderId } = req.body;
+      const { orderId, force = false, forceReason = "" } = req.body;
       if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
         throw new ErrorHandler("Valid orderId is required", 400);
       }
@@ -318,19 +318,80 @@ router.post(
         );
       }
 
+      // Pre-flight stock check. When `force: true` we still build a
+      // shortfall list so the audit fingerprint records what was
+      // forced through; we don't bail out. When `force: false` the
+      // first short material raises 400 with a machine-readable
+      // `code: "INSUFFICIENT_STOCK"` so the admin app can prompt for
+      // a reason and retry.
+      const shortfalls = [];
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
         if (!material) throw new ErrorHandler("Raw material not found", 404);
-        if (material.stock < rm.requiredWeight)
-          throw new ErrorHandler(`Insufficient stock for ${material.name}`, 400);
+        if (material.stock < rm.requiredWeight) {
+          if (!force) {
+            const err = new ErrorHandler(
+              `Insufficient stock for ${material.name} (have ${material.stock}, need ${rm.requiredWeight})`,
+              400
+            );
+            err.code = "INSUFFICIENT_STOCK";
+            err.shortfall = {
+              materialId:   rm.rawMaterial.toString(),
+              materialName: material.name,
+              available:    material.stock,
+              required:     rm.requiredWeight,
+              short:        rm.requiredWeight - material.stock,
+            };
+            throw err;
+          }
+          shortfalls.push({
+            materialId:   rm.rawMaterial.toString(),
+            materialName: material.name,
+            available:    material.stock,
+            required:     rm.requiredWeight,
+            short:        rm.requiredWeight - material.stock,
+          });
+        }
+      }
+      if (force) {
+        const reason = String(forceReason || "").trim();
+        if (reason.length < 8) {
+          throw new ErrorHandler(
+            "forceReason must be at least 8 characters when force=true",
+            400
+          );
+        }
       }
 
       const actor = actorFromRequest(req);
+
+      // If admin forced approval through a shortfall, leave a
+      // standalone fingerprint capturing the reason BEFORE the
+      // deduction fingerprints. This keeps the audit trail explicit
+      // about who overrode the stock guard and why.
+      if (force && shortfalls.length > 0) {
+        const forceFp = buildFingerprint(ACTION_CODES.ORDER_APPROVED, {
+          entityId: order._id,
+          actor,
+          meta: {
+            forced:     true,
+            reason:     String(forceReason).trim(),
+            shortfalls,
+          },
+        });
+        order.fingerprints.push(forceFp);
+      }
+
       const deductionFingerprints = [];
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
-        material.stock -= rm.requiredWeight;
-        material.totalConsumption = (material.totalConsumption || 0) + rm.requiredWeight;
+        // Clamp stock at 0 on a forced approval — the schema floor
+        // (min: 0) on RawMaterial.stock would otherwise reject the
+        // save and trash the whole transaction. The shortfall is
+        // already captured in the force fingerprint above.
+        const applied = Math.min(rm.requiredWeight, material.stock);
+        material.stock = Math.max(0, material.stock - rm.requiredWeight);
+        material.totalConsumption = (material.totalConsumption || 0) + applied;
         material.stockMovements?.push({
           date: new Date(), type: "ORDER_APPROVAL", order: order._id,
           quantity: rm.requiredWeight, balance: material.stock,
@@ -405,6 +466,9 @@ router.post(
         meta: {
           previousStatus:    "Open",
           newStatus:         "Approved",
+          forced:            force === true && shortfalls.length > 0,
+          forceReason:       force ? String(forceReason).trim() : undefined,
+          shortfallCount:    shortfalls.length,
           materialsDeducted: deductionFingerprints.length,
           elasticsReserved:  reservationFingerprints.length,
         },
