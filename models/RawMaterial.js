@@ -18,7 +18,7 @@ const PriceHistorySchema = new mongoose.Schema(
 const StockMovementSchema = new mongoose.Schema(
   {
     date:     { type: Date,   required: true },
-    type:     { type: String, required: true }, // ORDER_APPROVAL | PO_INWARD | STOCK_ADJUST
+    type:     { type: String, required: true }, // ORDER_APPROVAL | PO_INWARD | STOCK_ADJUST | ORDER_CANCEL_REFUND
     order:    { type: mongoose.Types.ObjectId, ref: "Order" },
     quantity: { type: Number, required: true },
     balance:  { type: Number },

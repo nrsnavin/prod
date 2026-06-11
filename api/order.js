@@ -133,7 +133,7 @@ async function _releaseAllReservations(session, order, actor, context) {
 //  Safe to call on Open orders (returns an empty list — no
 //  approval has been recorded for them yet).
 // ════════════════════════════════════════════════════════════════
-async function _refundRawMaterialsForOrder(session, order, actor) {
+async function _refundRawMaterialsForOrder(session, order, actor, userObjectId) {
   const refunded = [];
 
   // Only reverse outwards that haven't been reversed yet — protects
@@ -173,7 +173,12 @@ async function _refundRawMaterialsForOrder(session, order, actor) {
     // wasn't a true receipt.
     ow.reversed   = true;
     ow.reversedAt = new Date();
-    if (actor?.id) ow.reversedBy = actor.id;
+    // reversedBy is an ObjectId ref to User; only assign when we
+    // have a real mongo user id. The normalised `actor.id` can be
+    // a string sentinel like "system" / "unknown" which would
+    // CastError on save. The fingerprint already captures actor
+    // identity for audit, so this field is purely a cross-ref.
+    if (userObjectId) ow.reversedBy = userObjectId;
     await ow.save({ session });
 
     const fp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_RESTORED, {
@@ -639,7 +644,12 @@ router.post(
         // anyway, but skipping the call keeps the response cleaner.
         const refunded = previousStatus === "Open"
           ? []
-          : await _refundRawMaterialsForOrder(session, order, actor);
+          : await _refundRawMaterialsForOrder(
+              session,
+              order,
+              actor,
+              req.user?._id,
+            );
 
         order.status      = "Cancelled";
         order.cancelledBy = req.user?._id || null;
