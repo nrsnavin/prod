@@ -460,4 +460,64 @@ router.post(
   })
 );
 
+// ─────────────────────────────────────────────────────────────
+//  MAINTENANCE DUE
+//  GET /machine/maintenance-due?days=14
+//
+//  For every machine, takes the LATEST service log carrying a
+//  nextServiceDate and buckets it as:
+//    • overdue   — nextServiceDate in the past
+//    • dueSoon   — within the next `days` (default 14, max 90)
+//  Machines whose latest dated log is further out (or that have
+//  no dated logs at all) are excluded. Sorted most-urgent first.
+//
+//  Machine counts are small (tens), so the scan is in-process
+//  rather than an aggregation pipeline.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/maintenance-due",
+  catchAsyncErrors(async (req, res, next) => {
+    const days = Math.min(Math.max(Number(req.query.days) || 14, 1), 90);
+    const now = new Date();
+    const horizon = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const machines = await Machine.find()
+      .select("ID manufacturer status serviceLogs")
+      .lean();
+
+    const due = [];
+    for (const m of machines) {
+      const dated = (m.serviceLogs || [])
+        .filter((l) => l.nextServiceDate)
+        .sort((a, b) => new Date(b.date) - new Date(a.date));
+      if (dated.length === 0) continue;
+
+      const next = new Date(dated[0].nextServiceDate);
+      if (Number.isNaN(next.getTime()) || next > horizon) continue;
+
+      due.push({
+        machineId:       m._id,
+        ID:              m.ID,
+        manufacturer:    m.manufacturer,
+        status:          m.status,
+        nextServiceDate: next,
+        lastServiceType: dated[0].type,
+        lastServiceDate: dated[0].date,
+        overdue:         next < now,
+        daysUntil: Math.ceil((next - now) / (24 * 60 * 60 * 1000)),
+      });
+    }
+
+    due.sort((a, b) => new Date(a.nextServiceDate) - new Date(b.nextServiceDate));
+
+    res.json({
+      success: true,
+      days,
+      count: due.length,
+      overdueCount: due.filter((d) => d.overdue).length,
+      data: due,
+    });
+  })
+);
+
 module.exports = router;

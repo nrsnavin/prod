@@ -55,6 +55,10 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 
+// One JSON line per completed request (method, path, status, ms,
+// user when authenticated). Zero-dep stand-in for morgan.
+app.use(require("./middleware/requestLogger"));
+
 app.use(setUserContext);
 
 // Unauthenticated liveness probe for load balancers / uptime checks.

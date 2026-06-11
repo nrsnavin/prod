@@ -95,8 +95,11 @@ router.post(
 router.get(
   "/get-elastics",
   catchAsyncErrors(async (req, res) => {
-    const { search = "", page = 1, limit = 20 } = req.query;
+    const { search = "", page = 1, limit = 20, includeArchived } = req.query;
     const filter = search ? { name: { $regex: search, $options: "i" } } : {};
+    // Soft-deleted SKUs hidden by default; `$ne: true` keeps legacy
+    // docs without the key visible.
+    if (includeArchived !== "true") filter.archived = { $ne: true };
     const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 200);
     const elastics = await Elastic.find(filter)
       .skip((page - 1) * safeLimit)
@@ -122,8 +125,10 @@ router.get(
   "/stock-summary",
   isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
-    const elastics = await Elastic.find()
-      .select("name stock quantityProduced minStock reservedStock")
+    const elastics = await Elastic.find(
+      req.query.includeArchived === "true" ? {} : { archived: { $ne: true } }
+    )
+      .select("name stock quantityProduced minStock reservedStock archived")
       .lean();
 
     const ids = elastics.map((e) => e._id);
@@ -391,6 +396,54 @@ router.patch(
       reservedStock: reserved,
       available:     Math.max(0, stock - reserved),
       isLowStock:    minStock > 0 && stock <= minStock,
+    });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  ARCHIVE / UNARCHIVE (soft delete)
+//  PATCH /api/v2/elastic/:id/archive   { archived: true|false }
+//
+//  Archived SKUs disappear from /get-elastics and /stock-summary
+//  by default (override with ?includeArchived=true). Nothing is
+//  deleted — ledger rows, DCs, orders and jobs keep their refs.
+//  Guard: an elastic with live reservations can't be archived,
+//  because hiding it would orphan the reserved/available figures
+//  the order flow depends on.
+// ─────────────────────────────────────────────────────────────
+router.patch(
+  "/:id/archive",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid elastic id", 400));
+    }
+    const wantArchived = req.body?.archived !== false; // default: archive
+
+    const elastic = await Elastic.findById(id)
+      .select("_id name archived reservedStock");
+    if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
+
+    if (wantArchived && (Number(elastic.reservedStock) || 0) > 0) {
+      return next(new ErrorHandler(
+        `Cannot archive "${elastic.name}" — ${elastic.reservedStock} m is reserved against approved orders. Cancel or complete those orders first.`,
+        400
+      ));
+    }
+
+    elastic.archived   = wantArchived;
+    elastic.archivedAt = wantArchived ? new Date() : undefined;
+    await elastic.save();
+
+    res.json({
+      success:   true,
+      elasticId: elastic._id,
+      name:      elastic.name,
+      archived:  elastic.archived,
+      message:   wantArchived
+        ? `"${elastic.name}" archived — hidden from lists`
+        : `"${elastic.name}" restored to active lists`,
     });
   })
 );
