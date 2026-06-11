@@ -545,4 +545,71 @@ router.delete(
 );
 
 
+// ─────────────────────────────────────────────────────────────────────────
+// PO RECEIPT AGING REPORT
+// GET /supplier/po-receipt-aging
+//
+// Every Open/Partial PO with outstanding (ordered − received) line
+// quantities, bucketed by age since the PO was raised:
+//   fresh: 0–7d · watch: 8–30d · late: 31–60d · critical: 60d+
+//
+// One row per PO; per-item pending detail nested so the admin app
+// can expand. Sorted oldest-first (most overdue at the top).
+// ─────────────────────────────────────────────────────────────────────────
+router.get(
+  "/po-receipt-aging",
+  catchAsyncErrors(async (req, res, next) => {
+    const pos = await PurchaseOrder.find({
+      status: { $in: ["Open", "Partial"] },
+    })
+      .populate("supplier", "name phoneNumber")
+      .populate("items.rawMaterial", "name category")
+      .sort({ createdAt: 1 })
+      .lean();
+
+    const now = Date.now();
+    const DAY = 24 * 60 * 60 * 1000;
+    const bucketOf = (days) =>
+      days <= 7 ? "fresh" : days <= 30 ? "watch" : days <= 60 ? "late" : "critical";
+
+    const rows = [];
+    for (const po of pos) {
+      const pendingItems = (po.items || [])
+        .map((i) => ({
+          rawMaterialId:   i.rawMaterial?._id ?? i.rawMaterial,
+          rawMaterialName: i.rawMaterial?.name ?? "—",
+          ordered:         Number(i.quantity) || 0,
+          received:        Number(i.receivedQuantity) || 0,
+          pending: Math.max(
+            0,
+            (Number(i.quantity) || 0) - (Number(i.receivedQuantity) || 0)
+          ),
+        }))
+        .filter((i) => i.pending > 0);
+
+      if (pendingItems.length === 0) continue;
+
+      const ageDays = Math.floor((now - new Date(po.createdAt).getTime()) / DAY);
+      rows.push({
+        poId:          po._id,
+        poNo:          po.poNo,
+        supplierName:  po.supplier?.name ?? "—",
+        supplierPhone: po.supplier?.phoneNumber ?? "",
+        status:        po.status,
+        createdAt:     po.createdAt,
+        ageDays,
+        bucket:        bucketOf(ageDays),
+        totalPending:  pendingItems.reduce((s, i) => s + i.pending, 0),
+        pendingItems,
+      });
+    }
+
+    const summary = { fresh: 0, watch: 0, late: 0, critical: 0 };
+    for (const r of rows) summary[r.bucket]++;
+
+    res.json({ success: true, count: rows.length, summary, data: rows });
+  })
+);
+
+
 module.exports = router;

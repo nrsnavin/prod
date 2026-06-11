@@ -122,6 +122,14 @@ const ElasticSchema = new mongoose.Schema(
     // dispatched against the same order.
     reservedStock: { type: Number, default: 0 },
 
+    // Soft-delete. Archived elastics are excluded from list /
+    // stock-summary by default (filter `archived: { $ne: true }`
+    // so legacy docs without the key behave as active). History,
+    // ledger rows and references stay intact — this is a display
+    // filter, not a deletion.
+    archived:   { type: Boolean, default: false, index: true },
+    archivedAt: { type: Date },
+
     // Legacy embedded ledger — kept read-only during the migration
     // window. Writers use StockMovement (the standalone collection)
     // via utils/elasticStock.js. Removed in a follow-up PR.
