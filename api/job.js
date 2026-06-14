@@ -913,4 +913,67 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  GET /stale?days=14
+//  Jobs that have been sitting in the same status for more than
+//  `days` days. Powers the AIAdvisor "stale jobs" card.
+//
+//  Each non-terminal stage records its entry timestamp on the
+//  job document (weavingAt, finishingAt, checkingAt, packingAt).
+//  The "entered current status at" is whichever timestamp the
+//  status maps to; preparatory falls back to createdAt because no
+//  preparatoryAt field exists.
+// ══════════════════════════════════════════════════════════════
+router.get('/stale', async (req, res) => {
+  try {
+    const days = Math.max(1, parseInt(req.query.days, 10) || 14);
+    const cutoff = new Date(Date.now() - days * 86_400_000);
+
+    const jobs = await JobOrder.find({
+      status: { $nin: ['completed', 'cancelled'] },
+    })
+      .select('jobOrderNo status createdAt weavingAt finishingAt checkingAt packingAt customer')
+      .populate('customer', 'name')
+      .lean();
+
+    const enteredAt = (j) => {
+      switch (j.status) {
+        case 'weaving':   return j.weavingAt   ?? j.createdAt;
+        case 'finishing': return j.finishingAt ?? j.createdAt;
+        case 'checking':  return j.checkingAt  ?? j.createdAt;
+        case 'packing':   return j.packingAt   ?? j.createdAt;
+        default:          return j.createdAt;
+      }
+    };
+
+    const stale = jobs
+      .map((j) => {
+        const enteredOn = enteredAt(j);
+        const idleDays  = Math.floor(
+          (Date.now() - new Date(enteredOn).getTime()) / 86_400_000
+        );
+        return { job: j, enteredOn, idleDays };
+      })
+      .filter((x) => x.idleDays > days)
+      .sort((a, b) => b.idleDays - a.idleDays)
+      .map((x) => ({
+        jobId:        x.job._id,
+        jobOrderNo:   x.job.jobOrderNo,
+        status:       x.job.status,
+        customerName: x.job.customer?.name ?? '—',
+        enteredOn:    x.enteredOn,
+        idleDays:     x.idleDays,
+      }));
+
+    return res.json({
+      success:   true,
+      windowDays: days,
+      jobs:      stale,
+      count:     stale.length,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;

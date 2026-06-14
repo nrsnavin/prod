@@ -14,6 +14,7 @@ const Order       = require("../models/Order");
 const ShiftDetail = require("../models/ShiftDetail");
 const ShiftPlan   = require("../models/ShiftPlan");
 const JobOrder    = require("../models/JobOrder");
+const Attendance  = require("../models/Attendence.js");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
@@ -941,6 +942,157 @@ router.post('/confirm-shift-plan', isAdmin('admin'), async (req, res) => {
 
   } catch (err) {
     console.error('[POST /confirm-shift-plan]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+//  GET /production-anomalies?dropPct=30&minShifts=5
+//  Per-machine production drop vs the trailing 30-day average.
+//  A machine is "dropping" when:
+//    - it has at least `minShifts` closed shifts in the last 30 days
+//    - today's productionMeters < (1 - dropPct/100) × the avg
+//  Powers the AIAdvisor "production drop" card.
+// ══════════════════════════════════════════════════════════════
+router.get("/production-anomalies", isAdmin('admin'), async (req, res) => {
+  try {
+    const dropPct   = Math.max(1, parseFloat(req.query.dropPct)   || 30);
+    const minShifts = Math.max(1, parseInt(req.query.minShifts, 10) || 5);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today.getTime() + 86_400_000);
+    const monthAgo = new Date(today.getTime() - 30 * 86_400_000);
+
+    const shifts = await ShiftDetail.find({
+      status: "closed",
+      date:   { $gte: monthAgo, $lt: tomorrow },
+    })
+      .select("machine date productionMeters")
+      .lean();
+
+    // Bucket per machine into { today: meters, trailing: [meters...] }
+    const buckets = new Map();
+    for (const s of shifts) {
+      if (!s.machine) continue;
+      const key = String(s.machine);
+      if (!buckets.has(key)) buckets.set(key, { today: 0, trailing: [] });
+      const b = buckets.get(key);
+      if (new Date(s.date) >= today) {
+        b.today += s.productionMeters || 0;
+      } else {
+        b.trailing.push(s.productionMeters || 0);
+      }
+    }
+
+    const anomalyIds = [];
+    const meta       = new Map();
+    for (const [mid, { today: t, trailing }] of buckets) {
+      if (trailing.length < minShifts) continue;
+      const avg = trailing.reduce((a, b) => a + b, 0) / trailing.length;
+      if (avg <= 0) continue;
+      const drop = ((avg - t) / avg) * 100;
+      if (drop > dropPct) {
+        anomalyIds.push(mid);
+        meta.set(mid, {
+          today:       Math.round(t),
+          avg:         parseFloat(avg.toFixed(1)),
+          dropPct:     parseFloat(drop.toFixed(1)),
+          sampleSize:  trailing.length,
+        });
+      }
+    }
+
+    if (anomalyIds.length === 0) {
+      return res.json({ success: true, machines: [], count: 0 });
+    }
+
+    const machines = await Machine.find({
+      _id: { $in: anomalyIds.map((id) => new mongoose.Types.ObjectId(id)) },
+    }).select("ID manufacturer").lean();
+
+    const out = machines
+      .map((m) => ({
+        machineId:   m._id,
+        machineCode: m.ID,
+        manufacturer: m.manufacturer,
+        ...meta.get(String(m._id)),
+      }))
+      .sort((a, b) => b.dropPct - a.dropPct);
+
+    return res.json({ success: true, machines: out, count: out.length });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+//  GET /attendance-mismatch?days=7
+//  Closed shifts in the last `days` whose operator has no
+//  attendance row for the shift's date. The exact (employee,
+//  date, shift) tuple isn't required because attendance is
+//  recorded per day not per shift type — a missing day for an
+//  operator who worked is what we want to surface.
+//
+//  Powers the AIAdvisor "shift ↔ attendance mismatch" card.
+// ══════════════════════════════════════════════════════════════
+router.get("/attendance-mismatch", isAdmin('admin'), async (req, res) => {
+  try {
+    const days = Math.max(1, parseInt(req.query.days, 10) || 7);
+    const since = new Date(Date.now() - days * 86_400_000);
+    since.setHours(0, 0, 0, 0);
+
+    const shifts = await ShiftDetail.find({
+      status: "closed",
+      date:   { $gte: since },
+    })
+      .select("employee date shift")
+      .populate("employee", "name")
+      .lean();
+
+    if (shifts.length === 0) {
+      return res.json({ success: true, windowDays: days, mismatches: [], count: 0 });
+    }
+
+    const dayKey = (d) => new Date(d).toISOString().slice(0, 10);
+
+    // Build the (employee, day) set we need to check, then a single
+    // attendance find covers all of them at once.
+    const empIds  = [...new Set(shifts.map((s) => String(s.employee?._id ?? s.employee)))];
+    const dates   = [...new Set(shifts.map((s) => dayKey(s.date)))];
+    const minDate = new Date(Math.min(...dates.map((d) => new Date(d).getTime())));
+    const maxDate = new Date(Math.max(...dates.map((d) => new Date(d).getTime())));
+    maxDate.setHours(23, 59, 59, 999);
+
+    const att = await Attendance.find({
+      employee: { $in: empIds },
+      date:     { $gte: minDate, $lte: maxDate },
+    }).select("employee date").lean();
+
+    const marked = new Set(
+      att.map((a) => `${String(a.employee)}|${dayKey(a.date)}`)
+    );
+
+    const mismatches = shifts
+      .filter((s) => {
+        const empId = String(s.employee?._id ?? s.employee);
+        return !marked.has(`${empId}|${dayKey(s.date)}`);
+      })
+      .map((s) => ({
+        shiftId:      s._id,
+        date:         s.date,
+        shiftType:    s.shift,
+        employeeId:   s.employee?._id ?? s.employee,
+        employeeName: s.employee?.name ?? "—",
+      }));
+
+    return res.json({
+      success:   true,
+      windowDays: days,
+      mismatches,
+      count:     mismatches.length,
+    });
+  } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
