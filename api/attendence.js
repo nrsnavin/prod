@@ -456,4 +456,80 @@ router.get('/recurring-latecomers', isAdmin('admin'), async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// GET /repeatedly-unmarked
+// Employees missing attendance on > `threshold` working days in
+// the last `days` window. "Working day" = any date in the window
+// where the system has at least one attendance record (this
+// approximates the actual operating calendar without us having
+// to encode a separate holiday model).
+// Defaults match the audit recommendation: > 2 missed in 7 days.
+// ─────────────────────────────────────────────────────────────
+router.get('/repeatedly-unmarked', isAdmin('admin'), async (req, res) => {
+  try {
+    const days      = Math.max(1, parseInt(req.query.days, 10)      || 7);
+    const threshold = Math.max(1, parseInt(req.query.threshold, 10) || 2);
+
+    const since = new Date(Date.now() - days * 86_400_000);
+    since.setHours(0, 0, 0, 0);
+
+    // 1. Pull every attendance row in the window, only the fields we
+    // need. One round-trip; the dataset for a single week is tiny.
+    const Employee = require('../models/Employee');
+    const rows = await Attendance.find({ date: { $gte: since } })
+      .select('employee date')
+      .lean();
+
+    // 2. Working-day set: distinct dates that had any attendance row.
+    const dayKey = (d) => new Date(d).toISOString().slice(0, 10);
+    const workingDays = new Set(rows.map((r) => dayKey(r.date)));
+    if (workingDays.size === 0) {
+      return res.json({
+        success: true, windowDays: days, threshold,
+        employees: [], count: 0,
+      });
+    }
+
+    // 3. Per-employee marked-day set.
+    const markedByEmp = new Map();
+    for (const r of rows) {
+      const id = String(r.employee);
+      if (!markedByEmp.has(id)) markedByEmp.set(id, new Set());
+      markedByEmp.get(id).add(dayKey(r.date));
+    }
+
+    // 4. Compute unmarked = workingDays - markedDays per active employee.
+    const employees = await Employee.find({})
+      .select('name department')
+      .lean();
+
+    const out = [];
+    for (const e of employees) {
+      const marked = markedByEmp.get(String(e._id)) || new Set();
+      let unmarked = 0;
+      for (const d of workingDays) if (!marked.has(d)) unmarked++;
+      if (unmarked > threshold) {
+        out.push({
+          employeeId:   e._id,
+          name:         e.name,
+          department:   e.department,
+          unmarkedDays: unmarked,
+          workingDays:  workingDays.size,
+        });
+      }
+    }
+    out.sort((a, b) => b.unmarkedDays - a.unmarkedDays);
+
+    return res.json({
+      success: true,
+      windowDays: days,
+      threshold,
+      employees: out,
+      count:     out.length,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
