@@ -217,4 +217,92 @@ router.patch(
   })
 );
 
+// ═════════════════════════════════════════════════════════════
+//  GET /performance-delta
+//  Employees whose current-month avg shift efficiency dropped
+//  more than `dropPct`% vs the previous month. Only includes
+//  operators with meaningful samples in both windows so we don't
+//  flag noise from the first shift of a new joiner.
+//
+//  Efficiency is computed exactly the same way as the employee
+//  detail screen above:
+//      eff = min(100, runtimeMinutes / 720 * 100)
+//  where 720 = a 12-hour DAY shift in minutes.
+// ═════════════════════════════════════════════════════════════
+router.get(
+  "/performance-delta",
+  catchAsyncErrors(async (req, res) => {
+    const dropPct      = Math.max(1, parseFloat(req.query.dropPct) || 15);
+    const minShifts    = 3;     // per window — drops 1-shift outliers
+    const minPrevAvg   = 40;    // ignore operators who were already low
+
+    const now      = new Date();
+    const curStart = new Date(now.getFullYear(), now.getMonth(),     1);
+    const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+
+    // Pull every closed shift in the two-month window in one query,
+    // then bucket per (employee, month) in memory. Cheaper than two
+    // round-trips and lets us reuse the same clockToMinutes helper.
+    const shifts = await ShiftDetail.find({
+      status: "closed",
+      date:   { $gte: prevStart },
+    })
+      .select("employee date timer")
+      .lean();
+
+    const buckets = new Map();   // employeeId → { cur: [eff...], prev: [eff...] }
+    for (const s of shifts) {
+      if (!s.employee) continue;
+      const runtime    = clockToMinutes(s.timer);
+      const efficiency = runtime > 0 ? Math.min(100, (runtime / 720) * 100) : 0;
+      const bucket     = new Date(s.date) >= curStart ? "cur" : "prev";
+      const key        = String(s.employee);
+      if (!buckets.has(key)) buckets.set(key, { cur: [], prev: [] });
+      buckets.get(key)[bucket].push(efficiency);
+    }
+
+    const candidateIds = [];
+    const deltas       = new Map();   // employeeId → { cur, prev, dropPct }
+    for (const [empId, { cur, prev }] of buckets) {
+      if (cur.length < minShifts || prev.length < minShifts) continue;
+      const curAvg  = cur.reduce((a, b) => a + b, 0)  / cur.length;
+      const prevAvg = prev.reduce((a, b) => a + b, 0) / prev.length;
+      if (prevAvg < minPrevAvg) continue;
+      const drop = ((prevAvg - curAvg) / prevAvg) * 100;
+      if (drop > dropPct) {
+        candidateIds.push(empId);
+        deltas.set(empId, {
+          currentAvg:  parseFloat(curAvg.toFixed(2)),
+          previousAvg: parseFloat(prevAvg.toFixed(2)),
+          dropPct:     parseFloat(drop.toFixed(2)),
+        });
+      }
+    }
+
+    if (candidateIds.length === 0) {
+      return res.json({ success: true, employees: [], count: 0 });
+    }
+
+    const employees = await Employee.find({
+      _id: { $in: candidateIds.map((id) => new mongoose.Types.ObjectId(id)) },
+    })
+      .select("name department")
+      .lean();
+
+    const out = employees
+      .map((e) => {
+        const d = deltas.get(String(e._id));
+        return {
+          employeeId:  e._id,
+          name:        e.name,
+          department:  e.department,
+          ...d,
+        };
+      })
+      .sort((a, b) => b.dropPct - a.dropPct);
+
+    return res.json({ success: true, employees: out, count: out.length });
+  })
+);
+
 module.exports = router;
