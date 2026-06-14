@@ -968,4 +968,60 @@ router.get(
 );
 
 
+// ══════════════════════════════════════════════════════════════
+//  GET /delivery-risk?horizonDays=7
+//  Orders whose supplyDate lands inside the horizon and still
+//  have outstanding production (pendingElastic total > 0). Powers
+//  the AIAdvisor "delivery risk" card on the admin dashboard.
+//
+//  Status filter excludes Completed, Cancelled, Deleted — those
+//  are not going to ship anyway.
+// ══════════════════════════════════════════════════════════════
+router.get('/delivery-risk', async (req, res) => {
+  try {
+    const horizon = Math.max(1, parseInt(req.query.horizonDays, 10) || 7);
+    const now     = new Date();
+    const cutoff  = new Date(now.getTime() + horizon * 86_400_000);
+
+    const orders = await Order.find({
+      status:     { $in: ['Open', 'Approved', 'InProgress'] },
+      supplyDate: { $lte: cutoff },
+    })
+      .select('orderNo customer status supplyDate pendingElastic')
+      .populate('customer', 'name')
+      .lean();
+
+    const at_risk = [];
+    for (const o of orders) {
+      const pendingUnits = (o.pendingElastic || []).reduce(
+        (sum, p) => sum + (Number(p.quantity) || 0),
+        0
+      );
+      if (pendingUnits <= 0) continue;
+      const daysToSupply = Math.ceil(
+        (new Date(o.supplyDate).getTime() - now.getTime()) / 86_400_000
+      );
+      at_risk.push({
+        orderId:      o._id,
+        orderNo:      o.orderNo,
+        customerName: o.customer?.name ?? '—',
+        status:       o.status,
+        supplyDate:   o.supplyDate,
+        daysToSupply,
+        pendingUnits,
+      });
+    }
+    at_risk.sort((a, b) => a.daysToSupply - b.daysToSupply);
+
+    return res.json({
+      success: true,
+      horizonDays: horizon,
+      orders:  at_risk,
+      count:   at_risk.length,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;

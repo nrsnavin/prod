@@ -976,4 +976,99 @@ router.get('/stale', async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  GET /wastage-outliers?lookbackDays=30&sigmaThreshold=2
+//  Machines whose recent (last 7 days) wastage total is more than
+//  `sigmaThreshold` standard deviations above their own trailing
+//  baseline. Joins Wastage → JobOrder.machine so the per-machine
+//  signal works even though Wastage rows carry only `job`.
+//
+//  Guard: a machine needs at least 5 wastage events in the
+//  baseline window before we'll trip an alert. New machines or
+//  ones with sparse data don't fire on their first dirty shift.
+// ══════════════════════════════════════════════════════════════
+router.get('/wastage-outliers', async (req, res) => {
+  try {
+    const lookback   = Math.max(7, parseInt(req.query.lookbackDays,   10) || 30);
+    const threshold  = Math.max(1, parseFloat(req.query.sigmaThreshold) || 2);
+    const recentDays = 7;
+    const minSamples = 5;
+
+    const now        = Date.now();
+    const lookbackAt = new Date(now - lookback   * 86_400_000);
+    const recentAt   = new Date(now - recentDays * 86_400_000);
+
+    const rows = await Wastage.aggregate([
+      { $match: { createdAt: { $gte: lookbackAt } } },
+      { $lookup: {
+          from:         'joborders',
+          localField:   'job',
+          foreignField: '_id',
+          as:           'jo',
+        } },
+      { $unwind: '$jo' },
+      { $match: { 'jo.machine': { $ne: null } } },
+      { $project: {
+          machine:   '$jo.machine',
+          quantity:  1,
+          createdAt: 1,
+        } },
+    ]);
+
+    // Bucket per machine: trailing baseline samples + recent window total.
+    const buckets = new Map();
+    for (const r of rows) {
+      const key = String(r.machine);
+      if (!buckets.has(key)) buckets.set(key, { samples: [], recent: 0 });
+      const b = buckets.get(key);
+      b.samples.push(r.quantity);
+      if (r.createdAt >= recentAt) b.recent += r.quantity;
+    }
+
+    const candidateIds = [];
+    const meta         = new Map();
+    for (const [mid, { samples, recent }] of buckets) {
+      if (samples.length < minSamples) continue;
+      const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+      const variance = samples.reduce(
+        (acc, x) => acc + (x - mean) ** 2,
+        0
+      ) / samples.length;
+      const stddev = Math.sqrt(variance);
+      if (stddev <= 0) continue;
+      const ceiling = mean + threshold * stddev;
+      if (recent > ceiling) {
+        candidateIds.push(mid);
+        meta.set(mid, {
+          recentTotal: Math.round(recent * 100) / 100,
+          mean:        Math.round(mean * 100)   / 100,
+          stddev:      Math.round(stddev * 100) / 100,
+        });
+      }
+    }
+
+    if (candidateIds.length === 0) {
+      return res.json({ success: true, machines: [], count: 0 });
+    }
+
+    const Machine = require('../models/Machine');
+    const machines = await Machine.find({
+      _id: { $in: candidateIds.map((id) => new mongoose.Types.ObjectId(id)) },
+    }).select('ID manufacturer').lean();
+
+    const out = machines
+      .map((m) => ({
+        machineId:    m._id,
+        machineCode:  m.ID,
+        manufacturer: m.manufacturer,
+        ...meta.get(String(m._id)),
+      }))
+      .sort((a, b) => b.recentTotal - a.recentTotal);
+
+    return res.json({ success: true, machines: out, count: out.length });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
