@@ -409,4 +409,51 @@ router.get('/monthly/:empId', selfOrAdmin, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// GET /recurring-latecomers
+// Employees with > `threshold` `late` attendance marks in the
+// last `days` window. Powers the AIAdvisor latecomer card.
+// Defaults match the gap-audit recommendation: > 3 in 30 days.
+// ─────────────────────────────────────────────────────────────
+router.get('/recurring-latecomers', isAdmin('admin'), async (req, res) => {
+  try {
+    const days      = Math.max(1, parseInt(req.query.days, 10)      || 30);
+    const threshold = Math.max(1, parseInt(req.query.threshold, 10) || 3);
+
+    const since = new Date(Date.now() - days * 86_400_000);
+    since.setHours(0, 0, 0, 0);
+
+    const rows = await Attendance.aggregate([
+      { $match: { status: 'late', date: { $gte: since } } },
+      { $group: { _id: '$employee', lateCount: { $sum: 1 } } },
+      { $match: { lateCount: { $gt: threshold } } },
+      { $lookup: {
+          from:         'employees',
+          localField:   '_id',
+          foreignField: '_id',
+          as:           'emp',
+        } },
+      { $unwind: '$emp' },
+      { $project: {
+          _id:        0,
+          employeeId: '$_id',
+          name:       '$emp.name',
+          department: '$emp.department',
+          lateCount:  1,
+        } },
+      { $sort: { lateCount: -1 } },
+    ]);
+
+    return res.json({
+      success:   true,
+      windowDays: days,
+      threshold,
+      employees: rows,
+      count:     rows.length,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;

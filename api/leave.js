@@ -15,6 +15,7 @@ const express      = require('express');
 const router       = express.Router();
 const LeaveRequest = require('../models/LeaveRequest');
 const Attendance   = require('../models/Attendence.js');
+const ShiftDetail  = require('../models/ShiftDetail');
 const Employee     = require('../models/Employee');
 const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 
@@ -206,6 +207,60 @@ router.delete('/:id', isAuthenticated, async (req, res) => {
     return res.json({ success:true, message:'Leave request cancelled.' });
   } catch(err) {
     return res.status(500).json({ success:false, message:err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /conflicts
+// Approved leaves whose [startDate, endDate] overlaps a
+// non-closed shift for the same employee. Powers the AIAdvisor
+// "schedule conflict" card on the admin dashboard.
+// ─────────────────────────────────────────────────────────────
+router.get('/conflicts', isAuthenticated, isAdmin('admin'), async (_req, res) => {
+  try {
+    // We only care about leaves that haven't yet finished — historical
+    // overlaps are noise.
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const leaves = await LeaveRequest.find({
+      status:  'approved',
+      endDate: { $gte: today },
+    })
+      .populate('employee', 'name')
+      .lean();
+
+    const conflicts = [];
+    for (const lv of leaves) {
+      if (!lv.employee) continue;
+      const shift = await ShiftDetail.findOne({
+        employee: lv.employee._id,
+        date:     { $gte: lv.startDate, $lte: lv.endDate },
+        status:   { $in: ['open', 'running', 'pending_verification'] },
+      }).select('_id date shift status').lean();
+
+      if (shift) {
+        conflicts.push({
+          leaveId:      lv._id,
+          employeeId:   lv.employee._id,
+          employeeName: lv.employee.name,
+          leaveStart:   lv.startDate,
+          leaveEnd:     lv.endDate,
+          shiftId:      shift._id,
+          shiftDate:    shift.date,
+          shiftType:    shift.shift,
+          shiftStatus:  shift.status,
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      conflicts,
+      count: conflicts.length,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
