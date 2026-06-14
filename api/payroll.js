@@ -656,4 +656,155 @@ router.get('/attendance', isAdmin('admin'), async (req, res) => {
 });
 
 
+// ══════════════════════════════════════════════════════════════
+//  AUTO-GENERATE  (idempotent)
+//  POST /auto-generate?period=YYYY-MM
+//
+//  Designed for unattended calls — from a future cron, from the
+//  Flutter AIAdvisor on the 1st of the month, or from a manual
+//  retry. Safe to call repeatedly.
+//
+//  Decision tree:
+//    1. period defaults to LAST completed month (so calling on
+//       Jun 1 generates May's payroll, which is what the user
+//       actually wants).
+//    2. If every active operator already has a Payroll row for
+//       the period → reason: ALREADY_GENERATED, triggered: false.
+//    3. Else compute attendance completeness for the period:
+//         coveredDays / (employees × workingDays).
+//       If < 0.9 → reason: ATTENDANCE_INCOMPLETE.
+//    4. Else run the same per-employee computePayroll loop the
+//       existing /generate uses. Re-runs only employees who don't
+//       yet have a payroll row (so a partial prior run can finish
+//       cleanly on retry).
+// ══════════════════════════════════════════════════════════════
+router.post('/auto-generate', isAdmin('admin'), async (req, res) => {
+  try {
+    // Default to the last completed month so the typical "1st of
+    // the month" trigger does the right thing without the client
+    // having to subtract.
+    let year, month;
+    const period = (req.query.period || req.body?.period || '').trim();
+    if (period) {
+      const m = period.match(/^(\d{4})-(\d{2})$/);
+      if (!m) return res.status(400).json({
+        success: false, message: 'period must be YYYY-MM',
+      });
+      year = +m[1]; month = +m[2];
+    } else {
+      const now  = new Date();
+      const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      year  = prev.getFullYear();
+      month = prev.getMonth() + 1;
+    }
+
+    const empIds = (await Employee
+      .find({ hourlyRate: { $gt: 0 } }, '_id')
+      .lean()).map((e) => e._id.toString());
+
+    if (empIds.length === 0) {
+      return res.json({
+        success: false,
+        triggered: false,
+        reason: 'NO_ACTIVE_EMPLOYEES',
+        period: `${year}-${String(month).padStart(2, '0')}`,
+      });
+    }
+
+    // Already-generated check: count existing payroll rows in scope.
+    const existing = await Payroll.find(
+      { year, month, employee: { $in: empIds } },
+      '_id employee'
+    ).lean();
+
+    if (existing.length >= empIds.length) {
+      return res.json({
+        success: true,
+        triggered: false,
+        reason: 'ALREADY_GENERATED',
+        period: `${year}-${String(month).padStart(2, '0')}`,
+        existingCount: existing.length,
+      });
+    }
+
+    // Completeness gate. Working days = distinct dates in the period
+    // that have at least one attendance record (same heuristic as
+    // /repeatedly-unmarked, keeps us off a hardcoded holiday model).
+    const periodStart = new Date(year, month - 1, 1);
+    const periodEnd   = new Date(year, month, 1);
+    const att = await Attendance.find({
+      date: { $gte: periodStart, $lt: periodEnd },
+      employee: { $in: empIds },
+    }).select('employee date').lean();
+
+    const dayKey      = (d) => new Date(d).toISOString().slice(0, 10);
+    const workingDays = new Set(att.map((r) => dayKey(r.date)));
+    const denom       = empIds.length * workingDays.size;
+    const completenessPct = denom > 0
+      ? Math.round((att.length / denom) * 100)
+      : 0;
+
+    if (workingDays.size === 0 || completenessPct < 90) {
+      return res.json({
+        success: true,
+        triggered: false,
+        reason: 'ATTENDANCE_INCOMPLETE',
+        period: `${year}-${String(month).padStart(2, '0')}`,
+        completenessPct,
+      });
+    }
+
+    // Run only employees that don't yet have a row — supports
+    // resuming a partial prior run.
+    const haveRow = new Set(existing.map((p) => String(p.employee)));
+    const todo    = empIds.filter((id) => !haveRow.has(id));
+
+    const results = [], errors = [];
+    for (const id of todo) {
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(async () => {
+          const data   = await computePayroll(id, year, month);
+          const advIds = data._advanceIds || [];
+          delete data._advanceIds;
+
+          await Payroll.findOneAndUpdate(
+            { employee: id, year, month },
+            { $set: data },
+            { upsert: true, new: true, session }
+          );
+
+          if (advIds.length) {
+            await AdvanceRequest.updateMany(
+              { _id: { $in: advIds }, deductedInPayroll: { $ne: true } },
+              { $set: { deductedInPayroll: true } },
+              { session }
+            );
+          }
+
+          results.push({ employeeId: id, netPay: data.netPay });
+        });
+      } catch (err) {
+        errors.push({ employeeId: id, error: err.message });
+      } finally {
+        await session.endSession();
+      }
+    }
+
+    return res.json({
+      success: true,
+      triggered: true,
+      period: `${year}-${String(month).padStart(2, '0')}`,
+      completenessPct,
+      result: {
+        generated:       results.length,
+        skippedExisting: existing.length,
+        errors:          errors.length ? errors : undefined,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
 module.exports = router;
