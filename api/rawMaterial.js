@@ -425,6 +425,63 @@ router.get(
 );
 
 // ══════════════════════════════════════════════════════════════
+//  10b. LOW STOCK  (auto-draft PO source)
+//       GET /materials/low-stock
+//
+//  Returns materials at or below their min-stock threshold, each
+//  decorated with a `suggestedQty` so the Flutter draft-PO sheet
+//  can render a ready-to-submit form without further math.
+//
+//  Quantity heuristic: max(minStock * 2 - stock, minStock).
+//  This refills back to ~2x the floor while always ordering at
+//  least one full reorder cycle. Pure UI suggestion — the user
+//  edits the value in the PO sheet before submitting.
+//
+//  Materials with no supplier are excluded from `materials` and
+//  surfaced as `skippedNoSupplier` so the page can show a footer
+//  count instead of silently swallowing them.
+// ══════════════════════════════════════════════════════════════
+router.get(
+  "/low-stock",
+  catchAsyncErrors(async (_req, res) => {
+    const docs = await RawMaterial.find({
+      $expr: { $lte: ["$stock", "$minStock"] },
+      minStock: { $gt: 0 },
+    })
+      .populate("supplier", "name")
+      .select("name stock minStock price supplier")
+      .sort({ stock: 1 })
+      .lean();
+
+    const materials = [];
+    let skippedNoSupplier = 0;
+
+    for (const m of docs) {
+      if (!m.supplier || !m.supplier._id) {
+        skippedNoSupplier += 1;
+        continue;
+      }
+      const suggestedQty = Math.max(m.minStock * 2 - m.stock, m.minStock);
+      materials.push({
+        _id:          m._id,
+        name:         m.name,
+        stock:        m.stock,
+        minStock:     m.minStock,
+        price:        m.price || 0,
+        suggestedQty,
+        supplier:     { _id: m.supplier._id, name: m.supplier.name },
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      materials,
+      skippedNoSupplier,
+    });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
 //  11. MATERIAL FOR NEW ELASTIC  (legacy)
 // ══════════════════════════════════════════════════════════════
 router.get(
