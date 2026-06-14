@@ -807,4 +807,64 @@ router.post('/auto-generate', isAdmin('admin'), async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  GET /outstanding-advances
+//  Approved advances whose deduct month/year has already passed
+//  but `deductedInPayroll` is still false — payroll either didn't
+//  run for that period or skipped them. Powers the AIAdvisor
+//  card pointing back at the payroll module so the admin can
+//  re-run / investigate.
+// ══════════════════════════════════════════════════════════════
+router.get('/outstanding-advances', isAdmin('admin'), async (_req, res) => {
+  try {
+    const now = new Date();
+    const curYear  = now.getFullYear();
+    const curMonth = now.getMonth() + 1;
+
+    const advances = await AdvanceRequest.find({
+      status: 'approved',
+      deductedInPayroll: false,
+      // deductYear/deductMonth strictly earlier than current period.
+      // Note: an advance approved for current month is not "overdue"
+      // until next month — current-period skips might be a payroll
+      // not yet run, not a missed deduction.
+      $or: [
+        { deductYear: { $lt: curYear } },
+        { deductYear: curYear, deductMonth: { $lt: curMonth } },
+      ],
+    })
+      .populate('employee', 'name department')
+      .sort({ deductYear: 1, deductMonth: 1 })
+      .lean();
+
+    const out = advances
+      .filter((a) => a.deductYear && a.deductMonth)
+      .map((a) => {
+        const monthsOverdue =
+          (curYear - a.deductYear) * 12 + (curMonth - a.deductMonth);
+        return {
+          advanceId:    a._id,
+          employeeId:   a.employee?._id ?? a.employee,
+          name:         a.employee?.name ?? '—',
+          department:   a.employee?.department ?? '',
+          amount:       a.amount,
+          deductMonth:  a.deductMonth,
+          deductYear:   a.deductYear,
+          monthsOverdue,
+        };
+      });
+
+    const totalAmount = out.reduce((s, a) => s + (a.amount || 0), 0);
+
+    return res.json({
+      success:     true,
+      advances:    out,
+      count:       out.length,
+      totalAmount,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
