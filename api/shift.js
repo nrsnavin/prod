@@ -579,7 +579,37 @@ router.post(
           req,
         });
 
-        resp = { shift, fingerprint };
+        // Auto-mark attendance for this operator on this date if
+        // there isn't already a row. Manual marks win — we only
+        // fill the gap. Skipped when production is zero (treat that
+        // as "verify-but-no-work-done", admin should mark manually).
+        let attendanceAutoMarked = false;
+        if (prodValue > 0 && shift.employee) {
+          const dayStart = new Date(shift.date);
+          dayStart.setHours(0, 0, 0, 0);
+          const dayEnd = new Date(dayStart.getTime() + 86_400_000);
+          const existing = await Attendance.findOne({
+            employee: shift.employee,
+            date:     { $gte: dayStart, $lt: dayEnd },
+            shift:    shift.shift,
+          }).session(session);
+
+          if (!existing) {
+            // new + save (not insertOne) so the pre('save') hook
+            // computes shiftHours / hoursWorked correctly.
+            const att = new Attendance({
+              employee: shift.employee,
+              date:     dayStart,
+              shift:    shift.shift,
+              status:   'present',
+              markedBy: 'auto_shift_verify',
+            });
+            await att.save({ session });
+            attendanceAutoMarked = true;
+          }
+        }
+
+        resp = { shift, fingerprint, attendanceAutoMarked };
       });
       res.json({ success: true, ...resp });
     } catch (err) {
