@@ -578,4 +578,100 @@ router.post(
   })
 );
 
+// ══════════════════════════════════════════════════════════════
+//  PROJECTED STOCKOUT  (predictive low-stock)
+//  GET /materials/projected-stockout?lookbackDays=30&horizonDays=7
+//
+//  For each material that is NOT already below its min-stock
+//  floor (those are handled by /low-stock), project a stockout
+//  date using its trailing daily consumption rate:
+//
+//      dailyRate     = Σ outward(quantity, last lookbackDays)
+//                      / lookbackDays
+//      daysToStockout = stock / dailyRate
+//
+//  Materials whose `daysToStockout < horizonDays` are returned
+//  with a `suggestedQty` sized so the next reorder lands above
+//  the floor after one trailing horizon's worth of consumption:
+//
+//      suggestedQty = max(minStock * 2 - stock + dailyRate * horizonDays,
+//                         minStock)
+//
+//  Materials with reversed outward rows are excluded from the
+//  consumption sum (the original write was rolled back).
+// ══════════════════════════════════════════════════════════════
+router.get(
+  "/projected-stockout",
+  catchAsyncErrors(async (req, res) => {
+    const lookback  = Math.max(1, parseInt(req.query.lookbackDays, 10) || 30);
+    const horizon   = Math.max(1, parseInt(req.query.horizonDays,  10) || 7);
+
+    const since = new Date(Date.now() - lookback * 86_400_000);
+
+    // Materials still in safe territory — strict > so we don't
+    // double-count what /low-stock already surfaces.
+    const mats = await RawMaterial.find({
+      $expr: { $gt: ["$stock", "$minStock"] },
+      stock:    { $gt: 0 },
+      minStock: { $gt: 0 },
+    })
+      .populate("supplier", "name")
+      .select("name stock minStock price supplier")
+      .lean();
+
+    if (mats.length === 0) {
+      return res.json({ success: true, materials: [], count: 0 });
+    }
+
+    // One aggregation over MaterialOutward, bucketed per material.
+    const totals = await MaterialOutward.aggregate([
+      { $match: {
+          rawMaterial: { $in: mats.map((m) => m._id) },
+          outwardDate: { $gte: since },
+          reversed:    { $ne: true },
+        } },
+      { $group: { _id: '$rawMaterial', total: { $sum: '$quantity' } } },
+    ]);
+    const consumedById = new Map(
+      totals.map((t) => [String(t._id), t.total])
+    );
+
+    const out = [];
+    for (const m of mats) {
+      const consumed  = consumedById.get(String(m._id)) || 0;
+      if (consumed <= 0) continue;
+      const dailyRate = consumed / lookback;
+      const daysToStockout = m.stock / dailyRate;
+      if (daysToStockout >= horizon) continue;
+      if (!m.supplier || !m.supplier._id) continue;
+
+      const suggestedQty = Math.max(
+        m.minStock * 2 - m.stock + dailyRate * horizon,
+        m.minStock
+      );
+
+      out.push({
+        _id:           m._id,
+        name:          m.name,
+        stock:         m.stock,
+        minStock:      m.minStock,
+        price:         m.price || 0,
+        dailyRate:     parseFloat(dailyRate.toFixed(2)),
+        daysToStockout: parseFloat(daysToStockout.toFixed(1)),
+        suggestedQty:  parseFloat(suggestedQty.toFixed(2)),
+        supplier:      { _id: m.supplier._id, name: m.supplier.name },
+      });
+    }
+    out.sort((a, b) => a.daysToStockout - b.daysToStockout);
+
+    res.json({
+      success: true,
+      lookbackDays: lookback,
+      horizonDays:  horizon,
+      materials:    out,
+      count:        out.length,
+    });
+  })
+);
+
 module.exports = router;
