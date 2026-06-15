@@ -913,4 +913,162 @@ router.get('/', async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════
+//  GET /stale?days=14
+//  Jobs that have been sitting in the same status for more than
+//  `days` days. Powers the AIAdvisor "stale jobs" card.
+//
+//  Each non-terminal stage records its entry timestamp on the
+//  job document (weavingAt, finishingAt, checkingAt, packingAt).
+//  The "entered current status at" is whichever timestamp the
+//  status maps to; preparatory falls back to createdAt because no
+//  preparatoryAt field exists.
+// ══════════════════════════════════════════════════════════════
+router.get('/stale', async (req, res) => {
+  try {
+    const days = Math.max(1, parseInt(req.query.days, 10) || 14);
+    const cutoff = new Date(Date.now() - days * 86_400_000);
+
+    const jobs = await JobOrder.find({
+      status: { $nin: ['completed', 'cancelled'] },
+    })
+      .select('jobOrderNo status createdAt weavingAt finishingAt checkingAt packingAt customer')
+      .populate('customer', 'name')
+      .lean();
+
+    const enteredAt = (j) => {
+      switch (j.status) {
+        case 'weaving':   return j.weavingAt   ?? j.createdAt;
+        case 'finishing': return j.finishingAt ?? j.createdAt;
+        case 'checking':  return j.checkingAt  ?? j.createdAt;
+        case 'packing':   return j.packingAt   ?? j.createdAt;
+        default:          return j.createdAt;
+      }
+    };
+
+    const stale = jobs
+      .map((j) => {
+        const enteredOn = enteredAt(j);
+        const idleDays  = Math.floor(
+          (Date.now() - new Date(enteredOn).getTime()) / 86_400_000
+        );
+        return { job: j, enteredOn, idleDays };
+      })
+      .filter((x) => x.idleDays > days)
+      .sort((a, b) => b.idleDays - a.idleDays)
+      .map((x) => ({
+        jobId:        x.job._id,
+        jobOrderNo:   x.job.jobOrderNo,
+        status:       x.job.status,
+        customerName: x.job.customer?.name ?? '—',
+        enteredOn:    x.enteredOn,
+        idleDays:     x.idleDays,
+      }));
+
+    return res.json({
+      success:   true,
+      windowDays: days,
+      jobs:      stale,
+      count:     stale.length,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+//  GET /wastage-outliers?lookbackDays=30&sigmaThreshold=2
+//  Machines whose recent (last 7 days) wastage total is more than
+//  `sigmaThreshold` standard deviations above their own trailing
+//  baseline. Joins Wastage → JobOrder.machine so the per-machine
+//  signal works even though Wastage rows carry only `job`.
+//
+//  Guard: a machine needs at least 5 wastage events in the
+//  baseline window before we'll trip an alert. New machines or
+//  ones with sparse data don't fire on their first dirty shift.
+// ══════════════════════════════════════════════════════════════
+router.get('/wastage-outliers', async (req, res) => {
+  try {
+    const lookback   = Math.max(7, parseInt(req.query.lookbackDays,   10) || 30);
+    const threshold  = Math.max(1, parseFloat(req.query.sigmaThreshold) || 2);
+    const recentDays = 7;
+    const minSamples = 5;
+
+    const now        = Date.now();
+    const lookbackAt = new Date(now - lookback   * 86_400_000);
+    const recentAt   = new Date(now - recentDays * 86_400_000);
+
+    const rows = await Wastage.aggregate([
+      { $match: { createdAt: { $gte: lookbackAt } } },
+      { $lookup: {
+          from:         'joborders',
+          localField:   'job',
+          foreignField: '_id',
+          as:           'jo',
+        } },
+      { $unwind: '$jo' },
+      { $match: { 'jo.machine': { $ne: null } } },
+      { $project: {
+          machine:   '$jo.machine',
+          quantity:  1,
+          createdAt: 1,
+        } },
+    ]);
+
+    // Bucket per machine: trailing baseline samples + recent window total.
+    const buckets = new Map();
+    for (const r of rows) {
+      const key = String(r.machine);
+      if (!buckets.has(key)) buckets.set(key, { samples: [], recent: 0 });
+      const b = buckets.get(key);
+      b.samples.push(r.quantity);
+      if (r.createdAt >= recentAt) b.recent += r.quantity;
+    }
+
+    const candidateIds = [];
+    const meta         = new Map();
+    for (const [mid, { samples, recent }] of buckets) {
+      if (samples.length < minSamples) continue;
+      const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
+      const variance = samples.reduce(
+        (acc, x) => acc + (x - mean) ** 2,
+        0
+      ) / samples.length;
+      const stddev = Math.sqrt(variance);
+      if (stddev <= 0) continue;
+      const ceiling = mean + threshold * stddev;
+      if (recent > ceiling) {
+        candidateIds.push(mid);
+        meta.set(mid, {
+          recentTotal: Math.round(recent * 100) / 100,
+          mean:        Math.round(mean * 100)   / 100,
+          stddev:      Math.round(stddev * 100) / 100,
+        });
+      }
+    }
+
+    if (candidateIds.length === 0) {
+      return res.json({ success: true, machines: [], count: 0 });
+    }
+
+    const Machine = require('../models/Machine');
+    const machines = await Machine.find({
+      _id: { $in: candidateIds.map((id) => new mongoose.Types.ObjectId(id)) },
+    }).select('ID manufacturer').lean();
+
+    const out = machines
+      .map((m) => ({
+        machineId:    m._id,
+        machineCode:  m.ID,
+        manufacturer: m.manufacturer,
+        ...meta.get(String(m._id)),
+      }))
+      .sort((a, b) => b.recentTotal - a.recentTotal);
+
+    return res.json({ success: true, machines: out, count: out.length });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
