@@ -7,6 +7,13 @@
  *  cross-reference is by NAME, never by Mongo _id, so the file
  *  round-trips: export → edit in Excel → re-import.
  *
+ *  The exported / template workbook ships with Excel DROPDOWNS:
+ *    - RawMaterials.supplierName  → list of Suppliers names
+ *    - RawMaterials.category      → fixed list
+ *    - Elastics.*_material        → list of RawMaterials names
+ *    - ElasticWarpYarns.material  → list of RawMaterials names
+ *  so picking a linked material is a click, not a retype.
+ *
  *  Sheets (filled / read in dependency order):
  *    Suppliers          name is the key
  *    RawMaterials       references a supplier via `supplierName`
@@ -16,15 +23,9 @@
  *                       — one row per warp yarn, linked by `elasticName`
  *
  *  Usage (run from the repo root so config/.env loads):
- *    node scripts/excel-io.js template <out.xlsx>   # blank template
+ *    node scripts/excel-io.js template <out.xlsx>   # blank + dropdowns
  *    node scripts/excel-io.js export   <out.xlsx>   # dump live DB
  *    node scripts/excel-io.js import   <in.xlsx>    # load into DB
- *
- *  Import semantics: UPSERT by name on every sheet. Re-importing a
- *  row whose name already exists updates it in place. A *_material
- *  value must match a RawMaterials.name present in the file or
- *  already in the DB, otherwise that elastic row is reported and
- *  skipped (nothing partial is written for it).
  * ════════════════════════════════════════════════════════════════
  */
 'use strict';
@@ -33,7 +34,7 @@ const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../config/.env') });
 
 const mongoose = require('mongoose');
-const XLSX     = require('xlsx');
+const ExcelJS  = require('exceljs');
 
 const auditFields = require('../models/plugins/auditFields.js');
 mongoose.plugin(auditFields);
@@ -58,31 +59,112 @@ const COLUMNS = {
   ElasticWarpYarns: ['elasticName', 'material', 'ends', 'type', 'weight'],
 };
 
+// Dropdown wiring. `range` is a cross-sheet list source; `list` is a
+// literal CSV. Cross-sheet list validation is valid in Excel 2010+.
+// A generous 1000-row source range means new names added to the
+// source sheet show up in the dropdown without re-running the tool.
+const MATERIAL_SRC = 'RawMaterials!$A$2:$A$1000';
+const SUPPLIER_SRC = 'Suppliers!$A$2:$A$1000';
+const DROPDOWNS = {
+  RawMaterials: {
+    supplierName: { range: SUPPLIER_SRC },
+    category:     { list: 'warp,weft,covering,Rubber,other' },
+  },
+  Elastics: {
+    warpSpandex_material:     { range: MATERIAL_SRC },
+    spandexCovering_material: { range: MATERIAL_SRC },
+    weftYarn_material:        { range: MATERIAL_SRC },
+  },
+  ElasticWarpYarns: {
+    material: { range: MATERIAL_SRC },
+  },
+};
+
+const DROPDOWN_ROWS = 1000;   // how far down to apply the validation
+
 const num = (v) => {
   if (v === undefined || v === null || v === '') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
-const str = (v) => (v === undefined || v === null) ? undefined : String(v).trim();
+const str = (v) => {
+  if (v === undefined || v === null) return undefined;
+  // ExcelJS can hand back rich-text / formula objects — unwrap them.
+  if (typeof v === 'object') {
+    if (typeof v.text === 'string')   v = v.text;
+    else if ('result' in v)           v = v.result;
+    else if (Array.isArray(v.richText)) v = v.richText.map((t) => t.text).join('');
+  }
+  const s = String(v).trim();
+  return s === '' ? undefined : s;
+};
+
+// ── Workbook writer (shared by template + export) ──────────────
+function colLetter(n) {
+  let s = '';
+  while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = (n - m - 1) / 26; }
+  return s;
+}
+
+function buildSheet(wb, name, rows) {
+  const cols = COLUMNS[name];
+  const ws = wb.addWorksheet(name);
+  ws.columns = cols.map((c) => ({ header: c, key: c, width: Math.max(14, c.length + 3) }));
+
+  // Header band.
+  const head = ws.getRow(1);
+  head.eachCell((cell) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1D6FEB' } };
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  });
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+
+  if (rows && rows.length) ws.addRows(rows);
+
+  // Dropdowns for this sheet.
+  const dd = DROPDOWNS[name];
+  if (dd) {
+    for (const [header, cfg] of Object.entries(dd)) {
+      const letter = colLetter(cols.indexOf(header) + 1);
+      const formulae = cfg.range ? [cfg.range] : [`"${cfg.list}"`];
+      ws.dataValidations.add(`${letter}2:${letter}${DROPDOWN_ROWS}`, {
+        type: 'list',
+        allowBlank: true,
+        formulae,
+        showErrorMessage: false,   // soft — a typed value that isn't in
+                                   // the list still imports (we resolve
+                                   // by exact name and report misses).
+      });
+    }
+  }
+  return ws;
+}
 
 // ════════════════════════════════════════════════════════════════
-//  TEMPLATE  —  write a blank workbook with headers only
+//  TEMPLATE  —  blank workbook (headers + dropdowns), no DB
 // ════════════════════════════════════════════════════════════════
-function writeTemplate(outPath) {
-  const wb = XLSX.utils.book_new();
-  const instructions = [
-    ['Raw Material & Elastic import/export template'],
-    ['Fill sheets in order: Suppliers -> RawMaterials -> Elastics -> ElasticWarpYarns.'],
-    ['Everything links by NAME. *_material must match a RawMaterials.name.'],
-    ['An elastic can have many warp yarns: add one row per yarn in ElasticWarpYarns, keyed by elasticName.'],
-    ['Import: node scripts/excel-io.js import <file.xlsx>   Export: node scripts/excel-io.js export <file.xlsx>'],
-  ];
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(instructions), 'Instructions');
-  for (const [sheet, cols] of Object.entries(COLUMNS)) {
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([cols]), sheet);
-  }
-  XLSX.writeFile(wb, outPath);
-  console.log(`Blank template written -> ${outPath}`);
+async function writeTemplate(outPath) {
+  const wb = new ExcelJS.Workbook();
+  const info = wb.addWorksheet('Instructions');
+  info.getColumn(1).width = 110;
+  [
+    'Raw Material & Elastic import/export template',
+    '',
+    'Fill order: Suppliers -> RawMaterials -> Elastics -> ElasticWarpYarns.',
+    'Everything links by NAME. The *_material and supplierName columns are DROPDOWNS',
+    'sourced from the RawMaterials / Suppliers sheets — add your rows there first,',
+    'then pick from the dropdown on the Elastics / ElasticWarpYarns sheets.',
+    'An elastic can have many warp yarns: one row per yarn in ElasticWarpYarns (keyed by elasticName).',
+    '',
+    'Import: node scripts/excel-io.js import <file.xlsx>',
+    'Export: node scripts/excel-io.js export <file.xlsx>',
+  ].forEach((t, i) => { info.getCell(i + 1, 1).value = t; });
+  info.getCell(1, 1).font = { bold: true, size: 13 };
+
+  for (const name of Object.keys(COLUMNS)) buildSheet(wb, name, []);
+  await wb.xlsx.writeFile(outPath);
+  console.log(`Blank template (with dropdowns) written -> ${outPath}`);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -134,14 +216,12 @@ async function exportAll(outPath) {
     }
   }
 
-  const wb = XLSX.utils.book_new();
-  const sheet = (cols, rows) =>
-    XLSX.utils.json_to_sheet(rows, { header: cols });
-  XLSX.utils.book_append_sheet(wb, sheet(COLUMNS.Suppliers, supRows), 'Suppliers');
-  XLSX.utils.book_append_sheet(wb, sheet(COLUMNS.RawMaterials, matRows), 'RawMaterials');
-  XLSX.utils.book_append_sheet(wb, sheet(COLUMNS.Elastics, elRows), 'Elastics');
-  XLSX.utils.book_append_sheet(wb, sheet(COLUMNS.ElasticWarpYarns, warpRows), 'ElasticWarpYarns');
-  XLSX.writeFile(wb, outPath);
+  const wb = new ExcelJS.Workbook();
+  buildSheet(wb, 'Suppliers', supRows);
+  buildSheet(wb, 'RawMaterials', matRows);
+  buildSheet(wb, 'Elastics', elRows);
+  buildSheet(wb, 'ElasticWarpYarns', warpRows);
+  await wb.xlsx.writeFile(outPath);
 
   console.log(`Exported -> ${outPath}`);
   console.log(`  suppliers=${supRows.length} rawMaterials=${matRows.length} `
@@ -152,13 +232,30 @@ async function exportAll(outPath) {
 //  IMPORT  —  load the workbook into the DB (upsert by name)
 // ════════════════════════════════════════════════════════════════
 function readSheet(wb, name) {
-  const ws = wb.Sheets[name];
+  const ws = wb.getWorksheet(name);
   if (!ws) return [];
-  return XLSX.utils.sheet_to_json(ws, { defval: '' });
+  const headers = [];
+  ws.getRow(1).eachCell((cell, col) => { headers[col] = str(cell.value); });
+  const out = [];
+  ws.eachRow((row, rn) => {
+    if (rn === 1) return;
+    const obj = {};
+    let any = false;
+    row.eachCell({ includeEmpty: false }, (cell, col) => {
+      const h = headers[col];
+      if (!h) return;
+      obj[h] = cell.value;
+      const s = str(cell.value);
+      if (s !== undefined) any = true;
+    });
+    if (any) out.push(obj);
+  });
+  return out;
 }
 
 async function importAll(inPath) {
-  const wb = XLSX.readFile(inPath);
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(inPath);
   const report = { suppliers: 0, materials: 0, elastics: 0, skipped: [] };
 
   // ── 1. Suppliers ──────────────────────────────────────────
@@ -171,7 +268,7 @@ async function importAll(inPath) {
           name,
           phoneNumber:   str(row.phoneNumber),
           email:         str(row.email),
-          gstin:         str(row.gstin) || undefined,
+          gstin:         str(row.gstin),
           address:       str(row.address),
           contactPerson: str(row.contactPerson),
         } },
@@ -180,7 +277,6 @@ async function importAll(inPath) {
     report.suppliers++;
   }
 
-  // Build supplier name -> _id map (covers pre-existing + just-added).
   const supplierMap = new Map(
     (await Supplier.find({}, 'name').lean()).map((s) => [s.name, s._id]),
   );
@@ -210,7 +306,6 @@ async function importAll(inPath) {
     report.materials++;
   }
 
-  // Build raw-material name -> _id map.
   const materialMap = new Map(
     (await RawMaterial.find({}, 'name').lean()).map((m) => [m.name, m._id]),
   );
@@ -280,8 +375,6 @@ async function importAll(inPath) {
       continue;   // never write a partially-linked elastic
     }
 
-    // Costing reuses the exact server util — materials must exist
-    // (they do, we just resolved them).
     const { materialCost, details } = await calculateElasticCosting(doc);
     const conversionCost = 1.25;
     const totalCost = materialCost + conversionCost;
@@ -292,7 +385,6 @@ async function importAll(inPath) {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
 
-    // One Costing row per elastic, refreshed on each import.
     const costing = await Costing.findOneAndUpdate(
       { elastic: elastic._id },
       { $set: {
@@ -328,11 +420,7 @@ async function main() {
     process.exit(1);
   }
 
-  // `template` is offline — no DB needed.
-  if (cmd === 'template') {
-    writeTemplate(file);
-    return;
-  }
+  if (cmd === 'template') { await writeTemplate(file); return; }
 
   if (!process.env.MONGO_URL) {
     throw new Error('MONGO_URL not set. Run from the repo root so config/.env loads.');
