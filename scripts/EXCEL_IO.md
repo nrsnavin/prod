@@ -19,6 +19,28 @@ what makes the linking work without you ever seeing a database id.
 
 Fill them top to bottom — later sheets reference earlier ones.
 
+## Dropdowns
+
+The template and every export carry Excel **dropdowns** so linked
+fields are a click, not a retype:
+
+| Sheet.column | Dropdown source |
+|--------------|-----------------|
+| `RawMaterials.category` | fixed list: warp / weft / covering / Rubber / other |
+| `RawMaterials.supplierName` | the `Suppliers` sheet `name` column |
+| `Elastics.warpSpandex_material` / `spandexCovering_material` / `weftYarn_material` | the `RawMaterials` sheet `name` column |
+| `ElasticWarpYarns.material` | the `RawMaterials` sheet `name` column |
+
+Add a row on the source sheet (e.g. a new raw material) and it
+appears in the dropdowns automatically — the lists point at a
+1000-row range, not a fixed snapshot. The validation is *soft*: a
+typed value that isn't in the list still imports (we resolve by exact
+name and report anything that doesn't match), so the dropdowns help
+without getting in the way.
+
+> The **export** output is the **same** format with the same
+> dropdowns, so `export` → edit → `import` round-trips cleanly.
+
 ## Commands
 
 Run from the repo root (so `config/.env` loads and `MONGO_URL` is set):
