@@ -21,6 +21,7 @@ const { isAuthenticated, isAdmin } = require("./middleware/auth.js");
 
 const user     = require("./api/user.js");
 const advisor  = require("./api/advisor.js");
+const io       = require("./api/io.js");
 const machine  = require("./api/machine.js");
 const shift    = require("./api/shift.js");
 const employee = require("./api/employee.js");
@@ -107,6 +108,7 @@ app.use("/api/v2/announcement", announcement);
 app.use("/api/v2/feedback",    feedback);
 app.use("/api/v2/dashboard",   dashboard);
 app.use("/api/v2/advisor",     advisor);
+app.use("/api/v2/io",          io);
 
 
 app.use(ErrorHandler);

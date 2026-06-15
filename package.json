@@ -33,6 +33,7 @@
     "mongoose": "^8.5.1",
     "mongoose-id-autoincrement": "^1.0.4",
     "mongoose-sequence": "^6.0.1",
+    "multer": "^2.1.1",
     "nodemon": "^3.1.14",
     "openai": "^6.42.0",
     "pdfkit": "^0.15.0"
