@@ -1259,11 +1259,16 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now) 
 
     const producedMap = {};
     for (const p of job.producedElastic || []) {
+      if (!p?.elastic) continue;
       producedMap[p.elastic.toString()] = Number(p.quantity) || 0;
     }
 
     const elasticRows = [];
     for (const e of job.elastics || []) {
+      // Defensive — legacy job orders occasionally have a null
+      // elastic ref (data older than the schema gate). Skip rather
+      // than throwing "cannot read 'toString' of null".
+      if (!e?.elastic) continue;
       const elasticId = e.elastic.toString();
       const planned   = Number(e.quantity) || 0;
       const produced  = producedMap[elasticId] || 0;
@@ -1336,9 +1341,11 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now) 
 function _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now) {
   const producedMap = {};
   for (const p of order.producedElastic || []) {
+    if (!p?.elastic) continue;
     producedMap[p.elastic.toString()] = Number(p.quantity) || 0;
   }
   const lines = (order.elasticOrdered || [])
+    .filter((e) => e?.elastic)
     .map((e) => {
       const id = e.elastic.toString();
       const planned   = Number(e.quantity) || 0;
@@ -1521,9 +1528,19 @@ router.post(
         etas[id] = { ok: false, reason: "NOT_RUNNING", status: order.status };
         continue;
       }
-      const result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now);
-      // Compact response — strip the heavy perJob breakdown that the
-      // detail card needs but the list chip doesn't.
+      // Per-order try/catch so a single bad order can't poison the
+      // whole batch — frontend chip just shows "ETA error" for that
+      // row instead of every row failing.
+      let result;
+      try {
+        result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now);
+      } catch (err) {
+        console.warn(
+          "[running-eta-bulk] order", String(id), "failed:", err?.message
+        );
+        etas[id] = { ok: false, reason: "COMPUTE_ERROR", message: err?.message };
+        continue;
+      }
       if (result.ok) {
         etas[id] = {
           ok: true,
