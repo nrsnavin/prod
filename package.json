@@ -4,7 +4,8 @@
   "main": "index.js",
   "scripts": {
     "start": "nodemon index.js",
-    "test": "jest --runInBand"
+    "test": "jest --runInBand",
+    "seed:demo": "node scripts/seedDemoCustomer.js"
   },
   "jest": {
     "testEnvironment": "node",
