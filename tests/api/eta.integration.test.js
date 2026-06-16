@@ -118,7 +118,7 @@ describe("GET /api/v2/order/:id/running-eta", () => {
     expect(res.status).toBe(404);
   });
 
-  test("returns NO_ACTIVE_JOBS for an order with no jobs", async () => {
+  test("falls back to entry-time estimate when order has no jobs yet", async () => {
     const cust = await seedCustomer(M);
     const order = await seedOrder(M, {
       customer: cust._id,
@@ -130,8 +130,56 @@ describe("GET /api/v2/order/:id/running-eta", () => {
     const res = await request(H.app)
       .get(`/api/v2/order/${order._id}/running-eta`);
     expect(res.status).toBe(200);
+    // New contract: ok:true with a fallback estimate so the UI shows
+    // a date even before the JobOrder is created.
+    expect(res.body.ok).toBe(true);
+    expect(res.body.usedEntryTimeFallback).toBe(true);
+    expect(res.body.expectedDate).toBeDefined();
+    expect(res.body.workingDays).toBeGreaterThan(0);
+    expect(res.body.perJob).toEqual([]);
+    expect(res.body.assumptions.join(" ")).toMatch(/hasn't started/i);
+  });
+
+  test("returns NOTHING_REMAINING when an order has nothing left to produce", async () => {
+    const cust = await seedCustomer(M);
+    const order = await seedOrder(M, {
+      customer: cust._id,
+      supplyDate: new Date(Date.now() + 7 * 86_400_000),
+      status: "Approved",
+      elasticOrdered:  [{ elastic: oid(10), quantity: 1000 }],
+      producedElastic: [{ elastic: oid(10), quantity: 1000 }],
+    });
+
+    const res = await request(H.app)
+      .get(`/api/v2/order/${order._id}/running-eta`);
+    expect(res.status).toBe(200);
     expect(res.body.ok).toBe(false);
-    expect(res.body.reason).toBe("NO_ACTIVE_JOBS");
+    expect(res.body.reason).toBe("NOTHING_REMAINING");
+  });
+
+  test("falls back to 1 head per elastic when the machine has no head map", async () => {
+    const cust    = await seedCustomer(M);
+    // Machine with NO elastics in its head map — simulates a legacy
+    // order whose head-elastic mapping was never set up.
+    const machine = await seedMachine(M, { id: "M-LEGACY", NoOfHead: 4, elastics: [] });
+    const order   = await seedOrder(M, {
+      customer: cust._id,
+      supplyDate: new Date(Date.now() + 30 * 86_400_000),
+      status: "InProgress",
+      elasticOrdered: [{ elastic: oid(10), quantity: 4000 }],
+    });
+    await seedJob(M, {
+      order: order._id, customer: cust._id, machine: machine._id,
+      elastics: [{ elastic: oid(10), quantity: 4000 }],
+      status:   "weaving",
+    });
+
+    const res = await request(H.app).get(`/api/v2/order/${order._id}/running-eta`);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.workingDays).toBeGreaterThan(0);
+    // Per-elastic heads default to 1 instead of disabling the row.
+    expect(res.body.perJob[0].perElastic[0].headsAssigned).toBe(1);
   });
 
   test("returns full ETA with perJob breakdown for an in-flight order", async () => {
