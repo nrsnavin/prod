@@ -6,8 +6,9 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
-const Customer = require("../models/Customer");
-const Order    = require("../models/Order");
+const Customer     = require("../models/Customer");
+const CustomerUser = require("../models/CustomerUser");
+const Order        = require("../models/Order");
 
 // All customer management routes are admin-only.
 router.use(isAuthenticated, isAdmin('admin'));
@@ -113,6 +114,70 @@ router.get(
       page,
       hasMore: skip + past.length < pastTotal,
     });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────────
+// Portal user provisioning — admins create the first login for a
+// customer. The customer can then invite additional users from
+// inside the portal (Phase 2). Self-registration is intentionally
+// not exposed — keeps onboarding controlled.
+//
+// POST /api/v2/customer/:id/portal-users
+// Body: { name, email, phone?, role?, password }
+// ─────────────────────────────────────────────────────────────────
+router.post(
+  "/:id/portal-users",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid customer id", 400));
+    }
+    const customer = await Customer.findById(id);
+    if (!customer) return next(new ErrorHandler("Customer not found", 404));
+
+    const { name, email, phone, role, password } = req.body || {};
+    if (!name || !email || !password) {
+      return next(new ErrorHandler("name, email, and password are required", 400));
+    }
+    const dupe = await CustomerUser.findOne({
+      email: String(email).toLowerCase().trim(),
+    });
+    if (dupe) return next(new ErrorHandler("Email already registered", 409));
+
+    const user = await CustomerUser.create({
+      customer: customer._id,
+      name,
+      email,
+      phone: phone || "",
+      role:  role  || "buyer",
+      password,
+    });
+    return res.status(201).json({
+      success: true,
+      user: {
+        _id:   user._id,
+        name:  user.name,
+        email: user.email,
+        role:  user.role,
+        phone: user.phone,
+      },
+    });
+  })
+);
+
+// GET /api/v2/customer/:id/portal-users — list portal users on a customer.
+router.get(
+  "/:id/portal-users",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid customer id", 400));
+    }
+    const users = await CustomerUser.find({ customer: id })
+      .select("name email phone role status lastLoginAt createdAt")
+      .lean();
+    return res.json({ success: true, users });
   })
 );
 

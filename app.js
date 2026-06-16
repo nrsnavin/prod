@@ -46,6 +46,11 @@ const announcement = require("./api/announcement.js");
 const feedback     = require("./api/feedback.js");
 const dashboard    = require("./api/dashboard.js");
 
+// Customer-facing portal API (v3 namespace). Separate auth surface
+// from the admin/employee app — see middleware/portalAuth.js for
+// the three-layer separation (cookie, secret, audience claim).
+const portalAuth = require("./api/portal/auth.js");
+
 const corsConfig = {
   origin: true,
   credentials: true,
@@ -109,6 +114,11 @@ app.use("/api/v2/feedback",    feedback);
 app.use("/api/v2/dashboard",   dashboard);
 app.use("/api/v2/advisor",     advisor);
 app.use("/api/v2/io",          io);
+
+// ── Customer portal API (v3) ────────────────────────────────────
+// Mounted unauthenticated at the router level — the portal auth
+// middleware is applied per-router (login is public, /me is gated).
+app.use("/api/v3/portal/auth", portalAuth);
 
 
 app.use(ErrorHandler);
