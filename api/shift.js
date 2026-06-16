@@ -16,6 +16,7 @@ const ShiftPlan   = require("../models/ShiftPlan");
 const JobOrder    = require("../models/JobOrder");
 const Attendance  = require("../models/Attendence.js");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+const { updatePairPosterior } = require("../utils/etaPosterior.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
 router.use(isAuthenticated);
@@ -136,6 +137,26 @@ async function applyProductionCascade(
   if (sp) {
     sp.totalProduction = (sp.totalProduction || 0) + prodValue * (machineDoc?.NoOfHead || 1);
     await sp.save({ session });
+  }
+
+  // Bayesian ETA posterior: one observation per (elastic, machine)
+  // pair touched by this shift. Wrapped so a posterior failure can
+  // never break the cascade — the ETA layer is a forecasting hint,
+  // not a correctness gate. Audit-only on failure.
+  try {
+    await updatePairPosterior(session, {
+      shift,
+      machine: machineDoc,
+      productionMeters: prodValue,
+    });
+  } catch (err) {
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn(
+        "[eta-posterior] update failed for shift",
+        shift?._id?.toString?.(),
+        err?.message
+      );
+    }
   }
 
   return { job, fingerprint: fp, machine: machineDoc };
