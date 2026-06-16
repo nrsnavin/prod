@@ -1233,8 +1233,12 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now) 
     .populate({ path: "machine", select: "ID NoOfHead elastics status" })
     .lean();
 
+  // No JobOrder yet — common for orders that were just approved but
+  // haven't been planned, and for legacy orders that pre-date the ML
+  // ETA layer. Fall back to an entry-time-style estimate so the UI
+  // can still show a forward date instead of an empty card.
   if (activeJobs.length === 0) {
-    return { ok: false, reason: "NO_ACTIVE_JOBS", message: "Order has no active jobs." };
+    return _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now);
   }
 
   const jobs = [];
@@ -1282,12 +1286,18 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now) 
       }
       rateSources[rateSource] += 1;
 
+      // Machine.elastics may not include this job's elastic in its
+      // head map (existing/legacy orders where the head-elastic
+      // mapping wasn't kept in sync). Falling back to 1 head keeps
+      // the estimate conservative but visible.
+      const headsAssigned = headsByElastic[elasticId] || 1;
+
       elasticRows.push({
         elastic:         elasticId,
         plannedMeters:   planned,
         producedMeters:  produced,
         remainingMeters: remaining,
-        headsAssigned:   headsByElastic[elasticId] || 0,
+        headsAssigned,
         metersPerHeadPerShift,
         metersPerMachineDay: Math.round(
           toMetersPerMachineDay(metersPerHeadPerShift, noOfHead, C.SHIFTS_PER_DAY)
@@ -1315,6 +1325,77 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now) 
   });
 
   return { ...result, rateSources };
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Entry-time fallback — for orders that don't have an active job
+// yet (just approved, or legacy). Reuses the entry-time estimator
+// (utils/orderEta.js) on the order's *remaining* quantities so the
+// shape matches the running-ETA contract the UI already renders.
+// ─────────────────────────────────────────────────────────────────
+function _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now) {
+  const producedMap = {};
+  for (const p of order.producedElastic || []) {
+    producedMap[p.elastic.toString()] = Number(p.quantity) || 0;
+  }
+  const lines = (order.elasticOrdered || [])
+    .map((e) => {
+      const id = e.elastic.toString();
+      const planned   = Number(e.quantity) || 0;
+      const produced  = producedMap[id] || 0;
+      return { elastic: id, quantity: Math.max(0, planned - produced) };
+    })
+    .filter((l) => l.quantity > 0);
+
+  if (lines.length === 0) {
+    return { ok: false, reason: "NOTHING_REMAINING" };
+  }
+
+  const aggregates = {
+    plantRate:          plantMetersPerMachineDay,
+    elasticRate:        {},
+    consistencyScore:   70,
+    attendanceMomentum: 1,
+    machineHealth:      1,
+    freeMachines:       1,
+    machineNoOfHeadAvg: 4,
+  };
+
+  const result = estimateOrderEta({
+    lines,
+    today:      now,
+    supplyDate: order.supplyDate,
+    aggregates,
+  });
+
+  if (!result.ok) {
+    return { ok: false, reason: result.reason || "NO_RATE" };
+  }
+
+  // Reshape to match the running-eta contract — same fields the UI
+  // already knows how to render. perJob is empty (no jobs yet); the
+  // assumptions list explains the fallback in plain language.
+  const rateSource = result.usedColdStart ? "coldstart" : "plant";
+  return {
+    ok:           true,
+    expectedDate: result.expectedDate,
+    workingDays:  result.workingDays,
+    weavingDays:  result.weavingDays || (result.workingDays - (result.leadDays || 0)),
+    leadDays:     result.leadDays || 0,
+    perJob:       [],
+    risk:         result.risk,
+    assumptions:  [
+      "Production hasn't started on this order yet — estimate uses the plant-wide rate.",
+      ...(result.assumptions || []),
+    ],
+    rateSources:  {
+      posterior: 0,
+      plant:     rateSource === "plant" ? 1 : 0,
+      coldstart: rateSource === "coldstart" ? 1 : 0,
+      missing:   0,
+    },
+    usedEntryTimeFallback: true,
+  };
 }
 
 // ═════════════════════════════════════════════════════════════════
