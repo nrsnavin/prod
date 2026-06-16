@@ -1215,6 +1215,134 @@ router.post(
 );
 
 // ═════════════════════════════════════════════════════════════════
+//  Shared helper — compute running ETA for a single order.
+//
+//  Resolves active jobs, builds the rate input from the per-pair
+//  Bayesian posterior (with plant + cold-start fallbacks), and
+//  feeds the structured input into the pure math estimator.
+//
+//  Callers pass a hydrated `plantMetersPerMachineDay` so a bulk
+//  request can amortise the one expensive plant aggregation across
+//  many orders.
+// ═════════════════════════════════════════════════════════════════
+async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now) {
+  const activeJobs = await Job.find({
+    order: order._id,
+    status: { $nin: ["completed", "cancelled"] },
+  })
+    .populate({ path: "machine", select: "ID NoOfHead elastics status" })
+    .lean();
+
+  if (activeJobs.length === 0) {
+    return { ok: false, reason: "NO_ACTIVE_JOBS", message: "Order has no active jobs." };
+  }
+
+  const jobs = [];
+  const rateSources = { posterior: 0, plant: 0, coldstart: 0, missing: 0 };
+
+  for (const job of activeJobs) {
+    const machine = job.machine;
+    if (!machine?._id) continue;
+
+    const noOfHead = Number(machine.NoOfHead) || 1;
+
+    const headsByElastic = {};
+    for (const h of machine.elastics || []) {
+      const id = h.elastic?.toString();
+      if (!id) continue;
+      headsByElastic[id] = (headsByElastic[id] || 0) + 1;
+    }
+
+    const producedMap = {};
+    for (const p of job.producedElastic || []) {
+      producedMap[p.elastic.toString()] = Number(p.quantity) || 0;
+    }
+
+    const elasticRows = [];
+    for (const e of job.elastics || []) {
+      const elasticId = e.elastic.toString();
+      const planned   = Number(e.quantity) || 0;
+      const produced  = producedMap[elasticId] || 0;
+      const remaining = Math.max(0, planned - produced);
+
+      let metersPerHeadPerShift = null;
+      let rateSource = "missing";
+      const post = await getPairRate(elasticId, machine._id);
+      if (post && post.informative) {
+        metersPerHeadPerShift = post.metersPerHeadPerShift;
+        rateSource = "posterior";
+      } else if (plantMetersPerMachineDay && plantMetersPerMachineDay > 0) {
+        metersPerHeadPerShift =
+          plantMetersPerMachineDay / Math.max(1, noOfHead) / Math.max(1, C.SHIFTS_PER_DAY);
+        rateSource = "plant";
+      } else {
+        metersPerHeadPerShift =
+          C.COLDSTART_METERS_PER_HEAD_DAY * C.LOOM_EFFICIENCY / Math.max(1, C.SHIFTS_PER_DAY);
+        rateSource = "coldstart";
+      }
+      rateSources[rateSource] += 1;
+
+      elasticRows.push({
+        elastic:         elasticId,
+        plannedMeters:   planned,
+        producedMeters:  produced,
+        remainingMeters: remaining,
+        headsAssigned:   headsByElastic[elasticId] || 0,
+        metersPerHeadPerShift,
+        metersPerMachineDay: Math.round(
+          toMetersPerMachineDay(metersPerHeadPerShift, noOfHead, C.SHIFTS_PER_DAY)
+        ),
+        rateSource,
+        posteriorObservations: post?.observations || 0,
+      });
+    }
+
+    jobs.push({
+      job:          job._id,
+      jobOrderNo:   job.jobOrderNo,
+      status:       job.status,
+      machineId:    machine._id,
+      machineLabel: machine.ID || null,
+      noOfHead,
+      elastics:     elasticRows,
+    });
+  }
+
+  const result = estimateRunningOrderEta({
+    jobs,
+    today:      now,
+    supplyDate: order.supplyDate,
+  });
+
+  return { ...result, rateSources };
+}
+
+// ═════════════════════════════════════════════════════════════════
+// Shared helper — plant rate aggregation. One round-trip, used by
+// every running-ETA caller.
+// ═════════════════════════════════════════════════════════════════
+async function _loadPlantMetersPerMachineDay(now) {
+  const since = new Date(now.getTime() - C.RATE_LOOKBACK_DAYS * 86_400_000);
+  const plantShiftAgg = await ShiftDetail.aggregate([
+    { $match: { status: "closed", date: { $gte: since } } },
+    { $group: {
+        _id: { machine: "$machine", date: {
+          $dateToString: { format: "%Y-%m-%d", date: "$date" } } },
+        meters: { $sum: "$productionMeters" },
+      } },
+    { $group: {
+        _id: null,
+        totalMeters: { $sum: "$meters" },
+        machineDays: { $sum: 1 },
+      } },
+  ]);
+  const plantRow = plantShiftAgg[0] || {};
+  return (plantRow.machineDays || 0) > 0
+    ? plantRow.totalMeters / plantRow.machineDays
+    : null;
+}
+
+// ═════════════════════════════════════════════════════════════════
 //  GET /api/v2/order/:id/running-eta
 //
 //  Live ETA for an in-flight order. Uses the per-(elastic, machine)
@@ -1239,130 +1367,9 @@ router.get(
     const order = await Order.findById(orderId).lean();
     if (!order) return res.status(404).json({ success: false, message: "Order not found" });
 
-    // Active jobs only — completed/cancelled jobs no longer contribute.
-    const activeJobs = await Job.find({
-      order: order._id,
-      status: { $nin: ["completed", "cancelled"] },
-    })
-      .populate({ path: "machine", select: "ID NoOfHead elastics status" })
-      .lean();
-
-    if (activeJobs.length === 0) {
-      return res.json({
-        success: true,
-        ok: false,
-        reason: "NO_ACTIVE_JOBS",
-        message: "Order has no active jobs.",
-      });
-    }
-
-    // Plant fallback rate (single round-trip, same shape as
-    // /estimate-completion) — used when a pair has no informative
-    // posterior.
     const now = new Date();
-    const since = new Date(now.getTime() - C.RATE_LOOKBACK_DAYS * 86_400_000);
-    const [plantShiftAgg] = await Promise.all([
-      ShiftDetail.aggregate([
-        { $match: { status: "closed", date: { $gte: since } } },
-        { $group: {
-            _id: { machine: "$machine", date: {
-              $dateToString: { format: "%Y-%m-%d", date: "$date" } } },
-            meters: { $sum: "$productionMeters" },
-          } },
-        { $group: {
-            _id: null,
-            totalMeters: { $sum: "$meters" },
-            machineDays: { $sum: 1 },
-          } },
-      ]),
-    ]);
-    const plantRow = plantShiftAgg[0] || {};
-    const plantMetersPerMachineDay = (plantRow.machineDays || 0) > 0
-      ? plantRow.totalMeters / plantRow.machineDays
-      : null;
-
-    // ── Build the per-job, per-elastic remaining + rate input ────
-    const jobs = [];
-    const rateSources = { posterior: 0, plant: 0, coldstart: 0, missing: 0 };
-
-    for (const job of activeJobs) {
-      const machine = job.machine;
-      if (!machine?._id) continue;
-
-      const noOfHead = Number(machine.NoOfHead) || 1;
-
-      // Heads on this machine producing each elastic.
-      const headsByElastic = {};
-      for (const h of machine.elastics || []) {
-        const id = h.elastic?.toString();
-        if (!id) continue;
-        headsByElastic[id] = (headsByElastic[id] || 0) + 1;
-      }
-
-      // Remaining = planned − produced, per elastic in this job.
-      const producedMap = {};
-      for (const p of job.producedElastic || []) {
-        producedMap[p.elastic.toString()] = Number(p.quantity) || 0;
-      }
-
-      const elasticRows = [];
-      for (const e of job.elastics || []) {
-        const elasticId = e.elastic.toString();
-        const planned   = Number(e.quantity) || 0;
-        const produced  = producedMap[elasticId] || 0;
-        const remaining = Math.max(0, planned - produced);
-
-        // Posterior (per-pair) first; plant blend second; coldstart third.
-        let metersPerHeadPerShift = null;
-        let rateSource = "missing";
-        const post = await getPairRate(elasticId, machine._id);
-        if (post && post.informative) {
-          metersPerHeadPerShift = post.metersPerHeadPerShift;
-          rateSource = "posterior";
-        } else if (plantMetersPerMachineDay && plantMetersPerMachineDay > 0) {
-          // Plant rate is meters/machine-day. Convert backward to
-          // meters/head/shift so the per-shift math stays consistent.
-          metersPerHeadPerShift =
-            plantMetersPerMachineDay / Math.max(1, noOfHead) / Math.max(1, C.SHIFTS_PER_DAY);
-          rateSource = "plant";
-        } else {
-          metersPerHeadPerShift =
-            C.COLDSTART_METERS_PER_HEAD_DAY * C.LOOM_EFFICIENCY / Math.max(1, C.SHIFTS_PER_DAY);
-          rateSource = "coldstart";
-        }
-        rateSources[rateSource] += 1;
-
-        elasticRows.push({
-          elastic:         elasticId,
-          plannedMeters:   planned,
-          producedMeters:  produced,
-          remainingMeters: remaining,
-          headsAssigned:   headsByElastic[elasticId] || 0,
-          metersPerHeadPerShift,
-          metersPerMachineDay: Math.round(
-            toMetersPerMachineDay(metersPerHeadPerShift, noOfHead, C.SHIFTS_PER_DAY)
-          ),
-          rateSource,
-          posteriorObservations: post?.observations || 0,
-        });
-      }
-
-      jobs.push({
-        job:          job._id,
-        jobOrderNo:   job.jobOrderNo,
-        status:       job.status,
-        machineId:    machine._id,
-        machineLabel: machine.ID || null,
-        noOfHead,
-        elastics:     elasticRows,
-      });
-    }
-
-    const result = estimateRunningOrderEta({
-      jobs,
-      today:      now,
-      supplyDate: order.supplyDate,
-    });
+    const plantMetersPerMachineDay = await _loadPlantMetersPerMachineDay(now);
+    const result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now);
 
     return res.json({
       success: true,
@@ -1370,8 +1377,89 @@ router.get(
       orderNo: order.orderNo,
       status:  order.status,
       ...result,
-      rateSources,
     });
+  }),
+);
+
+// ═════════════════════════════════════════════════════════════════
+//  POST /api/v2/order/running-eta-bulk
+//
+//  Compact ETA summary for many orders at once. Used by the order
+//  list to render a per-row chip without N+1 round trips. Returns
+//  one entry per order id including those not in an in-flight
+//  state — the frontend decides whether to render a chip or not.
+//
+//  Body: { orderIds: [id, id, ...] }   max 50
+// ═════════════════════════════════════════════════════════════════
+router.post(
+  "/running-eta-bulk",
+  isAuthenticated, isAdmin('admin'),
+  catchAsyncErrors(async (req, res) => {
+    const orderIds = Array.isArray(req.body?.orderIds) ? req.body.orderIds : null;
+    if (!orderIds || orderIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "orderIds must be a non-empty array",
+      });
+    }
+    if (orderIds.length > 50) {
+      return res.status(400).json({
+        success: false,
+        message: "orderIds capped at 50 per request",
+      });
+    }
+
+    const validIds = orderIds
+      .filter((id) => typeof id === "string" && mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    const orders = await Order.find({ _id: { $in: validIds } })
+      .select({ _id: 1, orderNo: 1, status: 1, supplyDate: 1 })
+      .lean();
+    const orderById = new Map(orders.map((o) => [o._id.toString(), o]));
+
+    const now = new Date();
+    // Only load plant rate if we have at least one in-flight order to
+    // compute — avoids a useless aggregation on lists of only Open or
+    // Completed orders.
+    const inFlight = orders.filter(
+      (o) => o.status === "Approved" || o.status === "InProgress"
+    );
+    const plantMetersPerMachineDay = inFlight.length > 0
+      ? await _loadPlantMetersPerMachineDay(now)
+      : null;
+
+    const etas = {};
+    for (const id of orderIds) {
+      const order = orderById.get(String(id));
+      if (!order) {
+        etas[id] = { ok: false, reason: "NOT_FOUND" };
+        continue;
+      }
+      if (order.status !== "Approved" && order.status !== "InProgress") {
+        etas[id] = { ok: false, reason: "NOT_RUNNING", status: order.status };
+        continue;
+      }
+      const result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now);
+      // Compact response — strip the heavy perJob breakdown that the
+      // detail card needs but the list chip doesn't.
+      if (result.ok) {
+        etas[id] = {
+          ok: true,
+          expectedDate: result.expectedDate,
+          workingDays:  result.workingDays,
+          weavingDays:  result.weavingDays,
+          leadDays:     result.leadDays,
+          late:           result.risk?.late === true,
+          lateWorkingDays: result.risk?.lateWorkingDays || 0,
+          rateSources:  result.rateSources,
+        };
+      } else {
+        etas[id] = { ok: false, reason: result.reason || "UNKNOWN" };
+      }
+    }
+
+    return res.json({ success: true, etas });
   }),
 );
 
