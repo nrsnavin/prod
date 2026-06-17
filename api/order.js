@@ -18,6 +18,8 @@ const { estimateOrderEta } = require("../utils/orderEta.js");
 const { estimateRunningOrderEta } = require("../utils/runningOrderEta.js");
 const { getPairRate, toMetersPerMachineDay } = require("../utils/etaPosterior.js");
 const C                    = require("../utils/etaConfig.js");
+const Customer             = require("../models/Customer.js");
+const { notify }           = require("../utils/notify.js");
 
 
 // ════════════════════════════════════════════════════════════════
@@ -274,6 +276,30 @@ router.post(
         orderId:     order._id,
         fingerprint: fp,
       });
+
+      // Owner WhatsApp ping — fire-and-forget AFTER the response so a
+      // slow/failed notification can never delay or break order
+      // creation. notify() itself never throws; this catch is belt-
+      // and-suspenders for the customer lookup.
+      (async () => {
+        try {
+          const totalMeters = (elasticOrdered || [])
+            .reduce((s, e) => s + (Number(e.quantity) || 0), 0);
+          let customerName;
+          if (customer) {
+            const cust = await Customer.findById(customer).select("name").lean();
+            customerName = cust?.name;
+          }
+          await notify("orderCreated", {
+            orderNo:      order.orderNo,
+            po,
+            customerName,
+            totalMeters,
+            lineCount:    (elasticOrdered || []).length,
+            supplyDate,
+          });
+        } catch (_) { /* notification is best-effort */ }
+      })();
     } catch (error) {
       // ErrorHandler already logs; no duplicate console.error.
       return next(new ErrorHandler(error.message, 500));
