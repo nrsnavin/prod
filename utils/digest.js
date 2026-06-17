@@ -18,6 +18,7 @@ const Wastage         = require("../models/Wastage.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
 const Machine         = require("../models/Machine.js");
+const Order           = require("../models/Order.js");
 
 // ── Pure formatter ───────────────────────────────────────────────
 function formatDigest(d) {
@@ -52,6 +53,17 @@ function formatDigest(d) {
     lines.push("  None within horizon. 👍");
   }
 
+  // Predicted late (ML)
+  lines.push("", "⏰ *Predicted late* (ML)");
+  if ((d.predictedLate || []).length > 0) {
+    for (const o of d.predictedLate.slice(0, 5)) {
+      lines.push(`  Order #${o.orderNo}${o.customerName ? ` · ${o.customerName}` : ""}: ${o.lateWorkingDays}d late`);
+    }
+    if (d.predictedLate.length > 5) lines.push(`  +${d.predictedLate.length - 5} more`);
+  } else {
+    lines.push("  All in-flight orders on track. 👍");
+  }
+
   // Maintenance
   lines.push("", "🔧 *Maintenance due*");
   if (d.maintenance.length > 0) {
@@ -77,17 +89,56 @@ async function buildDigestData(now = new Date(), opts = {}) {
   const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
   const startYday  = new Date(startToday.getTime() - 86_400_000);
 
-  const [production, wastage, stockouts, maintenance] = await Promise.all([
+  const [production, wastage, stockouts, maintenance, predictedLate] = await Promise.all([
     _production(startYday, startToday),
     _wastage(startYday, startToday),
     _stockouts(now, lookbackDays, horizonDays),
     _maintenance(now, maintDays),
+    _predictedLate(now),
   ]);
 
   return {
     dateLabel: startYday.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
-    production, wastage, stockouts, maintenance,
+    production, wastage, stockouts, maintenance, predictedLate,
   };
+}
+
+// Predicted-late: walks every active order, runs the running-ETA
+// helper, surfaces the ones the ML predicts will miss supplyDate.
+// Reuses the same _computeRunningEtaForOrder + _loadPlantMetersPerMachineDay
+// the route uses, so the numbers match the order detail card.
+async function _predictedLate(now) {
+  // Late-require to avoid a circular require at module load.
+  const { _computeRunningEtaForOrder, _loadPlantMetersPerMachineDay } =
+    require("../api/order.js")._etaHelpers || {};
+  if (!_computeRunningEtaForOrder) return []; // helpers not exposed → skip section
+
+  const orders = await Order.find({
+    status: { $in: ["Approved", "InProgress"] },
+    supplyDate: { $exists: true, $ne: null },
+  })
+    .select("_id orderNo customer supplyDate elasticOrdered producedElastic status")
+    .populate("customer", "name")
+    .lean();
+  if (orders.length === 0) return [];
+
+  const plantRate = await _loadPlantMetersPerMachineDay(now);
+  const out = [];
+  for (const order of orders) {
+    try {
+      const r = await _computeRunningEtaForOrder(order, plantRate, now);
+      if (!r?.ok || !r.risk?.late) continue;
+      out.push({
+        orderNo:         order.orderNo,
+        customerName:    order.customer?.name,
+        expectedDate:    r.expectedDate,
+        supplyDate:      order.supplyDate,
+        lateWorkingDays: r.risk.lateWorkingDays || 0,
+      });
+    } catch (_) { /* one bad order doesn't block the digest */ }
+  }
+  out.sort((a, b) => (b.lateWorkingDays || 0) - (a.lateWorkingDays || 0));
+  return out;
 }
 
 async function _production(start, end) {

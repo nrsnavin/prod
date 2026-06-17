@@ -623,6 +623,25 @@ router.post(
         deductionFingerprints,
         reservationFingerprints,
       });
+
+      // Owner WhatsApp ping when an approval bypassed the stock
+      // guardrail — fire-and-forget, after the response, in its own
+      // try/catch so a notification failure can't roll anything back.
+      if (force) {
+        (async () => {
+          try {
+            const cust = order.customer
+              ? await Customer.findById(order.customer).select("name").lean()
+              : null;
+            await notify("orderForceApproved", {
+              orderNo:      order.orderNo,
+              customerName: cust?.name,
+              by:           actorFromRequest(req)?.name || "Admin",
+              reason:       forceReason || "(no reason given)",
+            });
+          } catch (_) { /* best-effort */ }
+        })();
+      }
     } catch (error) {
       await session.abortTransaction();
       session.endSession();
@@ -1586,5 +1605,14 @@ router.post(
     return res.json({ success: true, etas });
   }),
 );
+
+// Expose the per-order ETA computation + plant-rate loader so utility
+// modules (utils/digest.js) can reuse the exact same math the route
+// returns to clients — no duplication, identical numbers across the
+// app and the WhatsApp digest.
+router._etaHelpers = {
+  _computeRunningEtaForOrder,
+  _loadPlantMetersPerMachineDay,
+};
 
 module.exports = router;
