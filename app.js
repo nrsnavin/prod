@@ -162,6 +162,30 @@ app.use("/api/v2/feedback",    feedback);
 app.use("/api/v2/dashboard",   dashboard);
 app.use("/api/v2/advisor",     advisor);
 app.use("/api/v2/io",          io);
+
+// Cron-triggerable morning digest — authenticated by a shared secret
+// header instead of an admin session, so an external scheduler (system
+// crontab, cloud scheduler) can fire it at ~9 AM with a plain curl:
+//   curl -X POST -H "x-cron-secret: $CRON_SECRET" \
+//        http://host/api/v2/notify/cron/run-digest
+// Mounted BEFORE the admin-gated /notify router so the gate doesn't
+// intercept it. No-ops with 503 if CRON_SECRET isn't configured.
+app.post("/api/v2/notify/cron/run-digest", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) {
+    return res.status(503).json({ success: false, message: "CRON_SECRET not configured" });
+  }
+  if (req.get("x-cron-secret") !== secret) {
+    return res.status(401).json({ success: false, message: "bad cron secret" });
+  }
+  try {
+    const result = await notify.runDigest(false);
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.use("/api/v2/notify",      ADMIN_GATE, notify);
 
 // ── Customer portal API (v3) ────────────────────────────────────

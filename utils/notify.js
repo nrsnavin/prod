@@ -56,6 +56,13 @@ const fmt = {
     ].filter(Boolean).join("\n");
   },
 
+  // The digest text is built by utils/digest.js and passed through
+  // pre-formatted; this formatter is just the pass-through so the
+  // orchestrator's toggle/recipient logic still applies.
+  morningDigest(p) {
+    return p?.body || null;
+  },
+
   test(p) {
     return p?.body || "✅ Test message from your factory notifications. If you can read this, WhatsApp alerts are working.";
   },
@@ -71,6 +78,7 @@ const EVENT_FLAG = {
   orderCreated:       "orderCreated",
   orderForceApproved: "orderForceApproved",
   orderPredictedLate: "orderPredictedLate",
+  morningDigest:      "morningDigest",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

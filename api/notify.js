@@ -17,6 +17,7 @@ const ErrorHandler     = require("../utils/ErrorHandler.js");
 const NotificationSettings = require("../models/NotificationSettings.js");
 const { notify }           = require("../utils/notify.js");
 const { isConfigured, PROVIDER } = require("../utils/whatsapp.js");
+const { buildDigestData, formatDigest } = require("../utils/digest.js");
 
 // ── GET settings ──────────────────────────────────────────────────
 router.get(
@@ -103,5 +104,37 @@ router.post(
     });
   })
 );
+
+// ── POST run-digest ───────────────────────────────────────────────
+// Builds the morning digest and sends it. Designed to be called by a
+// scheduler at ~9 AM. Two auth paths:
+//   • the normal admin gate (when an admin triggers it from the UI), or
+//   • an x-cron-secret header matching env CRON_SECRET (so an external
+//     cron / cloud scheduler can fire it without a login session).
+// The mount applies ADMIN_GATE; this handler additionally lets a
+// valid cron secret through by short-circuiting before the gate runs
+// — but since the gate is mount-level, we instead expose the secret
+// path as a sibling unguarded route registered in app.js. To keep it
+// simple here, this route trusts the mount's admin gate; the cron
+// secret variant is handled in app.js (see runDigestPublic).
+router.post(
+  "/run-digest",
+  catchAsyncErrors(async (req, res) => {
+    const result = await runDigest(req.query.dryReturn === "1");
+    res.json({ success: true, ...result });
+  })
+);
+
+// Shared digest runner — builds + sends, returns a summary. Exported
+// so app.js can wire the cron-secret public route to the same logic.
+async function runDigest(returnTextOnly = false) {
+  const data = await buildDigestData(new Date());
+  const text = formatDigest(data);
+  if (returnTextOnly) return { preview: text, sent: false };
+  const notifyResult = await notify("morningDigest", { body: text });
+  return { notifyResult, preview: text };
+}
+
+router.runDigest = runDigest;
 
 module.exports = router;
