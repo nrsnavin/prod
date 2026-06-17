@@ -45,6 +45,7 @@ const machineIssue = require("./api/machineIssue.js");
 const announcement = require("./api/announcement.js");
 const feedback     = require("./api/feedback.js");
 const dashboard    = require("./api/dashboard.js");
+const notify       = require("./api/notify.js");
 
 // Customer-facing portal API (v3 namespace). Separate auth surface
 // from the admin/employee app — see middleware/portalAuth.js for
@@ -161,6 +162,7 @@ app.use("/api/v2/feedback",    feedback);
 app.use("/api/v2/dashboard",   dashboard);
 app.use("/api/v2/advisor",     advisor);
 app.use("/api/v2/io",          io);
+app.use("/api/v2/notify",      ADMIN_GATE, notify);
 
 // ── Customer portal API (v3) ────────────────────────────────────
 // Mounted unauthenticated at the router level — the portal auth
