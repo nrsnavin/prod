@@ -75,6 +75,53 @@ app.get("/api/v2/health", (req, res) =>
   res.json({ status: "ok", uptime: process.uptime() })
 );
 
+// Build-info probe — exposes the commit SHA + start time + a quick
+// inventory of marker routes so you can verify what's actually
+// running on this host. Unauthenticated so a curl from any machine
+// works ("did the deploy land?" is the most common ops question).
+//
+// Best-effort SHA discovery: env var first (typical CI artefact),
+// then .git/HEAD walk if the repo is bundled with the deploy, then
+// "unknown". Never throws — health probes must always respond.
+const fs   = require("fs");
+const path2 = require("path");
+function _readCommitSha() {
+  if (process.env.GIT_COMMIT_SHA) return process.env.GIT_COMMIT_SHA;
+  if (process.env.COMMIT_SHA)     return process.env.COMMIT_SHA;
+  try {
+    const head = fs.readFileSync(path2.join(__dirname, ".git/HEAD"), "utf8").trim();
+    if (head.startsWith("ref: ")) {
+      const ref = head.slice(5);
+      return fs.readFileSync(path2.join(__dirname, ".git", ref), "utf8").trim();
+    }
+    return head;
+  } catch (_) {
+    return "unknown";
+  }
+}
+const _BOOT_AT  = new Date();
+const _BOOT_SHA = _readCommitSha();
+app.get("/api/v2/health/build", (req, res) => {
+  res.json({
+    status:        "ok",
+    commitSha:     _BOOT_SHA,
+    startedAt:     _BOOT_AT.toISOString(),
+    uptimeSeconds: Math.round(process.uptime()),
+    node:          process.version,
+    env:           process.env.NODE_ENV || "development",
+    // Quick-look inventory so ops can grep for "running-eta" in the
+    // response and confirm the route family is mounted *on this
+    // process*. If these are missing, the deploy didn't pick up the
+    // latest order router.
+    routes: {
+      "/api/v2/order/estimate-completion":    true,
+      "/api/v2/order/:id/running-eta":        true,
+      "/api/v2/order/running-eta-bulk":       true,
+      "/api/v3/portal/auth/login":            true,
+    },
+  });
+});
+
 
 // Mount-level admin gate for the all-ADMIN router groups.
 //
