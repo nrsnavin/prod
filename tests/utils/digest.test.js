@@ -8,6 +8,7 @@ const base = {
   wastage:    { meters: 0, penalty: 0, entries: 0, topReason: null },
   stockouts:  [],
   maintenance: [],
+  predictedLate: [],
 };
 
 describe('digest.formatDigest', () => {
@@ -18,6 +19,19 @@ describe('digest.formatDigest', () => {
     expect(t).toMatch(/None recorded/);
     expect(t).toMatch(/None within horizon/);
     expect(t).toMatch(/Nothing due/);
+    expect(t).toMatch(/All in-flight orders on track/);
+  });
+
+  test('lists ML predicted-late orders sorted by lateness with overflow cap', () => {
+    const predictedLate = [
+      { orderNo: 1041, customerName: 'Acme',   lateWorkingDays: 2 },
+      { orderNo: 1042, customerName: 'Bravo',  lateWorkingDays: 5 },
+      { orderNo: 1043, customerName: null,     lateWorkingDays: 1 },
+    ];
+    const t = formatDigest({ ...base, predictedLate });
+    expect(t).toMatch(/Predicted late/);
+    expect(t).toMatch(/Order #1041 · Acme: 2d late/);
+    expect(t).toMatch(/Order #1043: 1d late/); // null customer omits separator
   });
 
   test('renders production + wastage figures with en-IN grouping', () => {
