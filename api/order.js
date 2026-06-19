@@ -279,8 +279,9 @@ router.post(
 
       // Owner WhatsApp ping — fire-and-forget AFTER the response so a
       // slow/failed notification can never delay or break order
-      // creation. notify() itself never throws; this catch is belt-
-      // and-suspenders for the customer lookup.
+      // creation. Outcome is *logged* (not silently swallowed) so
+      // "no message arrived" reports come with the actual reason
+      // in journalctl instead of the orchestration looking opaque.
       (async () => {
         try {
           const totalMeters = (elasticOrdered || [])
@@ -290,7 +291,7 @@ router.post(
             const cust = await Customer.findById(customer).select("name").lean();
             customerName = cust?.name;
           }
-          await notify("orderCreated", {
+          const result = await notify("orderCreated", {
             orderNo:      order.orderNo,
             po,
             customerName,
@@ -298,7 +299,10 @@ router.post(
             lineCount:    (elasticOrdered || []).length,
             supplyDate,
           });
-        } catch (_) { /* notification is best-effort */ }
+          console.log(`[notify:orderCreated] order=${order.orderNo} →`, JSON.stringify(result));
+        } catch (err) {
+          console.warn(`[notify:orderCreated] hook crashed: ${err?.message}`);
+        }
       })();
     } catch (error) {
       // ErrorHandler already logs; no duplicate console.error.
@@ -633,13 +637,16 @@ router.post(
             const cust = order.customer
               ? await Customer.findById(order.customer).select("name").lean()
               : null;
-            await notify("orderForceApproved", {
+            const result = await notify("orderForceApproved", {
               orderNo:      order.orderNo,
               customerName: cust?.name,
               by:           actorFromRequest(req)?.name || "Admin",
               reason:       forceReason || "(no reason given)",
             });
-          } catch (_) { /* best-effort */ }
+            console.log(`[notify:orderForceApproved] order=${order.orderNo} →`, JSON.stringify(result));
+          } catch (err) {
+            console.warn(`[notify:orderForceApproved] hook crashed: ${err?.message}`);
+          }
         })();
       }
     } catch (error) {
