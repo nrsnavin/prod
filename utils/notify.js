@@ -35,12 +35,25 @@ const fmt = {
     return lines.join("\n");
   },
 
+  orderApproved(p) {
+    return [
+      "✅ *Order approved*",
+      p.orderNo ? `Order #${p.orderNo}` : null,
+      p.customerName ? `Customer: ${p.customerName}` : null,
+      p.totalMeters ? `Qty: ${_num(p.totalMeters)} m` : null,
+      p.by ? `By: ${p.by}` : null,
+      p.via ? `Via: ${p.via}` : null,
+      p.supplyDate ? `Supply by: ${_date(p.supplyDate)}` : null,
+    ].filter(Boolean).join("\n");
+  },
+
   orderForceApproved(p) {
     return [
       "⚠️ *Order force-approved* (guardrail override)",
       p.orderNo ? `Order #${p.orderNo}` : null,
       p.customerName ? `Customer: ${p.customerName}` : null,
       p.by ? `By: ${p.by}` : null,
+      p.via ? `Via: ${p.via}` : null,
       p.reason ? `Reason: ${p.reason}` : null,
     ].filter(Boolean).join("\n");
   },
@@ -76,6 +89,7 @@ function formatMessage(eventType, payload) {
 // Map eventType → the settings.events flag that gates it.
 const EVENT_FLAG = {
   orderCreated:       "orderCreated",
+  orderApproved:      "orderApproved",
   orderForceApproved: "orderForceApproved",
   orderPredictedLate: "orderPredictedLate",
   morningDigest:      "morningDigest",

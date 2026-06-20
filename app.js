@@ -186,6 +186,23 @@ app.post("/api/v2/notify/cron/run-digest", async (req, res) => {
   }
 });
 
+// Public inbound WhatsApp webhook — Twilio POSTs replies here.
+// Twilio sends application/x-www-form-urlencoded, so we don't need
+// the JSON parser, but the body parser is already mounted at app
+// scope. Auth is the Twilio signature + sender allow-list (inside
+// the handler), NOT the admin JWT — Twilio has neither.
+app.post("/api/v2/notify/incoming", async (req, res) => {
+  try {
+    const r = await notify.handleIncoming(req);
+    res.status(r.status).type("text/xml").send(r.body);
+  } catch (err) {
+    console.warn(`[whatsapp:incoming] handler crashed: ${err?.message}`);
+    res.status(500).type("text/xml").send(
+      `<?xml version="1.0" encoding="UTF-8"?><Response><Message>Sorry, internal error.</Message></Response>`
+    );
+  }
+});
+
 app.use("/api/v2/notify",      ADMIN_GATE, notify);
 
 // ── Customer portal API (v3) ────────────────────────────────────

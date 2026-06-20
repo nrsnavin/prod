@@ -30,6 +30,22 @@ describe('notify.formatMessage — orderCreated', () => {
   });
 });
 
+describe('notify.formatMessage — orderApproved', () => {
+  test('includes by/via/customer/qty/supply', () => {
+    const body = formatMessage('orderApproved', {
+      orderNo: 1042, customerName: 'Acme', totalMeters: 12000,
+      by: 'Navin', via: 'WhatsApp (+91…)',
+      supplyDate: '2026-07-15',
+    });
+    expect(body).toMatch(/Order approved/);
+    expect(body).toMatch(/Order #1042/);
+    expect(body).toMatch(/Acme/);
+    expect(body).toMatch(/12,000 m/);
+    expect(body).toMatch(/By: Navin/);
+    expect(body).toMatch(/Via: WhatsApp/);
+  });
+});
+
 describe('notify.formatMessage — orderForceApproved', () => {
   test('surfaces the override reason and actor', () => {
     const body = formatMessage('orderForceApproved', {
