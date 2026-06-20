@@ -598,6 +598,16 @@ router.post(
         reservationFingerprints.push(resFp);
       }
 
+      // Provenance — when the approve came from the WhatsApp webhook,
+      // the inbound handler passes whatsappActor.from in the body so
+      // the audit trail keeps the originating phone (the JWT actor
+      // would otherwise just say "WhatsApp Bot"). Stamp both the
+      // order doc and the fingerprint meta so the admin app can
+      // render a "via WhatsApp +91…" pill in the timeline + a small
+      // icon on the order list.
+      const whatsappFrom = req.body?.whatsappActor?.from || null;
+      const approvalVia  = whatsappFrom ? "whatsapp" : "admin";
+
       const approveFp = buildFingerprint(ACTION_CODES.ORDER_APPROVED, {
         entityId: order._id,
         actor,
@@ -609,13 +619,17 @@ router.post(
           shortfallCount:    shortfalls.length,
           materialsDeducted: deductionFingerprints.length,
           elasticsReserved:  reservationFingerprints.length,
+          via:               approvalVia,
+          whatsappFrom:      whatsappFrom || undefined,
         },
       });
       order.fingerprints.push(approveFp);
 
-      order.status     = "Approved";
-      order.approvedBy = req.user?._id || null;
-      order.approvedAt = new Date();
+      order.status               = "Approved";
+      order.approvedBy           = req.user?._id || null;
+      order.approvedAt           = new Date();
+      order.approvalVia          = approvalVia;
+      order.approvalWhatsappFrom = whatsappFrom || undefined;
       await order.save({ session });
       await session.commitTransaction();
       session.endSession();

@@ -88,6 +88,13 @@ const OrderSchema = new mongoose.Schema(
     // Per-state fingerprints — set explicitly in each route handler
     approvedBy:  { type: mongoose.Types.ObjectId, ref: "User" },
     approvedAt:  { type: Date },
+    // Provenance — how the approval was initiated. Used by the admin
+    // app to surface a visible "via WhatsApp +91…" pill on the order
+    // detail timeline and a small icon on the order list card.
+    //   "admin"     → approved from the admin web/mobile app
+    //   "whatsapp"  → owner replied APPROVE to a WhatsApp ping
+    approvalVia:          { type: String, enum: ["admin", "whatsapp"], default: "admin" },
+    approvalWhatsappFrom: { type: String }, // E.164 of the sender, when via=whatsapp
     cancelledBy: { type: mongoose.Types.ObjectId, ref: "User" },
     cancelledAt: { type: Date },
     startedBy:   { type: mongoose.Types.ObjectId, ref: "User" },
