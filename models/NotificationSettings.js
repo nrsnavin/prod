@@ -25,7 +25,8 @@ const NotificationSettingsSchema = new mongoose.Schema(
     // Per-event toggles. Default everything on; an admin can mute
     // any channel from the settings screen.
     events: {
-      orderCreated:    { type: Boolean, default: true },
+      orderCreated:       { type: Boolean, default: true },
+      orderApproved:      { type: Boolean, default: true },
       orderForceApproved: { type: Boolean, default: true },
       orderPredictedLate: { type: Boolean, default: true },
       morningDigest:   { type: Boolean, default: true },

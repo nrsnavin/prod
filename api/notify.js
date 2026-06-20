@@ -18,6 +18,12 @@ const NotificationSettings = require("../models/NotificationSettings.js");
 const { notify }           = require("../utils/notify.js");
 const { isConfigured, PROVIDER } = require("../utils/whatsapp.js");
 const { buildDigestData, formatDigest } = require("../utils/digest.js");
+const {
+  verifyTwilioSignature, parseCommand, twimlReply, getWhatsAppBotToken,
+} = require("../utils/whatsappInbound.js");
+const NotifSettings = NotificationSettings;
+const axios         = require("axios");
+const Order         = require("../models/Order.js");
 
 // ── GET settings ──────────────────────────────────────────────────
 router.get(
@@ -136,5 +142,131 @@ async function runDigest(returnTextOnly = false) {
 }
 
 router.runDigest = runDigest;
+
+// ─────────────────────────────────────────────────────────────────
+// Inbound WhatsApp webhook — Twilio fires this on every reply.
+// Mounted as a sibling route in app.js (NOT behind ADMIN_GATE) so
+// Twilio's public POST can reach it. Auth is the Twilio signature
+// + the sender allow-list, not an admin JWT.
+//
+// Currently supports only:
+//   APPROVE 1042
+//   APPROVE 1042 force: <reason>
+//
+// Architecture: webhook validates → internal axios call to the
+// existing /api/v2/order/approve route with a system "WhatsApp Bot"
+// admin JWT. Zero risk to the 250-line approve logic; exact same
+// code path; audit trail includes both the bot user and the
+// originating WhatsApp number.
+// ─────────────────────────────────────────────────────────────────
+async function handleIncoming(req) {
+  const from = req.body?.From || "";        // "whatsapp:+91…"
+  const body = req.body?.Body || "";
+
+  // 1. Twilio signature — proves the call really came from Twilio.
+  //    Skipped in dev when TWILIO_AUTH_TOKEN is unset (dry-run mode).
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  if (token) {
+    // The signed URL is what Twilio used — reconstruct from headers.
+    const url = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+    const sig = req.get("x-twilio-signature");
+    const ok = verifyTwilioSignature({
+      url, body: req.body, signature: sig, authToken: token,
+    });
+    if (!ok) {
+      console.warn(`[whatsapp:incoming] bad signature from ${from}`);
+      return { status: 403, body: twimlReply("Unauthorized.") };
+    }
+  }
+
+  // 2. Allow-list: sender's E.164 must be in NotificationSettings.recipients.
+  const senderE164 = from.replace(/^whatsapp:/i, "").trim();
+  const settings = await NotifSettings.load();
+  if (!(settings.recipients || []).includes(senderE164)) {
+    console.warn(`[whatsapp:incoming] sender ${senderE164} not on allow-list`);
+    return {
+      status: 200,
+      body: twimlReply(`Your number (${senderE164}) is not authorized to act on orders.`),
+    };
+  }
+
+  // 3. Parse the command.
+  const cmd = parseCommand(body);
+  if (!cmd) {
+    return {
+      status: 200,
+      body: twimlReply(
+        "Sorry, I didn't recognize that command. Reply with:\n" +
+        "  APPROVE <orderNo>\n" +
+        "  APPROVE <orderNo> force: <reason>"
+      ),
+    };
+  }
+
+  // 4. Look up the order by orderNo (the WhatsApp body has the human
+  //    number, not the _id).
+  const order = await Order.findOne({ orderNo: cmd.orderNo }).lean();
+  if (!order) {
+    return { status: 200, body: twimlReply(`Order #${cmd.orderNo} not found.`) };
+  }
+  if (order.status !== "Open") {
+    return {
+      status: 200,
+      body: twimlReply(`Order #${cmd.orderNo} is ${order.status} — cannot approve.`),
+    };
+  }
+
+  // 5. Internal call to /api/v2/order/approve. Uses the WhatsApp Bot
+  //    admin JWT; the route handles transactions, stock checks,
+  //    reservations, fingerprints, and the orderForceApproved
+  //    notification all by itself.
+  try {
+    const botToken = await getWhatsAppBotToken();
+    const port = process.env.PORT || 2701;
+    const internalUrl = `http://localhost:${port}/api/v2/order/approve`;
+    const payload = {
+      orderId:     order._id.toString(),
+      force:       cmd.force,
+      forceReason: cmd.forceReason,
+      // Per-call audit context — the existing actorFromRequest
+      // picks up the JWT user but this extra meta is recorded in
+      // the request body for the route to optionally surface.
+      whatsappActor: { from: senderE164 },
+    };
+    const res = await axios.post(internalUrl, payload, {
+      headers: { Cookie: `token=${botToken}` },
+      timeout: 30_000,
+      // Don't throw on 4xx — we want to read the body and surface it.
+      validateStatus: () => true,
+    });
+    if (res.status === 200 && res.data?.success) {
+      return {
+        status: 200,
+        body:   twimlReply(
+          `✓ Order #${cmd.orderNo} approved${cmd.force ? " (forced)" : ""}.\n` +
+          `Raw stock deducted, elastic stock reserved.`
+        ),
+      };
+    }
+    // Failure — pass the API's message to the user.
+    const msg = res.data?.message || `HTTP ${res.status}`;
+    // Specifically mention the force command when stock is short.
+    const hint = res.data?.code === "INSUFFICIENT_STOCK"
+      ? `\nReply: APPROVE ${cmd.orderNo} force: <reason>`
+      : "";
+    return {
+      status: 200,
+      body:   twimlReply(`✗ Could not approve #${cmd.orderNo}: ${msg}${hint}`),
+    };
+  } catch (err) {
+    console.warn(`[whatsapp:incoming] internal call failed: ${err?.message}`);
+    return {
+      status: 200,
+      body:   twimlReply(`✗ Could not approve #${cmd.orderNo} — server error.`),
+    };
+  }
+}
+
+router.handleIncoming = handleIncoming;
 
 module.exports = router;

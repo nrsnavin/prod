@@ -628,27 +628,54 @@ router.post(
         reservationFingerprints,
       });
 
-      // Owner WhatsApp ping when an approval bypassed the stock
-      // guardrail — fire-and-forget, after the response, in its own
-      // try/catch so a notification failure can't roll anything back.
-      if (force) {
-        (async () => {
-          try {
-            const cust = order.customer
-              ? await Customer.findById(order.customer).select("name").lean()
-              : null;
+      // Owner WhatsApp pings — fire-and-forget AFTER the response so
+      // a slow/failed notification can never delay the request. Two
+      // separate events:
+      //   • orderApproved       — always, for the normal happy-path
+      //                           approve. Skipped when force=true so
+      //                           it doesn't double up with the force
+      //                           variant.
+      //   • orderForceApproved — only when force=true (stock guard
+      //                           override). Carries the reason.
+      // The webhook-driven path also passes whatsappActor.from in
+      // the body so the audit message tells the owner which channel
+      // initiated the approval.
+      (async () => {
+        try {
+          const cust = order.customer
+            ? await Customer.findById(order.customer).select("name").lean()
+            : null;
+          const actorName = actorFromRequest(req)?.name || "Admin";
+          const via = req.body?.whatsappActor?.from
+            ? `WhatsApp (${req.body.whatsappActor.from})`
+            : "Admin app";
+          const totalMeters = (order.elasticOrdered || [])
+            .reduce((s, e) => s + (Number(e.quantity) || 0), 0);
+
+          if (force) {
             const result = await notify("orderForceApproved", {
               orderNo:      order.orderNo,
               customerName: cust?.name,
-              by:           actorFromRequest(req)?.name || "Admin",
+              by:           actorName,
               reason:       forceReason || "(no reason given)",
+              via,
             });
             console.log(`[notify:orderForceApproved] order=${order.orderNo} →`, JSON.stringify(result));
-          } catch (err) {
-            console.warn(`[notify:orderForceApproved] hook crashed: ${err?.message}`);
+          } else {
+            const result = await notify("orderApproved", {
+              orderNo:      order.orderNo,
+              customerName: cust?.name,
+              totalMeters,
+              by:           actorName,
+              via,
+              supplyDate:   order.supplyDate,
+            });
+            console.log(`[notify:orderApproved] order=${order.orderNo} →`, JSON.stringify(result));
           }
-        })();
-      }
+        } catch (err) {
+          console.warn(`[notify:order-approved-hooks] crashed: ${err?.message}`);
+        }
+      })();
     } catch (error) {
       await session.abortTransaction();
       session.endSession();
