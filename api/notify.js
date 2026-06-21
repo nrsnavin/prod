@@ -26,6 +26,38 @@ const NotifSettings = NotificationSettings;
 const axios         = require("axios");
 const Order         = require("../models/Order.js");
 
+// Build a normalized events map so the admin app always sees
+// {enabled,recipients,tier,throttleSeconds} per event regardless of
+// whether storage holds the legacy Boolean or the new Object shape.
+function _normalizedEvents(s) {
+  const out = {};
+  // Iterate over the known event keys (declared in the schema).
+  for (const ev of Object.keys(s.events?.toObject?.() ?? s.events ?? {})) {
+    out[ev] = s.getEventConfig(ev);
+  }
+  return out;
+}
+
+// Validate one per-event config block. Returns null on success or
+// an error string on failure.
+function _validateEventConfig(ev, value) {
+  if (typeof value === "boolean") return null; // legacy toggle
+  if (!value || typeof value !== "object") return `events.${ev} must be a boolean or object`;
+  if (value.enabled !== undefined && typeof value.enabled !== "boolean")
+    return `events.${ev}.enabled must be boolean`;
+  if (value.recipients !== undefined) {
+    if (!Array.isArray(value.recipients))
+      return `events.${ev}.recipients must be an array`;
+    const bad = value.recipients.find((r) => typeof r !== "string" || !/^\+\d{8,15}$/.test(r));
+    if (bad) return `events.${ev}.recipients has invalid number: ${bad}`;
+  }
+  if (value.tier !== undefined && !["realtime", "hourly", "daily"].includes(value.tier))
+    return `events.${ev}.tier must be one of realtime|hourly|daily`;
+  if (value.throttleSeconds !== undefined && (!Number.isFinite(value.throttleSeconds) || value.throttleSeconds < 0))
+    return `events.${ev}.throttleSeconds must be a non-negative number`;
+  return null;
+}
+
 // ── GET settings ──────────────────────────────────────────────────
 router.get(
   "/settings",
@@ -36,7 +68,7 @@ router.get(
       settings: {
         enabled:    s.enabled,
         recipients: s.recipients,
-        events:     s.events,
+        events:     _normalizedEvents(s),
         quietHours: s.quietHours,
         timezone:   s.timezone,
       },
@@ -61,7 +93,6 @@ router.put(
       if (!Array.isArray(recipients)) {
         return next(new ErrorHandler("recipients must be an array of E.164 numbers", 400));
       }
-      // Light validation — must look like +<digits>.
       const bad = recipients.find((r) => typeof r !== "string" || !/^\+\d{8,15}$/.test(r));
       if (bad !== undefined) {
         return next(new ErrorHandler(`invalid number: ${bad} (use +countrycode...)`, 400));
@@ -69,9 +100,23 @@ router.put(
       s.recipients = recipients;
     }
 
+    // events can be a partial map: { orderCreated: false } or
+    // { orderCreated: { enabled: true, recipients: ["+91..."],
+    // throttleSeconds: 30 } }. We merge per-event into the current
+    // config so callers don't have to send the whole object.
     if (events && typeof events === "object") {
-      for (const [k, v] of Object.entries(events)) {
-        if (s.events[k] !== undefined && typeof v === "boolean") s.events[k] = v;
+      for (const [ev, value] of Object.entries(events)) {
+        if (s.events[ev] === undefined) continue; // ignore unknown events
+        const err = _validateEventConfig(ev, value);
+        if (err) return next(new ErrorHandler(err, 400));
+        if (typeof value === "boolean") {
+          // Preserve the existing rich fields, flip enabled.
+          const current = s.getEventConfig(ev);
+          s.events[ev] = { ...current, enabled: value };
+        } else {
+          const current = s.getEventConfig(ev);
+          s.events[ev] = { ...current, ...value };
+        }
       }
       s.markModified("events");
     }
@@ -87,10 +132,14 @@ router.put(
     if (typeof timezone === "string" && timezone) s.timezone = timezone;
 
     await s.save();
-    res.json({ success: true, settings: {
-      enabled: s.enabled, recipients: s.recipients, events: s.events,
-      quietHours: s.quietHours, timezone: s.timezone,
-    } });
+    res.json({
+      success: true,
+      settings: {
+        enabled: s.enabled, recipients: s.recipients,
+        events: _normalizedEvents(s),
+        quietHours: s.quietHours, timezone: s.timezone,
+      },
+    });
   })
 );
 

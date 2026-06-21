@@ -877,6 +877,31 @@ router.post(
       status:  order.status,
       fingerprint: fp,
     });
+
+    // Owner WhatsApp ping — fire-and-forget. Confirms operations
+    // actually picked up the order vs. it sitting in Approved limbo.
+    (async () => {
+      try {
+        const cust = order.customer
+          ? await Customer.findById(order.customer).select("name").lean()
+          : null;
+        const totalMeters = (order.elasticOrdered || [])
+          .reduce((s, e) => s + (Number(e.quantity) || 0), 0);
+        const actorName = actorFromRequest(req)?.name || "Admin";
+        const result = await notify("orderProductionStarted", {
+          orderNo:      order.orderNo,
+          customerName: cust?.name,
+          totalMeters,
+          by:           actorName,
+          via:          "Admin app",
+          _entity: { type: "Order", id: order._id },
+          _actor:  { id: req.user?._id, name: actorName },
+        });
+        console.log(`[notify:orderProductionStarted] order=${order.orderNo} →`, JSON.stringify(result));
+      } catch (err) {
+        console.warn(`[notify:orderProductionStarted] hook crashed: ${err?.message}`);
+      }
+    })();
   })
 );
 
@@ -929,14 +954,52 @@ router.post(
         order.fingerprints.push(fp);
         await order.save({ session });
 
+        // Snapshot for the post-response notification.
         resp = {
           status: order.status,
           fingerprint: fp,
           releasedReservations: released,
+          // captured for the hook outside the txn
+          _orderNo:       order.orderNo,
+          _customer:      order.customer,
+          _totalMeters:   (order.elasticOrdered || [])
+            .reduce((s, e) => s + (Number(e.quantity) || 0), 0),
+          _onTime:        order.supplyDate ? order.completedAt <= new Date(order.supplyDate) : undefined,
+          _actorName:     actor?.name || "Admin",
+          _orderId:       order._id,
         };
       });
 
-      res.status(200).json({ success: true, message: "Order completed", ...resp });
+      res.status(200).json({
+        success: true,
+        message: "Order completed",
+        status:  resp.status,
+        fingerprint:          resp.fingerprint,
+        releasedReservations: resp.releasedReservations,
+      });
+
+      // Owner WhatsApp ping — confirms revenue-recognition moment.
+      (async () => {
+        try {
+          const cust = resp._customer
+            ? await Customer.findById(resp._customer).select("name").lean()
+            : null;
+          const result = await notify("orderCompleted", {
+            orderNo:              resp._orderNo,
+            customerName:         cust?.name,
+            totalMeters:          resp._totalMeters,
+            releasedReservations: resp.releasedReservations?.length || 0,
+            onTime:               resp._onTime,
+            by:                   resp._actorName,
+            via:                  "Admin app",
+            _entity: { type: "Order", id: resp._orderId },
+            _actor:  { id: req.user?._id, name: resp._actorName },
+          });
+          console.log(`[notify:orderCompleted] order=${resp._orderNo} →`, JSON.stringify(result));
+        } catch (err) {
+          console.warn(`[notify:orderCompleted] hook crashed: ${err?.message}`);
+        }
+      })();
     } catch (err) {
       return next(err);
     } finally {

@@ -52,7 +52,9 @@ describe("GET /api/v2/notify/settings", () => {
     expect(r.status).toBe(200);
     expect(r.body.settings.enabled).toBe(true);
     expect(r.body.settings.recipients).toEqual([]);
-    expect(r.body.settings.events.orderCreated).toBe(true);
+    expect(r.body.settings.events.orderCreated).toEqual({
+      enabled: true, recipients: [], tier: "realtime", throttleSeconds: 0,
+    });
     // No Twilio env in tests → not configured.
     expect(r.body.provider.configured).toBe(false);
   });
@@ -68,7 +70,7 @@ describe("PUT /api/v2/notify/settings", () => {
       });
     expect(r.status).toBe(200);
     expect(r.body.settings.recipients).toEqual(["+919876543210"]);
-    expect(r.body.settings.events.orderCreated).toBe(false);
+    expect(r.body.settings.events.orderCreated.enabled).toBe(false);
     // Persisted.
     const s = await NotificationSettings.load();
     expect(s.recipients).toEqual(["+919876543210"]);
