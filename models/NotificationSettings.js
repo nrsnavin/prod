@@ -27,6 +27,7 @@ const NotificationSettingsSchema = new mongoose.Schema(
     events: {
       orderCreated:       { type: Boolean, default: true },
       orderApproved:      { type: Boolean, default: true },
+      orderCancelled:     { type: Boolean, default: true },
       orderForceApproved: { type: Boolean, default: true },
       orderPredictedLate: { type: Boolean, default: true },
       morningDigest:   { type: Boolean, default: true },

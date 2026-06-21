@@ -298,6 +298,8 @@ router.post(
             totalMeters,
             lineCount:    (elasticOrdered || []).length,
             supplyDate,
+            _entity: { type: "Order", id: order._id },
+            _actor:  actorFromRequest(req),
           });
           console.log(`[notify:orderCreated] order=${order.orderNo} →`, JSON.stringify(result));
         } catch (err) {
@@ -666,6 +668,10 @@ router.post(
           const totalMeters = (order.elasticOrdered || [])
             .reduce((s, e) => s + (Number(e.quantity) || 0), 0);
 
+          const auditContext = {
+            _entity: { type: "Order", id: order._id },
+            _actor:  { id: req.user?._id, name: actorName, via },
+          };
           if (force) {
             const result = await notify("orderForceApproved", {
               orderNo:      order.orderNo,
@@ -673,6 +679,7 @@ router.post(
               by:           actorName,
               reason:       forceReason || "(no reason given)",
               via,
+              ...auditContext,
             });
             console.log(`[notify:orderForceApproved] order=${order.orderNo} →`, JSON.stringify(result));
           } else {
@@ -683,6 +690,7 @@ router.post(
               by:           actorName,
               via,
               supplyDate:   order.supplyDate,
+              ...auditContext,
             });
             console.log(`[notify:orderApproved] order=${order.orderNo} →`, JSON.stringify(result));
           }
@@ -712,12 +720,13 @@ router.post(
 router.post(
   "/cancel",
   catchAsyncErrors(async (req, res, next) => {
-    const { orderId } = req.body;
+    const { orderId, cancelReason } = req.body;
     if (!orderId) return next(new ErrorHandler("Order ID is required", 400));
 
     const session = await mongoose.startSession();
     try {
       let resp;
+      let snapshot; // populated inside the txn for the post-response notification
       await session.withTransaction(async () => {
         const order = await Order.findById(orderId).session(session);
         if (!order) throw new ErrorHandler("Order not found", 404);
@@ -739,9 +748,6 @@ router.post(
           "order cancelled"
         );
 
-        // Refund only if the order had been approved (Open orders
-        // never touched stock). The helper short-circuits on Open
-        // anyway, but skipping the call keeps the response cleaner.
         const refunded = previousStatus === "Open"
           ? []
           : await _refundRawMaterialsForOrder(
@@ -755,6 +761,10 @@ router.post(
         order.cancelledBy = req.user?._id || null;
         order.cancelledAt = new Date();
 
+        // Capture the cancel reason on the audit fingerprint when
+        // the caller supplied one. The WhatsApp inbound webhook will
+        // pass it through as part of the body; the admin app is
+        // expected to prompt for it for any non-Open cancel.
         const fp = buildFingerprint(ACTION_CODES.ORDER_CANCELLED, {
           entityId: order._id,
           actor,
@@ -763,10 +773,27 @@ router.post(
             newStatus: "Cancelled",
             releasedReservations: released.length,
             refundedMaterials:    refunded.length,
+            reason:               cancelReason ? String(cancelReason).trim() : undefined,
+            via:                  req.body?.whatsappActor?.from ? "whatsapp" : "admin",
+            whatsappFrom:         req.body?.whatsappActor?.from || undefined,
           },
         });
         order.fingerprints.push(fp);
         await order.save({ session });
+
+        snapshot = {
+          orderNo:      order.orderNo,
+          customer:     order.customer,
+          previousStatus,
+          released:     released.length,
+          refunded:     refunded.length,
+          reason:       cancelReason ? String(cancelReason).trim() : undefined,
+          via:          req.body?.whatsappActor?.from
+            ? `WhatsApp (${req.body.whatsappActor.from})`
+            : "Admin app",
+          actorName:    actor?.name || "Admin",
+          actorId:      req.user?._id || null,
+        };
 
         resp = {
           orderId: order._id,
@@ -778,6 +805,35 @@ router.post(
       });
 
       res.status(200).json({ success: true, message: "Order cancelled", ...resp });
+
+      // Owner WhatsApp ping — fire-and-forget AFTER the response so
+      // a slow notification can never delay or break a cancel. Skip
+      // when the actor is themselves the recipient (you don't ping
+      // yourself for an action you just took in the app).
+      if (snapshot) {
+        (async () => {
+          try {
+            const cust = snapshot.customer
+              ? await Customer.findById(snapshot.customer).select("name").lean()
+              : null;
+            const result = await notify("orderCancelled", {
+              orderNo:              snapshot.orderNo,
+              customerName:         cust?.name,
+              previousStatus:       snapshot.previousStatus,
+              releasedReservations: snapshot.released,
+              refundedMaterials:    snapshot.refunded,
+              reason:               snapshot.reason || "(not provided)",
+              by:                   snapshot.actorName,
+              via:                  snapshot.via,
+              _entity: { type: "Order", id: resp.orderId },
+              _actor:  { id: snapshot.actorId, name: snapshot.actorName, via: snapshot.via },
+            });
+            console.log(`[notify:orderCancelled] order=${snapshot.orderNo} →`, JSON.stringify(result));
+          } catch (err) {
+            console.warn(`[notify:orderCancelled] hook crashed: ${err?.message}`);
+          }
+        })();
+      }
     } catch (err) {
       return next(err);
     } finally {

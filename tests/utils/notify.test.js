@@ -46,6 +46,36 @@ describe('notify.formatMessage — orderApproved', () => {
   });
 });
 
+describe('notify.formatMessage — orderCancelled', () => {
+  test('renders status transition + reason + actor + counts', () => {
+    const body = formatMessage('orderCancelled', {
+      orderNo: 1042,
+      customerName: 'Acme',
+      previousStatus: 'Approved',
+      releasedReservations: 2,
+      refundedMaterials: 5,
+      reason: 'Customer changed mind',
+      by: 'Navin',
+      via: 'WhatsApp (+91...)',
+    });
+    expect(body).toMatch(/Order cancelled/);
+    expect(body).toMatch(/Order #1042/);
+    expect(body).toMatch(/Previous status: Approved/);
+    expect(body).toMatch(/Reservations released: 2/);
+    expect(body).toMatch(/Materials refunded: 5/);
+    expect(body).toMatch(/Reason: Customer changed mind/);
+    expect(body).toMatch(/By: Navin/);
+    expect(body).toMatch(/Via: WhatsApp/);
+  });
+
+  test('omits absent fields cleanly', () => {
+    const body = formatMessage('orderCancelled', { orderNo: 7 });
+    expect(body).toMatch(/Order #7/);
+    expect(body).not.toMatch(/Reason:/);
+    expect(body).not.toMatch(/By:/);
+  });
+});
+
 describe('notify.formatMessage — orderForceApproved', () => {
   test('surfaces the override reason and actor', () => {
     const body = formatMessage('orderForceApproved', {
