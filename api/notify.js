@@ -187,7 +187,22 @@ async function runDigest(returnTextOnly = false) {
   const data = await buildDigestData(new Date());
   const text = formatDigest(data);
   if (returnTextOnly) return { preview: text, sent: false };
-  const notifyResult = await notify("morningDigest", { body: text });
+
+  // Build + publish a PDF version so the WhatsApp ping carries an
+  // attachment Twilio fetches by URL. PDF generation failures are
+  // non-fatal — the text body still ships.
+  let mediaUrl = null;
+  try {
+    const { buildMorningDigestPdf } = require("../utils/reportPdf.js");
+    const { publishPdf, pdfFilename } = require("../utils/reportPublisher.js");
+    const pdf = await buildMorningDigestPdf(data);
+    const published = await publishPdf(pdf, pdfFilename("morning-digest"));
+    mediaUrl = published.url;
+  } catch (err) {
+    console.warn(`[runDigest] PDF render/publish failed: ${err?.message}`);
+  }
+
+  const notifyResult = await notify("morningDigest", { body: text, _mediaUrl: mediaUrl });
 
   // Piggy-back on the daily cron to surface notification-system
   // health: delivery failures, missed cron runs, lingering dry-run.
@@ -209,7 +224,7 @@ async function runDigest(returnTextOnly = false) {
     console.warn(`[runDigest] anomaly alerts crashed: ${err?.message}`);
   }
 
-  return { notifyResult, preview: text };
+  return { notifyResult, preview: text, mediaUrl };
 }
 
 router.runDigest = runDigest;
@@ -231,8 +246,20 @@ async function runEveningReport(returnTextOnly = false) {
   const data = await buildEveningReportData(new Date());
   const text = formatEveningReport(data);
   if (returnTextOnly) return { preview: text, sent: false };
-  const notifyResult = await notify("eveningReport", { body: text });
-  return { notifyResult, preview: text };
+
+  let mediaUrl = null;
+  try {
+    const { buildEveningReportPdf } = require("../utils/reportPdf.js");
+    const { publishPdf, pdfFilename } = require("../utils/reportPublisher.js");
+    const pdf = await buildEveningReportPdf(data);
+    const published = await publishPdf(pdf, pdfFilename("evening-report"));
+    mediaUrl = published.url;
+  } catch (err) {
+    console.warn(`[runEveningReport] PDF render/publish failed: ${err?.message}`);
+  }
+
+  const notifyResult = await notify("eveningReport", { body: text, _mediaUrl: mediaUrl });
+  return { notifyResult, preview: text, mediaUrl };
 }
 
 router.runEveningReport = runEveningReport;
