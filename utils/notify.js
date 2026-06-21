@@ -235,6 +235,55 @@ const fmt = {
     ].filter(Boolean).join("\n");
   },
 
+  projectedStockoutAlert(p) {
+    const lines = [
+      "📉 *Projected stockouts within 3 days*",
+    ];
+    for (const item of (p.items || []).slice(0, 5)) {
+      const days = item.daysToStockout != null
+        ? `~${item.daysToStockout}d left`
+        : "soon";
+      lines.push(`  ${item.name}: ${days} (stock ${_num(item.stock)})`);
+    }
+    if ((p.items || []).length > 5) lines.push(`  +${p.items.length - 5} more`);
+    lines.push("Raise POs before the floor is breached.");
+    return lines.join("\n");
+  },
+
+  posteriorDriftDetected(p) {
+    return [
+      "📊 *Posterior drift detected*",
+      p.machineLabel && p.elasticName
+        ? `Pair: ${p.machineLabel} · ${p.elasticName}`
+        : null,
+      p.dropPct != null ? `Slowdown: ↓${Math.round(p.dropPct)}% (7d vs prior 7d)` : null,
+      p.recentAvg != null ? `Recent avg: ${_num(p.recentAvg)} m/shift` : null,
+      p.olderAvg != null ? `Earlier avg: ${_num(p.olderAvg)} m/shift` : null,
+      "Investigate yarn quality / operator / machine setup.",
+    ].filter(Boolean).join("\n");
+  },
+
+  wastageAnomalyDay(p) {
+    return [
+      "🚨 *Wastage spike — yesterday*",
+      p.dateLabel ? `Date: ${p.dateLabel}` : null,
+      p.metersYesterday != null ? `Yesterday: ${_num(p.metersYesterday)} m` : null,
+      p.baseline != null ? `30d daily avg: ${_num(p.baseline)} m` : null,
+      p.multiplier != null ? `That's ${p.multiplier.toFixed(1)}× baseline.` : null,
+      p.topReason ? `Top reason: ${p.topReason}` : null,
+    ].filter(Boolean).join("\n");
+  },
+
+  mlPosteriorStale(p) {
+    return [
+      "🤖 *ML rate posterior is stale*",
+      p.staleDays != null ? `No updates in: ${p.staleDays}d` : null,
+      p.activePairs != null ? `Active (elastic·machine) pairs: ${p.activePairs}` : null,
+      p.stalePairs != null ? `Stale pairs: ${p.stalePairs}` : null,
+      "Check that shift verification cascades are running — ETA predictions will drift.",
+    ].filter(Boolean).join("\n");
+  },
+
   dcDelayedDelivery(p) {
     return [
       "🚚 *DC dispatched — late vs promise*",
@@ -302,6 +351,10 @@ const EVENT_FLAG = {
   notificationDeliveryFailed: "notificationDeliveryFailed",
   cronDigestSkipped:          "cronDigestSkipped",
   notifyDryRunStillActive:    "notifyDryRunStillActive",
+  projectedStockoutAlert:     "projectedStockoutAlert",
+  posteriorDriftDetected:     "posteriorDriftDetected",
+  wastageAnomalyDay:          "wastageAnomalyDay",
+  mlPosteriorStale:           "mlPosteriorStale",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

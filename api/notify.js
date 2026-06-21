@@ -200,6 +200,15 @@ async function runDigest(returnTextOnly = false) {
     console.warn(`[runDigest] health checks crashed: ${err?.message}`);
   }
 
+  // Per-event anomaly stream — fired as separate WhatsApp pings so
+  // each one is individually actionable, throttled via NotificationSettings.
+  try {
+    const { runDailyAnomalyAlerts } = require("../utils/dailyAnomalyAlerts.js");
+    await runDailyAnomalyAlerts(new Date());
+  } catch (err) {
+    console.warn(`[runDigest] anomaly alerts crashed: ${err?.message}`);
+  }
+
   return { notifyResult, preview: text };
 }
 
