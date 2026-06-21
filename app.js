@@ -186,6 +186,26 @@ app.post("/api/v2/notify/cron/run-digest", async (req, res) => {
   }
 });
 
+// Cron-triggerable 9 PM evening report — production + wastage +
+// deliveries for TODAY. Same shared-secret pattern as the digest.
+//   curl -X POST -H "x-cron-secret: $CRON_SECRET" \
+//        http://host/api/v2/notify/cron/run-evening-report
+app.post("/api/v2/notify/cron/run-evening-report", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) {
+    return res.status(503).json({ success: false, message: "CRON_SECRET not configured" });
+  }
+  if (req.get("x-cron-secret") !== secret) {
+    return res.status(401).json({ success: false, message: "bad cron secret" });
+  }
+  try {
+    const result = await notify.runEveningReport(false);
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Public inbound WhatsApp webhook — Twilio POSTs replies here.
 // Twilio sends application/x-www-form-urlencoded, so we don't need
 // the JSON parser, but the body parser is already mounted at app
