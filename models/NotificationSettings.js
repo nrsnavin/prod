@@ -1,61 +1,136 @@
 // models/NotificationSettings.js
 //
-// Singleton-style config for owner WhatsApp notifications. There is
-// only ever one of these documents — use NotificationSettings.load()
-// to fetch-or-create it.
+// Singleton-style config for owner WhatsApp notifications.
 //
-// Secrets (Twilio SID / auth token) are NEVER stored here — those
-// live in env (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN,
-// TWILIO_WHATSAPP_FROM). This doc only holds the toggles and
-// recipient numbers an admin can change at runtime without a deploy.
+// Per-event configuration is stored as Mixed because the orchestrator
+// supports two shapes for backward compatibility:
+//
+//   1. Legacy:  events.orderCreated = true       (Boolean toggle)
+//   2. Current: events.orderCreated = {
+//        enabled:         true,
+//        recipients:      ["+91..."],    // empty = use global recipients
+//        tier:            "realtime",    // realtime | hourly | daily
+//        throttleSeconds: 30,             // 0 = no throttle
+//      }
+//
+// The orchestrator calls normalizeEventConfig() at use-time so both
+// shapes work without a migration. Admin app PUT can write either.
 const mongoose = require("mongoose");
+
+// Anchor metadata for each event we know about. tier defaults are
+// the orchestrator's hint about how urgent the event is; the per-
+// event config can override.
+const EVENT_DEFAULTS = {
+  orderCreated:           { tier: "realtime" },
+  orderApproved:          { tier: "realtime" },
+  orderCancelled:         { tier: "realtime" },
+  orderForceApproved:     { tier: "realtime" },
+  orderCompleted:         { tier: "realtime" },
+  orderProductionStarted: { tier: "realtime" },
+  orderPredictedLate:     { tier: "daily"    },
+  morningDigest:          { tier: "daily"    },
+};
+
+function normalizeEventConfig(value, eventName) {
+  const tierDefault = EVENT_DEFAULTS[eventName]?.tier || "realtime";
+  if (typeof value === "boolean") {
+    return {
+      enabled:         value,
+      recipients:      [],
+      tier:            tierDefault,
+      throttleSeconds: 0,
+    };
+  }
+  if (value && typeof value === "object") {
+    return {
+      enabled:         value.enabled !== false,
+      recipients:      Array.isArray(value.recipients) ? value.recipients.filter(Boolean) : [],
+      tier:            value.tier || tierDefault,
+      throttleSeconds: Number(value.throttleSeconds) || 0,
+    };
+  }
+  return {
+    enabled:         true,
+    recipients:      [],
+    tier:            tierDefault,
+    throttleSeconds: 0,
+  };
+}
 
 const NotificationSettingsSchema = new mongoose.Schema(
   {
-    // Marker so load() always finds the same doc.
     singleton: { type: String, default: "owner", unique: true },
 
-    // E.164 numbers (e.g. "+919876543210"). Owner-only for v1 but a
-    // list so we can add managers later without a schema change.
+    // Global recipients fallback. Per-event recipients (when set)
+    // override this list — but if an event's recipients is empty,
+    // we fall through to this global list.
     recipients: { type: [String], default: [] },
 
-    // Master kill-switch. When false, notify() short-circuits.
     enabled: { type: Boolean, default: true },
 
-    // Per-event toggles. Default everything on; an admin can mute
-    // any channel from the settings screen.
+    // Per-event config. Mixed so we accept both Boolean (legacy) and
+    // Object (current) values without a migration. normalizeEventConfig
+    // unifies the shapes at read time.
     events: {
-      orderCreated:       { type: Boolean, default: true },
-      orderApproved:      { type: Boolean, default: true },
-      orderCancelled:     { type: Boolean, default: true },
-      orderForceApproved: { type: Boolean, default: true },
-      orderPredictedLate: { type: Boolean, default: true },
-      morningDigest:   { type: Boolean, default: true },
-      dailyProduction: { type: Boolean, default: true },
-      dailyWastage:    { type: Boolean, default: true },
-      stockout:        { type: Boolean, default: true },
-      maintenanceDue:  { type: Boolean, default: true },
+      orderCreated:           { type: mongoose.Schema.Types.Mixed, default: true },
+      orderApproved:          { type: mongoose.Schema.Types.Mixed, default: true },
+      orderCancelled:         { type: mongoose.Schema.Types.Mixed, default: true },
+      orderForceApproved:     { type: mongoose.Schema.Types.Mixed, default: true },
+      orderCompleted:         { type: mongoose.Schema.Types.Mixed, default: true },
+      orderProductionStarted: { type: mongoose.Schema.Types.Mixed, default: true },
+      orderPredictedLate:     { type: mongoose.Schema.Types.Mixed, default: true },
+      morningDigest:          { type: mongoose.Schema.Types.Mixed, default: true },
     },
 
-    // Quiet hours — local-time window during which non-urgent
-    // notifications are suppressed (digest still queues for the
-    // morning send). Stored as 0–23 hours; null disables.
+    // Quiet hours — wall-clock window in `timezone`. Non-realtime
+    // events are deferred when `isInQuietHours(now)` is true. Real-
+    // time events ignore the window because their urgency is the
+    // whole point.
     quietHours: {
-      start: { type: Number, default: null }, // e.g. 22
-      end:   { type: Number, default: null }, // e.g. 7
+      start: { type: Number, default: null }, // 0-23
+      end:   { type: Number, default: null }, // 0-23
     },
-
-    // IANA tz for interpreting quiet hours + digest schedule.
     timezone: { type: String, default: "Asia/Kolkata" },
   },
   { timestamps: true }
 );
 
-// Fetch-or-create the single settings doc.
 NotificationSettingsSchema.statics.load = async function () {
   let doc = await this.findOne({ singleton: "owner" });
   if (!doc) doc = await this.create({ singleton: "owner" });
   return doc;
 };
+
+// Returns the normalized config for one event — never throws,
+// always returns a fully-shaped object.
+NotificationSettingsSchema.methods.getEventConfig = function (eventName) {
+  return normalizeEventConfig(this.events?.[eventName], eventName);
+};
+
+// True iff the wall-clock hour in this settings' timezone falls
+// inside [start, end). Handles wrap-around windows (e.g. 22-7).
+NotificationSettingsSchema.methods.isInQuietHours = function (now = new Date()) {
+  const { start, end } = this.quietHours || {};
+  if (start == null || end == null) return false;
+  // Hour in the configured timezone. Intl is the only stdlib API
+  // that gives us a tz-aware hour without a dep.
+  const hour = parseInt(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: this.timezone || "Asia/Kolkata",
+      hour: "2-digit", hour12: false,
+    }).format(now),
+    10
+  );
+  if (Number.isNaN(hour)) return false;
+  if (start <= end) {
+    return hour >= start && hour < end;
+  }
+  // Wrap-around: e.g. 22-7 means 22, 23, 0, 1, ..., 6.
+  return hour >= start || hour < end;
+};
+
+// Expose for tests + the GET /settings normalizer.
+NotificationSettingsSchema.statics.normalizeEventConfig = normalizeEventConfig;
+NotificationSettingsSchema.statics.EVENT_DEFAULTS         = EVENT_DEFAULTS;
 
 module.exports = mongoose.model("NotificationSettings", NotificationSettingsSchema);

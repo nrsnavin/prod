@@ -48,6 +48,30 @@ const fmt = {
     ].filter(Boolean).join("\n");
   },
 
+  orderCompleted(p) {
+    return [
+      "🎉 *Order completed*",
+      p.orderNo ? `Order #${p.orderNo}` : null,
+      p.customerName ? `Customer: ${p.customerName}` : null,
+      p.totalMeters ? `Qty: ${_num(p.totalMeters)} m` : null,
+      p.releasedReservations ? `Reservations released: ${p.releasedReservations}` : null,
+      p.by ? `By: ${p.by}` : null,
+      p.via ? `Via: ${p.via}` : null,
+      p.onTime !== undefined ? (p.onTime ? "✓ On time" : "⚠️ Late vs supply") : null,
+    ].filter(Boolean).join("\n");
+  },
+
+  orderProductionStarted(p) {
+    return [
+      "🛠️ *Production started*",
+      p.orderNo ? `Order #${p.orderNo}` : null,
+      p.customerName ? `Customer: ${p.customerName}` : null,
+      p.totalMeters ? `Qty: ${_num(p.totalMeters)} m` : null,
+      p.by ? `By: ${p.by}` : null,
+      p.via ? `Via: ${p.via}` : null,
+    ].filter(Boolean).join("\n");
+  },
+
   orderCancelled(p) {
     return [
       "❌ *Order cancelled*",
@@ -102,13 +126,19 @@ function formatMessage(eventType, payload) {
 }
 
 // Map eventType → the settings.events flag that gates it.
+// Legacy alias map — orchestrator now reads settings.getEventConfig()
+// which uses normalizeEventConfig, so this just declares the known
+// event types. Kept for compatibility with tests that referenced
+// EVENT_FLAG.
 const EVENT_FLAG = {
-  orderCreated:       "orderCreated",
-  orderApproved:      "orderApproved",
-  orderCancelled:     "orderCancelled",
-  orderForceApproved: "orderForceApproved",
-  orderPredictedLate: "orderPredictedLate",
-  morningDigest:      "morningDigest",
+  orderCreated:           "orderCreated",
+  orderApproved:          "orderApproved",
+  orderCancelled:         "orderCancelled",
+  orderForceApproved:     "orderForceApproved",
+  orderCompleted:         "orderCompleted",
+  orderProductionStarted: "orderProductionStarted",
+  orderPredictedLate:     "orderPredictedLate",
+  morningDigest:          "morningDigest",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 
@@ -121,9 +151,14 @@ const EVENT_FLAG = {
 // log row when present so we can later answer "show me every
 // notification this order produced" without joining backwards from
 // fingerprints.
+//
+// Per-event behaviour driven by NotificationSettings.events[ev]:
+//   - enabled         — kill switch per event
+//   - recipients[]    — overrides the global recipients when set
+//   - tier            — realtime ignores quiet hours; daily/hourly defer
+//   - throttleSeconds — N seconds since the last "sent" row for
+//                       (event, entity.id) → skip "throttled"
 async function notify(eventType, payload = {}) {
-  // Pull the audit-only fields out so they don't show up in the
-  // message body. They still ride along into the Notification rows.
   const auditEntity = payload?._entity || null;
   const auditActor  = payload?._actor  || null;
 
@@ -137,8 +172,8 @@ async function notify(eventType, payload = {}) {
       return { skipped: "disabled" };
     }
 
-    const flag = EVENT_FLAG[eventType];
-    if (flag && settings.events?.[flag] === false) {
+    const cfg = settings.getEventConfig(eventType);
+    if (!cfg.enabled) {
       await _audit({
         event: eventType, status: "skipped", reason: `event ${eventType} muted`,
         entity: auditEntity, actor: auditActor,
@@ -146,7 +181,45 @@ async function notify(eventType, payload = {}) {
       return { skipped: `event ${eventType} muted` };
     }
 
-    const recipients = (settings.recipients || []).filter(Boolean);
+    // Quiet hours — only suppresses non-realtime tiers. Real-time
+    // events are urgent by definition, so they punch through.
+    if (cfg.tier !== "realtime" && settings.isInQuietHours()) {
+      await _audit({
+        event: eventType, status: "skipped",
+        reason: `deferred — quiet hours (tier=${cfg.tier})`,
+        entity: auditEntity, actor: auditActor,
+      });
+      return { skipped: "quiet hours" };
+    }
+
+    // Per-event throttle. Looks for any recent "sent" row that
+    // matches the same (event, entity.id) within the throttle
+    // window. Without an entity we can't safely dedupe (would risk
+    // suppressing legitimately distinct messages), so skip the
+    // check in that case.
+    if (cfg.throttleSeconds > 0 && auditEntity?.id) {
+      const since = new Date(Date.now() - cfg.throttleSeconds * 1000);
+      const recent = await Notification.findOne({
+        event:       eventType,
+        "entity.id": auditEntity.id,
+        status:      "sent",
+        createdAt:   { $gte: since },
+      }).sort({ createdAt: -1 }).lean();
+      if (recent) {
+        const ago = Math.round((Date.now() - new Date(recent.createdAt).getTime()) / 1000);
+        await _audit({
+          event: eventType, status: "skipped",
+          reason: `throttled (last sent ${ago}s ago, window ${cfg.throttleSeconds}s)`,
+          entity: auditEntity, actor: auditActor,
+        });
+        return { skipped: "throttled" };
+      }
+    }
+
+    // Recipient resolution — per-event override falls through to
+    // the global list when the per-event recipients[] is empty.
+    const recipients = (cfg.recipients.length > 0 ? cfg.recipients : (settings.recipients || []))
+      .filter(Boolean);
     if (recipients.length === 0) {
       await _audit({
         event: eventType, status: "skipped", reason: "no recipients",
@@ -168,8 +241,6 @@ async function notify(eventType, payload = {}) {
     for (const to of recipients) {
       const r = await sendWhatsApp(to, body);
       results.push(r);
-      // One audit row per recipient per attempt — keeps the cost
-      // metering accurate when recipients > 1.
       const status = r.sent
         ? "sent"
         : r.dryRun
@@ -189,7 +260,6 @@ async function notify(eventType, payload = {}) {
     return { sent: results.filter((r) => r.sent).length, results };
   } catch (err) {
     console.warn(`[notify] ${eventType} failed: ${err?.message}`);
-    // Best-effort audit even on orchestrator crash.
     try {
       await _audit({
         event: eventType, status: "error", reason: err?.message || "unknown",
