@@ -19,6 +19,7 @@ const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
 const ShiftDetail= require('../models/ShiftDetail');
 const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
+const { maybeFireAttendanceCrashed } = require('../utils/attendanceAlerts');
 
 router.use(isAuthenticated);
 
@@ -134,12 +135,16 @@ router.post('/mark', isAdmin('admin'), async (req, res) => {
       await session.endSession();
     }
 
-    return res.json({
+    res.json({
       success:  true,
       message:  `Marked ${records.length} attendance record(s).`,
       upserted: result.upsertedCount,
       modified: result.modifiedCount,
     });
+
+    // Fire-and-forget — never blocks the marking response.
+    maybeFireAttendanceCrashed({ date: dateObj, shift: shiftUp });
+    return;
 
   } catch (err) {
     console.error('[POST /mark]', err);

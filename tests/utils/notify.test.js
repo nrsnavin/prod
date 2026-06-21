@@ -202,6 +202,53 @@ describe('notify.formatMessage — poReceivedForCritical', () => {
   });
 });
 
+describe('notify.formatMessage — customerComplaintFiled', () => {
+  test('shows subject, category, employee name, body preview', () => {
+    const body = formatMessage('customerComplaintFiled', {
+      subject: 'Loom #3 unsafe', category: 'safety',
+      employeeName: 'Ravi', bodyPreview: 'The guard rail is missing on M3.',
+    });
+    expect(body).toMatch(/Employee complaint filed/);
+    expect(body).toMatch(/Subject: Loom #3 unsafe/);
+    expect(body).toMatch(/Category: safety/);
+    expect(body).toMatch(/From: Ravi/);
+    expect(body).toMatch(/guard rail/);
+  });
+  test('shows anonymous when flagged', () => {
+    const body = formatMessage('customerComplaintFiled', {
+      subject: 'x', isAnonymous: true,
+    });
+    expect(body).toMatch(/From: \(anonymous\)/);
+  });
+});
+
+describe('notify.formatMessage — attendanceCrashedToday', () => {
+  test('renders shift, present vs baseline, percent', () => {
+    const body = formatMessage('attendanceCrashedToday', {
+      dateLabel: '20 Jun 2026', shift: 'DAY',
+      present: 8, baseline: 22, percentOfBaseline: 36,
+    });
+    expect(body).toMatch(/Attendance crashed today/);
+    expect(body).toMatch(/Shift: DAY/);
+    expect(body).toMatch(/Effective present: 8/);
+    expect(body).toMatch(/30d baseline: 22/);
+    expect(body).toMatch(/36% of baseline/);
+  });
+});
+
+describe('notify.formatMessage — dcDelayedDelivery', () => {
+  test('renders DC#, order, promised vs dispatched, late by N days', () => {
+    const body = formatMessage('dcDelayedDelivery', {
+      dcNumber: 'DC/E/26-27/001', orderNo: 1042, customerName: 'Acme',
+      supplyDate: '2026-06-15', dispatchDate: '2026-06-20', lateDays: 5,
+    });
+    expect(body).toMatch(/DC dispatched — late vs promise/);
+    expect(body).toMatch(/DC: DC\/E\/26-27\/001/);
+    expect(body).toMatch(/Order #1042/);
+    expect(body).toMatch(/Late by: 5 day/);
+  });
+});
+
 describe('notify.formatMessage — unknown event', () => {
   test('returns null so the orchestrator can skip it', () => {
     expect(formatMessage('does_not_exist', {})).toBeNull();

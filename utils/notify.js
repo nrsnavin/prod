@@ -185,6 +185,40 @@ const fmt = {
     ].filter(Boolean).join("\n");
   },
 
+  customerComplaintFiled(p) {
+    return [
+      "📣 *Employee complaint filed*",
+      p.subject ? `Subject: ${p.subject}` : null,
+      p.category ? `Category: ${p.category}` : null,
+      p.employeeName ? `From: ${p.employeeName}` : (p.isAnonymous ? "From: (anonymous)" : null),
+      p.bodyPreview ? `“${p.bodyPreview}”` : null,
+    ].filter(Boolean).join("\n");
+  },
+
+  attendanceCrashedToday(p) {
+    return [
+      "👷 *Attendance crashed today*",
+      p.dateLabel ? `Date: ${p.dateLabel}` : null,
+      p.shift ? `Shift: ${p.shift}` : null,
+      p.present != null ? `Effective present: ${p.present}` : null,
+      p.baseline != null ? `30d baseline: ${_num(p.baseline)}` : null,
+      p.percentOfBaseline != null
+        ? `That's ${Math.round(p.percentOfBaseline)}% of baseline.` : null,
+    ].filter(Boolean).join("\n");
+  },
+
+  dcDelayedDelivery(p) {
+    return [
+      "🚚 *DC dispatched — late vs promise*",
+      p.dcNumber ? `DC: ${p.dcNumber}` : null,
+      p.orderNo ? `Order #${p.orderNo}` : null,
+      p.customerName ? `Customer: ${p.customerName}` : null,
+      p.supplyDate ? `Promised: ${_date(p.supplyDate)}` : null,
+      p.dispatchDate ? `Dispatched: ${_date(p.dispatchDate)}` : null,
+      p.lateDays != null ? `Late by: ${p.lateDays} day(s)` : null,
+    ].filter(Boolean).join("\n");
+  },
+
   orderPredictedLate(p) {
     return [
       "⏰ *Order predicted late*",
@@ -234,6 +268,9 @@ const EVENT_FLAG = {
   criticalStockout:       "criticalStockout",
   priceChangeAbove10:     "priceChangeAbove10",
   poReceivedForCritical:  "poReceivedForCritical",
+  customerComplaintFiled: "customerComplaintFiled",
+  attendanceCrashedToday: "attendanceCrashedToday",
+  dcDelayedDelivery:      "dcDelayedDelivery",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

@@ -36,6 +36,9 @@ const EVENT_DEFAULTS = {
   criticalStockout:       { tier: "realtime" },
   priceChangeAbove10:     { tier: "realtime" },
   poReceivedForCritical:  { tier: "realtime" },
+  customerComplaintFiled: { tier: "realtime" },
+  attendanceCrashedToday: { tier: "hourly"   },
+  dcDelayedDelivery:      { tier: "realtime" },
 };
 
 function normalizeEventConfig(value, eventName) {
@@ -113,6 +116,14 @@ const NotificationSettingsSchema = new mongoose.Schema(
         type: mongoose.Schema.Types.Mixed,
         default: { enabled: true, recipients: [], tier: "realtime", throttleSeconds: 3600 },
       },
+      customerComplaintFiled: { type: mongoose.Schema.Types.Mixed, default: true },
+      // attendanceCrashedToday: at most one ping per day per (date, shift)
+      // even if /mark is hit multiple times.
+      attendanceCrashedToday: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "hourly", throttleSeconds: 86400 },
+      },
+      dcDelayedDelivery:      { type: mongoose.Schema.Types.Mixed, default: true },
     },
 
     // Quiet hours — wall-clock window in `timezone`. Non-realtime

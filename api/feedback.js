@@ -21,6 +21,7 @@ const Employee  = require("../models/Employee");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { notify } = require("../utils/notify");
 
 const TYPES      = ["complaint", "suggestion"];
 const CATEGORIES = ["machine", "safety", "management", "facilities", "payroll", "other"];
@@ -69,6 +70,25 @@ router.post(
     });
 
     res.status(201).json({ success: true, data: fb });
+
+    // Fire owner WhatsApp ping only for complaints (suggestions
+    // are routine and shouldn't wake anyone). Fire-and-forget.
+    if (fb.type === "complaint") {
+      (async () => {
+        try {
+          await notify("customerComplaintFiled", {
+            subject:      fb.subject,
+            category:     fb.category,
+            employeeName: isAnonymous ? null : emp.name,
+            isAnonymous:  !!isAnonymous,
+            bodyPreview:  fb.body.length > 140 ? `${fb.body.slice(0, 140)}…` : fb.body,
+            _entity:      { type: "EmployeeFeedback", id: String(fb._id) },
+          });
+        } catch (err) {
+          console.warn(`[notify:complaint] crashed: ${err?.message}`);
+        }
+      })();
+    }
   })
 );
 
