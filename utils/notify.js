@@ -48,6 +48,18 @@ const fmt = {
     ].filter(Boolean).join("\n");
   },
 
+  anomalyDetected(p) {
+    return [
+      "🔍 *Production anomaly*",
+      p.machineId ? `Machine: ${p.machineId}` : null,
+      p.shift ? `Shift: ${p.shift}` : null,
+      p.date ? `Date: ${_date(p.date)}` : null,
+      p.produced != null ? `Produced: ${_num(p.produced)} m` : null,
+      p.average != null ? `Machine's recent avg: ${_num(p.average)} m` : null,
+      p.percent != null ? `That's ${Math.round(p.percent)}% of normal.` : null,
+    ].filter(Boolean).join("\n");
+  },
+
   machineBreakdown(p) {
     return [
       "🚨 *Machine breakdown*",
@@ -179,6 +191,7 @@ const EVENT_FLAG = {
   machineBreakdown:       "machineBreakdown",
   shiftBelowThreshold:    "shiftBelowThreshold",
   wastageHighEvent:       "wastageHighEvent",
+  anomalyDetected:        "anomalyDetected",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

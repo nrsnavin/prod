@@ -32,6 +32,7 @@ const EVENT_DEFAULTS = {
   machineBreakdown:       { tier: "realtime" },
   shiftBelowThreshold:    { tier: "realtime" },
   wastageHighEvent:       { tier: "realtime" },
+  anomalyDetected:        { tier: "realtime" },
 };
 
 function normalizeEventConfig(value, eventName) {
@@ -86,6 +87,13 @@ const NotificationSettingsSchema = new mongoose.Schema(
       machineBreakdown:       { type: mongoose.Schema.Types.Mixed, default: true },
       shiftBelowThreshold:    { type: mongoose.Schema.Types.Mixed, default: true },
       wastageHighEvent:       { type: mongoose.Schema.Types.Mixed, default: true },
+      // anomalyDetected defaults to a 1h throttle per (event, entity.id).
+      // entity.id is the machine, so the orchestrator coalesces multiple
+      // anomaly signals on the same machine into one ping per hour.
+      anomalyDetected: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "realtime", throttleSeconds: 3600 },
+      },
     },
 
     // Quiet hours — wall-clock window in `timezone`. Non-realtime

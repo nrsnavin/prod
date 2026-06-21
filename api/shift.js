@@ -166,6 +166,7 @@ async function applyProductionCascade(
   // the cascade. Idempotent because shifts can only be closed once.
   try {
     await _checkLowOutputShift(shift, machineDoc, prodValue, req);
+    await _checkMachineAnomaly(shift, machineDoc, prodValue, req);
   } catch (err) {
     if (typeof console !== "undefined" && console.warn) {
       console.warn(
@@ -210,6 +211,42 @@ async function _checkLowOutputShift(shift, machine, prodValue, req) {
     _actor:  { id: req?.user?._id, name: req?.user?.name || "system" },
   });
   console.log(`[notify:shiftBelowThreshold] shift=${shift?._id} →`, JSON.stringify(result));
+}
+
+// ── Machine anomaly ─────────────────────────────────────────────
+// Compares this shift's per-head output to the trailing 30-day
+// average FOR THIS MACHINE (not plant-wide; that's
+// shiftBelowThreshold). Fires when under 40% of the machine's own
+// normal. Throttled to once per hour per machine via the orchestrator's
+// (event, entity.id) throttle (default throttleSeconds=3600 on the
+// event). The brainstorm called for "if 5 anomalies fire in an hour,
+// batch into one message" — the throttle achieves that.
+async function _checkMachineAnomaly(shift, machine, prodValue, req) {
+  if (!machine?._id) return;
+  const since = new Date(Date.now() - 30 * 86_400_000);
+  const rows = await ShiftDetail.aggregate([
+    { $match: { status: "closed", machine: machine._id, date: { $gte: since } } },
+    { $group: { _id: null, total: { $sum: "$productionMeters" }, n: { $sum: 1 } } },
+  ]);
+  const r = rows[0] || {};
+  if (!r.n || r.n < 3) return; // not enough machine history
+  const avg = r.total / r.n;
+  if (!(avg > 0)) return;
+  const pct = (prodValue / avg) * 100;
+  if (pct >= 40) return; // not an anomaly
+
+  const result = await notify("anomalyDetected", {
+    machineId: machine.ID,
+    shift:     shift?.shift,
+    date:      shift?.date,
+    produced:  Math.round(prodValue),
+    average:   Math.round(avg),
+    percent:   pct,
+    // entity.id = machine so the orchestrator throttles per machine.
+    _entity: { type: "Machine", id: machine._id },
+    _actor:  { id: req?.user?._id, name: req?.user?.name || "system" },
+  });
+  console.log(`[notify:anomalyDetected] machine=${machine.ID} →`, JSON.stringify(result));
 }
 
 router.get(

@@ -10,6 +10,7 @@ const base = {
   maintenance: [],
   predictedLate: [],
   orderActivity: { edited: 0 },
+  posteriorDrift: [],
 };
 
 describe('digest.formatDigest', () => {
@@ -63,6 +64,24 @@ describe('digest.formatDigest', () => {
     expect(none).not.toMatch(/Orders edited/);
     const some = formatDigest({ ...base, orderActivity: { edited: 4 } });
     expect(some).toMatch(/Orders edited yesterday.*: 4/);
+  });
+
+  test('renders posterior drift section when pairs slowed', () => {
+    const t = formatDigest({
+      ...base,
+      posteriorDrift: [
+        { machineLabel: 'M3', elasticName: 'ElasticA', dropPct: 32 },
+        { machineLabel: 'M1', elasticName: 'ElasticB', dropPct: 27 },
+      ],
+    });
+    expect(t).toMatch(/Posterior drift/);
+    expect(t).toMatch(/M3 · ElasticA: ↓32%/);
+    expect(t).toMatch(/M1 · ElasticB: ↓27%/);
+  });
+
+  test('hides posterior drift section when nothing drifted', () => {
+    const t = formatDigest(base);
+    expect(t).not.toMatch(/Posterior drift/);
   });
 
   test('flags overdue maintenance distinctly from upcoming', () => {

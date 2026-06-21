@@ -69,6 +69,16 @@ function formatDigest(d) {
     lines.push("  All in-flight orders on track. 👍");
   }
 
+  // Posterior drift (ML-detected machine/elastic slowdown)
+  if ((d.posteriorDrift || []).length > 0) {
+    lines.push("", "📊 *Posterior drift* (7d vs prior 7d)");
+    for (const drift of d.posteriorDrift.slice(0, 5)) {
+      const label = `${drift.machineLabel || "?"} · ${drift.elasticName || "?"}`;
+      lines.push(`  ${label}: ↓${Math.round(drift.dropPct)}%`);
+    }
+    if (d.posteriorDrift.length > 5) lines.push(`  +${d.posteriorDrift.length - 5} more`);
+  }
+
   // Maintenance
   lines.push("", "🔧 *Maintenance due*");
   if (d.maintenance.length > 0) {
@@ -94,19 +104,88 @@ async function buildDigestData(now = new Date(), opts = {}) {
   const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
   const startYday  = new Date(startToday.getTime() - 86_400_000);
 
-  const [production, wastage, stockouts, maintenance, predictedLate, orderActivity] = await Promise.all([
-    _production(startYday, startToday),
-    _wastage(startYday, startToday),
-    _stockouts(now, lookbackDays, horizonDays),
-    _maintenance(now, maintDays),
-    _predictedLate(now),
-    _orderActivity(startYday, startToday),
-  ]);
+  const [production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift] =
+    await Promise.all([
+      _production(startYday, startToday),
+      _wastage(startYday, startToday),
+      _stockouts(now, lookbackDays, horizonDays),
+      _maintenance(now, maintDays),
+      _predictedLate(now),
+      _orderActivity(startYday, startToday),
+      _posteriorDrift(now),
+    ]);
 
   return {
     dateLabel: startYday.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
-    production, wastage, stockouts, maintenance, predictedLate, orderActivity,
+    production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift,
   };
+}
+
+// Posterior drift — flags (elastic, machine) pairs whose per-head
+// production rate dropped > 25% comparing the last 7 days to the 7
+// days before that. Indicates machine slowdown, operator change, or
+// yarn quality drift. Skips pairs that had no shifts in the recent
+// window (machine was off — not a slowdown).
+async function _posteriorDrift(now) {
+  const recentStart = new Date(now.getTime() - 7  * 86_400_000);
+  const olderStart  = new Date(now.getTime() - 14 * 86_400_000);
+
+  const rows = await ShiftDetail.aggregate([
+    { $match: { status: "closed", date: { $gte: olderStart } } },
+    { $unwind: "$elastics" },
+    { $project: {
+        machine:    1,
+        elasticId: "$elastics.elastic",
+        productionMeters: 1,
+        bucket: {
+          $cond: [{ $gte: ["$date", recentStart] }, "recent", "older"],
+        },
+      } },
+    { $group: {
+        _id: { machine: "$machine", elastic: "$elasticId", bucket: "$bucket" },
+        total: { $sum: "$productionMeters" },
+        n:     { $sum: 1 },
+      } },
+  ]);
+
+  // Pivot: { pairKey: { recent: {total, n}, older: {total, n} } }
+  const byPair = new Map();
+  for (const r of rows) {
+    const key = `${r._id.machine}|${r._id.elastic}`;
+    if (!byPair.has(key)) byPair.set(key, { machine: r._id.machine, elastic: r._id.elastic, recent: null, older: null });
+    byPair.get(key)[r._id.bucket] = { total: r.total, n: r.n };
+  }
+
+  const drifts = [];
+  for (const p of byPair.values()) {
+    if (!p.recent || !p.older) continue;
+    if (p.recent.n < 2 || p.older.n < 2) continue; // not enough samples
+    const recentAvg = p.recent.total / p.recent.n;
+    const olderAvg  = p.older.total  / p.older.n;
+    if (!(olderAvg > 0)) continue;
+    const dropPct = (1 - recentAvg / olderAvg) * 100;
+    if (dropPct < 25) continue;
+    drifts.push({ machine: p.machine, elastic: p.elastic, dropPct, recentAvg, olderAvg });
+  }
+  // Hydrate names — cheap because the list is small.
+  if (drifts.length > 0) {
+    const Machine = require("../models/Machine.js");
+    const Elastic = require("../models/Elastic.js");
+    const machineIds = [...new Set(drifts.map((d) => d.machine.toString()))];
+    const elasticIds = [...new Set(drifts.map((d) => d.elastic.toString()))];
+    const [machines, elastics] = await Promise.all([
+      Machine.find({ _id: { $in: machineIds } }).select("ID").lean(),
+      Elastic.find({ _id: { $in: elasticIds } }).select("name").lean(),
+    ]);
+    const mById = Object.fromEntries(machines.map((m) => [m._id.toString(), m.ID]));
+    const eById = Object.fromEntries(elastics.map((e) => [e._id.toString(), e.name]));
+    for (const d of drifts) {
+      d.machineLabel = mById[d.machine.toString()];
+      d.elasticName  = eById[d.elastic.toString()];
+    }
+  }
+  drifts.sort((a, b) => b.dropPct - a.dropPct);
+  return drifts;
 }
 
 // Count yesterday's order edits (Open-state updates) so the digest
