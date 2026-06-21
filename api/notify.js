@@ -214,6 +214,29 @@ async function runDigest(returnTextOnly = false) {
 
 router.runDigest = runDigest;
 
+// ── POST run-evening-report ───────────────────────────────────────
+// Same shape as run-digest. The 9 PM cron triggers this; covers
+// what happened TODAY (the morning digest covers yesterday).
+router.post(
+  "/run-evening-report",
+  catchAsyncErrors(async (req, res) => {
+    const result = await runEveningReport(req.query.dryReturn === "1");
+    res.json({ success: true, ...result });
+  })
+);
+
+async function runEveningReport(returnTextOnly = false) {
+  const { buildEveningReportData, formatEveningReport } =
+    require("../utils/eveningReport.js");
+  const data = await buildEveningReportData(new Date());
+  const text = formatEveningReport(data);
+  if (returnTextOnly) return { preview: text, sent: false };
+  const notifyResult = await notify("eveningReport", { body: text });
+  return { notifyResult, preview: text };
+}
+
+router.runEveningReport = runEveningReport;
+
 // ─────────────────────────────────────────────────────────────────
 // Inbound WhatsApp webhook — Twilio fires this on every reply.
 // Mounted as a sibling route in app.js (NOT behind ADMIN_GATE) so

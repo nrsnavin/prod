@@ -314,6 +314,12 @@ const fmt = {
     return p?.body || null;
   },
 
+  // Same pass-through pattern for the 9 PM evening report —
+  // utils/eveningReport.js builds the text.
+  eveningReport(p) {
+    return p?.body || null;
+  },
+
   test(p) {
     return p?.body || "✅ Test message from your factory notifications. If you can read this, WhatsApp alerts are working.";
   },
@@ -355,6 +361,7 @@ const EVENT_FLAG = {
   posteriorDriftDetected:     "posteriorDriftDetected",
   wastageAnomalyDay:          "wastageAnomalyDay",
   mlPosteriorStale:           "mlPosteriorStale",
+  eveningReport:              "eveningReport",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 
