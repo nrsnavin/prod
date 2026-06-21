@@ -284,6 +284,63 @@ describe('notify.formatMessage — system health', () => {
   });
 });
 
+describe('notify.formatMessage — daily anomaly stream', () => {
+  test('projectedStockoutAlert lists materials with days left', () => {
+    const body = formatMessage('projectedStockoutAlert', {
+      items: [
+        { name: "Yarn-20s", stock: 12, daysToStockout: 2 },
+        { name: "Latex",    stock:  3, daysToStockout: 1 },
+      ],
+    });
+    expect(body).toMatch(/Projected stockouts within 3 days/);
+    expect(body).toMatch(/Yarn-20s: ~2d left/);
+    expect(body).toMatch(/Latex: ~1d left/);
+    expect(body).toMatch(/Raise POs/);
+  });
+
+  test('projectedStockoutAlert caps at 5 with overflow note', () => {
+    const items = Array.from({ length: 7 }, (_, i) =>
+      ({ name: `M${i}`, stock: 10, daysToStockout: i + 1 }));
+    const body = formatMessage('projectedStockoutAlert', { items });
+    expect(body).toMatch(/\+2 more/);
+    expect(body).not.toMatch(/M6:/);
+  });
+
+  test('posteriorDriftDetected shows pair + drop + averages', () => {
+    const body = formatMessage('posteriorDriftDetected', {
+      machineLabel: 'M3', elasticName: 'ElasticA',
+      dropPct: 32, recentAvg: 1800, olderAvg: 2650,
+    });
+    expect(body).toMatch(/Posterior drift detected/);
+    expect(body).toMatch(/Pair: M3 · ElasticA/);
+    expect(body).toMatch(/Slowdown: ↓32%/);
+    expect(body).toMatch(/Recent avg: 1,800/);
+    expect(body).toMatch(/Earlier avg: 2,650/);
+  });
+
+  test('wastageAnomalyDay shows yesterday vs baseline + multiplier', () => {
+    const body = formatMessage('wastageAnomalyDay', {
+      dateLabel: '20 Jun 2026', metersYesterday: 540,
+      baseline: 180, multiplier: 3.0, topReason: 'Yarn break',
+    });
+    expect(body).toMatch(/Wastage spike/);
+    expect(body).toMatch(/Yesterday: 540 m/);
+    expect(body).toMatch(/30d daily avg: 180 m/);
+    expect(body).toMatch(/3\.0× baseline/);
+    expect(body).toMatch(/Top reason: Yarn break/);
+  });
+
+  test('mlPosteriorStale shows stale-count + days', () => {
+    const body = formatMessage('mlPosteriorStale', {
+      staleDays: 3, activePairs: 18, stalePairs: 12,
+    });
+    expect(body).toMatch(/ML rate posterior is stale/);
+    expect(body).toMatch(/No updates in: 3d/);
+    expect(body).toMatch(/Stale pairs: 12/);
+    expect(body).toMatch(/shift verification cascades/);
+  });
+});
+
 describe('notify.formatMessage — unknown event', () => {
   test('returns null so the orchestrator can skip it', () => {
     expect(formatMessage('does_not_exist', {})).toBeNull();

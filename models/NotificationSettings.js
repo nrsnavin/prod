@@ -42,6 +42,10 @@ const EVENT_DEFAULTS = {
   notificationDeliveryFailed: { tier: "hourly" },
   cronDigestSkipped:         { tier: "daily"  },
   notifyDryRunStillActive:   { tier: "daily"  },
+  projectedStockoutAlert:    { tier: "daily"  },
+  posteriorDriftDetected:    { tier: "hourly" },
+  wastageAnomalyDay:         { tier: "daily"  },
+  mlPosteriorStale:          { tier: "daily"  },
 };
 
 function normalizeEventConfig(value, eventName) {
@@ -128,6 +132,22 @@ const NotificationSettingsSchema = new mongoose.Schema(
       },
       cronDigestSkipped:       { type: mongoose.Schema.Types.Mixed, default: true },
       notifyDryRunStillActive: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "daily", throttleSeconds: 86400 },
+      },
+      // 3-day throttle per material — we want a heads-up, not a daily nag.
+      projectedStockoutAlert: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "daily", throttleSeconds: 259200 },
+      },
+      // 6h per (machine,elastic) pair — the same pair shouldn't ping
+      // multiple times within a working day.
+      posteriorDriftDetected: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "hourly", throttleSeconds: 21600 },
+      },
+      wastageAnomalyDay: { type: mongoose.Schema.Types.Mixed, default: true },
+      mlPosteriorStale: {
         type: mongoose.Schema.Types.Mixed,
         default: { enabled: true, recipients: [], tier: "daily", throttleSeconds: 86400 },
       },
