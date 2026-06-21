@@ -53,6 +53,11 @@ function formatDigest(d) {
     lines.push("  None within horizon. 👍");
   }
 
+  // Order activity (low-priority edits)
+  if (d.orderActivity && d.orderActivity.edited > 0) {
+    lines.push("", `✏️ *Orders edited yesterday*: ${d.orderActivity.edited}`);
+  }
+
   // Predicted late (ML)
   lines.push("", "⏰ *Predicted late* (ML)");
   if ((d.predictedLate || []).length > 0) {
@@ -89,18 +94,39 @@ async function buildDigestData(now = new Date(), opts = {}) {
   const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
   const startYday  = new Date(startToday.getTime() - 86_400_000);
 
-  const [production, wastage, stockouts, maintenance, predictedLate] = await Promise.all([
+  const [production, wastage, stockouts, maintenance, predictedLate, orderActivity] = await Promise.all([
     _production(startYday, startToday),
     _wastage(startYday, startToday),
     _stockouts(now, lookbackDays, horizonDays),
     _maintenance(now, maintDays),
     _predictedLate(now),
+    _orderActivity(startYday, startToday),
   ]);
 
   return {
     dateLabel: startYday.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
-    production, wastage, stockouts, maintenance, predictedLate,
+    production, wastage, stockouts, maintenance, predictedLate, orderActivity,
   };
+}
+
+// Count yesterday's order edits (Open-state updates) so the digest
+// surfaces routine, non-urgent edit volume the owner doesn't need
+// real-time pings for. Reads fingerprint timestamps because the
+// Order doc only stores the latest updatedItemsAt and we want a
+// per-day count.
+async function _orderActivity(start, end) {
+  const Order = require("../models/Order.js");
+  const rows = await Order.aggregate([
+    { $match: { fingerprints: { $exists: true, $ne: [] } } },
+    { $unwind: "$fingerprints" },
+    { $match: {
+        "fingerprints.code": "ORDER_UPDATED",
+        "fingerprints.at":   { $gte: start, $lt: end },
+      } },
+    { $group: { _id: "$_id" } }, // dedupe per order in case of multiple edits
+    { $count: "n" },
+  ]);
+  return { edited: rows[0]?.n || 0 };
 }
 
 // Predicted-late: walks every active order, runs the running-ETA

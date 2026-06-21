@@ -46,6 +46,47 @@ describe('notify.formatMessage — orderApproved', () => {
   });
 });
 
+describe('notify.formatMessage — machineBreakdown', () => {
+  test('renders machine id + previous status + order', () => {
+    const body = formatMessage('machineBreakdown', {
+      machineId: 'M3', previousStatus: 'running',
+      orderRunning: 'job123', by: 'Navin', via: 'Admin app',
+    });
+    expect(body).toMatch(/Machine breakdown/);
+    expect(body).toMatch(/Machine: M3/);
+    expect(body).toMatch(/Was: running/);
+    expect(body).toMatch(/Reported by: Navin/);
+  });
+});
+
+describe('notify.formatMessage — shiftBelowThreshold', () => {
+  test('shows produced vs baseline + percent', () => {
+    const body = formatMessage('shiftBelowThreshold', {
+      machineId: 'M3', shift: 'DAY', date: '2026-06-20',
+      produced: 200, baseline: 500, percentOfBaseline: 40,
+    });
+    expect(body).toMatch(/Low-output shift/);
+    expect(body).toMatch(/Produced: 200 m/);
+    expect(body).toMatch(/Plant baseline: 500 m/);
+    expect(body).toMatch(/40% of baseline/);
+  });
+});
+
+describe('notify.formatMessage — wastageHighEvent', () => {
+  test('renders job, elastic, quantity, percent', () => {
+    const body = formatMessage('wastageHighEvent', {
+      jobNo: 42, elasticName: 'Elastic-A',
+      quantity: 50, dailyProduction: 400, percent: 12.5,
+      reason: 'Yarn break', employee: 'Ravi',
+    });
+    expect(body).toMatch(/High wastage event/);
+    expect(body).toMatch(/Job: #42/);
+    expect(body).toMatch(/Elastic: Elastic-A/);
+    expect(body).toMatch(/13% — above 10% threshold/);
+    expect(body).toMatch(/Yarn break/);
+  });
+});
+
 describe('notify.formatMessage — orderCancelled', () => {
   test('renders status transition + reason + actor + counts', () => {
     const body = formatMessage('orderCancelled', {

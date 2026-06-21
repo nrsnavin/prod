@@ -6,6 +6,8 @@ const router  = express.Router();
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const Machine          = require("../models/Machine");
+const { notify }       = require("../utils/notify");
+const { actorFromRequest } = require("../utils/fingerprint");
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS
@@ -379,6 +381,8 @@ router.patch(
       );
     }
 
+    const previousStatus = machine.status;
+    const previousOrder  = machine.orderRunning;
     machine.status = status;
     if (status === "free") {
       machine.orderRunning = null;
@@ -389,6 +393,42 @@ router.patch(
       success: true,
       machine: { _id: machine._id, ID: machine.ID, status: machine.status },
     });
+
+    // Owner WhatsApp ping when a machine moves to "maintenance"
+    // unexpectedly — i.e. NOT preceded by a service-log entry in
+    // the last 5 minutes (which would indicate planned maintenance
+    // via the add-service-log flow). The breakdown is the lost-
+    // output signal; planned work isn't.
+    if (status === "maintenance" && previousStatus !== "maintenance") {
+      (async () => {
+        try {
+          // Look at the most recent service log. If it's fresh
+          // (within 5 min), this status change is planned — skip.
+          const logs = machine.serviceLogs || [];
+          const lastLog = logs.length
+            ? logs.reduce((a, b) => (new Date(a.date) > new Date(b.date) ? a : b))
+            : null;
+          const planned = lastLog && (Date.now() - new Date(lastLog.date).getTime() < 5 * 60_000);
+          if (planned) {
+            console.log(`[notify:machineBreakdown] machine=${machine.ID} → skipped: recent service log (planned)`);
+            return;
+          }
+          const actorName = actorFromRequest(req)?.name || "Admin";
+          const result = await notify("machineBreakdown", {
+            machineId:      machine.ID,
+            previousStatus,
+            orderRunning:   previousOrder?.toString?.() || null,
+            by:             actorName,
+            via:            "Admin app",
+            _entity: { type: "Machine", id: machine._id },
+            _actor:  { id: req.user?._id, name: actorName },
+          });
+          console.log(`[notify:machineBreakdown] machine=${machine.ID} →`, JSON.stringify(result));
+        } catch (err) {
+          console.warn(`[notify:machineBreakdown] hook crashed: ${err?.message}`);
+        }
+      })();
+    }
   })
 );
 
