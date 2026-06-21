@@ -18,6 +18,7 @@ const NotificationSettings = require("../models/NotificationSettings.js");
 const { notify }           = require("../utils/notify.js");
 const { isConfigured, PROVIDER } = require("../utils/whatsapp.js");
 const { buildDigestData, formatDigest } = require("../utils/digest.js");
+const Notification = require("../models/Notification.js");
 const {
   verifyTwilioSignature, parseCommand, twimlReply, getWhatsAppBotToken,
 } = require("../utils/whatsappInbound.js");
@@ -268,5 +269,59 @@ async function handleIncoming(req) {
 }
 
 router.handleIncoming = handleIncoming;
+
+// ─────────────────────────────────────────────────────────────────
+// Audit-log surface.
+//
+//   GET /api/v2/notify/log?event=…&recipient=…&status=…&limit=50
+//   GET /api/v2/notify/stats?days=30
+//
+// Both admin-gated by the mount in app.js. Designed to drive a
+// future settings/log screen + cost dashboards.
+// ─────────────────────────────────────────────────────────────────
+router.get(
+  "/log",
+  catchAsyncErrors(async (req, res) => {
+    const { event, recipient, status, entityType, entityId } = req.query;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+
+    const q = {};
+    if (event)      q.event      = event;
+    if (recipient)  q.recipient  = recipient;
+    if (status)     q.status     = status;
+    if (entityType) q["entity.type"] = entityType;
+    if (entityId)   q["entity.id"]   = entityId;
+
+    const rows = await Notification.find(q).sort({ createdAt: -1 }).limit(limit).lean();
+    res.json({ success: true, count: rows.length, rows });
+  })
+);
+
+router.get(
+  "/stats",
+  catchAsyncErrors(async (req, res) => {
+    const days  = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
+    const since = new Date(Date.now() - days * 86_400_000);
+
+    const rows = await Notification.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $group: {
+          _id: { event: "$event", status: "$status" },
+          count: { $sum: 1 },
+        } },
+      { $sort: { "_id.event": 1, "_id.status": 1 } },
+    ]);
+
+    // Pivot into a friendlier shape for the admin app.
+    const byEvent = {};
+    for (const r of rows) {
+      const ev = r._id.event;
+      byEvent[ev] ??= { event: ev, sent: 0, dry_run: 0, skipped: 0, error: 0, total: 0 };
+      byEvent[ev][r._id.status] = r.count;
+      byEvent[ev].total += r.count;
+    }
+    res.json({ success: true, days, events: Object.values(byEvent) });
+  })
+);
 
 module.exports = router;
