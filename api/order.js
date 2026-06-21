@@ -517,14 +517,22 @@ router.post(
       }
 
       const deductionFingerprints = [];
+      // Snapshots for the post-commit criticalStockout fire-and-forget.
+      const stockoutSnapshots = [];
       for (const rm of order.rawMaterialRequired) {
         const material = await RawMaterial.findById(rm.rawMaterial).session(session);
         // Clamp stock at 0 on a forced approval — the schema floor
         // (min: 0) on RawMaterial.stock would otherwise reject the
         // save and trash the whole transaction. The shortfall is
         // already captured in the force fingerprint above.
+        const _oldStock = Number(material.stock) || 0;
         const applied = Math.min(rm.requiredWeight, material.stock);
         material.stock = Math.max(0, material.stock - rm.requiredWeight);
+        stockoutSnapshots.push({
+          materialId: material._id,
+          oldStock:   _oldStock,
+          newStock:   Number(material.stock),
+        });
         material.totalConsumption = (material.totalConsumption || 0) + applied;
         // Ledger rows record what ACTUALLY moved (`applied`) so the
         // movement sums reconcile with stock after a clamped forced
@@ -694,6 +702,21 @@ router.post(
               ...auditContext,
             });
             console.log(`[notify:orderApproved] order=${order.orderNo} →`, JSON.stringify(result));
+          }
+
+          // Per-material critical-stockout pings — fire after the
+          // transaction has committed so we never alert on a write
+          // that subsequently got rolled back.
+          const { maybeFireCriticalStockout } = require("../utils/inventoryAlerts");
+          for (const snap of stockoutSnapshots) {
+            const fresh = await RawMaterial.findById(snap.materialId).select("name category minStock _id");
+            if (!fresh) continue;
+            await maybeFireCriticalStockout({
+              material:  fresh,
+              oldStock:  snap.oldStock,
+              newStock:  snap.newStock,
+              reason:    `Order #${order.orderNo ?? ""} approval`,
+            });
           }
         } catch (err) {
           console.warn(`[notify:order-approved-hooks] crashed: ${err?.message}`);

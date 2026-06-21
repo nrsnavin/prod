@@ -33,6 +33,9 @@ const EVENT_DEFAULTS = {
   shiftBelowThreshold:    { tier: "realtime" },
   wastageHighEvent:       { tier: "realtime" },
   anomalyDetected:        { tier: "realtime" },
+  criticalStockout:       { tier: "realtime" },
+  priceChangeAbove10:     { tier: "realtime" },
+  poReceivedForCritical:  { tier: "realtime" },
 };
 
 function normalizeEventConfig(value, eventName) {
@@ -91,6 +94,22 @@ const NotificationSettingsSchema = new mongoose.Schema(
       // entity.id is the machine, so the orchestrator coalesces multiple
       // anomaly signals on the same machine into one ping per hour.
       anomalyDetected: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "realtime", throttleSeconds: 3600 },
+      },
+      // criticalStockout throttles per material so a series of small
+      // deductions that keep the stock under-min don't fire repeatedly.
+      criticalStockout: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "realtime", throttleSeconds: 21600 },
+      },
+      // priceChangeAbove10 throttles 24h per material so bulk-update
+      // bursts collapse — one ping per material per day, not 30.
+      priceChangeAbove10: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "realtime", throttleSeconds: 86400 },
+      },
+      poReceivedForCritical: {
         type: mongoose.Schema.Types.Mixed,
         default: { enabled: true, recipients: [], tier: "realtime", throttleSeconds: 3600 },
       },

@@ -155,6 +155,53 @@ describe('notify.formatMessage — orderPredictedLate', () => {
   });
 });
 
+describe('notify.formatMessage — criticalStockout', () => {
+  test('shows material, stock vs floor, pending order count', () => {
+    const body = formatMessage('criticalStockout', {
+      materialName: 'Yarn-20s', category: 'Yarn',
+      stock: 4, minStock: 10, pendingOrders: 3,
+      reason: 'Order #1042 approval',
+    });
+    expect(body).toMatch(/Critical stockout/);
+    expect(body).toMatch(/Yarn-20s/);
+    expect(body).toMatch(/Min floor: 10/);
+    expect(body).toMatch(/Pending orders needing it: 3/);
+    expect(body).toMatch(/No open PO in flight/);
+  });
+});
+
+describe('notify.formatMessage — priceChangeAbove10', () => {
+  test('renders direction arrow + percent + old/new', () => {
+    const up = formatMessage('priceChangeAbove10', {
+      materialName: 'Latex', oldPrice: 100, newPrice: 125,
+      percent: 25, direction: 'up', recentConsumption: 4200,
+    });
+    expect(up).toMatch(/↑ 25%/);
+    expect(up).toMatch(/Was: ₹100/);
+    expect(up).toMatch(/Now: ₹125/);
+    expect(up).toMatch(/30d usage: 4,200/);
+    const down = formatMessage('priceChangeAbove10', {
+      materialName: 'Latex', oldPrice: 100, newPrice: 80,
+      percent: -20, direction: 'down',
+    });
+    expect(down).toMatch(/↓ 20%/);
+  });
+});
+
+describe('notify.formatMessage — poReceivedForCritical', () => {
+  test('shows quantity, before/after vs floor, supplier', () => {
+    const body = formatMessage('poReceivedForCritical', {
+      materialName: 'Yarn-20s', quantity: 50, stockBefore: 4,
+      stockAfter: 54, minStock: 10, supplierName: 'Acme Yarns',
+    });
+    expect(body).toMatch(/PO received/);
+    expect(body).toMatch(/Inwarded: 50/);
+    expect(body).toMatch(/Was: 4/);
+    expect(body).toMatch(/Now: 54/);
+    expect(body).toMatch(/Acme Yarns/);
+  });
+});
+
 describe('notify.formatMessage — unknown event', () => {
   test('returns null so the orchestrator can skip it', () => {
     expect(formatMessage('does_not_exist', {})).toBeNull();

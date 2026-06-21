@@ -146,6 +146,45 @@ const fmt = {
     ].filter(Boolean).join("\n");
   },
 
+  criticalStockout(p) {
+    return [
+      "🚨 *Critical stockout*",
+      p.materialName ? `Material: ${p.materialName}` : null,
+      p.category ? `Category: ${p.category}` : null,
+      p.stock != null ? `Stock: ${_num(p.stock)}` : null,
+      p.minStock != null ? `Min floor: ${_num(p.minStock)}` : null,
+      p.pendingOrders ? `Pending orders needing it: ${p.pendingOrders}` : null,
+      p.reason ? `Cause: ${p.reason}` : null,
+      "No open PO in flight — raise one.",
+    ].filter(Boolean).join("\n");
+  },
+
+  priceChangeAbove10(p) {
+    const arrow = p.direction === "down" ? "↓" : "↑";
+    return [
+      `💰 *Price ${arrow} ${Math.abs(Math.round(p.percent || 0))}%*`,
+      p.materialName ? `Material: ${p.materialName}` : null,
+      p.oldPrice != null ? `Was: ₹${_num(p.oldPrice)}` : null,
+      p.newPrice != null ? `Now: ₹${_num(p.newPrice)}` : null,
+      p.recentConsumption != null
+        ? `30d usage: ${_num(p.recentConsumption)}`
+        : null,
+      p.reason ? `Reason: ${p.reason}` : null,
+    ].filter(Boolean).join("\n");
+  },
+
+  poReceivedForCritical(p) {
+    return [
+      "📦 *PO received — critical material restocked*",
+      p.materialName ? `Material: ${p.materialName}` : null,
+      p.quantity != null ? `Inwarded: ${_num(p.quantity)}` : null,
+      p.stockBefore != null ? `Was: ${_num(p.stockBefore)}` : null,
+      p.stockAfter != null ? `Now: ${_num(p.stockAfter)}` : null,
+      p.minStock != null ? `Min floor: ${_num(p.minStock)}` : null,
+      p.supplierName ? `Supplier: ${p.supplierName}` : null,
+    ].filter(Boolean).join("\n");
+  },
+
   orderPredictedLate(p) {
     return [
       "⏰ *Order predicted late*",
@@ -192,6 +231,9 @@ const EVENT_FLAG = {
   shiftBelowThreshold:    "shiftBelowThreshold",
   wastageHighEvent:       "wastageHighEvent",
   anomalyDetected:        "anomalyDetected",
+  criticalStockout:       "criticalStockout",
+  priceChangeAbove10:     "priceChangeAbove10",
+  poReceivedForCritical:  "poReceivedForCritical",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

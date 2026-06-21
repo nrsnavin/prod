@@ -10,6 +10,11 @@ const MaterialOutward   = require("../models/MaterialOut.cjs");
 const Supplier          = require("../models/Supplier");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
+const {
+  maybeFireCriticalStockout,
+  maybeFirePriceChangeAlert,
+  maybeFirePoReceivedForCritical,
+} = require("../utils/inventoryAlerts");
 
 // ══════════════════════════════════════════════════════════════
 //  1.  CREATE RAW MATERIAL
@@ -138,6 +143,15 @@ router.put(
     const existing = await RawMaterial.findById(_id);
     if (!existing) return next(new ErrorHandler("Raw material not found", 404));
 
+    // Snapshot for the inventory-alert fire-and-forget below. The
+    // priceReason gets deleted from `update` before save, so we
+    // grab it here before that happens.
+    const _alertSnap = {
+      oldStock:  Number(existing.stock) || 0,
+      oldPrice:  Number(existing.price) || 0,
+      reason:    String(update.reason || update.priceReason || "Manual edit").trim(),
+    };
+
     // ── Track price change ────────────────────────────────────
     if (
       update.price !== undefined &&
@@ -160,6 +174,29 @@ router.put(
     });
 
     res.status(200).json({ success: true, material });
+
+    // Fire-and-forget alerts after the response — never blocks the
+    // user-facing PUT.
+    (async () => {
+      const newPrice = Number(material.price);
+      const newStock = Number(material.stock);
+      if (newPrice !== _alertSnap.oldPrice) {
+        await maybeFirePriceChangeAlert({
+          material,
+          oldPrice: _alertSnap.oldPrice,
+          newPrice,
+          reason:   _alertSnap.reason,
+        });
+      }
+      if (newStock !== _alertSnap.oldStock) {
+        await maybeFireCriticalStockout({
+          material,
+          oldStock: _alertSnap.oldStock,
+          newStock,
+          reason:   `Manual edit: ${_alertSnap.reason}`,
+        });
+      }
+    })();
   })
 );
 
@@ -243,6 +280,7 @@ router.post(
     if (!material) return next(new ErrorHandler("Raw material not found", 404));
     if (!po)       return next(new ErrorHandler("Purchase order not found", 404));
 
+    const _stockBefore = Number(material.stock) || 0;
     material.stock += qtyNum;
     material.stockMovements.push({
       date:     new Date(),
@@ -273,6 +311,21 @@ router.post(
     }
 
     res.status(201).json({ success: true, inward });
+
+    (async () => {
+      let supplierName = null;
+      try {
+        const populated = await po.populate({ path: "supplier", select: "name" });
+        supplierName = populated?.supplier?.name || null;
+      } catch { /* supplier name is flavour */ }
+      await maybeFirePoReceivedForCritical({
+        material,
+        stockBefore: _stockBefore,
+        stockAfter:  Number(material.stock),
+        quantity:    qtyNum,
+        supplierName,
+      });
+    })();
   })
 );
 
@@ -393,6 +446,16 @@ router.post(
             newStock,
             adjustment: item.adjustment,
           });
+
+          if (item.adjustment < 0) {
+            // Fire-and-forget; never blocks the bulk response.
+            maybeFireCriticalStockout({
+              material,
+              oldStock,
+              newStock,
+              reason: `Stock adjustment: ${item.reason?.trim() || globalReason}`,
+            });
+          }
         } catch (err) {
           errors.push({ id: item._id, error: err.message });
         }
@@ -564,6 +627,13 @@ router.post(
           oldPrice,
           newPrice,
           change:   +(newPrice - oldPrice).toFixed(4),
+        });
+
+        maybeFirePriceChangeAlert({
+          material,
+          oldPrice,
+          newPrice,
+          reason: reason || "Bulk price update",
         });
       })
     );
