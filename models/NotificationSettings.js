@@ -29,6 +29,9 @@ const EVENT_DEFAULTS = {
   orderProductionStarted: { tier: "realtime" },
   orderPredictedLate:     { tier: "daily"    },
   morningDigest:          { tier: "daily"    },
+  machineBreakdown:       { tier: "realtime" },
+  shiftBelowThreshold:    { tier: "realtime" },
+  wastageHighEvent:       { tier: "realtime" },
 };
 
 function normalizeEventConfig(value, eventName) {
@@ -80,6 +83,9 @@ const NotificationSettingsSchema = new mongoose.Schema(
       orderProductionStarted: { type: mongoose.Schema.Types.Mixed, default: true },
       orderPredictedLate:     { type: mongoose.Schema.Types.Mixed, default: true },
       morningDigest:          { type: mongoose.Schema.Types.Mixed, default: true },
+      machineBreakdown:       { type: mongoose.Schema.Types.Mixed, default: true },
+      shiftBelowThreshold:    { type: mongoose.Schema.Types.Mixed, default: true },
+      wastageHighEvent:       { type: mongoose.Schema.Types.Mixed, default: true },
     },
 
     // Quiet hours — wall-clock window in `timezone`. Non-realtime

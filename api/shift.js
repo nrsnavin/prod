@@ -159,7 +159,57 @@ async function applyProductionCascade(
     }
   }
 
+  // Low-output shift alert — owner WhatsApp when a freshly-closed
+  // shift's per-head meters fall below 50% of the plant baseline
+  // (last 30 days of closed shifts, plant-wide per-head average).
+  // Fire-and-forget; wrapped so a notification failure can't break
+  // the cascade. Idempotent because shifts can only be closed once.
+  try {
+    await _checkLowOutputShift(shift, machineDoc, prodValue, req);
+  } catch (err) {
+    if (typeof console !== "undefined" && console.warn) {
+      console.warn(
+        "[notify:shiftBelowThreshold] check failed for shift",
+        shift?._id?.toString?.(),
+        err?.message
+      );
+    }
+  }
+
   return { job, fingerprint: fp, machine: machineDoc };
+}
+
+// ── Low-output shift alert ──────────────────────────────────────
+// Compares this shift's per-head meters to the trailing 30-day
+// per-head average across all closed shifts. Fires a real-time
+// owner ping when ratio < 50% — that's the "bad day, look into it
+// now" signal.
+const Notification = require("../models/Notification");
+const { notify }   = require("../utils/notify");
+async function _checkLowOutputShift(shift, machine, prodValue, req) {
+  const since = new Date(Date.now() - 30 * 86_400_000);
+  const rows = await ShiftDetail.aggregate([
+    { $match: { status: "closed", date: { $gte: since } } },
+    { $group: { _id: null, total: { $sum: "$productionMeters" }, n: { $sum: 1 } } },
+  ]);
+  const r = rows[0] || {};
+  if (!r.n || r.n < 5) return; // not enough data
+  const baseline = r.total / r.n;
+  if (!(baseline > 0)) return;
+  const pct = (prodValue / baseline) * 100;
+  if (pct >= 50) return; // healthy enough
+
+  const result = await notify("shiftBelowThreshold", {
+    machineId: machine?.ID,
+    shift:     shift?.shift,
+    date:      shift?.date,
+    produced:          Math.round(prodValue),
+    baseline:          Math.round(baseline),
+    percentOfBaseline: pct,
+    _entity: { type: "ShiftDetail", id: shift?._id },
+    _actor:  { id: req?.user?._id, name: req?.user?.name || "system" },
+  });
+  console.log(`[notify:shiftBelowThreshold] shift=${shift?._id} →`, JSON.stringify(result));
 }
 
 router.get(

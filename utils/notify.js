@@ -48,6 +48,43 @@ const fmt = {
     ].filter(Boolean).join("\n");
   },
 
+  machineBreakdown(p) {
+    return [
+      "🚨 *Machine breakdown*",
+      p.machineId ? `Machine: ${p.machineId}` : null,
+      p.previousStatus ? `Was: ${p.previousStatus}` : null,
+      p.orderRunning ? `Was running order: #${p.orderRunning}` : null,
+      p.by ? `Reported by: ${p.by}` : null,
+      p.via ? `Via: ${p.via}` : null,
+    ].filter(Boolean).join("\n");
+  },
+
+  shiftBelowThreshold(p) {
+    return [
+      "📉 *Low-output shift*",
+      p.machineId ? `Machine: ${p.machineId}` : null,
+      p.shift ? `Shift: ${p.shift}` : null,
+      p.date ? `Date: ${_date(p.date)}` : null,
+      p.produced != null ? `Produced: ${_num(p.produced)} m` : null,
+      p.baseline != null ? `Plant baseline: ${_num(p.baseline)} m` : null,
+      p.percentOfBaseline != null
+        ? `That's ${Math.round(p.percentOfBaseline)}% of baseline.` : null,
+    ].filter(Boolean).join("\n");
+  },
+
+  wastageHighEvent(p) {
+    return [
+      "♻️ *High wastage event*",
+      p.jobNo ? `Job: #${p.jobNo}` : null,
+      p.elasticName ? `Elastic: ${p.elasticName}` : null,
+      p.quantity != null ? `Wastage: ${_num(p.quantity)} m` : null,
+      p.dailyProduction != null ? `Today's production: ${_num(p.dailyProduction)} m` : null,
+      p.percent != null ? `That's ${Math.round(p.percent)}% — above 10% threshold.` : null,
+      p.reason ? `Reason: ${p.reason}` : null,
+      p.employee ? `Operator: ${p.employee}` : null,
+    ].filter(Boolean).join("\n");
+  },
+
   orderCompleted(p) {
     return [
       "🎉 *Order completed*",
@@ -139,6 +176,9 @@ const EVENT_FLAG = {
   orderProductionStarted: "orderProductionStarted",
   orderPredictedLate:     "orderPredictedLate",
   morningDigest:          "morningDigest",
+  machineBreakdown:       "machineBreakdown",
+  shiftBelowThreshold:    "shiftBelowThreshold",
+  wastageHighEvent:       "wastageHighEvent",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

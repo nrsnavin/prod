@@ -20,6 +20,7 @@ const { getPairRate, toMetersPerMachineDay } = require("../utils/etaPosterior.js
 const C                    = require("../utils/etaConfig.js");
 const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
+const Notification         = require("../models/Notification.js");
 
 
 // ════════════════════════════════════════════════════════════════
@@ -880,8 +881,20 @@ router.post(
 
     // Owner WhatsApp ping — fire-and-forget. Confirms operations
     // actually picked up the order vs. it sitting in Approved limbo.
+    //
+    // Edge case: if production starts within 60s of approval (e.g.
+    // an automated planner kicked in), the back-to-back pings read
+    // weirdly ("approved then started one second later"). Skip in
+    // that window — owner already got the approve ping; the start
+    // is implied.
     (async () => {
       try {
+        const approvedTooRecent = order.approvedAt &&
+          (Date.now() - new Date(order.approvedAt).getTime() < 60_000);
+        if (approvedTooRecent) {
+          console.log(`[notify:orderProductionStarted] order=${order.orderNo} → skipped: approve was <60s ago`);
+          return;
+        }
         const cust = order.customer
           ? await Customer.findById(order.customer).select("name").lean()
           : null;
@@ -979,8 +992,21 @@ router.post(
       });
 
       // Owner WhatsApp ping — confirms revenue-recognition moment.
+      // Edge case: if a dcDelivered ping just fired for this same
+      // order (within the last hour), skip — the owner already saw
+      // "your order is done"; doubling up reads as system noise.
       (async () => {
         try {
+          const recentDc = await Notification.findOne({
+            event:       "dcDelivered",
+            "entity.id": resp._orderId,
+            status:      "sent",
+            createdAt:   { $gte: new Date(Date.now() - 60 * 60 * 1000) },
+          }).lean();
+          if (recentDc) {
+            console.log(`[notify:orderCompleted] order=${resp._orderNo} → skipped: dcDelivered fired ${Math.round((Date.now() - new Date(recentDc.createdAt).getTime()) / 1000)}s ago`);
+            return;
+          }
           const cust = resp._customer
             ? await Customer.findById(resp._customer).select("name").lean()
             : null;

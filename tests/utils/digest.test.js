@@ -9,6 +9,7 @@ const base = {
   stockouts:  [],
   maintenance: [],
   predictedLate: [],
+  orderActivity: { edited: 0 },
 };
 
 describe('digest.formatDigest', () => {
@@ -55,6 +56,13 @@ describe('digest.formatDigest', () => {
     expect(t).toMatch(/\+2 more/);
     // 6th and 7th not individually listed.
     expect(t).not.toMatch(/Mat6:/);
+  });
+
+  test('renders "Orders edited yesterday: N" only when N > 0', () => {
+    const none = formatDigest(base);
+    expect(none).not.toMatch(/Orders edited/);
+    const some = formatDigest({ ...base, orderActivity: { edited: 4 } });
+    expect(some).toMatch(/Orders edited yesterday.*: 4/);
   });
 
   test('flags overdue maintenance distinctly from upcoming', () => {
