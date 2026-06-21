@@ -14,6 +14,7 @@
 // so the numbers match what the admin app shows.
 
 const ShiftPlan       = require("../models/ShiftPlan.js");
+const ShiftDetail     = require("../models/ShiftDetail.js");
 const Wastage         = require("../models/Wastage.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
