@@ -46,6 +46,19 @@ describe('notify.formatMessage — orderApproved', () => {
   });
 });
 
+describe('notify.formatMessage — anomalyDetected', () => {
+  test('shows machine, shift, produced vs avg, percent', () => {
+    const body = formatMessage('anomalyDetected', {
+      machineId: 'M3', shift: 'DAY', date: '2026-06-20',
+      produced: 100, average: 400, percent: 25,
+    });
+    expect(body).toMatch(/Production anomaly/);
+    expect(body).toMatch(/Machine: M3/);
+    expect(body).toMatch(/Machine's recent avg: 400 m/);
+    expect(body).toMatch(/25% of normal/);
+  });
+});
+
 describe('notify.formatMessage — machineBreakdown', () => {
   test('renders machine id + previous status + order', () => {
     const body = formatMessage('machineBreakdown', {
