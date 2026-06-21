@@ -207,6 +207,34 @@ const fmt = {
     ].filter(Boolean).join("\n");
   },
 
+  notificationDeliveryFailed(p) {
+    return [
+      "🛑 *Notification delivery failing*",
+      p.windowLabel ? `Window: ${p.windowLabel}` : null,
+      p.errorCount != null ? `Errors: ${p.errorCount}` : null,
+      p.totalAttempts != null ? `Attempts: ${p.totalAttempts}` : null,
+      p.topReason ? `Top reason: ${p.topReason}` : null,
+      "Check WhatsApp provider credentials + recipient phone numbers.",
+    ].filter(Boolean).join("\n");
+  },
+
+  cronDigestSkipped(p) {
+    return [
+      "⏰ *Morning digest didn't run*",
+      p.lastSentLabel ? `Last sent: ${p.lastSentLabel}` : "No digest seen in 25h+.",
+      "Check the cron / scheduler is hitting /api/v2/notify/cron/run-digest.",
+    ].filter(Boolean).join("\n");
+  },
+
+  notifyDryRunStillActive(p) {
+    return [
+      "⚠️ *WhatsApp still in dry-run mode*",
+      p.windowLabel ? `Window: ${p.windowLabel}` : null,
+      p.dryRunCount != null ? `Dry-run pings: ${p.dryRunCount}` : null,
+      "Set TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN on the server and restart.",
+    ].filter(Boolean).join("\n");
+  },
+
   dcDelayedDelivery(p) {
     return [
       "🚚 *DC dispatched — late vs promise*",
@@ -271,6 +299,9 @@ const EVENT_FLAG = {
   customerComplaintFiled: "customerComplaintFiled",
   attendanceCrashedToday: "attendanceCrashedToday",
   dcDelayedDelivery:      "dcDelayedDelivery",
+  notificationDeliveryFailed: "notificationDeliveryFailed",
+  cronDigestSkipped:          "cronDigestSkipped",
+  notifyDryRunStillActive:    "notifyDryRunStillActive",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

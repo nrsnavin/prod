@@ -19,6 +19,9 @@ const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
 const Machine         = require("../models/Machine.js");
 const Order           = require("../models/Order.js");
+const Attendance      = require("../models/Attendence.js");
+const LeaveRequest    = require("../models/LeaveRequest.js");
+const EmployeeFeedback= require("../models/EmployeeFeedback.js");
 
 // ── Pure formatter ───────────────────────────────────────────────
 function formatDigest(d) {
@@ -79,6 +82,34 @@ function formatDigest(d) {
     if (d.posteriorDrift.length > 5) lines.push(`  +${d.posteriorDrift.length - 5} more`);
   }
 
+  // Attendance (yesterday vs 7d baseline)
+  if (d.attendance) {
+    lines.push("", "👷 *Attendance (yesterday)*");
+    const a = d.attendance;
+    if (a.totalEffective > 0) {
+      const pctLabel = a.percentOfBaseline != null
+        ? ` (${Math.round(a.percentOfBaseline)}% of 7d baseline)`
+        : "";
+      lines.push(`  ${a.totalEffective} effective present${pctLabel}`);
+      if (a.absent > 0) lines.push(`  ${a.absent} absent · ${a.onLeave} on leave`);
+    } else {
+      lines.push("  No attendance marked.");
+    }
+  }
+
+  // Leave requests pending decision
+  if (d.leave && d.leave.pending > 0) {
+    lines.push("", `🗓️ *Leave requests pending*: ${d.leave.pending}`);
+  }
+
+  // Open employee complaints
+  if (d.complaints) {
+    if (d.complaints.openCount > 0) {
+      lines.push("", `📣 *Open complaints*: ${d.complaints.openCount}` +
+        (d.complaints.newYesterday > 0 ? ` (${d.complaints.newYesterday} new yesterday)` : ""));
+    }
+  }
+
   // Maintenance
   lines.push("", "🔧 *Maintenance due*");
   if (d.maintenance.length > 0) {
@@ -104,7 +135,8 @@ async function buildDigestData(now = new Date(), opts = {}) {
   const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
   const startYday  = new Date(startToday.getTime() - 86_400_000);
 
-  const [production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift] =
+  const [production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift,
+         attendance, leave, complaints] =
     await Promise.all([
       _production(startYday, startToday),
       _wastage(startYday, startToday),
@@ -113,12 +145,89 @@ async function buildDigestData(now = new Date(), opts = {}) {
       _predictedLate(now),
       _orderActivity(startYday, startToday),
       _posteriorDrift(now),
+      _attendance(startYday, startToday),
+      _leavePending(),
+      _complaints(startYday, startToday),
     ]);
 
   return {
     dateLabel: startYday.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
     production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift,
+    attendance, leave, complaints,
   };
+}
+
+// Yesterday's attendance summary across both shifts + 7d baseline.
+async function _attendance(start, end) {
+  try {
+    const rows = await Attendance.find({
+      date: { $gte: start, $lt: end },
+    }).select("status").lean();
+    let present = 0, late = 0, halfDay = 0, absent = 0, onLeave = 0;
+    for (const r of rows) {
+      if (r.status === "present")       present += 1;
+      else if (r.status === "late")     late    += 1;
+      else if (r.status === "half_day") halfDay += 1;
+      else if (r.status === "absent")   absent  += 1;
+      else if (r.status === "on_leave") onLeave += 1;
+    }
+    const totalEffective = present + late + halfDay * 0.5;
+
+    // 7d trailing baseline (exclude yesterday). Average per distinct
+    // date so a thin day doesn't pull the baseline down.
+    const histStart = new Date(start.getTime() - 7 * 86_400_000);
+    const histRows  = await Attendance.find({
+      date: { $gte: histStart, $lt: start },
+    }).select("status date").lean();
+    let percentOfBaseline = null;
+    if (histRows.length > 0) {
+      const byDay = new Map();
+      for (const r of histRows) {
+        const k = new Date(r.date).toISOString().slice(0, 10);
+        if (!byDay.has(k)) byDay.set(k, 0);
+        const w = r.status === "present" || r.status === "late" ? 1
+                : r.status === "half_day" ? 0.5 : 0;
+        byDay.set(k, byDay.get(k) + w);
+      }
+      const days = [...byDay.values()];
+      const baseline = days.reduce((a, b) => a + b, 0) / days.length;
+      if (baseline > 0) percentOfBaseline = (totalEffective / baseline) * 100;
+    }
+    return { totalEffective, present, late, halfDay, absent, onLeave, percentOfBaseline };
+  } catch (err) {
+    console.warn(`[digest._attendance] ${err.message}`);
+    return { totalEffective: 0, present: 0, late: 0, halfDay: 0,
+             absent: 0, onLeave: 0, percentOfBaseline: null };
+  }
+}
+
+async function _leavePending() {
+  try {
+    const pending = await LeaveRequest.countDocuments({ status: "pending" });
+    return { pending };
+  } catch (err) {
+    console.warn(`[digest._leavePending] ${err.message}`);
+    return { pending: 0 };
+  }
+}
+
+async function _complaints(start, end) {
+  try {
+    const [openCount, newYesterday] = await Promise.all([
+      EmployeeFeedback.countDocuments({
+        type: "complaint",
+        status: { $in: ["open", "in_review"] },
+      }),
+      EmployeeFeedback.countDocuments({
+        type: "complaint",
+        createdAt: { $gte: start, $lt: end },
+      }),
+    ]);
+    return { openCount, newYesterday };
+  } catch (err) {
+    console.warn(`[digest._complaints] ${err.message}`);
+    return { openCount: 0, newYesterday: 0 };
+  }
 }
 
 // Posterior drift — flags (elastic, machine) pairs whose per-head

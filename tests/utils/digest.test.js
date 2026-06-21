@@ -11,6 +11,10 @@ const base = {
   predictedLate: [],
   orderActivity: { edited: 0 },
   posteriorDrift: [],
+  attendance: { totalEffective: 0, present: 0, late: 0, halfDay: 0,
+                absent: 0, onLeave: 0, percentOfBaseline: null },
+  leave: { pending: 0 },
+  complaints: { openCount: 0, newYesterday: 0 },
 };
 
 describe('digest.formatDigest', () => {
@@ -94,6 +98,37 @@ describe('digest.formatDigest', () => {
     });
     expect(t).toMatch(/M1: OVERDUE/);
     expect(t).toMatch(/M2: in 5d/);
+  });
+
+  test('renders attendance with baseline %', () => {
+    const t = formatDigest({
+      ...base,
+      attendance: { totalEffective: 22, present: 20, late: 2, halfDay: 0,
+                    absent: 3, onLeave: 1, percentOfBaseline: 95 },
+    });
+    expect(t).toMatch(/Attendance \(yesterday\)/);
+    expect(t).toMatch(/22 effective present \(95% of 7d baseline\)/);
+    expect(t).toMatch(/3 absent · 1 on leave/);
+  });
+
+  test('hides absence detail when nothing was marked', () => {
+    const t = formatDigest(base);
+    expect(t).toMatch(/No attendance marked/);
+  });
+
+  test('renders pending leave requests line only when > 0', () => {
+    expect(formatDigest(base)).not.toMatch(/Leave requests pending/);
+    const t = formatDigest({ ...base, leave: { pending: 4 } });
+    expect(t).toMatch(/Leave requests pending\*: 4/);
+  });
+
+  test('renders open complaints with "new yesterday" when applicable', () => {
+    expect(formatDigest(base)).not.toMatch(/Open complaints/);
+    const t = formatDigest({
+      ...base,
+      complaints: { openCount: 3, newYesterday: 1 },
+    });
+    expect(t).toMatch(/Open complaints\*: 3 \(1 new yesterday\)/);
   });
 
   test('singular vs plural wastage entry wording', () => {

@@ -249,6 +249,41 @@ describe('notify.formatMessage — dcDelayedDelivery', () => {
   });
 });
 
+describe('notify.formatMessage — system health', () => {
+  test('notificationDeliveryFailed shows error count, ratio, top reason', () => {
+    const body = formatMessage('notificationDeliveryFailed', {
+      windowLabel: 'last 24h', errorCount: 8, totalAttempts: 20,
+      topReason: 'Twilio: 21610',
+    });
+    expect(body).toMatch(/Notification delivery failing/);
+    expect(body).toMatch(/Errors: 8/);
+    expect(body).toMatch(/Attempts: 20/);
+    expect(body).toMatch(/Twilio: 21610/);
+  });
+
+  test('cronDigestSkipped shows last-sent timestamp', () => {
+    const body = formatMessage('cronDigestSkipped', {
+      lastSentLabel: '19/06/2026, 09:01',
+    });
+    expect(body).toMatch(/Morning digest didn't run/);
+    expect(body).toMatch(/19\/06\/2026/);
+  });
+
+  test('cronDigestSkipped falls back to a generic message when no last seen', () => {
+    const body = formatMessage('cronDigestSkipped', {});
+    expect(body).toMatch(/No digest seen in 25h/);
+  });
+
+  test('notifyDryRunStillActive shows dry-run count + how to fix', () => {
+    const body = formatMessage('notifyDryRunStillActive', {
+      windowLabel: 'last 24h', dryRunCount: 12,
+    });
+    expect(body).toMatch(/dry-run mode/);
+    expect(body).toMatch(/Dry-run pings: 12/);
+    expect(body).toMatch(/TWILIO_ACCOUNT_SID/);
+  });
+});
+
 describe('notify.formatMessage — unknown event', () => {
   test('returns null so the orchestrator can skip it', () => {
     expect(formatMessage('does_not_exist', {})).toBeNull();
