@@ -188,6 +188,18 @@ async function runDigest(returnTextOnly = false) {
   const text = formatDigest(data);
   if (returnTextOnly) return { preview: text, sent: false };
   const notifyResult = await notify("morningDigest", { body: text });
+
+  // Piggy-back on the daily cron to surface notification-system
+  // health: delivery failures, missed cron runs, lingering dry-run.
+  // Each helper is self-throttled via NotificationSettings so a
+  // chronic condition only pings on its own cadence.
+  try {
+    const { runSystemHealthChecks } = require("../utils/systemHealth.js");
+    await runSystemHealthChecks();
+  } catch (err) {
+    console.warn(`[runDigest] health checks crashed: ${err?.message}`);
+  }
+
   return { notifyResult, preview: text };
 }
 

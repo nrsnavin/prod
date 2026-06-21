@@ -39,6 +39,9 @@ const EVENT_DEFAULTS = {
   customerComplaintFiled: { tier: "realtime" },
   attendanceCrashedToday: { tier: "hourly"   },
   dcDelayedDelivery:      { tier: "realtime" },
+  notificationDeliveryFailed: { tier: "hourly" },
+  cronDigestSkipped:         { tier: "daily"  },
+  notifyDryRunStillActive:   { tier: "daily"  },
 };
 
 function normalizeEventConfig(value, eventName) {
@@ -117,6 +120,17 @@ const NotificationSettingsSchema = new mongoose.Schema(
         default: { enabled: true, recipients: [], tier: "realtime", throttleSeconds: 3600 },
       },
       customerComplaintFiled: { type: mongoose.Schema.Types.Mixed, default: true },
+      // System-health pings — bounded throttle so a chronic error
+      // condition doesn't ping every digest run forever.
+      notificationDeliveryFailed: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "hourly", throttleSeconds: 14400 },
+      },
+      cronDigestSkipped:       { type: mongoose.Schema.Types.Mixed, default: true },
+      notifyDryRunStillActive: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "daily", throttleSeconds: 86400 },
+      },
       // attendanceCrashedToday: at most one ping per day per (date, shift)
       // even if /mark is hit multiple times.
       attendanceCrashedToday: {
