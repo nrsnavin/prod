@@ -460,9 +460,10 @@ async function notify(eventType, payload = {}) {
       return { skipped: `no formatter for ${eventType}` };
     }
 
+    const mediaUrl = payload?._mediaUrl || null;
     const results = [];
     for (const to of recipients) {
-      const r = await sendWhatsApp(to, body);
+      const r = await sendWhatsApp(to, body, mediaUrl ? { mediaUrl } : {});
       results.push(r);
       const status = r.sent
         ? "sent"

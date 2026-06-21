@@ -33,7 +33,7 @@ function twilioConfigured() {
   return Boolean(c.sid && c.token && c.from);
 }
 
-async function twilioSend(to, body) {
+async function twilioSend(to, body, mediaUrl) {
   const c = twilioConfig();
   const url = `https://api.twilio.com/2010-04-01/Accounts/${c.sid}/Messages.json`;
   // Twilio wants "whatsapp:+E164" on both ends.
@@ -41,6 +41,7 @@ async function twilioSend(to, body) {
   const fromAddr = c.from.startsWith("whatsapp:") ? c.from : `whatsapp:${c.from}`;
 
   const params = new URLSearchParams({ To: toAddr, From: fromAddr, Body: body });
+  if (mediaUrl) params.set("MediaUrl", mediaUrl);
   const res = await axios.post(url, params.toString(), {
     auth: { username: c.sid, password: c.token },
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -65,26 +66,28 @@ function isConfigured() {
  *   { sent: false, dryRun: true, preview }     ← creds missing
  *   { sent: false, error }                     ← provider failed
  */
-async function sendWhatsApp(to, body) {
+async function sendWhatsApp(to, body, opts = {}) {
   if (!to || !body) {
     return { sent: false, error: "missing to/body" };
   }
+  const mediaUrl = opts?.mediaUrl;
 
   if (!isConfigured()) {
     // Dry-run — log exactly what would have been sent.
     console.log(
       `[whatsapp:dry-run] → ${to}\n` +
       `${body}\n` +
+      (mediaUrl ? `[whatsapp:dry-run] media: ${mediaUrl}\n` : "") +
       `[whatsapp:dry-run] (set ${PROVIDER.toUpperCase()} env vars to send for real)`
     );
-    return { sent: false, dryRun: true, preview: { to, body } };
+    return { sent: false, dryRun: true, preview: { to, body, mediaUrl } };
   }
 
   try {
     let providerResult;
     switch (PROVIDER) {
       case "twilio":
-        providerResult = await twilioSend(to, body);
+        providerResult = await twilioSend(to, body, mediaUrl);
         break;
       default:
         return { sent: false, error: `unknown provider: ${PROVIDER}` };

@@ -67,6 +67,15 @@ app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 // user when authenticated). Zero-dep stand-in for morgan.
 app.use(require("./middleware/requestLogger"));
 
+// Public static — daily report PDFs (utils/reportPublisher.js
+// writes here). The URLs are unguessable enough (timestamped
+// filenames) and contain only aggregated factory metrics, no
+// individual PII — same exposure the WhatsApp body already has.
+app.use("/public", express.static(require("path").join(__dirname, "public"), {
+  fallthrough: true,
+  maxAge: "1h",
+}));
+
 app.use(setUserContext);
 
 // Unauthenticated liveness probe for load balancers / uptime checks.
