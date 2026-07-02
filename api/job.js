@@ -17,6 +17,8 @@ const Machine     = require('../models/Machine');
 const ShiftDetail = require('../models/ShiftDetail');
 
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
+const { computeMaterialRequirement } = require('../utils/materialRequirement');
+const { buildMrpPdf } = require('../utils/mrpPdf');
 
 // Every job route requires a logged-in user. The previous setup left
 // the whole router anonymous, including the alternate `/:jobId`
@@ -877,6 +879,112 @@ router.get('/:jobId', async (req, res) => {
     return res
       .status(500)
       .json({ success: false, message: 'Failed to load job detail' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+//  MATERIAL REQUIREMENT PROGRAM (MRP)
+//
+//  PATCH /:jobId/production-mode  — set in_house / outsource (+vendor)
+//  GET   /:jobId/mrp              — computed MRP data as JSON
+//  GET   /:jobId/mrp.pdf          — the MRP sheet as a PDF download
+// ════════════════════════════════════════════════════════════════
+
+// Assemble the plain MRP data object the JSON route and the PDF
+// renderer both consume. Returns null if the job doesn't exist.
+async function _buildMrpData(jobId) {
+  const job = await JobOrder.findById(jobId)
+    .populate("customer", "name")
+    .populate("order",    "orderNo")
+    .populate("elastics.elastic", "name")
+    .lean();
+  if (!job) return null;
+
+  const materials = await computeMaterialRequirement(job.elastics || []);
+
+  return {
+    jobId:           String(job._id),
+    jobOrderNo:      job.jobOrderNo,
+    orderNo:         job.order?.orderNo ?? null,
+    customerName:    job.customer?.name || "",
+    dateLabel:       job.date
+      ? new Date(job.date).toLocaleDateString("en-IN",
+          { day: "2-digit", month: "short", year: "numeric" })
+      : "",
+    status:          job.status,
+    productionMode:  job.productionMode || "in_house",
+    outsourceVendor: job.outsourceVendor || "",
+    elastics: (job.elastics || []).map((e) => ({
+      name:     e.elastic?.name || "Unknown",
+      quantity: Number(e.quantity) || 0,
+    })),
+    materials,
+  };
+}
+
+router.patch('/:jobId/production-mode', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(jobId))
+      return res.status(400).json({ success: false, message: 'Invalid job ID.' });
+
+    const mode = req.body?.productionMode;
+    if (!['in_house', 'outsource'].includes(mode))
+      return res.status(400).json({ success: false, message: "productionMode must be 'in_house' or 'outsource'." });
+
+    const update = { productionMode: mode };
+    // Vendor only applies to outsource; clear it when switching back.
+    if (mode === 'outsource') {
+      update.outsourceVendor = typeof req.body?.outsourceVendor === 'string'
+        ? req.body.outsourceVendor.trim() : '';
+    } else {
+      update.outsourceVendor = '';
+    }
+
+    const job = await JobOrder.findByIdAndUpdate(jobId, update, { new: true })
+      .select('jobOrderNo productionMode outsourceVendor');
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
+
+    return res.json({ success: true, data: {
+      jobOrderNo:      job.jobOrderNo,
+      productionMode:  job.productionMode,
+      outsourceVendor: job.outsourceVendor,
+    }});
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to update production mode' });
+  }
+});
+
+router.get('/:jobId/mrp', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(jobId))
+      return res.status(400).json({ success: false, message: 'Invalid job ID.' });
+    const data = await _buildMrpData(jobId);
+    if (!data) return res.status(404).json({ success: false, message: 'Job not found.' });
+    return res.json({ success: true, data });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to build MRP' });
+  }
+});
+
+router.get('/:jobId/mrp.pdf', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(jobId))
+      return res.status(400).json({ success: false, message: 'Invalid job ID.' });
+    const data = await _buildMrpData(jobId);
+    if (!data) return res.status(404).json({ success: false, message: 'Job not found.' });
+
+    const pdf = await buildMrpPdf(data);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="MRP-job-${data.jobOrderNo ?? jobId}.pdf"`
+    );
+    return res.send(pdf);
+  } catch (err) {
+    return res.status(500).json({ success: false, message: 'Failed to render MRP PDF' });
   }
 });
 
