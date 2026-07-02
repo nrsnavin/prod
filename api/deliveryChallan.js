@@ -5,6 +5,7 @@ const mongoose = require("mongoose");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated } = require("../middleware/auth");
+const { escapeRegex } = require("../utils/escapeRegex");
 
 const DeliveryChallan = require("../models/DeliveryChallan");
 const Order           = require("../models/Order");
@@ -408,8 +409,8 @@ router.get(
     if (status) filter.status = status;
     if (search.trim()) {
       const or = [
-        { dcNumber:     { $regex: search, $options: "i" } },
-        { customerName: { $regex: search, $options: "i" } },
+        { dcNumber:     { $regex: escapeRegex(search), $options: "i" } },
+        { customerName: { $regex: escapeRegex(search), $options: "i" } },
       ];
       const asNum = Number(search);
       if (Number.isFinite(asNum)) {

@@ -90,6 +90,8 @@ router.post('/mark', isAdmin('admin'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'shift must be DAY or NIGHT.' });
     if (!Array.isArray(records) || records.length === 0)
       return res.status(400).json({ success: false, message: 'records array must not be empty.' });
+    if (records.length > 1000)
+      return res.status(400).json({ success: false, message: 'records exceeds the 1000-item limit per request.' });
 
     const dateObj  = startOfDay(date);
     const shiftUp  = shift.toUpperCase();

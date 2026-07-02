@@ -18,6 +18,7 @@ const Attendance   = require('../models/Attendence.js');
 const ShiftDetail  = require('../models/ShiftDetail');
 const Employee     = require('../models/Employee');
 const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
+const { resolveEmployeeId } = require('../utils/resolveEmployee');
 
 function toISODate(d)   { return new Date(d).toISOString().split('T')[0]; }
 function toDateLabel(d) {
@@ -51,10 +52,15 @@ function fmtLeave(l) {
 // ─────────────────────────────────────────────────────────────
 router.post('/request', isAuthenticated, async (req, res) => {
   try {
-    const { employeeId, date, shift='DAY', leaveType, reason, documentUrl='' } = req.body;
-    if (!employeeId || !date || !leaveType || !reason)
+    const { date, shift='DAY', leaveType, reason, documentUrl='' } = req.body;
+    // Workers submit leave for themselves; admins may submit for anyone.
+    const employeeId = resolveEmployeeId(req);
+    if (!employeeId)
+      return res.status(403).json({ success:false,
+        message:'Cannot determine employee — your account has no linked employee' });
+    if (!date || !leaveType || !reason)
       return res.status(400).json({ success:false,
-        message:'employeeId, date, leaveType, reason are required.' });
+        message:'date, leaveType, reason are required.' });
 
     const emp = await Employee.findById(employeeId, 'name department').lean();
     if (!emp) return res.status(404).json({ success:false, message:'Employee not found.' });
