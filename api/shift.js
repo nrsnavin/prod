@@ -1240,4 +1240,8 @@ router.get("/attendance-mismatch", isAdmin('admin'), async (req, res) => {
   }
 });
 
+// Exported for characterization/unit tests (Phase B0.3) — this is the
+// core production cascade the /verify-production route delegates to.
+router.applyProductionCascade = applyProductionCascade;
+
 module.exports = router;
