@@ -873,4 +873,8 @@ router.get('/outstanding-advances', isAdmin('admin'), async (_req, res) => {
   }
 });
 
+// Exported for characterization/unit tests (Phase B0.4) — the pure
+// read-only pay computation the /generate routes build on.
+router.computePayroll = computePayroll;
+
 module.exports = router;
