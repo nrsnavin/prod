@@ -26,33 +26,15 @@ const { buildMrpPdf } = require('../utils/mrpPdf');
 // transition mutations.
 router.use(isAuthenticated);
 
-const JOB_STATUSES = [
-  'preparatory', 'weaving', 'finishing', 'checking', 'packing', 'completed', 'cancelled',
-];
-
-const STATUS_TRANSITIONS = {
-  weaving:   'finishing',
-  finishing: 'checking',
-  checking:  'packing',
-  packing:   'completed',
-};
-
-const STAGE_FINGERPRINT = {
-  weaving:   { by: 'weavingBy',   at: 'weavingAt'   },
-  finishing: { by: 'finishingBy', at: 'finishingAt' },
-  checking:  { by: 'checkingBy',  at: 'checkingAt'  },
-  packing:   { by: 'packingBy',   at: 'packingAt'   },
-  completed: { by: 'completedBy', at: 'completedAt' },
-  cancelled: { by: 'cancelledBy', at: 'cancelledAt' },
-};
-
-function stampStage(job, stage, userId) {
-  const fp = STAGE_FINGERPRINT[stage];
-  if (fp) {
-    job[fp.by] = userId || null;
-    job[fp.at] = new Date();
-  }
-}
+// Job status flow, transition rules, per-stage timestamps and the
+// stampStage helper all live in domain/jobStatus.js — the single
+// source of truth (was previously re-encoded three times in this file).
+const {
+  JOB_STATUSES,
+  validateTransition,
+  stampStage,
+  enteredAtField,
+} = require('../domain/jobStatus');
 
 function fullJobPopulate(query) {
   return query
@@ -386,11 +368,8 @@ router.post(
     const job = await JobOrder.findById(jobId);
     if (!job) return next(new ErrorHandler('Job not found', 404));
 
-    const expected = STATUS_TRANSITIONS[job.status];
-    if (!expected)
-      return next(new ErrorHandler(`Job in status "${job.status}" cannot advance further`, 400));
-    if (expected !== nextStatus)
-      return next(new ErrorHandler(`Invalid transition: "${job.status}" → "${nextStatus}". Expected: "${expected}"`, 400));
+    const check = validateTransition(job.status, nextStatus);
+    if (!check.ok) return next(new ErrorHandler(check.message, 400));
 
     if (nextStatus === 'finishing') {
       await releaseMachine(job.machine);
@@ -1041,13 +1020,8 @@ router.get('/stale', async (req, res) => {
       .lean();
 
     const enteredAt = (j) => {
-      switch (j.status) {
-        case 'weaving':   return j.weavingAt   ?? j.createdAt;
-        case 'finishing': return j.finishingAt ?? j.createdAt;
-        case 'checking':  return j.checkingAt  ?? j.createdAt;
-        case 'packing':   return j.packingAt   ?? j.createdAt;
-        default:          return j.createdAt;
-      }
+      const field = enteredAtField(j.status);
+      return (field && j[field]) || j.createdAt;
     };
 
     const stale = jobs
