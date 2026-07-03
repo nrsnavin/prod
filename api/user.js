@@ -7,6 +7,7 @@ const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const sendToken = require("../utils/jwtToken.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 var jwt = require('jsonwebtoken');
 
 
@@ -107,7 +108,7 @@ router.get(
   isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
     const user = await User.findById(req.user.id)
-      .populate("employee", "name department phoneNumber role hourlyRate")
+      .populate("employee", EMPLOYEE_CARD_FIELDS)
       .lean();
     if (!user) return next(new ErrorHandler("User not found", 404));
 
@@ -205,7 +206,7 @@ router.patch(
 
     // Return the canonical /me shape so the client can swap state.
     const fresh = await User.findById(req.user.id)
-      .populate("employee", "name department phoneNumber role hourlyRate")
+      .populate("employee", EMPLOYEE_CARD_FIELDS)
       .lean();
 
     res.status(200).json({

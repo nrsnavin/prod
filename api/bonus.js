@@ -30,6 +30,7 @@ const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
 const PDFDocument      = require("pdfkit");
 const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
+const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 
 router.use(isAuthenticated);
 
@@ -218,7 +219,7 @@ router.get(
     if (status !== "all") filter.status = status;
 
     const records = await BonusRecord.find(filter)
-      .populate("employee", "name department role hourlyRate")
+      .populate("employee", EMPLOYEE_CARD_FIELDS)
       .sort({ bonusAmount: -1 });
 
     const totalPayout = records.reduce((s, r) => s + r.bonusAmount, 0);
@@ -252,7 +253,7 @@ router.get(
 
     const [record, config] = await Promise.all([
       BonusRecord.findOne({ employee: id, year })
-        .populate("employee", "name department role hourlyRate"),
+        .populate("employee", EMPLOYEE_CARD_FIELDS),
       BonusConfig.findOne({ year }),
     ]);
 
@@ -273,7 +274,7 @@ router.get(
 
     const [record, config] = await Promise.all([
       BonusRecord.findOne({ employee: id, year })
-        .populate("employee", "name department role hourlyRate"),
+        .populate("employee", EMPLOYEE_CARD_FIELDS),
       BonusConfig.findOne({ year }),
     ]);
 

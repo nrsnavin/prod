@@ -16,7 +16,7 @@ const Wastage     = require('../models/Wastage');
 const Machine     = require('../models/Machine');
 const ShiftDetail = require('../models/ShiftDetail');
 
-const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
+const { buildFingerprint, stampFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
 
 // Every job route requires a logged-in user. The previous setup left
 // the whole router anonymous, including the alternate `/:jobId`
@@ -179,8 +179,7 @@ router.post(
 
     // 🪪 Mirror fingerprint on the parent Order so the order timeline
     //    also shows that a job was spun off.
-    order.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_CREATED, {
-      entityId: order._id,
+    stampFingerprint(order, ACTION_CODES.JOB_CREATED, {
       actor,
       meta: {
         jobId:          job._id.toString(),
@@ -189,7 +188,7 @@ router.post(
         relatedHash:    jobFp.hash,
         relatedShortId: jobFp.shortId,
       },
-    }));
+    });
     await order.save();
 
     res.status(201).json({
@@ -343,9 +342,8 @@ router.post(
         if (job.status === 'preparatory') {
           job.status = 'weaving';
           stampStage(job, 'weaving', req.user?._id);
-          job.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
-            entityId: job._id,
-            actor:    actorFromRequest(req),
+          stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
+            req,
             meta:     {
               previousStage: 'preparatory',
               newStage:      'weaving',
@@ -353,7 +351,7 @@ router.post(
               machineId:     machine._id.toString(),
               machineName:   machine.ID,
             },
-          }));
+          });
         }
         job.machine = machine._id;
         await job.save({ session });
@@ -437,8 +435,7 @@ router.post(
           order.status      = 'Completed';
           order.completedBy = req.user?._id || null;
           order.completedAt = new Date();
-          order.fingerprints.push(buildFingerprint(ACTION_CODES.ORDER_COMPLETED, {
-            entityId: order._id,
+          stampFingerprint(order, ACTION_CODES.ORDER_COMPLETED, {
             actor,
             meta: {
               previousStatus:  'InProgress',
@@ -448,7 +445,7 @@ router.post(
               relatedHash:     completionFp.hash,
               relatedShortId:  completionFp.shortId,
             },
-          }));
+          });
           await order.save();
         }
       }
@@ -712,9 +709,8 @@ router.post(
       job.status = 'weaving';
       stampStage(job, 'weaving', req.user?._id);
       // 🪪 Fingerprint: JOB_STAGE_UPDATED (preparatory → weaving)
-      job.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
-        entityId: job._id,
-        actor:    actorFromRequest(req),
+      stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
+        req,
         meta: {
           previousStage: 'preparatory',
           newStage:      'weaving',
@@ -722,7 +718,7 @@ router.post(
           machineId:     machine._id.toString(),
           machineName:   machine.ID,
         },
-      }));
+      });
     }
     job.machine = machine._id;
     await job.save();
