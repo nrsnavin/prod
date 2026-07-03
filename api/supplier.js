@@ -23,6 +23,7 @@ const RawMaterial    = require("../models/RawMaterial");   // ← added for stoc
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { escapeRegex } = require("../utils/escapeRegex");
 const { isAuthenticated } = require("../middleware/auth");
 
 // Every supplier / PO / material-inward route requires a logged-in
@@ -306,6 +307,8 @@ router.post(
         return next(new ErrorHandler("PO ID is required", 400));
       if (!Array.isArray(items) || items.length === 0)
         return next(new ErrorHandler("At least one item is required", 400));
+      if (items.length > 500)
+        return next(new ErrorHandler("items exceeds the 500-item limit per request", 400));
 
       // ── Load PO ────────────────────────────────────────────────────
       const po = await PurchaseOrder.findById(poId);
@@ -467,7 +470,7 @@ router.get(
       const limit = Number(req.query.limit) || 20;
       const skip  = (page - 1) * limit;
       const keyword = req.query.search
-        ? { name: { $regex: req.query.search, $options: "i" } }
+        ? { name: { $regex: escapeRegex(req.query.search), $options: "i" } }
         : {};
 
       const [suppliers, total] = await Promise.all([
@@ -508,12 +511,21 @@ router.get(
 // ─────────────────────────────────────────────────────────────────────────
 // PUT /edit-supplier
 // ─────────────────────────────────────────────────────────────────────────
+// Whitelist the client-settable fields; spreading the raw body let a
+// caller inject arbitrary/internal fields.
+const SUPPLIER_FIELDS = [
+  "name", "gstin", "phoneNumber", "email", "address", "contactPerson", "isActive",
+];
 router.put(
   "/edit-supplier",
   catchAsyncErrors(async (req, res, next) => {
     try {
+      const update = {};
+      for (const f of SUPPLIER_FIELDS) {
+        if (req.body[f] !== undefined) update[f] = req.body[f];
+      }
       const supplier = await Supplier.findByIdAndUpdate(
-        req.body._id, req.body, { new: true }
+        req.body._id, update, { new: true, runValidators: true }
       );
       if (!supplier)
         return next(new ErrorHandler("Supplier not found", 404));

@@ -28,9 +28,17 @@ exports.isAuthenticated = catchAsyncErrors(async (req, res, next) => {
 
 exports.isAdmin = (...roles) => {
     return (req, res, next) => {
+        // Guard against being mounted without a preceding isAuthenticated
+        // — a null req.user would otherwise throw a 500 and read as a
+        // server error rather than an auth failure.
+        if (!req.user) {
+            return next(new ErrorHandler("Please login to continue", 401));
+        }
         if (!roles.includes(req.user.role)) {
-            return next(new ErrorHandler(`${req.user.role} can not access this resources!`));
-        };
+            // 403, not the ErrorHandler default of 500 — this is an
+            // authorization denial, not a server fault.
+            return next(new ErrorHandler(`${req.user.role} can not access this resources!`, 403));
+        }
         next();
     }
 }

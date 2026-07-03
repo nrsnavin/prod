@@ -13,11 +13,46 @@ mongoose.plugin(auditFields);
 
 const ErrorHandler = require("./middleware/error.js");
 const app = express();
+const crypto = require("crypto");
 const cookieParser = require("cookie-parser");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+const sanitizeMongo = require("./middleware/sanitizeMongo.js");
 const { setUserContext } = require("./middleware/userContext.js");
 const { isAuthenticated, isAdmin } = require("./middleware/auth.js");
+
+// Trust the reverse proxy (nginx/ALB) so req.protocol, req.ip, and the
+// `secure` cookie flag reflect the real client connection rather than
+// the proxy hop. Required for rate-limit keying and HTTPS detection.
+app.set("trust proxy", 1);
+
+// Constant-time string comparison for shared secrets (cron header).
+// Avoids the timing side-channel of `===` on secret material.
+function safeEqual(a, b) {
+  const ab = Buffer.from(String(a || ""));
+  const bb = Buffer.from(String(b || ""));
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
+// Brute-force / abuse throttles. Keyed per-IP (trust proxy is set so
+// the real client IP is used behind the reverse proxy).
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,   // 15 min
+  max: 20,                    // 20 attempts / IP / window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many login attempts — try again later." },
+});
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,        // 1 min
+  max: 30,                    // 30 inbound webhook hits / IP / min
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Rate limit exceeded." },
+});
 
 const user     = require("./api/user.js");
 const advisor  = require("./api/advisor.js");
@@ -52,28 +87,71 @@ const notify       = require("./api/notify.js");
 // the three-layer separation (cookie, secret, audience claim).
 const portalAuth = require("./api/portal/auth.js");
 
+// CORS allow-list. Browsers enforce CORS; non-browser clients (the
+// Flutter app via Dio, curl, server-to-server) send no Origin header
+// and are always allowed. Browser origins must be explicitly listed
+// in CORS_ORIGINS (comma-separated) — reflecting any origin while
+// credentials:true is on would let any website drive the API as a
+// logged-in admin. Localhost dev origins are allowed by default.
+const _allowedOrigins = new Set(
+  (process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean)
+);
+const _devOrigins = [
+  "http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000",
+];
+if (process.env.NODE_ENV !== "PRODUCTION") {
+  _devOrigins.forEach((o) => _allowedOrigins.add(o));
+}
 const corsConfig = {
-  origin: true,
+  origin(origin, cb) {
+    // No Origin header → non-browser client (mobile/curl/server). Allow.
+    if (!origin) return cb(null, true);
+    if (_allowedOrigins.has(origin)) return cb(null, true);
+    return cb(new Error(`Origin ${origin} not allowed by CORS`), false);
+  },
   credentials: true,
 };
 
+app.use(helmet());
 app.use(cors(corsConfig));
 app.options('*', cors(corsConfig));
-app.use(express.json());
+// Bound the JSON body. The default (100kb) is fine for this API; the
+// old 50mb urlencoded ceiling was a DoS amplifier for the bulk-array
+// endpoints. File uploads use multer (memoryStorage, own 5mb cap).
+app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
-app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
+app.use(bodyParser.urlencoded({ extended: true, limit: "1mb" }));
+
+// Strip Mongo operator keys ($-prefixed / dotted) from all inputs.
+app.use(sanitizeMongo);
 
 // One JSON line per completed request (method, path, status, ms,
 // user when authenticated). Zero-dep stand-in for morgan.
 app.use(require("./middleware/requestLogger"));
 
-// Public static — daily report PDFs (utils/reportPublisher.js
-// writes here). The URLs are unguessable enough (timestamped
-// filenames) and contain only aggregated factory metrics, no
-// individual PII — same exposure the WhatsApp body already has.
+// Public static — daily report PDFs (utils/reportPublisher.js writes
+// here). These MUST stay reachable without auth because Twilio fetches
+// the PDF by URL to attach it to the WhatsApp message. The confidential-
+// ity control is therefore an UNGUESSABLE filename: reportPublisher.js
+// appends 128 bits of crypto-random entropy to each name, and files are
+// swept after 14 days. Directory listing is off by default in
+// express.static; `index:false` and `dotfiles:"deny"` make that explicit
+// and keep .gitkeep and any dotfile unreachable.
 app.use("/public", express.static(require("path").join(__dirname, "public"), {
   fallthrough: true,
+  index: false,
+  dotfiles: "deny",
   maxAge: "1h",
+  setHeaders(res) {
+    // helmet sets Cross-Origin-Resource-Policy: same-origin globally;
+    // relax it here so Twilio's media fetch of the report PDF isn't
+    // blocked. (CORP is browser-enforced, but this keeps the contract
+    // explicit and future-proof against a stricter default.)
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  },
 }));
 
 app.use(setUserContext);
@@ -111,7 +189,10 @@ function _readCommitSha() {
 }
 const _BOOT_AT  = new Date();
 const _BOOT_SHA = _readCommitSha();
-app.get("/api/v2/health/build", (req, res) => {
+// Detailed build info (commit SHA, Node version, route inventory) is a
+// fingerprinting aid for attackers, so it's admin-gated. Ops still gets
+// it with an admin session.
+app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), (req, res) => {
   res.json({
     status:        "ok",
     commitSha:     _BOOT_SHA,
@@ -119,10 +200,6 @@ app.get("/api/v2/health/build", (req, res) => {
     uptimeSeconds: Math.round(process.uptime()),
     node:          process.version,
     env:           process.env.NODE_ENV || "development",
-    // Quick-look inventory so ops can grep for "running-eta" in the
-    // response and confirm the route family is mounted *on this
-    // process*. If these are missing, the deploy didn't pick up the
-    // latest order router.
     routes: {
       "/api/v2/order/estimate-completion":    true,
       "/api/v2/order/:id/running-eta":        true,
@@ -145,6 +222,8 @@ app.get("/api/v2/health/build", (req, res) => {
 // also handle their own middleware to allow login + employee-facing reads.
 const ADMIN_GATE = [isAuthenticated, isAdmin('admin')];
 
+// Throttle credential-guessing before the login handler runs.
+app.use("/api/v2/user/login-user", loginLimiter);
 app.use("/api/v2/user", user);
 app.use("/api/v2/machine",     ADMIN_GATE, machine);
 app.use("/api/v2/shift",       shift);
@@ -184,7 +263,7 @@ app.post("/api/v2/notify/cron/run-digest", async (req, res) => {
   if (!secret) {
     return res.status(503).json({ success: false, message: "CRON_SECRET not configured" });
   }
-  if (req.get("x-cron-secret") !== secret) {
+  if (!safeEqual(req.get("x-cron-secret"), secret)) {
     return res.status(401).json({ success: false, message: "bad cron secret" });
   }
   try {
@@ -204,7 +283,7 @@ app.post("/api/v2/notify/cron/run-evening-report", async (req, res) => {
   if (!secret) {
     return res.status(503).json({ success: false, message: "CRON_SECRET not configured" });
   }
-  if (req.get("x-cron-secret") !== secret) {
+  if (!safeEqual(req.get("x-cron-secret"), secret)) {
     return res.status(401).json({ success: false, message: "bad cron secret" });
   }
   try {
@@ -220,7 +299,7 @@ app.post("/api/v2/notify/cron/run-evening-report", async (req, res) => {
 // the JSON parser, but the body parser is already mounted at app
 // scope. Auth is the Twilio signature + sender allow-list (inside
 // the handler), NOT the admin JWT — Twilio has neither.
-app.post("/api/v2/notify/incoming", async (req, res) => {
+app.post("/api/v2/notify/incoming", webhookLimiter, async (req, res) => {
   try {
     const r = await notify.handleIncoming(req);
     res.status(r.status).type("text/xml").send(r.body);

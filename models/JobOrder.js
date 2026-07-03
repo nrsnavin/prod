@@ -43,6 +43,19 @@ const JobOrderSchema = new mongoose.Schema(
       default: "preparatory",
     },
 
+    // Whether this job is woven in-house or sent to a subcontractor.
+    // Drives the framing of the Material Requirement Program (MRP)
+    // sheet — an outsourced job's MRP carries a vendor section. Purely
+    // informational for now; stock deduction is unchanged.
+    productionMode: {
+      type: String,
+      enum: ["in_house", "outsource"],
+      default: "in_house",
+    },
+    // Free-text vendor/subcontractor name; only meaningful when
+    // productionMode === "outsource".
+    outsourceVendor: { type: String, default: "" },
+
     elastics:        { type: [ElasticQtySchema], default: [] },
     producedElastic: { type: [ElasticQtySchema], default: [] },
     packedElastic:   { type: [ElasticQtySchema], default: [] },

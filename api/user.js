@@ -33,7 +33,11 @@ router.post(
   "/login-user",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { email, password } = req.body;
+      // Coerce to strings so a JSON object like {"$gt":""} can never
+      // reach the query as a Mongo operator (defence-in-depth on top
+      // of the app-wide sanitizeMongo middleware).
+      const email    = typeof req.body.email === "string" ? req.body.email.trim() : "";
+      const password = typeof req.body.password === "string" ? req.body.password : "";
 
       if (!email || !password) {
         return next(new ErrorHandler("Please provide the all fields!", 400));

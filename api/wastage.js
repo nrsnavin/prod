@@ -16,6 +16,7 @@ const StockMovement = require("../models/StockMovement");
 const Elastic       = require("../models/Elastic");
 const { notify }    = require("../utils/notify");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { resolveEmployeeId } = require("../utils/resolveEmployee");
 const { applyMovement } = require("../utils/elasticStock");
 
 router.use(isAuthenticated);
@@ -33,11 +34,19 @@ router.post(
   "/add-wastage",
   catchAsyncErrors(async (req, res, next) => {
     const { job: jobId, elastic: elasticId,
-            employee: employeeId, quantity, penalty, reason } = req.body;
+            quantity, penalty, reason } = req.body;
+
+    // Non-admins may only record wastage under their own employee id;
+    // admins may attribute it to anyone. This route's legacy field is
+    // `employee`, so map it onto the resolver's `employeeId` input.
+    if (req.user?.role === "admin" && req.body.employee) {
+      req.body.employeeId = req.body.employee;
+    }
+    const employeeId = resolveEmployeeId(req);
 
     if (!jobId)      return next(new ErrorHandler("job is required", 400));
     if (!elasticId)  return next(new ErrorHandler("elastic is required", 400));
-    if (!employeeId) return next(new ErrorHandler("employee is required", 400));
+    if (!employeeId) return next(new ErrorHandler("Cannot determine employee — your account has no linked employee", 403));
     if (!reason?.trim()) return next(new ErrorHandler("reason is required", 400));
     if (typeof quantity !== "number" || quantity <= 0)
       return next(new ErrorHandler("quantity must be a positive number", 400));

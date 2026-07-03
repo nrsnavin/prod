@@ -82,9 +82,15 @@ describe("reportPublisher", () => {
     } catch { /* dir may not exist */ }
   });
 
-  test("pdfFilename uses a date-derived stable shape", () => {
+  test("pdfFilename is date-derived plus 128 bits of random entropy", () => {
     const name = pdfFilename("test-thing", new Date("2026-06-20T08:30:00Z"));
-    expect(name).toBe("test-thing-2026-06-20-08-30.pdf");
+    // prefix + minute-resolution timestamp + 32 hex chars (16 bytes).
+    expect(name).toMatch(/^test-thing-2026-06-20-08-30-[0-9a-f]{32}\.pdf$/);
+  });
+
+  test("pdfFilename is unguessable — two calls with the same date differ", () => {
+    const d = new Date("2026-06-20T08:30:00Z");
+    expect(pdfFilename("r", d)).not.toBe(pdfFilename("r", d));
   });
 
   test("publishPdf writes the buffer + returns a URL ending in the filename", async () => {

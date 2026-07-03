@@ -19,6 +19,7 @@ const AdvanceRequest   = require('../models/Advance');
 const YearlyBonus      = require('../models/YearlyBonus');
 const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 const { EMPLOYEE_CARD_FIELDS } = require('../utils/populateFields');
+const { resolveEmployeeId } = require('../utils/resolveEmployee');
 
 router.use(isAuthenticated);
 
@@ -443,12 +444,16 @@ router.get('/advance', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-// Worker-facing — any authenticated employee can request an advance.
+// Worker-facing — an authenticated employee can request an advance
+// FOR THEMSELVES. Admins may request on behalf of anyone.
 router.post('/advance', async (req, res) => {
   try {
-    const { employeeId, amount, reason = '' } = req.body;
-    if (!employeeId || !amount)
-      return res.status(400).json({ success: false, message: 'employeeId and amount required' });
+    const { amount, reason = '' } = req.body;
+    const employeeId = resolveEmployeeId(req);
+    if (!employeeId)
+      return res.status(403).json({ success: false, message: 'Cannot determine employee — your account has no linked employee' });
+    if (!amount)
+      return res.status(400).json({ success: false, message: 'amount required' });
     const emp = await Employee.findById(employeeId, 'name').lean();
     if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
 
