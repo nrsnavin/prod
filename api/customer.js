@@ -5,6 +5,7 @@ const router   = express.Router();
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { escapeRegex } = require("../utils/escapeRegex");
 
 const Customer     = require("../models/Customer");
 const CustomerUser = require("../models/CustomerUser");
@@ -13,10 +14,25 @@ const Order        = require("../models/Order");
 // All customer management routes are admin-only.
 router.use(isAuthenticated, isAdmin('admin'));
 
+// Fields a client is allowed to set on a customer. Everything else
+// (audit fields, anything future/internal) is ignored so the raw body
+// can't overwrite protected state.
+const CUSTOMER_FIELDS = [
+  "name", "email", "gstin", "status", "contactName", "phoneNumber",
+  "purchase", "accountant", "merchandiser", "paymentTerms",
+];
+function pickCustomer(body) {
+  const out = {};
+  for (const f of CUSTOMER_FIELDS) {
+    if (body[f] !== undefined) out[f] = body[f];
+  }
+  return out;
+}
+
 router.post(
   "/create",
   catchAsyncErrors(async (req, res, next) => {
-    const customerData = req.body;
+    const customerData = pickCustomer(req.body);
     if (!customerData.name) {
       return next(new ErrorHandler("Customer name is required", 400));
     }
@@ -35,7 +51,7 @@ router.put(
     }
     const customer = await Customer.findByIdAndUpdate(
       id,
-      req.body,
+      pickCustomer(req.body),
       { new: true, runValidators: true }
     );
     if (!customer) return next(new ErrorHandler("Customer not found", 404));
@@ -53,9 +69,9 @@ router.get(
 
     const query = search ? {
       $or: [
-        { name:        { $regex: search, $options: "i" } },
-        { phoneNumber: { $regex: search, $options: "i" } },
-        { gstin:       { $regex: search, $options: "i" } },
+        { name:        { $regex: escapeRegex(search), $options: "i" } },
+        { phoneNumber: { $regex: escapeRegex(search), $options: "i" } },
+        { gstin:       { $regex: escapeRegex(search), $options: "i" } },
       ],
     } : {};
 
@@ -140,6 +156,10 @@ router.post(
     if (!name || !email || !password) {
       return next(new ErrorHandler("name, email, and password are required", 400));
     }
+    // Constrain the portal role to the known set rather than trusting
+    // the raw body value (defence-in-depth; the schema enum also guards).
+    const PORTAL_ROLES = ["buyer", "viewer", "accountant"];
+    const portalRole = PORTAL_ROLES.includes(role) ? role : "buyer";
     const dupe = await CustomerUser.findOne({
       email: String(email).toLowerCase().trim(),
     });
@@ -150,7 +170,7 @@ router.post(
       name,
       email,
       phone: phone || "",
-      role:  role  || "buyer",
+      role:  portalRole,
       password,
     });
     return res.status(201).json({

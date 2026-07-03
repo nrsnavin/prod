@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { escapeRegex }  = require("../utils/escapeRegex");
 
 const Elastic       = require("../models/Elastic");
 const Costing       = require("../models/Costing");
@@ -96,7 +97,7 @@ router.get(
   "/get-elastics",
   catchAsyncErrors(async (req, res) => {
     const { search = "", page = 1, limit = 20, includeArchived } = req.query;
-    const filter = search ? { name: { $regex: search, $options: "i" } } : {};
+    const filter = search ? { name: { $regex: escapeRegex(search), $options: "i" } } : {};
     // Soft-deleted SKUs hidden by default; `$ne: true` keeps legacy
     // docs without the key visible.
     if (includeArchived !== "true") filter.archived = { $ne: true };

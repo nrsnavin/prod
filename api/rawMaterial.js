@@ -10,6 +10,7 @@ const MaterialOutward   = require("../models/MaterialOut.cjs");
 const Supplier          = require("../models/Supplier");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
+const { escapeRegex } = require("../utils/escapeRegex");
 const {
   maybeFireCriticalStockout,
   maybeFirePriceChangeAlert,
@@ -54,7 +55,7 @@ router.get(
 
     const filter = {};
     if (category)            filter.category = category;
-    if (search)              filter.name = { $regex: search, $options: "i" };
+    if (search)              filter.name = { $regex: escapeRegex(search), $options: "i" };
     if (lowStock === "true") filter.$expr = { $lte: ["$stock", "$minStock"] };
 
     const materials = await RawMaterial.find(filter)
@@ -137,19 +138,28 @@ router.delete(
 router.put(
   "/edit-raw-material",
   catchAsyncErrors(async (req, res, next) => {
-    const { _id, ...update } = req.body;
+    const { _id } = req.body;
     if (!_id) return next(new ErrorHandler("Material ID required", 400));
+
+    // Whitelist the fields a client may set. Spreading the raw body
+    // let a caller overwrite the audit ledgers (stockMovements,
+    // priceHistory) or totalConsumption wholesale — build an explicit
+    // update instead. The append-only priceHistory is managed below.
+    const ALLOWED = ["name", "category", "supplier", "price", "minStock", "stock"];
+    const update = {};
+    for (const f of ALLOWED) {
+      if (req.body[f] !== undefined) update[f] = req.body[f];
+    }
+    const priceReason = req.body.priceReason;
 
     const existing = await RawMaterial.findById(_id);
     if (!existing) return next(new ErrorHandler("Raw material not found", 404));
 
-    // Snapshot for the inventory-alert fire-and-forget below. The
-    // priceReason gets deleted from `update` before save, so we
-    // grab it here before that happens.
+    // Snapshot for the inventory-alert fire-and-forget below.
     const _alertSnap = {
       oldStock:  Number(existing.stock) || 0,
       oldPrice:  Number(existing.price) || 0,
-      reason:    String(update.reason || update.priceReason || "Manual edit").trim(),
+      reason:    String(req.body.reason || priceReason || "Manual edit").trim(),
     };
 
     // ── Track price change ────────────────────────────────────
@@ -162,11 +172,9 @@ router.put(
           price:    Number(update.price),
           oldPrice: Number(existing.price),
           changedAt: new Date(),
-          reason:   update.priceReason?.trim() || "Manual edit",
+          reason:   priceReason?.trim() || "Manual edit",
         },
       };
-      // Remove priceReason from the root update (not a schema field)
-      delete update.priceReason;
     }
 
     const material = await RawMaterial.findByIdAndUpdate(_id, update, {
@@ -209,7 +217,7 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     const { search } = req.query;
     const filter = {};
-    if (search) filter.name = { $regex: search, $options: "i" };
+    if (search) filter.name = { $regex: escapeRegex(search), $options: "i" };
 
     const suppliers = await Supplier.find(filter)
       .select("name phone email")
@@ -352,6 +360,10 @@ router.post(
   "/bulk-adjust-stock",
   catchAsyncErrors(async (req, res, next) => {
     const { adjustments = [], globalReason = "Stock adjustment" } = req.body;
+
+    if (adjustments.length > 500) {
+      return next(new ErrorHandler("adjustments exceeds the 500-item limit per request", 400));
+    }
 
     if (!Array.isArray(adjustments) || adjustments.length === 0) {
       return next(new ErrorHandler("adjustments array is required", 400));
@@ -578,6 +590,10 @@ router.post(
   "/bulk-update-prices",
   catchAsyncErrors(async (req, res, next) => {
     const { updates = [], reason = "Bulk price update" } = req.body;
+
+    if (updates.length > 500) {
+      return next(new ErrorHandler("updates exceeds the 500-item limit per request", 400));
+    }
 
     if (!Array.isArray(updates) || updates.length === 0) {
       return next(new ErrorHandler("updates array is required", 400));

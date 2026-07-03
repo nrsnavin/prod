@@ -285,11 +285,27 @@ async function handleIncoming(req) {
   const body = req.body?.Body || "";
 
   // 1. Twilio signature — proves the call really came from Twilio.
-  //    Skipped in dev when TWILIO_AUTH_TOKEN is unset (dry-run mode).
+  //    This handler triggers a real order approval (deducts stock),
+  //    so the signature is MANDATORY in production: if the auth token
+  //    isn't configured, we fail closed rather than trusting the
+  //    attacker-controlled `From` allow-list alone. Only a non-
+  //    production env is allowed to skip (local dry-run testing).
   const token = process.env.TWILIO_AUTH_TOKEN;
-  if (token) {
-    // The signed URL is what Twilio used — reconstruct from headers.
-    const url = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+  const isProd = process.env.NODE_ENV === "PRODUCTION";
+  if (!token) {
+    if (isProd) {
+      console.error("[whatsapp:incoming] TWILIO_AUTH_TOKEN unset in production — rejecting");
+      return { status: 503, body: twimlReply("Webhook not configured.") };
+    }
+    console.warn("[whatsapp:incoming] TWILIO_AUTH_TOKEN unset — signature check skipped (non-prod only)");
+  } else {
+    // Pin the signed URL to the configured public base URL rather than
+    // trusting req.host / X-Forwarded-Proto, which a proxy hop lets an
+    // attacker influence. PUBLIC_BASE_URL must match the URL Twilio is
+    // configured to POST to (the webhook URL in the Twilio console).
+    const base = (process.env.PUBLIC_BASE_URL
+      || `${req.protocol}://${req.get("host")}`).replace(/\/$/, "");
+    const url = `${base}${req.originalUrl}`;
     const sig = req.get("x-twilio-signature");
     const ok = verifyTwilioSignature({
       url, body: req.body, signature: sig, authToken: token,

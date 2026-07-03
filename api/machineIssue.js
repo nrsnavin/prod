@@ -22,7 +22,8 @@ const Employee       = require("../models/Employee");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
-const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
+const { resolveEmployeeId } = require("../utils/resolveEmployee");
 
 // Every machine-issue route requires login. Admin-only routes
 // additionally chain isAdmin('admin') in-line below.
@@ -36,15 +37,17 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const {
       machineId,
-      employeeId,
       title,
       description,
       severity = "medium",
       attachments = [],
     } = req.body;
 
+    // Workers file under their own id; admins may file on behalf.
+    const employeeId = resolveEmployeeId(req);
+
     if (!machineId)   return next(new ErrorHandler("machineId is required", 400));
-    if (!employeeId)  return next(new ErrorHandler("employeeId is required", 400));
+    if (!employeeId)  return next(new ErrorHandler("Cannot determine employee — your account has no linked employee", 403));
     if (!title?.trim())       return next(new ErrorHandler("title is required", 400));
     if (!description?.trim()) return next(new ErrorHandler("description is required", 400));
     if (!SEVERITIES.includes(severity)) {
@@ -74,6 +77,7 @@ router.post(
 
 router.get(
   "/employee/:empId",
+  selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
     const { empId } = req.params;
     const issues = await MachineIssue.find({ employee: empId })

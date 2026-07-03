@@ -10,8 +10,9 @@
 // matching the deployed server. If neither is available, the
 // caller should send the WhatsApp message without media.
 
-const fs   = require("fs");
-const path = require("path");
+const fs     = require("fs");
+const path   = require("path");
+const crypto = require("crypto");
 
 const REPORTS_DIR = path.join(__dirname, "..", "public", "reports");
 const RETENTION_DAYS = 14;       // sweep out PDFs older than this on each run
@@ -51,9 +52,16 @@ async function _sweepOld() {
   } catch { /* ignore */ }
 }
 
+// The report PDFs are served from an unauthenticated static mount
+// (Twilio must fetch them by URL to attach them to WhatsApp), so the
+// ONLY confidentiality control is that the filename is unguessable.
+// A minute-resolution timestamp alone is trivially enumerable, so we
+// append 128 bits of crypto-random entropy. An attacker can no longer
+// iterate timestamps to harvest a day's reports.
 function pdfFilename(prefix, date = new Date()) {
-  const iso = date.toISOString().slice(0, 16).replace(/[T:]/g, "-");
-  return `${prefix}-${iso}.pdf`;
+  const iso   = date.toISOString().slice(0, 16).replace(/[T:]/g, "-");
+  const token = crypto.randomBytes(16).toString("hex"); // 128-bit
+  return `${prefix}-${iso}-${token}.pdf`;
 }
 
 module.exports = { publishPdf, pdfFilename, REPORTS_DIR };

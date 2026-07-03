@@ -409,6 +409,11 @@ router.post('/bulk-enter-production', async (req, res) => {
     if (!Array.isArray(entries) || entries.length === 0) {
       return res.status(400).json({ success: false, message: 'entries must be a non-empty array.' });
     }
+    // Cap the batch — each entry drives multiple DB round-trips, so an
+    // unbounded array is a DoS lever for any authenticated worker.
+    if (entries.length > 200) {
+      return res.status(400).json({ success: false, message: 'entries exceeds the 200-item limit per request.' });
+    }
 
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
