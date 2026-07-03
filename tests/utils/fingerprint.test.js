@@ -4,6 +4,7 @@ const {
   ACTION_CODES,
   ACTION_LABELS,
   buildFingerprint,
+  stampFingerprint,
   actorFromRequest,
   normaliseActor,
 } = require("../../utils/fingerprint");
@@ -100,6 +101,68 @@ describe("fingerprint utility", () => {
       expect(actorFromRequest({})).toEqual({
         id: "system", name: "System", role: "system",
       });
+    });
+  });
+
+  describe("stampFingerprint", () => {
+    it("pushes onto doc.fingerprints and returns the fingerprint", () => {
+      const doc = { _id: "order1", fingerprints: [] };
+      const fp = stampFingerprint(doc, ACTION_CODES.ORDER_APPROVED, {
+        req: { user: { id: "u1", name: "Alice", role: "admin" } },
+        meta: { forced: true },
+      });
+      expect(doc.fingerprints).toHaveLength(1);
+      expect(doc.fingerprints[0]).toBe(fp);
+      expect(fp.code).toBe("ORDER_APPROVED");
+      expect(fp.meta).toEqual({ forced: true });
+      expect(fp.actor.name).toBe("Alice");
+    });
+
+    it("defaults entityId to doc._id", () => {
+      const doc = { _id: "job42", fingerprints: [] };
+      const fp = stampFingerprint(doc, ACTION_CODES.JOB_CREATED);
+      // entityId feeds the hash; two different ids → different hashes.
+      const other = buildFingerprint(ACTION_CODES.JOB_CREATED, { entityId: "different" });
+      expect(fp.hash).not.toBe(other.hash);
+    });
+
+    it("explicit actor wins over req", () => {
+      const doc = { _id: "x", fingerprints: [] };
+      const fp = stampFingerprint(doc, ACTION_CODES.ORDER_CREATED, {
+        req: { user: { name: "FromReq" } },
+        actor: { id: "e", name: "Explicit", role: "admin" },
+      });
+      expect(fp.actor.name).toBe("Explicit");
+    });
+
+    it("initialises fingerprints when the array is absent", () => {
+      const doc = { _id: "y" };
+      stampFingerprint(doc, ACTION_CODES.ORDER_CREATED);
+      expect(Array.isArray(doc.fingerprints)).toBe(true);
+      expect(doc.fingerprints).toHaveLength(1);
+    });
+
+    it("defaults the actor to System when neither actor nor req given", () => {
+      const doc = { _id: "z", fingerprints: [] };
+      const fp = stampFingerprint(doc, ACTION_CODES.ORDER_CREATED);
+      expect(fp.actor).toEqual({ id: "system", name: "System", role: "system" });
+    });
+
+    it("is behaviour-equivalent to the manual build-and-push idiom", () => {
+      // The old idiom vs the helper produce the same shape (minus
+      // hash/at which are nonce/time based).
+      const req = { user: { id: "u1", name: "Alice", role: "admin" } };
+      const doc = { _id: "order1", fingerprints: [] };
+      const manual = buildFingerprint(ACTION_CODES.RAW_MATERIAL_DEDUCTED, {
+        entityId: doc._id, actor: actorFromRequest(req), meta: { applied: 5 },
+      });
+      const helper = stampFingerprint(doc, ACTION_CODES.RAW_MATERIAL_DEDUCTED, {
+        req, meta: { applied: 5 },
+      });
+      expect(helper.code).toBe(manual.code);
+      expect(helper.label).toBe(manual.label);
+      expect(helper.actor).toEqual(manual.actor);
+      expect(helper.meta).toEqual(manual.meta);
     });
   });
 });

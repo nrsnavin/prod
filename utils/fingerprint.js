@@ -178,10 +178,48 @@ function buildFingerprint(code, { entityId, meta = {}, actor } = {}) {
   };
 }
 
+/**
+ * Build a fingerprint AND push it onto a document's `fingerprints`
+ * array in one call — collapsing the repeated
+ *   doc.fingerprints.push(buildFingerprint(CODE, {
+ *     entityId: doc._id, actor: actorFromRequest(req), meta,
+ *   }))
+ * idiom that appears ~40× across the order/job/shift routes.
+ *
+ * Resolves the actor from (in order): opts.actor, opts.req (via
+ * actorFromRequest), else "system". Uses doc._id as the entityId
+ * unless opts.entityId overrides it. Initialises doc.fingerprints
+ * if absent. Returns the fingerprint that was pushed so callers that
+ * also need to return/collect it (e.g. deductionFingerprints) can.
+ *
+ * @param {object} doc               Mongoose doc with a fingerprints array
+ * @param {string} code             one of ACTION_CODES values
+ * @param {object} [opts]
+ * @param {object} [opts.req]        Express request (actor source)
+ * @param {object|string} [opts.actor]  explicit actor (wins over req)
+ * @param {object} [opts.meta]       extra metadata
+ * @param {string|object} [opts.entityId]  override (defaults to doc._id)
+ * @returns {object} the pushed fingerprint
+ */
+function stampFingerprint(doc, code, opts = {}) {
+  const actor = opts.actor !== undefined
+    ? opts.actor
+    : actorFromRequest(opts.req);
+  const fp = buildFingerprint(code, {
+    entityId: opts.entityId !== undefined ? opts.entityId : doc?._id,
+    actor,
+    meta: opts.meta || {},
+  });
+  if (!Array.isArray(doc.fingerprints)) doc.fingerprints = [];
+  doc.fingerprints.push(fp);
+  return fp;
+}
+
 module.exports = {
   ACTION_CODES,
   ACTION_LABELS,
   buildFingerprint,
+  stampFingerprint,
   actorFromRequest,
   normaliseActor,
 };

@@ -359,8 +359,12 @@ async function handleIncoming(req) {
   //    notification all by itself.
   try {
     const botToken = await getWhatsAppBotToken();
-    const port = process.env.PORT || 2701;
-    const internalUrl = `http://localhost:${port}/api/v2/order/approve`;
+    // Base URL for the internal self-call. Configurable so a deploy
+    // behind a proxy / on a non-default port doesn't hardcode
+    // localhost:2701. Falls back to the local loopback address.
+    const internalBase = (process.env.INTERNAL_BASE_URL
+      || `http://localhost:${process.env.PORT || 2701}`).replace(/\/$/, "");
+    const internalUrl = `${internalBase}/api/v2/order/approve`;
     const payload = {
       orderId:     order._id.toString(),
       force:       cmd.force,

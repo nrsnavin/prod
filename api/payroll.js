@@ -18,6 +18,7 @@ const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
 const YearlyBonus      = require('../models/YearlyBonus');
 const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
+const { EMPLOYEE_CARD_FIELDS } = require('../utils/populateFields');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
 
 router.use(isAuthenticated);
@@ -402,7 +403,7 @@ router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
     const year  = +(req.query.year  || new Date().getFullYear());
     const month = +(req.query.month || new Date().getMonth() + 1);
     const p = await Payroll.findOne({ employee: req.params.empId, year, month })
-      .populate('employee', 'name department role phoneNumber hourlyRate').lean();
+      .populate('employee', EMPLOYEE_CARD_FIELDS).lean();
     if (!p) return res.status(404).json({ success: false, message: 'Not generated yet' });
     res.json({ success: true, data: p });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
