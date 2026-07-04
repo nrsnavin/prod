@@ -21,6 +21,7 @@ const C                    = require("../utils/etaConfig.js");
 const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
 const Notification         = require("../models/Notification.js");
+const { approveOrderTxn }  = require("../services/orderService.js");
 
 
 // ════════════════════════════════════════════════════════════════
@@ -435,213 +436,22 @@ router.post(
     session.startTransaction();
     try {
       const { orderId, force = false, forceReason = "" } = req.body;
-      if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
-        throw new ErrorHandler("Valid orderId is required", 400);
-      }
-      const order = await Order.findById(orderId).session(session);
-      if (!order) throw new ErrorHandler("Order not found", 404);
-      if (order.status !== "Open")
-        throw new ErrorHandler("Only Open orders can be approved", 400);
-      if (!Array.isArray(order.elasticOrdered) ||
-          order.elasticOrdered.length === 0) {
-        throw new ErrorHandler(
-          "Order has no elastic lines — cannot approve", 400
-        );
-      }
-
-      // Pre-flight stock check. When `force: true` we still build a
-      // shortfall list so the audit fingerprint records what was
-      // forced through; we don't bail out. When `force: false` the
-      // first short material raises 400 with a machine-readable
-      // `code: "INSUFFICIENT_STOCK"` so the admin app can prompt for
-      // a reason and retry.
-      const shortfalls = [];
-      for (const rm of order.rawMaterialRequired) {
-        const material = await RawMaterial.findById(rm.rawMaterial).session(session);
-        if (!material) throw new ErrorHandler("Raw material not found", 404);
-        if (material.stock < rm.requiredWeight) {
-          if (!force) {
-            const err = new ErrorHandler(
-              `Insufficient stock for ${material.name} (have ${material.stock}, need ${rm.requiredWeight})`,
-              400
-            );
-            err.code = "INSUFFICIENT_STOCK";
-            err.shortfall = {
-              materialId:   rm.rawMaterial.toString(),
-              materialName: material.name,
-              available:    material.stock,
-              required:     rm.requiredWeight,
-              short:        rm.requiredWeight - material.stock,
-            };
-            throw err;
-          }
-          shortfalls.push({
-            materialId:   rm.rawMaterial.toString(),
-            materialName: material.name,
-            available:    material.stock,
-            required:     rm.requiredWeight,
-            short:        rm.requiredWeight - material.stock,
-          });
-        }
-      }
-      // Reason is only demanded when the force flag actually
-      // overrides something — a force=true call against healthy
-      // stock behaves like a normal approval.
-      if (force && shortfalls.length > 0) {
-        const reason = String(forceReason || "").trim();
-        if (reason.length < 8) {
-          throw new ErrorHandler(
-            "forceReason must be at least 8 characters when forcing through a shortfall",
-            400
-          );
-        }
-      }
-
       const actor = actorFromRequest(req);
 
-      // If admin forced approval through a shortfall, leave a
-      // standalone fingerprint capturing the reason BEFORE the
-      // deduction fingerprints. This keeps the audit trail explicit
-      // about who overrode the stock guard and why.
-      if (force && shortfalls.length > 0) {
-        const forceFp = buildFingerprint(ACTION_CODES.ORDER_APPROVED, {
-          entityId: order._id,
-          actor,
-          meta: {
-            forced:     true,
-            reason:     String(forceReason).trim(),
-            shortfalls,
-          },
-        });
-        order.fingerprints.push(forceFp);
-      }
-
-      const deductionFingerprints = [];
-      // Snapshots for the post-commit criticalStockout fire-and-forget.
-      const stockoutSnapshots = [];
-      for (const rm of order.rawMaterialRequired) {
-        const material = await RawMaterial.findById(rm.rawMaterial).session(session);
-        // Clamp stock at 0 on a forced approval — the schema floor
-        // (min: 0) on RawMaterial.stock would otherwise reject the
-        // save and trash the whole transaction. The shortfall is
-        // already captured in the force fingerprint above.
-        const _oldStock = Number(material.stock) || 0;
-        const applied = Math.min(rm.requiredWeight, material.stock);
-        material.stock = Math.max(0, material.stock - rm.requiredWeight);
-        stockoutSnapshots.push({
-          materialId: material._id,
-          oldStock:   _oldStock,
-          newStock:   Number(material.stock),
-        });
-        material.totalConsumption = (material.totalConsumption || 0) + applied;
-        // Ledger rows record what ACTUALLY moved (`applied`) so the
-        // movement sums reconcile with stock after a clamped forced
-        // approval. The requested amount lives in the deduction
-        // fingerprint + force fingerprint shortfalls.
-        material.stockMovements?.push({
-          date: new Date(), type: "ORDER_APPROVAL", order: order._id,
-          quantity: applied, balance: material.stock,
-        });
-        await material.save({ session });
-        await MaterialOutward.create([{
-          rawMaterial: rm.rawMaterial,
-          quantity:    applied,
-          order:       order._id,
-          type:        "ORDER_APPROVAL",
-          outwardDate: new Date(),
-          unitPrice:   material.price ?? 0,
-          remarks:     applied < rm.requiredWeight
-            ? `Order #${order.orderNo ?? ""} approval (forced — requested ${rm.requiredWeight}, short ${rm.requiredWeight - applied})`
-            : `Order #${order.orderNo ?? ""} approval`,
-        }], { session });
-
-        const deductFp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_DEDUCTED, {
-          entityId: order._id,
-          actor,
-          meta: {
-            rawMaterialId:   rm.rawMaterial.toString(),
-            rawMaterialName: material.name,
-            requested:       rm.requiredWeight,
-            applied,
-            unit:            "kg",
-            balanceAfter:    material.stock,
-          },
-        });
-        order.fingerprints.push(deductFp);
-        deductionFingerprints.push(deductFp);
-      }
-
-      // ── Reserve elastic units against this order ───────────
-      const reservationFingerprints = [];
-      for (const line of order.elasticOrdered) {
-        const qty = Number(line.quantity || 0);
-        if (qty <= 0) continue;
-
-        const elasticDoc = await Elastic.findById(line.elastic).session(session);
-        if (!elasticDoc) {
-          throw new ErrorHandler(`Elastic ${line.elastic} not found`, 404);
-        }
-        elasticDoc.reservedStock = (Number(elasticDoc.reservedStock) || 0) + qty;
-        await elasticDoc.save({ session });
-
-        order.reservations.push({ elastic: line.elastic, quantity: qty });
-
-        await applyMovement(session, {
-          elasticId: line.elastic,
-          type:      "RESERVATION_HOLD",
-          quantity:  +qty,
-          refType:   "Order",
-          refId:     order._id,
-          reason:    `Order ${order.orderNo ?? order._id} approved`,
-          by:        req.user?._id,
-        });
-
-        const resFp = buildFingerprint(ACTION_CODES.STOCK_RESERVED, {
-          entityId: order._id,
-          actor,
-          meta: {
-            elasticId:   line.elastic.toString(),
-            elasticName: elasticDoc.name,
-            quantity:    qty,
-          },
-        });
-        order.fingerprints.push(resFp);
-        reservationFingerprints.push(resFp);
-      }
-
-      // Provenance — when the approve came from the WhatsApp webhook,
-      // the inbound handler passes whatsappActor.from in the body so
-      // the audit trail keeps the originating phone (the JWT actor
-      // would otherwise just say "WhatsApp Bot"). Stamp both the
-      // order doc and the fingerprint meta so the admin app can
-      // render a "via WhatsApp +91…" pill in the timeline + a small
-      // icon on the order list.
-      const whatsappFrom = req.body?.whatsappActor?.from || null;
-      const approvalVia  = whatsappFrom ? "whatsapp" : "admin";
-
-      const approveFp = buildFingerprint(ACTION_CODES.ORDER_APPROVED, {
-        entityId: order._id,
-        actor,
-        meta: {
-          previousStatus:    "Open",
-          newStatus:         "Approved",
-          forced:            force === true && shortfalls.length > 0,
-          forceReason:       force ? String(forceReason).trim() : undefined,
-          shortfallCount:    shortfalls.length,
-          materialsDeducted: deductionFingerprints.length,
-          elasticsReserved:  reservationFingerprints.length,
-          via:               approvalVia,
-          whatsappFrom:      whatsappFrom || undefined,
-        },
+      // The transactional domain logic (validate → pre-flight → force
+      // fingerprint → raw deduction → elastic reservation → approval
+      // fingerprint + status flip) lives in services/orderService.js.
+      // The route keeps only session lifecycle, HTTP shaping, and the
+      // post-commit fire-and-forget notifications.
+      const {
+        order, approveFp, deductionFingerprints, reservationFingerprints,
+        stockoutSnapshots,
+      } = await approveOrderTxn(session, {
+        orderId, force, forceReason, actor,
+        whatsappActor: req.body?.whatsappActor,
+        userId:        req.user?._id,
       });
-      order.fingerprints.push(approveFp);
 
-      order.status               = "Approved";
-      order.approvedBy           = req.user?._id || null;
-      order.approvedAt           = new Date();
-      order.approvalVia          = approvalVia;
-      order.approvalWhatsappFrom = whatsappFrom || undefined;
-      await order.save({ session });
       await session.commitTransaction();
       session.endSession();
 
