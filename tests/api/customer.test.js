@@ -1,5 +1,14 @@
 "use strict";
 
+// Bypass the mount-level ADMIN_GATE so these unit tests reach the
+// handlers. jest.mock is hoisted above the app require below, so app.js
+// picks up the mocked middleware. Without this every request 401s.
+jest.mock("../../middleware/auth.js", () => ({
+  isAuthenticated: (req, _res, next) => { req.user = { _id: "test", role: "admin", name: "Test" }; next(); },
+  isAdmin:         () => (_req, _res, next) => next(),
+  selfOrAdmin:     (_req, _res, next) => next(),
+}));
+
 jest.mock("../../models/Customer");
 
 const request = require("supertest");
@@ -51,7 +60,7 @@ describe("PUT /api/v2/customer/update", () => {
 
     const res = await request(app)
       .put("/api/v2/customer/update")
-      .send({ _id: "cust1", name: "Updated Corp" });
+      .send({ _id: "507f1f77bcf86cd799439011", name: "Updated Corp" });
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -63,7 +72,7 @@ describe("PUT /api/v2/customer/update", () => {
 
     const res = await request(app)
       .put("/api/v2/customer/update")
-      .send({ _id: "nonexistent", name: "X" });
+      .send({ _id: "507f1f77bcf86cd799439099", name: "X" });
 
     expect(res.status).toBe(404);
     expect(res.body.message).toMatch(/not found/i);
