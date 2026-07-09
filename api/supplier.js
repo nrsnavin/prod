@@ -86,7 +86,7 @@ router.post(
   "/create-po",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { supplier, items } = req.body;
+      const { supplier, items, expectedDate, notes } = req.body;
       if (!supplier)
         return next(new ErrorHandler("Supplier is required", 400));
       if (!Array.isArray(items) || items.length === 0)
@@ -109,6 +109,7 @@ router.post(
       const last     = await PurchaseOrder.findOne({}, { poNo: 1 }).sort({ poNo: -1 });
       const nextPoNo = last ? (last.poNo || 1000) + 1 : 1001;
 
+      const parsedDate = expectedDate ? new Date(expectedDate) : undefined;
       const po = await PurchaseOrder.create({
         supplier,
         items: items.map((i) => ({
@@ -117,6 +118,8 @@ router.post(
           quantity:         i.quantity || 0,
           receivedQuantity: 0,
         })),
+        expectedDate: parsedDate && !isNaN(parsedDate.getTime()) ? parsedDate : undefined,
+        notes:        typeof notes === "string" ? notes.trim() : "",
         poNo:   nextPoNo,
         status: "Open",
       });

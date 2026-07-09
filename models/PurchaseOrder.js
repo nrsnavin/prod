@@ -34,6 +34,9 @@ const PurchaseOrderSchema = new mongoose.Schema(
       enum: ["Open", "Partial", "Completed"],
       default: "Open",
     },
+    // Requested delivery date + free-text terms/notes for the printed PO.
+    expectedDate: { type: Date },
+    notes: { type: String, default: "" },
     poNo: {
       type: Number,
       immutable: true,
