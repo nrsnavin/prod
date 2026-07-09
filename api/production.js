@@ -26,6 +26,7 @@ const Machine    = require('../models/Machine');
 const Employee   = require('../models/Employee');
 const Customer   = require('../models/Customer');
 const Order      = require('../models/Order');
+const Elastic    = require('../models/Elastic');
 const { isAuthenticated } = require('../middleware/auth');
 
 // Every production-analytics route requires login. Was previously
@@ -843,7 +844,7 @@ router.get('/analytics', async (req, res) => {
 //    insights:[{ severity, title, detail }]
 //  }
 // ═════════════════════════════════════════════════════════════
-const GROUP_DIMS = ['machine', 'operator', 'customer', 'order'];
+const GROUP_DIMS = ['machine', 'operator', 'customer', 'order', 'elastic'];
 
 function toObjectId(v) {
   try { return new mongoose.Types.ObjectId(v); } catch (_) { return null; }
@@ -892,19 +893,40 @@ router.get('/breakdown', async (req, res) => {
       if (oId) post['jobDoc.order'] = oId;
       if (Object.keys(post).length) prodPipe.push({ $match: post });
     }
-    const prodKey = {
-      machine:  '$machine',
-      operator: '$employee',
-      customer: '$jobDoc.customer',
-      order:    '$jobDoc.order',
-    }[groupBy];
-    prodPipe.push({
-      $group: {
-        _id: prodKey,
-        production: { $sum: '$productionMeters' },
-        shiftCount: { $sum: 1 },
-      },
-    });
+    if (groupBy === 'elastic') {
+      // Production is booked per shift, not per elastic. Attribute a
+      // shift's metres across the elastics it ran, weighted by how many
+      // heads each elastic occupied in that shift's head→elastic map.
+      // A shift can therefore contribute to several elastics; shiftCount
+      // counts distinct shifts that touched each elastic.
+      prodPipe.push(
+        { $addFields: { totalHeads: { $size: { $ifNull: ['$elastics', []] } } } },
+        { $match: { totalHeads: { $gt: 0 } } },
+        { $unwind: '$elastics' },
+        { $group: {
+            _id: '$elastics.elastic',
+            production: {
+              $sum: { $divide: ['$productionMeters', '$totalHeads'] },
+            },
+            shiftIds: { $addToSet: '$_id' },
+        } },
+        { $project: { production: 1, shiftCount: { $size: '$shiftIds' } } },
+      );
+    } else {
+      const prodKey = {
+        machine:  '$machine',
+        operator: '$employee',
+        customer: '$jobDoc.customer',
+        order:    '$jobDoc.order',
+      }[groupBy];
+      prodPipe.push({
+        $group: {
+          _id: prodKey,
+          production: { $sum: '$productionMeters' },
+          shiftCount: { $sum: 1 },
+        },
+      });
+    }
 
     // ── Wastage pipeline (Wastage ledger) ────────────────────
     // Wastage carries employee directly; machine/customer/order are
@@ -931,6 +953,7 @@ router.get('/breakdown', async (req, res) => {
       operator: '$employee',
       customer: '$jobDoc.customer',
       order:    '$jobDoc.order',
+      elastic:  '$elastic',
     }[groupBy];
     wastePipe.push({
       $group: {
@@ -1002,6 +1025,14 @@ router.get('/breakdown', async (req, res) => {
           labels.set(d._id.toString(), {
             label: `Order #${d.orderNo ?? '—'}`,
             sublabel: d.status || '',
+          });
+      } else if (groupBy === 'elastic') {
+        const docs = await Elastic.find({ _id: { $in: keys } })
+          .select('name weaveType').lean();
+        for (const d of docs)
+          labels.set(d._id.toString(), {
+            label: d.name || 'Unknown elastic',
+            sublabel: d.weaveType || '',
           });
       }
     }
