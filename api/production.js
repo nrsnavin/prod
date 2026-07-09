@@ -17,9 +17,15 @@
 'use strict';
 
 const express    = require('express');
+const mongoose   = require('mongoose');
 const router     = express.Router();
 const ShiftPlan  = require('../models/ShiftPlan');
 const ShiftDetail= require('../models/ShiftDetail');
+const Wastage    = require('../models/Wastage');
+const Machine    = require('../models/Machine');
+const Employee   = require('../models/Employee');
+const Customer   = require('../models/Customer');
+const Order      = require('../models/Order');
 const { isAuthenticated } = require('../middleware/auth');
 
 // Every production-analytics route requires login. Was previously
@@ -800,6 +806,322 @@ router.get('/analytics', async (req, res) => {
   } catch(err) {
     console.error('[GET /analytics]', err);
     return res.status(500).json({ success:false, message:err.message });
+  }
+});
+
+// ═════════════════════════════════════════════════════════════
+//  ENDPOINT 4 — GET /breakdown
+//
+//  Unified production + wastage analytics, grouped by any one of
+//  four dimensions and narrowable by every other one. This is the
+//  cross-tab the admin actually asks for: "how much did we make and
+//  waste, per machine / per operator / per customer / per order?"
+//
+//  Query params:
+//    start, end   YYYY-MM-DD  (required)
+//    groupBy      machine | operator | customer | order   (default: machine)
+//    shift        all | DAY | NIGHT   (default: all, production only)
+//    machineId    (optional filter)
+//    employeeId   (optional filter)
+//    customerId   (optional filter)
+//    orderId      (optional filter)
+//
+//  Production comes from closed ShiftDetail docs; wastage from the
+//  Wastage ledger. Both are keyed onto the same dimension so a row
+//  carries produced metres AND wasted metres side by side. Customer,
+//  order and (for wastage) machine dimensions are resolved through
+//  the parent JobOrder.
+//
+//  Response:
+//  {
+//    success, groupBy, range:{ start, end },
+//    totals:{ production, shiftCount, wastageQty, wastageEvents,
+//             wastagePenalty, wastageRate },
+//    rows:[{ key, label, sublabel, production, shiftCount,
+//            avgPerShift, wastageQty, wastageEvents, wastagePenalty,
+//            wastageRate, share }],
+//    insights:[{ severity, title, detail }]
+//  }
+// ═════════════════════════════════════════════════════════════
+const GROUP_DIMS = ['machine', 'operator', 'customer', 'order'];
+
+function toObjectId(v) {
+  try { return new mongoose.Types.ObjectId(v); } catch (_) { return null; }
+}
+
+router.get('/breakdown', async (req, res) => {
+  try {
+    const {
+      start, end, groupBy = 'machine', shift = 'all',
+      machineId, employeeId, customerId, orderId,
+    } = req.query;
+
+    if (!start || !end)
+      return res.status(400).json({ success: false, message: 'start and end are required.' });
+    if (!GROUP_DIMS.includes(groupBy))
+      return res.status(400).json({ success: false, message: `groupBy must be one of ${GROUP_DIMS.join(', ')}.` });
+
+    let rangeStart, rangeEnd;
+    try {
+      rangeStart = parseDateParam(start, 0, 0, 0, 0);
+      rangeEnd   = parseDateParam(end, 23, 59, 59, 999);
+    } catch (e) { return res.status(400).json({ success: false, message: e.message }); }
+
+    // ── Shared filters ───────────────────────────────────────
+    const mId = machineId  ? toObjectId(machineId)  : null;
+    const eId = employeeId ? toObjectId(employeeId) : null;
+    const cId = customerId ? toObjectId(customerId) : null;
+    const oId = orderId    ? toObjectId(orderId)    : null;
+
+    // ── Production pipeline (ShiftDetail) ─────────────────────
+    const prodMatch = { date: { $gte: rangeStart, $lte: rangeEnd }, status: 'closed' };
+    if (shift !== 'all') prodMatch.shift = shift.toUpperCase();
+    if (mId) prodMatch.machine  = mId;
+    if (eId) prodMatch.employee = eId;
+
+    const prodPipe = [{ $match: prodMatch }];
+    // Only pay for the join when a customer/order dimension or filter needs it.
+    const needsJobJoin = groupBy === 'customer' || groupBy === 'order' || cId || oId;
+    if (needsJobJoin) {
+      prodPipe.push(
+        { $lookup: { from: 'joborders', localField: 'job', foreignField: '_id', as: 'jobDoc' } },
+        { $unwind: { path: '$jobDoc', preserveNullAndEmptyArrays: true } },
+      );
+      const post = {};
+      if (cId) post['jobDoc.customer'] = cId;
+      if (oId) post['jobDoc.order'] = oId;
+      if (Object.keys(post).length) prodPipe.push({ $match: post });
+    }
+    const prodKey = {
+      machine:  '$machine',
+      operator: '$employee',
+      customer: '$jobDoc.customer',
+      order:    '$jobDoc.order',
+    }[groupBy];
+    prodPipe.push({
+      $group: {
+        _id: prodKey,
+        production: { $sum: '$productionMeters' },
+        shiftCount: { $sum: 1 },
+      },
+    });
+
+    // ── Wastage pipeline (Wastage ledger) ────────────────────
+    // Wastage carries employee directly; machine/customer/order are
+    // resolved through the parent job. Dated by createdAt to match
+    // the existing /wastage/analytics convention.
+    const wastePipe = [{ $match: { createdAt: { $gte: rangeStart, $lte: rangeEnd } } }];
+    const wasteNeedsJob =
+      groupBy === 'machine' || groupBy === 'customer' || groupBy === 'order' || mId || cId || oId;
+    if (wasteNeedsJob) {
+      wastePipe.push(
+        { $lookup: { from: 'joborders', localField: 'job', foreignField: '_id', as: 'jobDoc' } },
+        { $unwind: { path: '$jobDoc', preserveNullAndEmptyArrays: true } },
+      );
+    }
+    const wPost = {};
+    if (mId) wPost['jobDoc.machine']  = mId;
+    if (eId) wPost.employee           = eId;
+    if (cId) wPost['jobDoc.customer'] = cId;
+    if (oId) wPost['jobDoc.order']    = oId;
+    if (Object.keys(wPost).length) wastePipe.push({ $match: wPost });
+
+    const wasteKey = {
+      machine:  '$jobDoc.machine',
+      operator: '$employee',
+      customer: '$jobDoc.customer',
+      order:    '$jobDoc.order',
+    }[groupBy];
+    wastePipe.push({
+      $group: {
+        _id: wasteKey,
+        wastageQty:     { $sum: '$quantity' },
+        wastageEvents:  { $sum: 1 },
+        wastagePenalty: { $sum: '$penalty' },
+      },
+    });
+
+    const [prodRows, wasteRows] = await Promise.all([
+      ShiftDetail.aggregate(prodPipe),
+      Wastage.aggregate(wastePipe),
+    ]);
+
+    // ── Merge on the dimension key ───────────────────────────
+    const rowMap = new Map();
+    const blank = () => ({
+      production: 0, shiftCount: 0,
+      wastageQty: 0, wastageEvents: 0, wastagePenalty: 0,
+    });
+    for (const p of prodRows) {
+      if (!p._id) continue;
+      const k = p._id.toString();
+      const r = rowMap.get(k) || blank();
+      r.production += p.production || 0;
+      r.shiftCount += p.shiftCount || 0;
+      rowMap.set(k, r);
+    }
+    for (const w of wasteRows) {
+      if (!w._id) continue;
+      const k = w._id.toString();
+      const r = rowMap.get(k) || blank();
+      r.wastageQty     += w.wastageQty || 0;
+      r.wastageEvents  += w.wastageEvents || 0;
+      r.wastagePenalty += w.wastagePenalty || 0;
+      rowMap.set(k, r);
+    }
+
+    // ── Resolve human labels for the dimension ───────────────
+    const keys = [...rowMap.keys()].map(toObjectId).filter(Boolean);
+    const labels = new Map(); // key → { label, sublabel }
+    if (keys.length) {
+      if (groupBy === 'machine') {
+        const docs = await Machine.find({ _id: { $in: keys } })
+          .select('ID manufacturer NoOfHead status').lean();
+        for (const d of docs)
+          labels.set(d._id.toString(), {
+            label: `Machine ${d.ID ?? '—'}`,
+            sublabel: [d.manufacturer, d.NoOfHead ? `${d.NoOfHead} heads` : null]
+              .filter(Boolean).join(' · '),
+          });
+      } else if (groupBy === 'operator') {
+        const docs = await Employee.find({ _id: { $in: keys } })
+          .select('name department role').lean();
+        for (const d of docs)
+          labels.set(d._id.toString(), {
+            label: d.name || 'Unknown operator',
+            sublabel: [d.department, d.role].filter(Boolean).join(' · '),
+          });
+      } else if (groupBy === 'customer') {
+        const docs = await Customer.find({ _id: { $in: keys } }).select('name').lean();
+        for (const d of docs)
+          labels.set(d._id.toString(), { label: d.name || 'Unknown customer', sublabel: '' });
+      } else if (groupBy === 'order') {
+        const docs = await Order.find({ _id: { $in: keys } })
+          .select('orderNo status supplyDate').lean();
+        for (const d of docs)
+          labels.set(d._id.toString(), {
+            label: `Order #${d.orderNo ?? '—'}`,
+            sublabel: d.status || '',
+          });
+      }
+    }
+
+    // ── Assemble + derive rates ──────────────────────────────
+    const round = (n) => Math.round(n * 100) / 100;
+    let totalProd = 0, totalShifts = 0, totalWaste = 0, totalEvents = 0, totalPenalty = 0;
+    let rows = [...rowMap.entries()].map(([key, r]) => {
+      totalProd    += r.production;
+      totalShifts  += r.shiftCount;
+      totalWaste   += r.wastageQty;
+      totalEvents  += r.wastageEvents;
+      totalPenalty += r.wastagePenalty;
+      const meta = labels.get(key) || { label: 'Unknown', sublabel: '' };
+      const denom = r.production + r.wastageQty;
+      return {
+        key,
+        label: meta.label,
+        sublabel: meta.sublabel,
+        production: round(r.production),
+        shiftCount: r.shiftCount,
+        avgPerShift: r.shiftCount ? round(r.production / r.shiftCount) : 0,
+        wastageQty: round(r.wastageQty),
+        wastageEvents: r.wastageEvents,
+        wastagePenalty: round(r.wastagePenalty),
+        wastageRate: denom > 0 ? round((r.wastageQty / denom) * 100) : 0,
+      };
+    });
+    rows.sort((a, b) => b.production - a.production);
+    // Share of total production, computed after totals are known.
+    rows = rows.map((r) => ({
+      ...r,
+      share: totalProd > 0 ? round((r.production / totalProd) * 100) : 0,
+    }));
+
+    const plantRate = (totalProd + totalWaste) > 0
+      ? round((totalWaste / (totalProd + totalWaste)) * 100)
+      : 0;
+
+    // ── Rule-based insights ("AI analytical") ────────────────
+    const dimLabel = { machine: 'machine', operator: 'operator', customer: 'customer', order: 'order' }[groupBy];
+    const insights = [];
+    if (rows.length) {
+      const top = rows[0];
+      if (top.production > 0) {
+        insights.push({
+          severity: 'good',
+          title: `Top ${dimLabel}: ${top.label}`,
+          detail: `Produced ${top.production.toLocaleString('en-IN')} m — ${top.share}% of the ${totalProd.toLocaleString('en-IN')} m total in this range.`,
+        });
+      }
+      // Output concentration risk.
+      if (top.share >= 40 && rows.length > 2) {
+        insights.push({
+          severity: 'warn',
+          title: 'Output is concentrated',
+          detail: `${top.label} alone accounts for ${top.share}% of production. A stoppage here would hit throughput hard — consider load-balancing.`,
+        });
+      }
+      // Worst wastage offenders vs plant rate.
+      const wasters = rows
+        .filter((r) => r.wastageQty > 0 && r.wastageRate > 0)
+        .sort((a, b) => b.wastageRate - a.wastageRate);
+      if (wasters.length) {
+        const w = wasters[0];
+        insights.push({
+          severity: w.wastageRate >= plantRate * 1.5 && plantRate > 0 ? 'warn' : 'info',
+          title: `Highest wastage: ${w.label}`,
+          detail: `Wasting ${w.wastageRate}% of its output (${w.wastageQty.toLocaleString('en-IN')} m), against a plant average of ${plantRate}%.`,
+        });
+        // Additional offenders running well above plant rate.
+        for (const x of wasters.slice(1, 3)) {
+          if (plantRate > 0 && x.wastageRate >= plantRate * 2) {
+            insights.push({
+              severity: 'warn',
+              title: `${x.label} wastage is 2×+ the plant rate`,
+              detail: `${x.wastageRate}% wasted vs ${plantRate}% plant average — worth a root-cause check.`,
+            });
+          }
+        }
+      }
+      // Under-utilised: lowest avg/shift among those with enough shifts.
+      const active = rows.filter((r) => r.shiftCount >= 3);
+      if (active.length >= 3) {
+        const avgOfAvgs = round(active.reduce((s, r) => s + r.avgPerShift, 0) / active.length);
+        const laggard = [...active].sort((a, b) => a.avgPerShift - b.avgPerShift)[0];
+        if (avgOfAvgs > 0 && laggard.avgPerShift < avgOfAvgs * 0.6) {
+          insights.push({
+            severity: 'info',
+            title: `${laggard.label} is running below average`,
+            detail: `${laggard.avgPerShift.toLocaleString('en-IN')} m/shift vs a ${dimLabel} average of ${avgOfAvgs.toLocaleString('en-IN')} m/shift across ${laggard.shiftCount} shifts.`,
+          });
+        }
+      }
+    } else {
+      insights.push({
+        severity: 'info',
+        title: 'No production in this range',
+        detail: 'Widen the date range or clear filters to see data.',
+      });
+    }
+
+    return res.json({
+      success: true,
+      groupBy,
+      range: { start, end },
+      totals: {
+        production: round(totalProd),
+        shiftCount: totalShifts,
+        wastageQty: round(totalWaste),
+        wastageEvents: totalEvents,
+        wastagePenalty: round(totalPenalty),
+        wastageRate: plantRate,
+      },
+      rows,
+      insights,
+    });
+  } catch (err) {
+    console.error('[GET /breakdown]', err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 });
 
