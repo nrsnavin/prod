@@ -18,6 +18,15 @@ const Attendance  = require("../models/Attendence.js");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { updatePairPosterior } = require("../utils/etaPosterior.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const multer = require("multer");
+const { buildShiftSheetPdf, shortCode } = require("../utils/shiftSheetPdf");
+const { extractShiftRows } = require("../utils/shiftSheetOcr");
+
+// Scanned 200-machine sheets run ~19 pages; allow up to 25 MB in memory.
+const sheetUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
 
 router.use(isAuthenticated);
 
@@ -1243,5 +1252,187 @@ router.get("/attendance-mismatch", isAdmin('admin'), async (req, res) => {
 // Exported for characterization/unit tests (Phase B0.3) — this is the
 // core production cascade the /verify-production route delegates to.
 router.applyProductionCascade = applyProductionCascade;
+
+// ═════════════════════════════════════════════════════════════════
+//  GET /shift/:shiftPlanId/production-sheet.pdf
+//
+//  Downloads the printable production sheet for a plan — one row per
+//  assigned machine, prefilled, with empty Production / Timer /
+//  Remarks columns for the floor to fill by hand.
+// ═════════════════════════════════════════════════════════════════
+router.get(
+  "/:shiftPlanId/production-sheet.pdf",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { shiftPlanId } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(shiftPlanId)) return next(new ErrorHandler("Invalid shiftPlanId", 400));
+
+    const sp = await ShiftPlan.findById(shiftPlanId)
+      .populate({
+        path: "plan",
+        model: "ShiftDetail",
+        populate: [
+          { path: "machine", model: "Machine", select: "ID" },
+          { path: "employee", model: "Employee", select: "name" },
+          { path: "job", model: "JobOrder", select: "jobOrderNo" },
+        ],
+      })
+      .lean();
+    if (!sp) return next(new ErrorHandler("Shift plan not found", 404));
+
+    const rows = (sp.plan || []).map((d) => ({
+      sdId: d._id,
+      machine: d.machine?.ID || "—",
+      operator: d.employee?.name || "—",
+      job: d.job?.jobOrderNo != null ? `J-${d.job.jobOrderNo}` : "—",
+    }));
+
+    const dateLabel = moment(sp.date).format("DD-MMM-YYYY");
+    const pdf = await buildShiftSheetPdf({
+      dateLabel,
+      shift: sp.shift,
+      planNo: `SP-${moment(sp.date).format("YYYYMMDD")}-${sp.shift === "NIGHT" ? "N" : "D"}`,
+      rows,
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="production-sheet-${moment(sp.date).format("YYYY-MM-DD")}-${sp.shift}.pdf"`
+    );
+    return res.send(pdf);
+  })
+);
+
+// ═════════════════════════════════════════════════════════════════
+//  POST /shift/:shiftPlanId/ingest-sheet   (multipart 'file')
+//
+//  Reads a filled + scanned production sheet with Claude vision and
+//  maps each hand-written Production / Timer / Remarks back to its
+//  ShiftDetail by the printed Code. READ-ONLY: it returns a review
+//  payload; the admin confirms in the UI, which then stages the
+//  values through the existing /bulk-enter-production route.
+// ═════════════════════════════════════════════════════════════════
+router.post(
+  "/:shiftPlanId/ingest-sheet",
+  isAdmin("admin"),
+  sheetUpload.single("file"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { shiftPlanId } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(shiftPlanId)) return next(new ErrorHandler("Invalid shiftPlanId", 400));
+    if (!req.file) return next(new ErrorHandler('No file uploaded (field name must be "file").', 400));
+    if (req.file.mimetype !== "application/pdf") {
+      return next(new ErrorHandler("Upload must be a PDF of the filled sheet.", 400));
+    }
+
+    const sp = await ShiftPlan.findById(shiftPlanId)
+      .populate({
+        path: "plan",
+        model: "ShiftDetail",
+        populate: [
+          { path: "machine", model: "Machine", select: "ID" },
+          { path: "employee", model: "Employee", select: "name" },
+          { path: "job", model: "JobOrder", select: "jobOrderNo" },
+        ],
+      })
+      .lean();
+    if (!sp) return next(new ErrorHandler("Shift plan not found", 404));
+
+    // Map printed Code -> shift detail(s). Suffix collisions inside one
+    // plan are vanishingly unlikely but resolved by machine ID if they
+    // ever happen.
+    const codeMap = new Map();
+    for (const d of sp.plan || []) {
+      const code = shortCode(d._id);
+      const meta = {
+        shiftDetailId: String(d._id),
+        machineID: d.machine?.ID || null,
+        operator: d.employee?.name || null,
+        jobNo: d.job?.jobOrderNo != null ? `J-${d.job.jobOrderNo}` : null,
+        status: d.status,
+      };
+      if (!codeMap.has(code)) codeMap.set(code, []);
+      codeMap.get(code).push(meta);
+    }
+
+    let ocr;
+    try {
+      ocr = await extractShiftRows(req.file.buffer);
+    } catch (err) {
+      if (err.code === "ANTHROPIC_KEY_MISSING") {
+        return res.status(503).json({ success: false, reason: "ANTHROPIC_KEY_MISSING", message: err.message });
+      }
+      console.error("[ingest-sheet] OCR error:", err.message);
+      return res.status(502).json({ success: false, reason: "OCR_FAILED", message: err.message });
+    }
+
+    const matched = [];
+    const unmatched = [];
+    const seen = new Set();
+
+    for (const r of ocr.rows) {
+      const code = String(r.code || "").toUpperCase().replace(/[^A-Z0-9-]/g, "");
+      const norm = code.startsWith("SD-") ? code : `SD-${code.replace(/^SD/, "").slice(-6)}`;
+      let candidates = codeMap.get(norm);
+      // Tolerate a missing/garbled "SD-" prefix by matching on the 6-char suffix.
+      if (!candidates) {
+        const suffix = code.replace(/[^A-Z0-9]/g, "").slice(-6);
+        candidates = codeMap.get(`SD-${suffix}`);
+      }
+      if (!candidates || candidates.length === 0) {
+        unmatched.push({ code: r.code, production: r.production, timer: r.timer, remarks: r.remarks });
+        continue;
+      }
+      // Resolve collisions by machine ID when the OCR row carries one.
+      const pick = candidates.length === 1
+        ? candidates[0]
+        : candidates.find((c) => c.machineID) || candidates[0];
+
+      if (seen.has(pick.shiftDetailId)) continue;
+      seen.add(pick.shiftDetailId);
+
+      matched.push({
+        shiftDetailId: pick.shiftDetailId,
+        machineID: pick.machineID,
+        operator: pick.operator,
+        jobNo: pick.jobNo,
+        status: pick.status,
+        alreadyClosed: pick.status === "closed",
+        production: r.production,
+        timer: r.timer,
+        remarks: r.remarks,
+        confidence: r.confidence,
+      });
+    }
+
+    // Plan rows that the OCR never produced a value for.
+    const missing = [];
+    for (const [code, metas] of codeMap.entries()) {
+      for (const m of metas) {
+        if (!seen.has(m.shiftDetailId)) {
+          missing.push({ code, shiftDetailId: m.shiftDetailId, machineID: m.machineID, operator: m.operator, jobNo: m.jobNo });
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      shiftPlanId,
+      model: ocr.model,
+      pages: ocr.pages,
+      batches: ocr.batches,
+      summary: {
+        planRows: (sp.plan || []).length,
+        matched: matched.length,
+        unmatched: unmatched.length,
+        missing: missing.length,
+        lowConfidence: matched.filter((m) => m.confidence < 0.6).length,
+      },
+      matched,
+      unmatched,
+      missing,
+    });
+  })
+);
 
 module.exports = router;

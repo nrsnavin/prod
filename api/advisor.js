@@ -3,27 +3,14 @@
 const express = require('express');
 const router  = express.Router();
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
-const OpenAI = require('openai');
+const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 
-// ─────────────────────────────────────────────────────────────────
-//  OpenAI client is lazy so a missing API key surfaces as a clean
-//  503 rather than crashing the server at boot. Once instantiated
-//  the client is reused across requests.
-// ─────────────────────────────────────────────────────────────────
-let _client = null;
-function client() {
-  if (_client) return _client;
-  if (!process.env.OPENAI_API_KEY) return null;
-  _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  return _client;
-}
-
-// gpt-4o-mini is plenty for a 3-sentence summary:
+// Claude Haiku is plenty for a 3-sentence summary:
 //   - latency ~1s for a few-token response
-//   - cost: roughly $0.00015 / 1K input, $0.00060 / 1K output
+//   - cost is a fraction of a cent per briefing
 //   - quality is well above what a briefing needs
-// Override via OPENAI_MODEL if you want to A/B test gpt-4o etc.
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+// Override via ANTHROPIC_MODEL if you want to A/B test a larger model.
+const MODEL = TEXT_MODEL;
 
 // ═════════════════════════════════════════════════════════════════
 //  POST /api/v2/advisor/briefing
@@ -47,12 +34,12 @@ router.post(
   isAuthenticated,
   isAdmin('admin'),
   async (req, res) => {
-    const oai = client();
-    if (!oai) {
+    const claude = anthropic();
+    if (!claude) {
       return res.status(503).json({
         success: false,
-        reason:  'OPENAI_KEY_MISSING',
-        message: 'OPENAI_API_KEY not set on the server.',
+        reason:  'ANTHROPIC_KEY_MISSING',
+        message: 'ANTHROPIC_API_KEY not set on the server.',
       });
     }
 
@@ -75,18 +62,18 @@ router.post(
     }
 
     try {
-      const completion = await oai.chat.completions.create({
+      const message = await claude.messages.create({
         model: MODEL,
         max_tokens: 220,
         temperature: 0.4,
+        system:
+          'You are a calm, brief plant-floor supervisor giving the '
+          + 'admin a morning briefing on their ERP. Use 2-3 short '
+          + 'sentences. No bullet lists. Identify the single most '
+          + 'urgent action. Mention numbers from the input verbatim. '
+          + 'Use plain text; wrap the most-urgent phrase in '
+          + '**double asterisks** so the UI can bold it.',
         messages: [
-          { role: 'system', content:
-              'You are a calm, brief plant-floor supervisor giving the '
-              + 'admin a morning briefing on their ERP. Use 2-3 short '
-              + 'sentences. No bullet lists. Identify the single most '
-              + 'urgent action. Mention numbers from the input verbatim. '
-              + 'Use plain text; wrap the most-urgent phrase in '
-              + '**double asterisks** so the UI can bold it.' },
           { role: 'user', content:
               `Today's advisor signals:\n${cards.map((c) =>
                 `- [${c.priority || 'med'}] ${c.title || ''} `
@@ -95,20 +82,25 @@ router.post(
         ],
       });
 
-      const summary = completion.choices?.[0]?.message?.content?.trim() ?? '';
+      // Claude returns an array of content blocks; concatenate the text.
+      const summary = (message.content || [])
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('')
+        .trim();
 
       return res.json({
         success: true,
         summary,
-        model:  completion.model,
+        model:  message.model,
         viaLlm: true,
-        usage:  completion.usage,
+        usage:  message.usage,
       });
     } catch (err) {
-      console.error('[advisor/briefing] OpenAI error:', err.message);
+      console.error('[advisor/briefing] Claude error:', err.message);
       return res.status(502).json({
         success: false,
-        reason:  'OPENAI_CALL_FAILED',
+        reason:  'ANTHROPIC_CALL_FAILED',
         message: err.message,
       });
     }
