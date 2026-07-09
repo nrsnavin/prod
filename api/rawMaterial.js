@@ -779,8 +779,14 @@ router.get(
       .lean();
 
     const groups = new Map();
+    let suggestedCount = 0;
     for (const m of low) {
       const suggestedQty = Math.max(0, m.minStock * 2 - m.stock);
+      // Skip items with nothing to reorder — happens when minStock is
+      // unset (0), which would otherwise put a zero-qty line into the PO
+      // draft and get rejected by /create-po.
+      if (suggestedQty <= 0) continue;
+      suggestedCount += 1;
       const key = m.supplier?._id?.toString() ?? "none";
       if (!groups.has(key)) {
         groups.set(key, {
@@ -805,7 +811,7 @@ router.get(
 
     res.json({
       success: true,
-      count: low.length,
+      count: suggestedCount,
       suppliers: [...groups.values()].map((g) => ({
         ...g,
         estimatedValue: Math.round(g.estimatedValue * 100) / 100,
