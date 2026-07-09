@@ -106,7 +106,6 @@ async function ocrBatch(claude, buf) {
   const message = await claude.messages.create({
     model: VISION_MODEL,
     max_tokens: 4096,
-    temperature: 0,
     messages: [
       {
         role: 'user',

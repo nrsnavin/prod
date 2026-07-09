@@ -65,7 +65,6 @@ router.post(
       const message = await claude.messages.create({
         model: MODEL,
         max_tokens: 220,
-        temperature: 0.4,
         system:
           'You are a calm, brief plant-floor supervisor giving the '
           + 'admin a morning briefing on their ERP. Use 2-3 short '
