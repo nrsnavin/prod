@@ -24,6 +24,13 @@ const materialInwardSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    // Supplier lot/batch number — first-class so a bad lot can be traced
+    // to the jobs and dispatches it reached (previously free-text remarks).
+    lotNo: {
+      type: String,
+      trim: true,
+      default: "",
+    },
   },
   { timestamps: true }
 );

@@ -9,10 +9,12 @@
 // were computePayroll-only); r2 is duplicated as a trivial rounding
 // helper (the route file keeps its own copy — used in many places).
 
+const mongoose        = require('mongoose');
 const Attendance      = require('../models/Attendence');
 const Employee        = require('../models/Employee');
 const PayrollSettings = require('../models/PayrollSettings');
 const AdvanceRequest  = require('../models/Advance');
+const Wastage         = require('../models/Wastage');
 
 const SHIFT_HOURS = { DAY: 12, NIGHT: 8 };
 const r2 = (n) => Math.round(n * 100) / 100;
@@ -129,8 +131,30 @@ async function computePayroll(empId, year, month) {
     });
   }
 
+  // Wastage penalties recorded against this employee in the pay month.
+  // Previously these were captured on wastage entries but never left
+  // them — recorded money that was never deducted.
+  const wastageAgg = await Wastage.aggregate([
+    {
+      $match: {
+        employee:  new mongoose.Types.ObjectId(String(empId)),
+        createdAt: { $gte: start, $lte: end },
+        penalty:   { $gt: 0 },
+      },
+    },
+    { $group: { _id: null, total: { $sum: '$penalty' }, count: { $sum: 1 } } },
+  ]);
+  const wastagePenalty = r2(wastageAgg[0]?.total ?? 0);
+  if (wastagePenalty > 0) {
+    lineItems.push({
+      label:  `Wastage penalty (${wastageAgg[0].count} entr${wastageAgg[0].count > 1 ? 'ies' : 'y'})`,
+      amount: -wastagePenalty,
+      type:   'deduction',
+    });
+  }
+
   let lateDeductions   = r2(lateDeductionTotal);
-  let totalDeductions  = r2(lateDeductionTotal + excessPenalty);
+  let totalDeductions  = r2(lateDeductionTotal + excessPenalty + wastagePenalty);
 
   let noLeaveBonusAmt       = 0;
   let perfectAttBonusAmt    = 0;

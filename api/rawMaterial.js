@@ -304,6 +304,7 @@ router.post(
       quantity:      Number(quantity),
       inwardDate:    new Date(),
       remarks:       remarks || "",
+      lotNo:         req.body.lotNo ? String(req.body.lotNo).trim() : "",
     });
 
     const item = po.items.find(
@@ -756,6 +757,59 @@ router.get(
       horizonDays:  horizon,
       materials:    out,
       count:        out.length,
+    });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  GET /materials/reorder-suggestions
+//
+//  Every material at/below its minimum, grouped by default
+//  supplier, with a suggested order quantity that tops stock
+//  back up to 2× minStock (a simple min/max policy). The web
+//  app turns each supplier group into a one-click PO draft.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/reorder-suggestions",
+  catchAsyncErrors(async (req, res) => {
+    const low = await RawMaterial.find({ $expr: { $lte: ["$stock", "$minStock"] } })
+      .populate("supplier", "name")
+      .select("name category stock minStock price supplier")
+      .sort({ stock: 1 })
+      .lean();
+
+    const groups = new Map();
+    for (const m of low) {
+      const suggestedQty = Math.max(0, m.minStock * 2 - m.stock);
+      const key = m.supplier?._id?.toString() ?? "none";
+      if (!groups.has(key)) {
+        groups.set(key, {
+          supplierId: m.supplier?._id ?? null,
+          supplierName: m.supplier?.name ?? "No default supplier",
+          items: [],
+          estimatedValue: 0,
+        });
+      }
+      const g = groups.get(key);
+      g.items.push({
+        materialId: m._id,
+        name: m.name,
+        category: m.category,
+        stock: m.stock,
+        minStock: m.minStock,
+        price: m.price,
+        suggestedQty,
+      });
+      g.estimatedValue += suggestedQty * (m.price || 0);
+    }
+
+    res.json({
+      success: true,
+      count: low.length,
+      suppliers: [...groups.values()].map((g) => ({
+        ...g,
+        estimatedValue: Math.round(g.estimatedValue * 100) / 100,
+      })),
     });
   })
 );

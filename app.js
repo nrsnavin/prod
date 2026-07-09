@@ -222,26 +222,34 @@ app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), (req, res) =>
 // also handle their own middleware to allow login + employee-facing reads.
 const ADMIN_GATE = [isAuthenticated, isAdmin('admin')];
 
+// ── Department roles (segregation of duties) ────────────────────────
+// 'admin' passes every gate; department roles unlock only their area.
+// This lets a stores clerk receive goods without being able to run
+// payroll, and a sales user manage orders without touching machines.
+// Assign via User.role: admin | sales | stores | production | accounts
+const gate = (...roles) => [isAuthenticated, isAdmin('admin', ...roles)];
+
 // Throttle credential-guessing before the login handler runs.
 app.use("/api/v2/user/login-user", loginLimiter);
 app.use("/api/v2/user", user);
-app.use("/api/v2/machine",     ADMIN_GATE, machine);
+app.use("/api/v2/machine",     gate('production'), machine);
 app.use("/api/v2/shift",       shift);
-app.use("/api/v2/customer",    ADMIN_GATE, customer);
-app.use("/api/v2/employee",    ADMIN_GATE, employee);
+app.use("/api/v2/customer",    gate('sales'), customer);
+app.use("/api/v2/employee",    gate('accounts', 'production'), employee);
 app.use("/api/v2/elastic",     elastic);
-app.use("/api/v2/dc",          ADMIN_GATE, deliveryChallanRouter);
-app.use("/api/v2/supplier",    ADMIN_GATE, supplier);
+app.use("/api/v2/dc",          gate('sales', 'stores'), deliveryChallanRouter);
+app.use("/api/v2/supplier",    gate('stores'), supplier);
 app.use("/api/v2/bonus",       bonus);
-app.use("/api/v2/order",       ADMIN_GATE, order);
-app.use("/api/v2/materials",   ADMIN_GATE, material);
+app.use("/api/v2/order",       gate('sales'), order);
+app.use("/api/v2/materials",   gate('stores', 'production'), material);
 app.use("/api/v2/warping",     warping);
 app.use("/api/v2/wastage",     wastage);
 app.use("/api/v2/attendance",  attendence);
 app.use("/api/v2/covering",    covering);
-app.use("/api/v2/job",         ADMIN_GATE, job);
+app.use("/api/v2/job",         gate('production'), job);
 app.use("/api/v2/packing",     packing);
-app.use("/api/v2/production",  ADMIN_GATE, production);
+app.use("/api/v2/production",  gate('production'), production);
+app.use("/api/v2/qc",          gate('production'), require("./api/qc.js"));
 app.use("/api/v2/payroll",     payroll);
 app.use("/api/v2/leave",       leave);
 app.use("/api/v2/machine-issue", machineIssue);

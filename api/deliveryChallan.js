@@ -593,4 +593,59 @@ router.delete(
   })
 );
 
+// ─────────────────────────────────────────────────────────────
+//  GET /dc/otd-stats?days=90
+//
+//  On-time delivery: order-linked, non-cancelled DCs dispatched
+//  in the window, compared against the parent order's supplyDate.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/otd-stats",
+  catchAsyncErrors(async (req, res) => {
+    const days = Math.min(Math.max(Number(req.query.days) || 90, 7), 365);
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const dcs = await DeliveryChallan.find({
+      order: { $ne: null },
+      status: { $ne: "cancelled" },
+      dispatchDate: { $gte: since },
+    })
+      .populate("order", "orderNo supplyDate")
+      .select("dcNumber orderNo customerName dispatchDate order")
+      .lean();
+
+    let onTime = 0;
+    const late = [];
+    let considered = 0;
+    for (const dc of dcs) {
+      const due = dc.order?.supplyDate ? new Date(dc.order.supplyDate) : null;
+      if (!due) continue;
+      considered += 1;
+      const dispatched = new Date(dc.dispatchDate);
+      const lateDays = Math.ceil((dispatched - due) / (24 * 60 * 60 * 1000));
+      if (lateDays <= 0) onTime += 1;
+      else
+        late.push({
+          dcNumber: dc.dcNumber,
+          orderNo: dc.order?.orderNo ?? dc.orderNo,
+          customerName: dc.customerName,
+          dueDate: due,
+          dispatchDate: dc.dispatchDate,
+          lateDays,
+        });
+    }
+    late.sort((a, b) => b.lateDays - a.lateDays);
+
+    res.json({
+      success: true,
+      days,
+      considered,
+      onTime,
+      lateCount: late.length,
+      otdPct: considered > 0 ? Math.round((onTime / considered) * 100) : null,
+      late: late.slice(0, 20),
+    });
+  })
+);
+
 module.exports = router;

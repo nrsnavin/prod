@@ -406,6 +406,7 @@ router.post(
                            ? new Date(inItem.inwardDate)
                            : new Date(),
           remarks:       inItem.remarks ? inItem.remarks.trim() : "",
+          lotNo:         inItem.lotNo ? String(inItem.lotNo).trim() : "",
         });
       }
 
