@@ -15,7 +15,8 @@ const ShiftDetail = require("../models/ShiftDetail");
 const ShiftPlan   = require("../models/ShiftPlan");
 const JobOrder    = require("../models/JobOrder");
 const Attendance  = require("../models/Attendence.js");
-const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
+const { requireReason } = require("../utils/auditReason");
 const { updatePairPosterior } = require("../utils/etaPosterior.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const multer = require("multer");
@@ -1432,6 +1433,150 @@ router.post(
       unmatched,
       missing,
     });
+  })
+);
+
+// ════════════════════════════════════════════════════════════════
+//  CORRECT / DELETE a VERIFIED production entry
+//
+//  Editing a closed shift's meters re-derives the linked job/order/
+//  plan totals by the delta, fanned across the shift's own head→elastic
+//  snapshot (robust to later machine re-config). The parent order's
+//  produced rollup is recomputed from the SUM of its jobs (clean, avoids
+//  double counting), and pending is recomputed from ordered − produced.
+//  Per the agreed scope, the Bayesian rate posterior is NOT rewritten —
+//  it self-corrects on future shifts.
+// ════════════════════════════════════════════════════════════════
+async function _rederiveShiftProduction(session, { shift, newTotalMeters, req, auditReason, code }) {
+  const heads = Array.isArray(shift.elastics) && shift.elastics.length > 0 ? shift.elastics.length : 1;
+  const oldTotal = Number(shift.productionMeters) || 0;
+  const oldPerHead = oldTotal / heads;
+  const newPerHead = Number(newTotalMeters) / heads;
+  const deltaPerHead = newPerHead - oldPerHead;
+
+  const job = shift.job ? await JobOrder.findById(shift.job).session(session) : null;
+  if (!job) throw new ErrorHandler("Shift has no linked job to re-derive", 400);
+
+  // Fan the per-head delta across the shift's elastic snapshot.
+  const deltaByElastic = {};
+  for (const head of shift.elastics || []) {
+    if (!head.elastic) continue;
+    const eid = head.elastic.toString();
+    deltaByElastic[eid] = (deltaByElastic[eid] || 0) + deltaPerHead;
+  }
+
+  const before = { productionMeters: oldTotal };
+
+  for (const [eid, d] of Object.entries(deltaByElastic)) {
+    const idx = job.producedElastic.findIndex((e) => e.elastic.toString() === eid);
+    if (idx >= 0) job.producedElastic[idx].quantity = Math.max(0, (job.producedElastic[idx].quantity || 0) + d);
+    else if (d > 0) job.producedElastic.push({ elastic: eid, quantity: d });
+  }
+  // Clamp each produced elastic to its planned quantity.
+  for (const e of job.elastics) {
+    const row = job.producedElastic.find((p) => p.elastic.toString() === e.elastic.toString());
+    if (row && row.quantity > e.quantity) row.quantity = e.quantity;
+  }
+
+  stampFingerprint(job, code, {
+    req,
+    meta: { shiftId: shift._id.toString(), auditReason, before, after: { productionMeters: Number(newTotalMeters) }, heads },
+  });
+  await job.save({ session });
+
+  // Recompute the parent order's produced rollup from the sum of ALL its
+  // jobs, then pending from ordered − produced. Correct regardless of how
+  // many shifts/jobs contributed.
+  const order = await Order.findById(job.order).session(session);
+  if (order) {
+    const jobs = await JobOrder.find({ order: order._id }).session(session);
+    const producedSum = {};
+    for (const j of jobs) {
+      for (const p of j.producedElastic || []) {
+        const eid = p.elastic.toString();
+        producedSum[eid] = (producedSum[eid] || 0) + (p.quantity || 0);
+      }
+    }
+    for (const row of order.producedElastic) {
+      row.quantity = producedSum[row.elastic.toString()] || 0;
+    }
+    for (const p of order.pendingElastic) {
+      const ordered = order.elasticOrdered.find((e) => e.elastic.toString() === p.elastic.toString());
+      const produced = producedSum[p.elastic.toString()] || 0;
+      if (ordered) p.quantity = Math.max(0, ordered.quantity - produced);
+    }
+    await order.save({ session });
+  }
+
+  const sp = await ShiftPlan.findById(shift.shiftPlan).session(session);
+  if (sp) {
+    sp.totalProduction = Math.max(0, (sp.totalProduction || 0) + deltaPerHead * heads);
+    await sp.save({ session });
+  }
+}
+
+router.put(
+  "/production-entry/:shiftId",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { shiftId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(shiftId)) return next(new ErrorHandler("Invalid shift id", 400));
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
+
+    const newTotal = Number(req.body.productionMeters);
+    if (!Number.isFinite(newTotal) || newTotal < 0) return next(new ErrorHandler("productionMeters must be ≥ 0", 400));
+
+    const session = await mongoose.startSession();
+    try {
+      let result;
+      await session.withTransaction(async () => {
+        const shift = await ShiftDetail.findById(shiftId).session(session);
+        if (!shift) throw new ErrorHandler("Shift not found", 404);
+        if (shift.status !== "closed") throw new ErrorHandler("Only verified (closed) production entries can be corrected", 400);
+
+        await _rederiveShiftProduction(session, {
+          shift, newTotalMeters: newTotal, req, auditReason, code: ACTION_CODES.SHIFT_PRODUCTION_EDITED,
+        });
+        shift.productionMeters = newTotal;
+        await shift.save({ session });
+        result = { id: shift._id, productionMeters: shift.productionMeters };
+      });
+      res.json({ success: true, message: "Production entry corrected", ...result });
+    } catch (err) { return next(err); } finally { session.endSession(); }
+  })
+);
+
+router.delete(
+  "/production-entry/:shiftId",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { shiftId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(shiftId)) return next(new ErrorHandler("Invalid shift id", 400));
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to delete", 400));
+
+    const session = await mongoose.startSession();
+    try {
+      let result;
+      await session.withTransaction(async () => {
+        const shift = await ShiftDetail.findById(shiftId).session(session);
+        if (!shift) throw new ErrorHandler("Shift not found", 404);
+        if (shift.status !== "closed") throw new ErrorHandler("Only verified (closed) production entries can be deleted", 400);
+
+        // Reverse the full contribution, then un-verify so it can be re-entered.
+        await _rederiveShiftProduction(session, {
+          shift, newTotalMeters: 0, req, auditReason, code: ACTION_CODES.SHIFT_PRODUCTION_DELETED,
+        });
+        shift.productionMeters = 0;
+        shift.status = "pending_verification";
+        shift.verifiedAt = undefined;
+        shift.verifiedBy = undefined;
+        await shift.save({ session });
+        result = { id: shift._id };
+      });
+      res.json({ success: true, message: "Production entry deleted (reversed and un-verified)", ...result });
+    } catch (err) { return next(err); } finally { session.endSession(); }
   })
 );
 
