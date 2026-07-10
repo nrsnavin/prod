@@ -8,6 +8,8 @@ const PurchaseOrder     = require("../models/PurchaseOrder");
 const MaterialInward    = require("../models/MaterialInward");
 const MaterialOutward   = require("../models/MaterialOut.cjs");
 const Supplier          = require("../models/Supplier");
+const Order             = require("../models/Order");
+const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
@@ -553,6 +555,150 @@ router.get(
       success: true,
       materials,
       skippedNoSupplier,
+    });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  GET /materials/replenishment-forecast?horizonDays=14&lookbackDays=30
+//
+//  Forecast-driven replenishment. Combines:
+//    • on-hand stock
+//    • committed demand — Open orders' rawMaterialRequired (deducts on
+//      approval), i.e. near-term consumption already in the pipeline
+//    • a run-rate from historical ORDER_APPROVAL outward movements
+//  …to project each material's stock over the horizon and flag those
+//  that dip below their safety floor. Each flag carries a suggestedQty
+//  and its default supplier, grouped by supplier so the admin can draft
+//  one PO per vendor. Deterministic; an optional Claude summary explains
+//  the "why now". Nothing is ordered automatically.
+// ══════════════════════════════════════════════════════════════
+router.get(
+  "/replenishment-forecast",
+  catchAsyncErrors(async (req, res) => {
+    const horizonDays  = Math.min(Math.max(Number(req.query.horizonDays)  || 14, 1), 120);
+    const lookbackDays = Math.min(Math.max(Number(req.query.lookbackDays) || 30, 7), 180);
+    const now   = new Date();
+    const since = new Date(now.getTime() - lookbackDays * 86_400_000);
+
+    const [materials, consumptionAgg, openOrders] = await Promise.all([
+      RawMaterial.find({}).populate("supplier", "name").lean(),
+      MaterialOutward.aggregate([
+        { $match: { type: "ORDER_APPROVAL", reversed: { $ne: true }, createdAt: { $gte: since } } },
+        { $group: { _id: "$rawMaterial", used: { $sum: "$quantity" } } },
+      ]),
+      Order.find({ status: "Open" }).select("rawMaterialRequired").lean(),
+    ]);
+
+    // Run-rate per material (units/day) over the lookback window.
+    const usedById = new Map(consumptionAgg.map((r) => [String(r._id), r.used]));
+    // Committed demand from the Open-order pipeline.
+    const committedById = new Map();
+    for (const o of openOrders) {
+      for (const rm of o.rawMaterialRequired || []) {
+        const id = String(rm.rawMaterial);
+        committedById.set(id, (committedById.get(id) || 0) + (Number(rm.quantity) || 0));
+      }
+    }
+
+    const flagged = [];
+    let skippedNoSupplier = 0;
+
+    for (const m of materials) {
+      const id        = String(m._id);
+      const onHand    = Number(m.stock) || 0;
+      const minStock  = Number(m.minStock) || 0;
+      const runRate   = (usedById.get(id) || 0) / lookbackDays;                 // units/day
+      const committed = committedById.get(id) || 0;
+      const projConsumption = committed + runRate * horizonDays;
+      const projStock = onHand - projConsumption;
+
+      // Only surface materials that dip to/below their safety floor within
+      // the horizon (or have nonzero demand and no floor set).
+      const willBreach = projStock < Math.max(minStock, 0) && projConsumption > 0;
+      if (!willBreach) continue;
+
+      if (!m.supplier || !m.supplier._id) { skippedNoSupplier += 1; continue; }
+
+      // Days until on-hand (net of committed) runs out at the run-rate.
+      const daysToStockout = runRate > 0 ? Math.max(0, (onHand - committed) / runRate) : null;
+      const stockoutDate = daysToStockout != null && daysToStockout <= 365
+        ? new Date(now.getTime() + daysToStockout * 86_400_000) : null;
+
+      // Refill to cover projected consumption + the safety floor.
+      const suggestedQty = Math.ceil(Math.max(0, projConsumption + minStock - onHand));
+      if (suggestedQty <= 0) continue;
+
+      flagged.push({
+        _id: id, name: m.name, category: m.category, unit: m.unit || "",
+        price: Number(m.price) || 0,
+        onHand, minStock,
+        runRatePerDay: Math.round(runRate * 100) / 100,
+        committedDemand: Math.round(committed),
+        projectedConsumption: Math.round(projConsumption),
+        projectedStock: Math.round(projStock),
+        daysToStockout: daysToStockout != null ? Math.round(daysToStockout) : null,
+        projectedStockoutDate: stockoutDate ? stockoutDate.toISOString().slice(0, 10) : null,
+        suggestedQty,
+        estimatedCost: Math.round(suggestedQty * (Number(m.price) || 0)),
+        severity: projStock < 0 ? "critical" : "warn",
+        supplier: { _id: String(m.supplier._id), name: m.supplier.name },
+      });
+    }
+
+    // Worst first: stockout soonest, then biggest shortfall.
+    flagged.sort((a, b) => {
+      if (a.severity !== b.severity) return a.severity === "critical" ? -1 : 1;
+      return (a.daysToStockout ?? 1e9) - (b.daysToStockout ?? 1e9);
+    });
+
+    // Group by supplier so the UI can draft one PO per vendor.
+    const bySupplierMap = new Map();
+    for (const f of flagged) {
+      const key = f.supplier._id;
+      if (!bySupplierMap.has(key)) bySupplierMap.set(key, { supplier: f.supplier, lines: [], estimatedCost: 0 });
+      const g = bySupplierMap.get(key);
+      g.lines.push(f);
+      g.estimatedCost += f.estimatedCost;
+    }
+    const bySupplier = [...bySupplierMap.values()];
+
+    const totals = {
+      flagged: flagged.length,
+      critical: flagged.filter((f) => f.severity === "critical").length,
+      suppliers: bySupplier.length,
+      estimatedCost: flagged.reduce((s, f) => s + f.estimatedCost, 0),
+    };
+
+    // Optional Claude "why now" narrative.
+    let aiSummary = null, aiGenerated = false;
+    const claude = anthropic();
+    if (claude && flagged.length > 0) {
+      try {
+        const facts = flagged.slice(0, 8).map((f) =>
+          `${f.name}: on-hand ${f.onHand}, run-rate ${f.runRatePerDay}/day, committed ${f.committedDemand}, ` +
+          `projected ${f.projectedStock} by day ${horizonDays}${f.projectedStockoutDate ? `, stockout ~${f.projectedStockoutDate}` : ""} → order ${f.suggestedQty}`
+        ).join("\n");
+        const msg = await claude.messages.create({
+          model: TEXT_MODEL,
+          max_tokens: 350,
+          system:
+            "You are a procurement planner for an elastic (narrow-fabric) plant. Given a raw-material " +
+            "replenishment forecast, write 2-3 short bullet lines starting with '- ': which materials are " +
+            "most urgent and why, and any consolidation worth doing (same supplier). Plain text, no preamble.",
+          messages: [{ role: "user", content: `Horizon ${horizonDays} days.\n${facts}\n\nSummarise the replenishment need.` }],
+        });
+        aiSummary = (msg.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+        aiGenerated = true;
+      } catch (err) {
+        console.warn("[replenishment-forecast] AI failed:", err?.message);
+      }
+    }
+
+    res.json({
+      success: true, horizonDays, lookbackDays,
+      totals, materials: flagged, bySupplier, skippedNoSupplier,
+      aiSummary, aiGenerated,
     });
   })
 );
