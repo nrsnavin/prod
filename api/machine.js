@@ -5,6 +5,8 @@ const router  = express.Router();
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const ShiftDetail      = require("../models/ShiftDetail");
+const MachineIssue     = require("../models/MachineIssue");
 const Machine          = require("../models/Machine");
 const { notify }       = require("../utils/notify");
 const { actorFromRequest } = require("../utils/fingerprint");
@@ -557,6 +559,127 @@ router.get(
       overdueCount: due.filter((d) => d.overdue).length,
       data: due,
     });
+  })
+);
+
+// ═════════════════════════════════════════════════════════════
+//  GET /machine/predictive-health
+//
+//  A per-machine health score (0–100) that predicts trouble before a
+//  hard breakdown, from signals the app already captures:
+//    • production drift  — recent 7d avg vs the prior 21d baseline
+//    • issue frequency   — MachineIssues in the last 30d (open/critical)
+//    • service recency   — overdue / due-soon next service date
+//    • current status    — machine sitting in maintenance
+//  Each machine comes back with a band (healthy/watch/at_risk) and the
+//  human-readable reasons that moved the score.
+// ═════════════════════════════════════════════════════════════
+router.get(
+  "/predictive-health",
+  catchAsyncErrors(async (req, res) => {
+    const now = new Date();
+    const d7  = new Date(now.getTime() - 7  * 86_400_000);
+    const d28 = new Date(now.getTime() - 28 * 86_400_000);
+    const d30 = new Date(now.getTime() - 30 * 86_400_000);
+
+    const [prodAgg, issueAgg, machines] = await Promise.all([
+      ShiftDetail.aggregate([
+        { $match: { status: "closed", date: { $gte: d28 } } },
+        { $group: {
+            _id: "$machine",
+            recentSum:   { $sum: { $cond: [{ $gte: ["$date", d7] }, "$productionMeters", 0] } },
+            recentCount: { $sum: { $cond: [{ $gte: ["$date", d7] }, 1, 0] } },
+            baseSum:     { $sum: { $cond: [{ $lt:  ["$date", d7] }, "$productionMeters", 0] } },
+            baseCount:   { $sum: { $cond: [{ $lt:  ["$date", d7] }, 1, 0] } },
+        } },
+      ]),
+      MachineIssue.aggregate([
+        { $match: { createdAt: { $gte: d30 } } },
+        { $group: {
+            _id: "$machine",
+            count:    { $sum: 1 },
+            open:     { $sum: { $cond: [{ $in: ["$status", ["open", "acknowledged", "in_progress"]] }, 1, 0] } },
+            critical: { $sum: { $cond: [{ $in: ["$severity", ["high", "critical"]] }, 1, 0] } },
+        } },
+      ]),
+      Machine.find().select("ID status serviceLogs manufacturer NoOfHead").lean(),
+    ]);
+
+    const prodBy  = new Map(prodAgg.map((r) => [String(r._id), r]));
+    const issueBy = new Map(issueAgg.map((r) => [String(r._id), r]));
+
+    const out = machines.map((m) => {
+      const id = String(m._id);
+      const p  = prodBy.get(id) || {};
+      const iss = issueBy.get(id) || { count: 0, open: 0, critical: 0 };
+
+      const recentAvg = p.recentCount ? p.recentSum / p.recentCount : null;
+      const baseAvg   = p.baseCount   ? p.baseSum   / p.baseCount   : null;
+      const dropPct = baseAvg && recentAvg != null && baseAvg > 0
+        ? Math.max(0, Math.round(((baseAvg - recentAvg) / baseAvg) * 100))
+        : 0;
+
+      // Service recency from the most recent log carrying a next date.
+      const logs = (m.serviceLogs || []).filter((l) => l.nextServiceDate)
+        .sort((a, b) => new Date(b.date) - new Date(a.date));
+      const nextService = logs.length ? new Date(logs[0].nextServiceDate) : null;
+      const serviceOverdue = nextService && nextService < now;
+      const serviceDueSoon = nextService && !serviceOverdue &&
+        nextService < new Date(now.getTime() + 7 * 86_400_000);
+
+      const reasons = [];
+      let score = 100;
+
+      if (dropPct >= 12 && p.recentCount) {
+        const pen = Math.min(35, Math.round(dropPct * 0.7));
+        score -= pen;
+        reasons.push({ severity: dropPct >= 30 ? "high" : "medium",
+          label: `Output down ${dropPct}%`,
+          detail: `Recent avg ${Math.round(recentAvg)} m/shift vs ${Math.round(baseAvg)} m baseline.` });
+      }
+      if (iss.count > 0) {
+        const pen = Math.min(40, iss.count * 8 + iss.critical * 5);
+        score -= pen;
+        reasons.push({ severity: iss.critical > 0 ? "high" : iss.count >= 3 ? "medium" : "low",
+          label: `${iss.count} issue${iss.count === 1 ? "" : "s"} in 30d`,
+          detail: `${iss.open} open${iss.critical ? ` · ${iss.critical} high/critical` : ""}.` });
+      }
+      if (serviceOverdue) {
+        score -= 20;
+        reasons.push({ severity: "high", label: "Service overdue",
+          detail: `Was due ${nextService.toLocaleDateString("en-IN")}.` });
+      } else if (serviceDueSoon) {
+        score -= 8;
+        reasons.push({ severity: "low", label: "Service due soon",
+          detail: `Due ${nextService.toLocaleDateString("en-IN")}.` });
+      }
+      if (m.status === "maintenance") {
+        score -= 10;
+        reasons.push({ severity: "medium", label: "In maintenance", detail: "Currently down." });
+      }
+
+      score = Math.max(0, Math.min(100, Math.round(score)));
+      const band = score >= 75 ? "healthy" : score >= 50 ? "watch" : "at_risk";
+
+      return {
+        machineId: m._id,
+        machineID: m.ID,
+        status: m.status,
+        score, band, dropPct,
+        issues30d: iss.count,
+        openIssues: iss.open,
+        recentAvg: recentAvg != null ? Math.round(recentAvg) : null,
+        baselineAvg: baseAvg != null ? Math.round(baseAvg) : null,
+        nextServiceDate: nextService,
+        reasons,
+      };
+    });
+
+    out.sort((a, b) => a.score - b.score); // worst first
+    const atRisk = out.filter((m) => m.band === "at_risk").length;
+    const watch  = out.filter((m) => m.band === "watch").length;
+
+    res.json({ success: true, generatedAt: now, summary: { total: out.length, atRisk, watch }, machines: out });
   })
 );
 
