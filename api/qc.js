@@ -100,6 +100,84 @@ router.post(
   })
 );
 
+// ── Fine-tune readiness: how close the labelled QC images are to a
+//    trainable defect dataset. The flywheel — every AI draft an
+//    inspector corrects and saves with a photo becomes a labelled
+//    sample. Training runs offline once the thresholds are met. ──────
+const FT = { MIN_SAMPLES: 200, MIN_CLASSES: 3, MIN_PER_CLASS: 20 };
+
+router.get(
+  "/training-readiness",
+  catchAsyncErrors(async (_req, res) => {
+    const [total, withImage, aiAssisted, failCount, byDefect] = await Promise.all([
+      QcRecord.countDocuments({}),
+      QcRecord.countDocuments({ image: { $ne: "" } }),
+      QcRecord.countDocuments({ aiAssisted: true, image: { $ne: "" } }),
+      QcRecord.countDocuments({ overallResult: "fail", image: { $ne: "" } }),
+      QcRecord.aggregate([
+        { $match: { image: { $ne: "" }, overallResult: "fail" } },
+        { $group: { _id: { $ifNull: ["$defectCode", "(unlabelled)"] }, count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+    ]);
+
+    const classes = byDefect.map((d) => ({ defectCode: d._id || "(unlabelled)", count: d.count }));
+    // A "pass" class is a valid label too (defect-free), plus each defect code.
+    const passWithImage = withImage - failCount;
+    const labelClasses = [
+      ...(passWithImage > 0 ? [{ defectCode: "pass (no defect)", count: passWithImage }] : []),
+      ...classes,
+    ];
+    const classesReady = labelClasses.filter((c) => c.count >= FT.MIN_PER_CLASS).length;
+
+    const ready = withImage >= FT.MIN_SAMPLES && classesReady >= FT.MIN_CLASSES;
+    const progressPct = Math.min(100, Math.round((withImage / FT.MIN_SAMPLES) * 100));
+
+    res.json({
+      success: true,
+      thresholds: FT,
+      totals: {
+        qcRecords: total,
+        labelledImages: withImage,
+        aiAssisted,
+        aiAssistedShare: withImage > 0 ? Math.round((aiAssisted / withImage) * 100) : 0,
+      },
+      classes: labelClasses,
+      classesReady,
+      progressPct,
+      ready,
+      recommendation: ready
+        ? "You have enough labelled data to fine-tune a defect classifier. Export the dataset to train offline."
+        : `Keep capturing QC photos. Need ${Math.max(0, FT.MIN_SAMPLES - withImage)} more labelled images and ${Math.max(0, FT.MIN_CLASSES - classesReady)} more classes with ≥${FT.MIN_PER_CLASS} samples.`,
+    });
+  })
+);
+
+// ── Export a fine-tuning dataset: image + label pairs. ─────────────
+router.get(
+  "/export-dataset",
+  catchAsyncErrors(async (req, res) => {
+    const limit = Math.min(Number(req.query.limit) || 500, 2000);
+    const records = await QcRecord.find({ image: { $ne: "" } })
+      .select("image overallResult defectCode results elastic createdAt")
+      .populate("elastic", "name")
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+
+    const samples = records.map((r) => ({
+      image: r.image,
+      label: r.overallResult === "fail" ? (r.defectCode || "defect") : "pass",
+      overallResult: r.overallResult,
+      elastic: r.elastic?.name || null,
+      parameters: (r.results || []).map((x) => ({ parameter: x.parameter, measured: x.measured, pass: x.pass })),
+      capturedAt: r.createdAt,
+    }));
+
+    res.json({ success: true, count: samples.length, exportedAt: new Date().toISOString(), samples });
+  })
+);
+
 router.post(
   "/create",
   catchAsyncErrors(async (req, res, next) => {
