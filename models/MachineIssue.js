@@ -16,11 +16,22 @@ const MachineIssueSchema = new mongoose.Schema(
       index: true,
     },
 
+    // The operator who reported it (worker portal). Optional — an admin
+    // may raise an issue directly, in which case reportedBy is set instead.
     employee: {
       type: mongoose.Types.ObjectId,
       ref: "Employee",
-      required: true,
       index: true,
+    },
+
+    // Admin/user who filed the issue when it wasn't a worker report.
+    reportedBy: { type: mongoose.Types.ObjectId, ref: "User" },
+
+    // Where the report came from.
+    source: {
+      type: String,
+      enum: ["worker", "admin"],
+      default: "worker",
     },
 
     // Brief title for list views.

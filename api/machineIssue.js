@@ -43,11 +43,16 @@ router.post(
       attachments = [],
     } = req.body;
 
-    // Workers file under their own id; admins may file on behalf.
+    // Workers file under their own id; admins may file on behalf, or
+    // raise the issue directly (no linked employee) — recorded against
+    // the admin user instead.
     const employeeId = resolveEmployeeId(req);
+    const isAdminRole = req.user?.role === "admin";
 
     if (!machineId)   return next(new ErrorHandler("machineId is required", 400));
-    if (!employeeId)  return next(new ErrorHandler("Cannot determine employee — your account has no linked employee", 403));
+    if (!employeeId && !isAdminRole) {
+      return next(new ErrorHandler("Cannot determine employee — your account has no linked employee", 403));
+    }
     if (!title?.trim())       return next(new ErrorHandler("title is required", 400));
     if (!description?.trim()) return next(new ErrorHandler("description is required", 400));
     if (!SEVERITIES.includes(severity)) {
@@ -55,16 +60,18 @@ router.post(
         `severity must be one of: ${SEVERITIES.join(", ")}`, 400));
     }
 
-    const [machine, employee] = await Promise.all([
-      Machine.findById(machineId, "ID status"),
-      Employee.findById(employeeId, "name"),
-    ]);
+    const machine = await Machine.findById(machineId, "ID status");
     if (!machine)  return next(new ErrorHandler("Machine not found", 404));
-    if (!employee) return next(new ErrorHandler("Employee not found", 404));
+    if (employeeId) {
+      const employee = await Employee.findById(employeeId, "name");
+      if (!employee) return next(new ErrorHandler("Employee not found", 404));
+    }
 
     const issue = await MachineIssue.create({
       machine:     machineId,
-      employee:    employeeId,
+      employee:    employeeId || undefined,
+      reportedBy:  req.user?._id || undefined,
+      source:      employeeId ? "worker" : "admin",
       title:       title.trim(),
       description: description.trim(),
       severity,
@@ -105,6 +112,47 @@ router.get(
       .lean();
 
     res.json({ success: true, count: issues.length, data: issues });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  GET /machine-issue/anomalies?days=30&threshold=3
+//
+//  Machines that reported issues frequently in the window — a
+//  repeat-offender signal worth a deeper look than any single
+//  ticket. Registered before /:id so "anomalies" isn't read as an id.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/anomalies",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res) => {
+    const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
+    const threshold = Math.max(2, Number(req.query.threshold) || 3);
+    const since = new Date(Date.now() - days * 86_400_000);
+
+    const anomalies = await MachineIssue.aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $group: {
+          _id: "$machine",
+          count:     { $sum: 1 },
+          openCount: { $sum: { $cond: [{ $in: ["$status", ["open", "acknowledged", "in_progress"]] }, 1, 0] } },
+          critical:  { $sum: { $cond: [{ $in: ["$severity", ["high", "critical"]] }, 1, 0] } },
+          lastIssueAt: { $max: "$createdAt" },
+      } },
+      { $match: { count: { $gte: threshold } } },
+      { $sort: { count: -1 } },
+      { $lookup: { from: "machines", localField: "_id", foreignField: "_id", as: "m" } },
+      { $unwind: { path: "$m", preserveNullAndEmptyArrays: true } },
+      { $project: {
+          _id: 0,
+          machineId: "$_id",
+          machineID: "$m.ID",
+          status:    "$m.status",
+          count: 1, openCount: 1, critical: 1, lastIssueAt: 1,
+      } },
+    ]);
+
+    res.json({ success: true, windowDays: days, threshold, anomalies });
   })
 );
 
