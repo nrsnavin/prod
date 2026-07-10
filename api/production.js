@@ -27,6 +27,7 @@ const Employee   = require('../models/Employee');
 const Customer   = require('../models/Customer');
 const Order      = require('../models/Order');
 const Elastic    = require('../models/Elastic');
+const ElasticGroup = require('../models/ElasticGroup');
 const { isAuthenticated } = require('../middleware/auth');
 
 // Every production-analytics route requires login. Was previously
@@ -844,7 +845,7 @@ router.get('/analytics', async (req, res) => {
 //    insights:[{ severity, title, detail }]
 //  }
 // ═════════════════════════════════════════════════════════════
-const GROUP_DIMS = ['machine', 'operator', 'customer', 'order', 'elastic'];
+const GROUP_DIMS = ['machine', 'operator', 'customer', 'order', 'elastic', 'group'];
 
 function toObjectId(v) {
   try { return new mongoose.Types.ObjectId(v); } catch (_) { return null; }
@@ -893,12 +894,14 @@ router.get('/breakdown', async (req, res) => {
       if (oId) post['jobDoc.order'] = oId;
       if (Object.keys(post).length) prodPipe.push({ $match: post });
     }
-    if (groupBy === 'elastic') {
+    if (groupBy === 'elastic' || groupBy === 'group') {
       // Production is booked per shift, not per elastic. Attribute a
       // shift's metres across the elastics it ran, weighted by how many
       // heads each elastic occupied in that shift's head→elastic map.
       // A shift can therefore contribute to several elastics; shiftCount
-      // counts distinct shifts that touched each elastic.
+      // counts distinct shifts that touched each elastic. The 'group'
+      // dimension aggregates per elastic here, then rolls up into groups
+      // below.
       prodPipe.push(
         { $addFields: { totalHeads: { $size: { $ifNull: ['$elastics', []] } } } },
         { $match: { totalHeads: { $gt: 0 } } },
@@ -954,6 +957,7 @@ router.get('/breakdown', async (req, res) => {
       customer: '$jobDoc.customer',
       order:    '$jobDoc.order',
       elastic:  '$elastic',
+      group:    '$elastic', // rolled up into groups after aggregation
     }[groupBy];
     wastePipe.push({
       $group: {
@@ -993,10 +997,46 @@ router.get('/breakdown', async (req, res) => {
       rowMap.set(k, r);
     }
 
+    // ── Group dimension: roll the per-elastic numbers up into each
+    //    group that contains the elastic. Groups can share elastics, so
+    //    an elastic's output may count toward several groups — this is a
+    //    per-group rollup (across all customers), not a partition, so
+    //    rows can overlap and need not sum to the plant total.
+    let presetLabels = null;
+    if (groupBy === 'group') {
+      const perElastic = new Map(rowMap); // keyed by elastic id
+      const groups = await ElasticGroup.find({ isActive: true })
+        .populate('customer', 'name').lean();
+      rowMap.clear();
+      presetLabels = new Map();
+      for (const g of groups) {
+        const acc = blank();
+        let any = false;
+        for (const it of g.items || []) {
+          const eid = it.elastic?.toString();
+          const r = eid && perElastic.get(eid);
+          if (!r) continue;
+          any = true;
+          acc.production     += r.production;
+          acc.shiftCount     += r.shiftCount;
+          acc.wastageQty     += r.wastageQty;
+          acc.wastageEvents  += r.wastageEvents;
+          acc.wastagePenalty += r.wastagePenalty;
+        }
+        if (!any) continue; // no activity for this group's elastics in range
+        const gid = g._id.toString();
+        rowMap.set(gid, acc);
+        presetLabels.set(gid, {
+          label: g.name,
+          sublabel: g.customer?.name || 'Global',
+        });
+      }
+    }
+
     // ── Resolve human labels for the dimension ───────────────
     const keys = [...rowMap.keys()].map(toObjectId).filter(Boolean);
-    const labels = new Map(); // key → { label, sublabel }
-    if (keys.length) {
+    const labels = presetLabels || new Map(); // key → { label, sublabel }
+    if (!presetLabels && keys.length) {
       if (groupBy === 'machine') {
         const docs = await Machine.find({ _id: { $in: keys } })
           .select('ID manufacturer NoOfHead status').lean();
@@ -1073,7 +1113,7 @@ router.get('/breakdown', async (req, res) => {
       : 0;
 
     // ── Rule-based insights ("AI analytical") ────────────────
-    const dimLabel = { machine: 'machine', operator: 'operator', customer: 'customer', order: 'order' }[groupBy];
+    const dimLabel = { machine: 'machine', operator: 'operator', customer: 'customer', order: 'order', elastic: 'elastic', group: 'group' }[groupBy] || groupBy;
     const insights = [];
     if (rows.length) {
       const top = rows[0];
