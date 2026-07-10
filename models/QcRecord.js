@@ -36,6 +36,12 @@ const qcRecordSchema = new mongoose.Schema(
     defectCode: { type: String, trim: true, default: "" },
     rejectedMeters: { type: Number, default: 0, min: 0 },
     notes: { type: String, trim: true, default: "" },
+    // Inspection photo (data URL) — kept as the labelling flywheel: every
+    // AI draft the inspector corrects becomes training data for a future
+    // fine-tuned defect model.
+    image: { type: String, default: "" },
+    // Whether the draft was AI-assisted (vision) before the human verified.
+    aiAssisted: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
