@@ -12,7 +12,8 @@ const Elastic          = require("../models/Elastic");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
-const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
+const { requireReason } = require("../utils/auditReason");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
 // All warping routes require login. Workers in the `warping` department
@@ -323,6 +324,82 @@ router.post("/warpingPlan/create", isAdmin('admin'), catchAsyncErrors(async (req
     .populate("beams.sections.warpYarn", "name category");
 
   res.status(201).json({ success: true, plan: populated });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// PUT /warpingPlan/:id — edit a plan's remarks (and optionally beams).
+// Only while the parent warping is still open. Requires an audit reason;
+// stamps a WARPING_PLAN_UPDATED fingerprint on the parent job.
+// ─────────────────────────────────────────────────────────────────────────
+router.put("/warpingPlan/:id", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next(new ErrorHandler("Invalid plan id", 400));
+  }
+  const auditReason = requireReason(req);
+  if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
+
+  const { remarks, beams } = req.body;
+  const plan = await WarpingPlan.findById(req.params.id);
+  if (!plan) return next(new ErrorHandler("Warping plan not found", 404));
+
+  const warping = await Warping.findById(plan.warping);
+  if (warping && warping.status !== "open") {
+    return next(new ErrorHandler(`Plan can only be edited while warping is open (current: "${warping.status}").`, 400));
+  }
+
+  const before = { remarks: plan.remarks, noOfBeams: plan.noOfBeams };
+  if (remarks !== undefined) plan.remarks = String(remarks);
+  if (Array.isArray(beams) && beams.length > 0) { plan.beams = beams; plan.noOfBeams = beams.length; }
+  await plan.save();
+
+  const job = await JobOrder.findById(plan.job);
+  if (job) {
+    stampFingerprint(job, ACTION_CODES.WARPING_PLAN_UPDATED, {
+      req,
+      meta: { planId: plan._id.toString(), auditReason, before, after: { remarks: plan.remarks, noOfBeams: plan.noOfBeams } },
+    });
+    await job.save();
+  }
+
+  const populated = await WarpingPlan.findById(plan._id)
+    .populate("job", "jobOrderNo status")
+    .populate("beams.sections.warpYarn", "name category");
+  res.status(200).json({ success: true, plan: populated });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────
+// DELETE /warpingPlan/:id — remove a plan (only while warping is open) so a
+// corrected one can be created. Requires an audit reason; stamps a
+// WARPING_PLAN_DELETED fingerprint on the parent job.
+// ─────────────────────────────────────────────────────────────────────────
+router.delete("/warpingPlan/:id", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next(new ErrorHandler("Invalid plan id", 400));
+  }
+  const auditReason = requireReason(req);
+  if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to delete", 400));
+
+  const plan = await WarpingPlan.findById(req.params.id);
+  if (!plan) return next(new ErrorHandler("Warping plan not found", 404));
+
+  const warping = await Warping.findById(plan.warping);
+  if (warping && warping.status !== "open") {
+    return next(new ErrorHandler(`Plan can only be deleted while warping is open (current: "${warping.status}").`, 400));
+  }
+
+  const job = await JobOrder.findById(plan.job);
+  if (job) {
+    stampFingerprint(job, ACTION_CODES.WARPING_PLAN_DELETED, {
+      req,
+      meta: { planId: plan._id.toString(), auditReason, noOfBeams: plan.noOfBeams },
+    });
+    await job.save();
+  }
+
+  if (warping) { warping.warpingPlan = undefined; await warping.save(); }
+  await plan.deleteOne();
+
+  res.status(200).json({ success: true, message: "Warping plan deleted", id: plan._id });
 }));
 
 router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
