@@ -20,6 +20,8 @@ const { notify }    = require("../utils/notify");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { resolveEmployeeId } = require("../utils/resolveEmployee");
 const { applyMovement } = require("../utils/elasticStock");
+const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
+const { requireReason } = require("../utils/auditReason");
 
 router.use(isAuthenticated);
 
@@ -172,6 +174,74 @@ router.post(
 //  WASTAGE_OUT row, so the reversal step is a no-op for them.
 //  Legacy records (pre-P0-4) still get cleaned up via this path.
 // ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+//  EDIT WASTAGE — adjust quantity/penalty/cause. Re-derives the
+//  job-level wastage counter by the delta and stamps an audit
+//  fingerprint (with reason + before/after) on the parent job.
+// ═══════════════════════════════════════════════════════════
+router.put(
+  "/:id",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid wastage id", 400));
+    }
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
+
+    const { quantity, penalty, reason } = req.body;
+    const session = await mongoose.startSession();
+    try {
+      let result;
+      await session.withTransaction(async () => {
+        const wastage = await Wastage.findById(id).session(session);
+        if (!wastage) throw new ErrorHandler("Wastage record not found", 404);
+
+        const before = { quantity: wastage.quantity, penalty: wastage.penalty, reason: wastage.reason };
+        const newQty = quantity != null ? Number(quantity) : wastage.quantity;
+        if (!Number.isFinite(newQty) || newQty <= 0) throw new ErrorHandler("Quantity must be > 0", 400);
+        const delta = newQty - Number(wastage.quantity || 0);
+
+        // Re-derive the job counter by the delta.
+        const job = await JobOrder.findById(wastage.job).session(session);
+        if (job && delta !== 0) {
+          const idx = job.wastageElastic.findIndex(
+            (x) => x.elastic.toString() === wastage.elastic.toString()
+          );
+          if (idx >= 0) {
+            job.wastageElastic[idx].quantity = Math.max(0, (job.wastageElastic[idx].quantity || 0) + delta);
+          }
+        }
+
+        wastage.quantity = newQty;
+        if (penalty != null) wastage.penalty = Number(penalty);
+        if (reason != null) wastage.reason = String(reason);
+        await wastage.save({ session });
+
+        if (job) {
+          stampFingerprint(job, ACTION_CODES.WASTAGE_UPDATED, {
+            req,
+            meta: {
+              wastageId: wastage._id.toString(),
+              auditReason,
+              before,
+              after: { quantity: wastage.quantity, penalty: wastage.penalty, reason: wastage.reason },
+            },
+          });
+          await job.save({ session });
+        }
+        result = wastage.toObject();
+      });
+      res.status(200).json({ success: true, message: "Wastage updated", wastage: result });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
+  })
+);
+
 router.delete(
   "/:id",
   isAdmin('admin'),
@@ -180,6 +250,8 @@ router.delete(
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return next(new ErrorHandler("Invalid wastage id", 400));
     }
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to delete", 400));
 
     const session = await mongoose.startSession();
     try {
@@ -201,6 +273,17 @@ router.delete(
           job.wastages = (job.wastages || []).filter(
             (w) => w.toString() !== wastage._id.toString()
           );
+          stampFingerprint(job, ACTION_CODES.WASTAGE_DELETED, {
+            req,
+            meta: {
+              wastageId: wastage._id.toString(),
+              auditReason,
+              elastic: wastage.elastic?.toString(),
+              quantity: wastage.quantity,
+              penalty: wastage.penalty,
+              cause: wastage.reason,
+            },
+          });
           await job.save({ session });
         }
 
