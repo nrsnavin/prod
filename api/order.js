@@ -10,6 +10,7 @@ const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
+const { requireReason } = require("../utils/auditReason.js");
 const { applyMovement } = require("../utils/elasticStock.js");
 const ShiftDetail        = require("../models/ShiftDetail.js");
 const Attendance         = require("../models/Attendence.js");
@@ -880,6 +881,8 @@ router.post(
       po, supplyDate, description, customer, elasticOrdered,
     } = req.body;
     if (!orderId) return next(new ErrorHandler("orderId is required", 400));
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
 
     const session = await mongoose.startSession();
     try {
@@ -938,6 +941,7 @@ router.post(
             changedFields: Object.keys(changed),
             previousValues,
             newValues:     changed,
+            auditReason,
           },
         });
         order.fingerprints.push(fp);
@@ -966,8 +970,10 @@ router.post(
 router.post(
   "/delete-order",
   catchAsyncErrors(async (req, res, next) => {
-    const { orderId, reason } = req.body;
+    const { orderId } = req.body;
     if (!orderId) return next(new ErrorHandler("orderId is required", 400));
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to delete", 400));
 
     const session = await mongoose.startSession();
     try {
@@ -1000,7 +1006,7 @@ router.post(
           meta: {
             previousStatus,
             newStatus: "Deleted",
-            reason:    reason || null,
+            auditReason,
             orderNo:   order.orderNo,
           },
         });
