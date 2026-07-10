@@ -14,6 +14,8 @@ const Employee      = require("../models/Employee");
 const ShiftDetail   = require("../models/ShiftDetail");
 const StockMovement = require("../models/StockMovement");
 const Elastic       = require("../models/Elastic");
+const Machine       = require("../models/Machine");
+const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const { notify }    = require("../utils/notify");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { resolveEmployeeId } = require("../utils/resolveEmployee");
@@ -487,6 +489,122 @@ router.get(
       .populate("employee", "name department");
 
     res.json({ success: true, wastage });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  GET /wastage/root-cause?days=30
+//
+//  Moves wastage from descriptive to diagnostic: what's driving it,
+//  and where the systemic hotspots are (reason × machine, reason ×
+//  operator). Optionally adds a Claude-written root-cause analysis +
+//  preventive actions.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/root-cause",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res) => {
+    const days  = Math.min(Number(req.query.days) || 30, 365);
+    const since = moment().subtract(days, "days").toDate();
+    const reasonExpr = { $trim: { input: { $ifNull: ["$reason", "(no reason given)"] } } };
+    const base    = [{ $match: { createdAt: { $gte: since } } }];
+    const withJob = [...base,
+      { $lookup: { from: "joborders", localField: "job", foreignField: "_id", as: "jobDoc" } },
+      { $unwind: { path: "$jobDoc", preserveNullAndEmptyArrays: true } }];
+
+    const [byReason, byOperator, byElastic, byMachine, reasonMachine, reasonOperator, totalsAgg] =
+      await Promise.all([
+        Wastage.aggregate([...base,
+          { $group: { _id: reasonExpr, qty: { $sum: "$quantity" }, count: { $sum: 1 }, penalty: { $sum: "$penalty" } } },
+          { $sort: { qty: -1 } }, { $limit: 8 },
+          { $project: { _id: 0, reason: "$_id", qty: 1, count: 1, penalty: 1 } }]),
+        Wastage.aggregate([...base,
+          { $group: { _id: "$employee", qty: { $sum: "$quantity" }, count: { $sum: 1 } } },
+          { $sort: { qty: -1 } }, { $limit: 6 },
+          { $lookup: { from: "employees", localField: "_id", foreignField: "_id", as: "e" } },
+          { $unwind: { path: "$e", preserveNullAndEmptyArrays: true } },
+          { $project: { _id: 0, name: { $ifNull: ["$e.name", "Unknown"] }, department: "$e.department", qty: 1, count: 1 } }]),
+        Wastage.aggregate([...base,
+          { $group: { _id: "$elastic", qty: { $sum: "$quantity" }, count: { $sum: 1 } } },
+          { $sort: { qty: -1 } }, { $limit: 6 },
+          { $lookup: { from: "elastics", localField: "_id", foreignField: "_id", as: "el" } },
+          { $unwind: { path: "$el", preserveNullAndEmptyArrays: true } },
+          { $project: { _id: 0, name: { $ifNull: ["$el.name", "Unknown"] }, qty: 1, count: 1 } }]),
+        Wastage.aggregate([...withJob,
+          { $group: { _id: "$jobDoc.machine", qty: { $sum: "$quantity" }, count: { $sum: 1 } } },
+          { $sort: { qty: -1 } }, { $limit: 6 },
+          { $lookup: { from: "machines", localField: "_id", foreignField: "_id", as: "m" } },
+          { $unwind: { path: "$m", preserveNullAndEmptyArrays: true } },
+          { $project: { _id: 0, machineID: { $ifNull: ["$m.ID", "—"] }, qty: 1, count: 1 } }]),
+        Wastage.aggregate([...withJob,
+          { $group: { _id: { reason: reasonExpr, machine: "$jobDoc.machine" }, qty: { $sum: "$quantity" }, count: { $sum: 1 } } },
+          { $sort: { qty: -1 } }, { $limit: 6 },
+          { $lookup: { from: "machines", localField: "_id.machine", foreignField: "_id", as: "m" } },
+          { $unwind: { path: "$m", preserveNullAndEmptyArrays: true } },
+          { $project: { _id: 0, reason: "$_id.reason", machineID: { $ifNull: ["$m.ID", "—"] }, qty: 1, count: 1 } }]),
+        Wastage.aggregate([...base,
+          { $group: { _id: { reason: reasonExpr, emp: "$employee" }, qty: { $sum: "$quantity" }, count: { $sum: 1 } } },
+          { $sort: { qty: -1 } }, { $limit: 6 },
+          { $lookup: { from: "employees", localField: "_id.emp", foreignField: "_id", as: "e" } },
+          { $unwind: { path: "$e", preserveNullAndEmptyArrays: true } },
+          { $project: { _id: 0, reason: "$_id.reason", operator: { $ifNull: ["$e.name", "Unknown"] }, qty: 1, count: 1 } }]),
+        Wastage.aggregate([...base,
+          { $group: { _id: null, qty: { $sum: "$quantity" }, count: { $sum: 1 }, penalty: { $sum: "$penalty" } } }]),
+      ]);
+
+    const totals = totalsAgg[0] || { qty: 0, count: 0, penalty: 0 };
+    const pct = (n) => (totals.qty > 0 ? Math.round((n / totals.qty) * 100) : 0);
+
+    // Rule-based insights (always present).
+    const insights = [];
+    if (byReason[0]) insights.push({ severity: "warn",
+      title: `Top reason: ${byReason[0].reason}`,
+      detail: `${byReason[0].qty.toLocaleString("en-IN")} m — ${pct(byReason[0].qty)}% of all wastage across ${byReason[0].count} entries.` });
+    if (reasonMachine[0] && reasonMachine[0].machineID !== "—") insights.push({ severity: "warn",
+      title: `Hotspot: "${reasonMachine[0].reason}" on ${reasonMachine[0].machineID}`,
+      detail: `${reasonMachine[0].qty.toLocaleString("en-IN")} m from this one machine+cause combo — a strong root-cause lead.` });
+    if (byOperator[0]) insights.push({ severity: "info",
+      title: `Most wastage by ${byOperator[0].name}`,
+      detail: `${byOperator[0].qty.toLocaleString("en-IN")} m over ${byOperator[0].count} entries — worth coaching or a process check.` });
+    if (byElastic[0]) insights.push({ severity: "info",
+      title: `Hardest elastic: ${byElastic[0].name}`,
+      detail: `${byElastic[0].qty.toLocaleString("en-IN")} m wasted — review its setup/spec.` });
+
+    // Optional Claude root-cause analysis.
+    let aiSummary = null, aiGenerated = false;
+    const claude = anthropic();
+    if (claude && totals.qty > 0) {
+      try {
+        const facts = [
+          `Window: last ${days} days. Total wastage ${Math.round(totals.qty)} m over ${totals.count} entries, penalty ₹${Math.round(totals.penalty)}.`,
+          `Top reasons: ${byReason.slice(0, 5).map((r) => `${r.reason} (${Math.round(r.qty)} m)`).join("; ")}.`,
+          `By machine: ${byMachine.slice(0, 4).map((m) => `${m.machineID} (${Math.round(m.qty)} m)`).join("; ")}.`,
+          `By operator: ${byOperator.slice(0, 4).map((o) => `${o.name} (${Math.round(o.qty)} m)`).join("; ")}.`,
+          `Reason×machine hotspots: ${reasonMachine.slice(0, 4).map((h) => `${h.reason} on ${h.machineID} (${Math.round(h.qty)} m)`).join("; ")}.`,
+        ].join("\n");
+        const message = await claude.messages.create({
+          model: TEXT_MODEL,
+          max_tokens: 500,
+          system:
+            "You are a lean-manufacturing quality engineer for an elastic (narrow-fabric) plant. " +
+            "Given wastage aggregates, identify the 2-3 most likely systemic root causes and a " +
+            "concrete preventive action for each. Be specific and reference the machines/reasons in " +
+            "the data. Output 2-3 short bullet lines starting with '- ', plain text, no preamble.",
+          messages: [{ role: "user", content: `Wastage data:\n${facts}\n\nGive the root-cause analysis.` }],
+        });
+        aiSummary = (message.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+        aiGenerated = true;
+      } catch (err) {
+        console.warn("[wastage/root-cause] AI failed:", err?.message);
+      }
+    }
+
+    res.json({
+      success: true, days,
+      totals: { qty: Math.round(totals.qty), count: totals.count, penalty: Math.round(totals.penalty) },
+      byReason, byOperator, byElastic, byMachine, reasonMachine, reasonOperator,
+      insights, aiSummary, aiGenerated,
+    });
   })
 );
 
