@@ -12,9 +12,10 @@ const Order            = require("../models/Order");
 const Employee         = require("../models/Employee");
 const Elastic          = require("../models/Elastic");
 const StockMovement    = require("../models/StockMovement");
-const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
+const { requireReason } = require("../utils/auditReason");
 
 router.use(isAuthenticated);
 
@@ -271,10 +272,84 @@ router.get(
 //  stock of 5 would only knock 5 off quantityProduced, leaving
 //  the counter 5 above truth.
 // ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+//  EDIT PACKING — correct the packed meters. Applies the delta to
+//  the job counter, the stock ledger (PACKING_INWARD / _REVERSE)
+//  and Elastic.quantityProduced, then stamps a fingerprint.
+// ═══════════════════════════════════════════════════════════
+router.put(
+  "/:id",
+  isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
+
+    const { meter } = req.body;
+    const session = await mongoose.startSession();
+    try {
+      let result;
+      await session.withTransaction(async () => {
+        const packing = await Packing.findById(req.params.id).session(session);
+        if (!packing) throw new ErrorHandler("Packing record not found", 404);
+
+        const oldMeter = Number(packing.meter || 0);
+        const newMeter = meter != null ? Number(meter) : oldMeter;
+        if (!Number.isFinite(newMeter) || newMeter <= 0) throw new ErrorHandler("Meter must be > 0", 400);
+        const delta = newMeter - oldMeter;
+
+        if (delta !== 0) {
+          const job = await JobOrder.findById(packing.job).session(session);
+          if (job) {
+            const idx = job.packedElastic.findIndex(
+              (e) => e.elastic.toString() === packing.elastic.toString()
+            );
+            if (idx >= 0) job.packedElastic[idx].quantity = Math.max(0, (job.packedElastic[idx].quantity || 0) + delta);
+          }
+
+          if (delta > 0) {
+            await applyMovement(session, {
+              elasticId: packing.elastic, type: "PACKING_INWARD", quantity: +delta,
+              refType: "Packing", refId: packing._id, alsoIncProduced: true,
+              reason: `packing edit +${delta} (${auditReason})`, by: req.user?._id,
+            });
+          } else {
+            await applyMovement(session, {
+              elasticId: packing.elastic, type: "PACKING_REVERSE", quantity: delta,
+              refType: "Packing", refId: packing._id,
+              reason: `packing edit ${delta} (${auditReason})`, by: req.user?._id,
+            });
+            await Elastic.updateOne({ _id: packing.elastic }, { $inc: { quantityProduced: delta } }, { session });
+          }
+
+          packing.meter = newMeter;
+          await packing.save({ session });
+
+          if (job) {
+            stampFingerprint(job, ACTION_CODES.PACKING_UPDATED, {
+              req,
+              meta: { packingId: packing._id.toString(), auditReason, before: { meter: oldMeter }, after: { meter: newMeter } },
+            });
+            await job.save({ session });
+          }
+        }
+        result = packing.toObject();
+      });
+      res.status(200).json({ success: true, message: "Packing updated", packing: result });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
+  })
+);
+
 router.delete(
   "/:id",
   isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to delete", 400));
+
     const session = await mongoose.startSession();
     try {
       let packingId;
@@ -296,6 +371,10 @@ router.delete(
           job.packingDetails = job.packingDetails.filter(
             (id) => id.toString() !== packing._id.toString()
           );
+          stampFingerprint(job, ACTION_CODES.PACKING_DELETED, {
+            req,
+            meta: { packingId: packing._id.toString(), auditReason, elastic: packing.elastic?.toString(), meter: packing.meter },
+          });
           await job.save({ session });
         }
 
