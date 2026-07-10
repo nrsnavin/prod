@@ -3,6 +3,7 @@
 const express = require("express");
 const router  = express.Router();
 
+const mongoose         = require("mongoose");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const ShiftDetail      = require("../models/ShiftDetail");
@@ -10,6 +11,7 @@ const MachineIssue     = require("../models/MachineIssue");
 const Machine          = require("../models/Machine");
 const { notify }       = require("../utils/notify");
 const { actorFromRequest } = require("../utils/fingerprint");
+const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS
@@ -680,6 +682,93 @@ router.get(
     const watch  = out.filter((m) => m.band === "watch").length;
 
     res.json({ success: true, generatedAt: now, summary: { total: out.length, atRisk, watch }, machines: out });
+  })
+);
+
+// ═════════════════════════════════════════════════════════════
+//  GET /machine/health-advice/:id
+//
+//  A real-AI maintenance diagnosis for one machine: gathers the same
+//  signals as the health score (production drift, recent issues,
+//  service state) and asks Claude for a concise root-cause hypothesis
+//  + recommended action + urgency. Falls back to a deterministic
+//  summary when no Claude key is configured.
+// ═════════════════════════════════════════════════════════════
+router.get(
+  "/health-advice/:id",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(id)) return next(new ErrorHandler("Invalid machine id", 400));
+
+    const now = new Date();
+    const d7  = new Date(now.getTime() - 7  * 86_400_000);
+    const d28 = new Date(now.getTime() - 28 * 86_400_000);
+    const d30 = new Date(now.getTime() - 30 * 86_400_000);
+    const oid = new mongoose.Types.ObjectId(id);
+
+    const [machine, prod, issues] = await Promise.all([
+      Machine.findById(id).select("ID status serviceLogs manufacturer NoOfHead").lean(),
+      ShiftDetail.aggregate([
+        { $match: { machine: oid, status: "closed", date: { $gte: d28 } } },
+        { $group: {
+            _id: null,
+            recentSum:   { $sum: { $cond: [{ $gte: ["$date", d7] }, "$productionMeters", 0] } },
+            recentCount: { $sum: { $cond: [{ $gte: ["$date", d7] }, 1, 0] } },
+            baseSum:     { $sum: { $cond: [{ $lt:  ["$date", d7] }, "$productionMeters", 0] } },
+            baseCount:   { $sum: { $cond: [{ $lt:  ["$date", d7] }, 1, 0] } },
+        } },
+      ]),
+      MachineIssue.find({ machine: oid, createdAt: { $gte: d30 } })
+        .select("title severity status createdAt").sort({ createdAt: -1 }).limit(8).lean(),
+    ]);
+    if (!machine) return next(new ErrorHandler("Machine not found", 404));
+
+    const p = prod[0] || {};
+    const recentAvg = p.recentCount ? Math.round(p.recentSum / p.recentCount) : null;
+    const baseAvg   = p.baseCount   ? Math.round(p.baseSum   / p.baseCount)   : null;
+    const dropPct = baseAvg && recentAvg != null && baseAvg > 0
+      ? Math.max(0, Math.round(((baseAvg - recentAvg) / baseAvg) * 100)) : 0;
+    const logs = (machine.serviceLogs || []).filter((l) => l.nextServiceDate)
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+    const nextService = logs.length ? new Date(logs[0].nextServiceDate) : null;
+    const serviceOverdue = nextService && nextService < now;
+
+    const facts = [
+      `Machine ${machine.ID} (${machine.manufacturer || "?"}, ${machine.NoOfHead || "?"} heads), status: ${machine.status}.`,
+      recentAvg != null ? `Recent 7d avg ${recentAvg} m/shift vs ${baseAvg} m baseline (${dropPct}% ${dropPct > 0 ? "drop" : "change"}).` : "No recent production data.",
+      `Issues in last 30d: ${issues.length}${issues.length ? " — " + issues.map((i) => `${i.title} [${i.severity}/${i.status}]`).join("; ") : ""}.`,
+      nextService ? `Next service ${nextService.toLocaleDateString("en-IN")}${serviceOverdue ? " (OVERDUE)" : ""}.` : "No scheduled service.",
+    ].join("\n");
+
+    const claude = anthropic();
+    if (claude) {
+      try {
+        const message = await claude.messages.create({
+          model: TEXT_MODEL,
+          max_tokens: 400,
+          system:
+            "You are a senior maintenance engineer for narrow-fabric (elastic tape) weaving/covering " +
+            "machines. Given a machine's recent signals, give a concise, practical diagnosis. Output " +
+            "plain text with three short labelled lines exactly: 'Likely cause:', 'Recommended action:', " +
+            "'Urgency:' (one of low/medium/high). No preamble, no markdown.",
+          messages: [{ role: "user", content: `Signals:\n${facts}\n\nGive the diagnosis.` }],
+        });
+        const advice = (message.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+        return res.json({ success: true, machineID: machine.ID, aiGenerated: true, advice, facts });
+      } catch (err) {
+        console.warn("[health-advice] AI failed, using fallback:", err?.message);
+      }
+    }
+
+    // Deterministic fallback when no Claude key.
+    const bits = [];
+    if (dropPct >= 12) bits.push(`output is down ${dropPct}%`);
+    if (issues.length) bits.push(`${issues.length} issue(s) in 30 days`);
+    if (serviceOverdue) bits.push("service is overdue");
+    const advice = bits.length
+      ? `Likely cause: ${bits.join(", ")}.\nRecommended action: inspect the machine, clear open issues and bring service up to date.\nUrgency: ${serviceOverdue || dropPct >= 30 ? "high" : "medium"}.`
+      : "Likely cause: no adverse signals.\nRecommended action: continue normal operation.\nUrgency: low.";
+    return res.json({ success: true, machineID: machine.ID, aiGenerated: false, advice, facts });
   })
 );
 

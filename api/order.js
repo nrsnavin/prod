@@ -22,6 +22,7 @@ const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
 const Notification         = require("../models/Notification.js");
 const { approveOrderTxn }  = require("../services/orderService.js");
+const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient.js");
 
 
 // ════════════════════════════════════════════════════════════════
@@ -1701,7 +1702,50 @@ router.get(
       });
     }
     risks.sort((a, b) => b.lateWorkingDays - a.lateWorkingDays);
-    return res.json({ success: true, count: risks.length, generatedAt: now, risks });
+
+    // Upgrade the template drafts to genuinely AI-written messages when a
+    // Claude key is configured. One call for all risks; on any failure we
+    // keep the deterministic template so the feature never breaks.
+    const claude = anthropic();
+    let aiDrafted = false;
+    if (claude && risks.length) {
+      try {
+        const message = await claude.messages.create({
+          model: TEXT_MODEL,
+          max_tokens: 1024,
+          system:
+            "You are a courteous customer-relations rep for an elastic (narrow-fabric) " +
+            "manufacturer. For each order, write a short, warm, professional WhatsApp message " +
+            "telling the customer their order will be slightly delayed. 2-3 sentences, plain " +
+            "text, no emojis, no placeholders/brackets. Use the EXACT dates provided, apologise " +
+            "briefly, and reassure them it's being prioritised.",
+          messages: [{
+            role: "user",
+            content:
+              'Return ONLY JSON: {"messages":[{"orderNo":<number>,"message":"..."}]}\n\nOrders:\n' +
+              risks.map((r) =>
+                `- Order #${r.orderNo}, customer ${r.customer.name}, promised ${_fmtDate(r.promised)}, ` +
+                `now expected ${_fmtDate(r.expectedDate)} (${r.lateWorkingDays} working days late).`
+              ).join("\n"),
+          }],
+        });
+        const text = (message.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+        const m = text.match(/\{[\s\S]*\}/);
+        const parsed = m ? JSON.parse(m[0]) : null;
+        if (parsed && Array.isArray(parsed.messages)) {
+          const byNo = new Map(parsed.messages.map((x) => [String(x.orderNo), x.message]));
+          for (const r of risks) {
+            const msg = byNo.get(String(r.orderNo));
+            if (msg && typeof msg === "string" && msg.trim()) { r.draft = msg.trim(); r.aiDrafted = true; }
+          }
+          aiDrafted = true;
+        }
+      } catch (err) {
+        console.warn("[eta-risks] AI draft failed, using templates:", err?.message);
+      }
+    }
+
+    return res.json({ success: true, count: risks.length, generatedAt: now, aiDrafted, risks });
   }),
 );
 
