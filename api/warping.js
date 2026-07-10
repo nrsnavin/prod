@@ -402,6 +402,116 @@ router.delete("/warpingPlan/:id", isAdmin('admin'), catchAsyncErrors(async (req,
   res.status(200).json({ success: true, message: "Warping plan deleted", id: plan._id });
 }));
 
+// ─────────────────────────────────────────────────────────────────────────
+// GET /optimize-layout/:warpingId?capacity=600
+//
+// Proposes an optimised beam layout for a warping. Treats it as bin-packing:
+// each warp yarn needs a number of ends; beams have a fixed ends capacity.
+// A first-fit-decreasing pack keeps small yarns whole (no changeover) and
+// only splits a yarn when it exceeds a beam, minimising both beam count and
+// yarn changeovers vs a naive one-yarn-per-beam layout. Deterministic; the
+// admin reviews and applies via /warpingPlan/create.
+// ─────────────────────────────────────────────────────────────────────────
+function _packBeams(items, capacity) {
+  const C = Math.max(1, Number(capacity) || 600);
+  const beams = [];
+  const newBeam = () => { const b = { capacityLeft: C, totalEnds: 0, sections: [] }; beams.push(b); return b; };
+  const place = (beam, item, take) => {
+    const existing = beam.sections.find((s) => s.warpYarnId === item.yarnId);
+    if (existing) existing.ends += take;
+    else beam.sections.push({ warpYarnId: item.yarnId, warpYarnName: item.yarnName, ends: take });
+    beam.capacityLeft -= take; beam.totalEnds += take;
+  };
+  // Largest yarns first.
+  const sorted = [...items].sort((a, b) => b.ends - a.ends);
+  for (const item of sorted) {
+    const whole = beams.find((b) => b.capacityLeft >= item.ends);
+    if (whole) { place(whole, item, item.ends); continue; }
+    let remaining = item.ends;
+    while (remaining > 0) {
+      const b = beams.find((x) => x.capacityLeft > 0) || newBeam();
+      const take = Math.min(remaining, b.capacityLeft);
+      place(b, item, take);
+      remaining -= take;
+    }
+  }
+  return { beams, capacity: C };
+}
+
+router.get("/optimize-layout/:warpingId", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.warpingId)) {
+    return next(new ErrorHandler("Invalid warping id", 400));
+  }
+  const warping = await Warping.findById(req.params.warpingId);
+  if (!warping) return next(new ErrorHandler("Warping not found", 404));
+
+  const job = await JobOrder.findById(warping.job)
+    .populate({ path: "elastics.elastic", populate: [
+      { path: "warpYarn.id", select: "name" },
+      { path: "warpSpandex.id", select: "name" },
+    ] });
+  if (!job) return next(new ErrorHandler("Job not found for this warping", 404));
+
+  // Aggregate required ends per warp yarn across the job's elastics.
+  const byYarn = new Map();
+  const add = (id, name, ends) => {
+    if (!id || !(ends > 0)) return;
+    const key = id.toString();
+    const cur = byYarn.get(key) || { yarnId: key, yarnName: name || "Yarn", ends: 0 };
+    cur.ends += Number(ends);
+    byYarn.set(key, cur);
+  };
+  for (const line of job.elastics || []) {
+    const el = line.elastic;
+    if (!el || typeof el !== "object") continue;
+    if (el.warpSpandex?.id) add(el.warpSpandex.id._id || el.warpSpandex.id, el.warpSpandex.id?.name || "Spandex", el.warpSpandex.ends);
+    for (const w of el.warpYarn || []) if (w.id) add(w.id._id || w.id, w.id?.name, w.ends);
+  }
+  const items = [...byYarn.values()];
+  if (items.length === 0) {
+    return res.json({ success: true, warpingId: warping._id.toString(), items: [], message: "No warp-yarn ends found on this warping's elastics." });
+  }
+
+  const capacity = Math.min(Math.max(Number(req.query.capacity) || 600, 20), 5000);
+  const { beams } = _packBeams(items, capacity);
+
+  const totalEnds = items.reduce((s, i) => s + i.ends, 0);
+  const totalSections = beams.reduce((s, b) => s + b.sections.length, 0);
+  // Naive baseline: one yarn group per beam (each yarn split only by capacity).
+  const baselineBeams = items.reduce((s, i) => s + Math.ceil(i.ends / capacity), 0);
+  const fillRate = beams.length > 0 ? Math.round((totalEnds / (beams.length * capacity)) * 100) : 0;
+
+  const proposedBeams = beams.map((b, i) => ({
+    beamNo: i + 1,
+    totalEnds: b.totalEnds,
+    fillPct: Math.round((b.totalEnds / capacity) * 100),
+    sections: b.sections.map((s) => ({ warpYarnId: s.warpYarnId, warpYarnName: s.warpYarnName, ends: s.ends })),
+  }));
+
+  res.json({
+    success: true,
+    warpingId: warping._id.toString(),
+    jobOrderNo: job.jobOrderNo,
+    capacity,
+    metrics: {
+      beamsUsed: beams.length,
+      baselineBeams,
+      beamsSaved: Math.max(0, baselineBeams - beams.length),
+      totalEnds,
+      totalYarns: items.length,
+      changeovers: Math.max(0, totalSections - beams.length),
+      fillRate,
+    },
+    beams: proposedBeams,
+    assumptions: [
+      `Beam capacity ${capacity} ends (adjust for your warping frame).`,
+      "Largest yarns are placed first; small yarns share a beam to cut changeovers.",
+      "A yarn only splits across beams when it exceeds one beam's capacity.",
+      "Applying creates the warping plan — you can still edit beams before starting.",
+    ],
+  });
+}));
+
 router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.jobId)) {
     return next(new ErrorHandler("Invalid job id", 400));
