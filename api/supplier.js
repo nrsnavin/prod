@@ -25,6 +25,8 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { isAuthenticated } = require("../middleware/auth");
+const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
+const { requireReason } = require("../utils/auditReason");
 
 // Every supplier / PO / material-inward route requires a logged-in
 // user. Auth was previously commented out, leaving these endpoints
@@ -138,6 +140,101 @@ router.post(
 
 
 // ─────────────────────────────────────────────────────────────────────────
+// PUT /edit-po  — edit an Open PO (items / expectedDate / notes).
+// Blocked once anything has been received. Requires an audit reason and
+// stamps a PO_UPDATED fingerprint on the PO.
+// ─────────────────────────────────────────────────────────────────────────
+router.put(
+  "/edit-po",
+  catchAsyncErrors(async (req, res, next) => {
+    const { poId, items, expectedDate, notes } = req.body;
+    if (!poId) return next(new ErrorHandler("poId is required", 400));
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
+
+    const po = await PurchaseOrder.findById(poId);
+    if (!po) return next(new ErrorHandler("Purchase order not found", 404));
+    if (po.status !== "Open") {
+      return next(new ErrorHandler(`Only Open purchase orders can be edited (current: "${po.status}").`, 400));
+    }
+    if ((po.items || []).some((i) => (i.receivedQuantity || 0) > 0)) {
+      return next(new ErrorHandler("Cannot edit a PO that already has receipts.", 400));
+    }
+
+    const before = {
+      items: po.items.map((i) => ({ rawMaterial: i.rawMaterial?.toString(), quantity: i.quantity, price: i.price })),
+      expectedDate: po.expectedDate,
+      notes: po.notes,
+    };
+
+    if (Array.isArray(items) && items.length > 0) {
+      for (const [idx, item] of items.entries()) {
+        if (!item || !item.rawMaterial) return next(new ErrorHandler(`items[${idx}].rawMaterial is required`, 400));
+        const q = Number(item.quantity);
+        if (!Number.isFinite(q) || q <= 0) return next(new ErrorHandler(`items[${idx}].quantity must be a positive number`, 400));
+      }
+      po.items = items.map((i) => ({
+        rawMaterial: i.rawMaterial, price: Number(i.price) || 0, quantity: Number(i.quantity) || 0, receivedQuantity: 0,
+      }));
+    }
+    if (expectedDate !== undefined) {
+      const d = expectedDate ? new Date(expectedDate) : undefined;
+      po.expectedDate = d && !isNaN(d.getTime()) ? d : undefined;
+    }
+    if (notes !== undefined) po.notes = String(notes).trim();
+
+    stampFingerprint(po, ACTION_CODES.PO_UPDATED, {
+      req,
+      meta: { auditReason, poNo: po.poNo, before, after: {
+        items: po.items.map((i) => ({ rawMaterial: i.rawMaterial?.toString(), quantity: i.quantity, price: i.price })),
+        expectedDate: po.expectedDate, notes: po.notes,
+      } },
+    });
+    po.markModified("fingerprints");
+    await po.save();
+
+    const populated = await PurchaseOrder.findById(po._id)
+      .populate("supplier", "name phoneNumber gstin")
+      .populate("items.rawMaterial", "name unit");
+    res.status(200).json({ success: true, message: "Purchase order updated", po: populated });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────────────────
+// DELETE /delete-po  — soft-delete (status → Cancelled) an Open PO with no
+// receipts. Requires an audit reason; stamps a PO_DELETED fingerprint.
+// ─────────────────────────────────────────────────────────────────────────
+router.delete(
+  "/delete-po",
+  catchAsyncErrors(async (req, res, next) => {
+    const poId = req.query.poId || req.query.id;
+    if (!poId) return next(new ErrorHandler("poId is required", 400));
+    const auditReason = requireReason(req);
+    if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to delete", 400));
+
+    const po = await PurchaseOrder.findById(poId);
+    if (!po) return next(new ErrorHandler("Purchase order not found", 404));
+    if (po.status === "Cancelled") return next(new ErrorHandler("PO is already cancelled", 400));
+    if ((po.items || []).some((i) => (i.receivedQuantity || 0) > 0)) {
+      return next(new ErrorHandler("Cannot delete a PO that already has receipts. Handle the received stock first.", 400));
+    }
+
+    const previousStatus = po.status;
+    po.status = "Cancelled";
+    stampFingerprint(po, ACTION_CODES.PO_DELETED, {
+      req,
+      meta: { auditReason, poNo: po.poNo, previousStatus },
+    });
+    po.markModified("fingerprints");
+    await po.save();
+
+    res.status(200).json({ success: true, message: "Purchase order deleted", id: po._id });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────────────────
 // GET /get-pos
 // Query: page, limit, status, supplierId, search (poNo)
 // ─────────────────────────────────────────────────────────────────────────
@@ -151,6 +248,7 @@ router.get(
 
       const filter = {};
       if (req.query.status)     filter.status   = req.query.status;
+      else                      filter.status   = { $ne: "Cancelled" }; // hide soft-deleted by default
       if (req.query.supplierId) filter.supplier  = req.query.supplierId;
       if (req.query.search) {
         const num = Number(req.query.search);

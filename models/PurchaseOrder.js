@@ -31,7 +31,7 @@ const PurchaseOrderSchema = new mongoose.Schema(
     items: [PurchaseItemSchema],
     status: {
       type: String,
-      enum: ["Open", "Partial", "Completed"],
+      enum: ["Open", "Partial", "Completed", "Cancelled"],
       default: "Open",
     },
     // Requested delivery date + free-text terms/notes for the printed PO.
@@ -41,6 +41,9 @@ const PurchaseOrderSchema = new mongoose.Schema(
       type: Number,
       immutable: true,
     },
+    // Tamper-evident audit trail (edit/delete with reason). Same shape as
+    // Order/JobOrder fingerprints so the UI can render them uniformly.
+    fingerprints: { type: Array, default: [] },
   },
   { timestamps: true }
 );
