@@ -1632,6 +1632,79 @@ router.post(
   }),
 );
 
+// ═════════════════════════════════════════════════════════════════
+//  GET /api/v2/order/eta-risks
+//
+//  Proactive delivery-risk detection: for every in-flight order, run
+//  the ML ETA and surface the ones whose predicted completion slips
+//  PAST the promised supply date (not just "date is near" — actually
+//  predicted late). Each risk comes with a ready-to-send customer
+//  message draft, so the admin approves & sends (human-in-the-loop)
+//  instead of chasing manually.
+// ═════════════════════════════════════════════════════════════════
+function _fmtDate(d) {
+  return d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+}
+function _draftCustomerUpdate({ customerName, orderNo, expectedDate, promised, lateWorkingDays }) {
+  const name = customerName && customerName !== '—' ? customerName : 'Sir/Madam';
+  return (
+    `Dear ${name}, an update on your order #${orderNo}: based on current production ` +
+    `progress we now expect completion around ${_fmtDate(expectedDate)}, about ` +
+    `${lateWorkingDays} working day${lateWorkingDays === 1 ? '' : 's'} later than the planned ` +
+    `${_fmtDate(promised)}. We are prioritising it and will keep you updated. ` +
+    `Thank you for your patience.`
+  );
+}
+
+router.get(
+  '/eta-risks',
+  isAuthenticated, isAdmin('admin'),
+  catchAsyncErrors(async (req, res) => {
+    const now = new Date();
+    const orders = await Order.find({ status: { $in: ['Approved', 'InProgress'] } })
+      .select('orderNo status supplyDate customer elasticOrdered producedElastic')
+      .populate('customer', 'name phoneNumber')
+      .lean();
+
+    if (orders.length === 0) {
+      return res.json({ success: true, count: 0, generatedAt: now, risks: [] });
+    }
+
+    const plantMetersPerMachineDay = await _loadPlantMetersPerMachineDay(now);
+    const risks = [];
+    for (const order of orders) {
+      let result;
+      try {
+        result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now);
+      } catch (err) {
+        console.warn('[eta-risks] order', String(order._id), 'failed:', err?.message);
+        continue;
+      }
+      if (!result.ok || !result.risk?.late) continue;
+      const lateWorkingDays = result.risk.lateWorkingDays || 0;
+      risks.push({
+        orderId:         order._id,
+        orderNo:         order.orderNo,
+        status:          order.status,
+        customer:        { name: order.customer?.name || '—', phone: order.customer?.phoneNumber || null },
+        promised:        order.supplyDate,
+        expectedDate:    result.expectedDate,
+        workingDays:     result.workingDays,
+        lateWorkingDays,
+        draft: _draftCustomerUpdate({
+          customerName: order.customer?.name,
+          orderNo: order.orderNo,
+          expectedDate: result.expectedDate,
+          promised: order.supplyDate,
+          lateWorkingDays,
+        }),
+      });
+    }
+    risks.sort((a, b) => b.lateWorkingDays - a.lateWorkingDays);
+    return res.json({ success: true, count: risks.length, generatedAt: now, risks });
+  }),
+);
+
 // Expose the per-order ETA computation + plant-rate loader so utility
 // modules (utils/digest.js) can reuse the exact same math the route
 // returns to clients — no duplication, identical numbers across the
