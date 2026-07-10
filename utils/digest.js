@@ -19,6 +19,7 @@ const Wastage         = require("../models/Wastage.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
 const Machine         = require("../models/Machine.js");
+const MachineIssue    = require("../models/MachineIssue.js");
 const Order           = require("../models/Order.js");
 const Attendance      = require("../models/Attendence.js");
 const LeaveRequest    = require("../models/LeaveRequest.js");
@@ -122,6 +123,15 @@ function formatDigest(d) {
     lines.push("  Nothing due. 👍");
   }
 
+  // Repeat-offender machines (frequent breakdowns)
+  if ((d.repeatOffenders || []).length > 0) {
+    lines.push("", `🚨 *Frequent breakdowns* (${d.issueThresh ?? 3}+ in ${d.issueWindow ?? 30}d)`);
+    for (const r of d.repeatOffenders.slice(0, 5)) {
+      lines.push(`  ${r.ID || "?"}: ${r.count} issues${r.openCount > 0 ? ` · ${r.openCount} open` : ""}`);
+    }
+    if (d.repeatOffenders.length > 5) lines.push(`  +${d.repeatOffenders.length - 5} more`);
+  }
+
   return lines.join("\n");
 }
 
@@ -130,6 +140,8 @@ async function buildDigestData(now = new Date(), opts = {}) {
   const horizonDays  = opts.stockoutHorizonDays  || 7;
   const lookbackDays = opts.stockoutLookbackDays || 30;
   const maintDays    = opts.maintenanceDays       || 14;
+  const issueWindow  = opts.issueWindowDays       || 30;
+  const issueThresh  = opts.issueThreshold        || 3;
 
   // "Yesterday" window — local midnight to midnight. Kept simple
   // (server tz); the digest is a glance, not an accounting report.
@@ -137,7 +149,7 @@ async function buildDigestData(now = new Date(), opts = {}) {
   const startYday  = new Date(startToday.getTime() - 86_400_000);
 
   const [production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift,
-         attendance, leave, complaints] =
+         attendance, leave, complaints, repeatOffenders] =
     await Promise.all([
       _production(startYday, startToday),
       _wastage(startYday, startToday),
@@ -149,12 +161,14 @@ async function buildDigestData(now = new Date(), opts = {}) {
       _attendance(startYday, startToday),
       _leavePending(),
       _complaints(startYday, startToday),
+      _repeatOffenders(now, issueWindow, issueThresh),
     ]);
 
   return {
     dateLabel: startYday.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
     production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift,
-    attendance, leave, complaints,
+    attendance, leave, complaints, repeatOffenders,
+    issueWindow, issueThresh,
   };
 }
 
@@ -450,6 +464,26 @@ async function _maintenance(now, days) {
   }
   due.sort((a, b) => a.daysUntil - b.daysUntil);
   return due;
+}
+
+// Machines reporting issues frequently in the window — same repeat-
+// offender signal as GET /machine-issue/anomalies.
+async function _repeatOffenders(now, days, threshold) {
+  const since = new Date(now.getTime() - days * 86_400_000);
+  const rows = await MachineIssue.aggregate([
+    { $match: { createdAt: { $gte: since } } },
+    { $group: {
+        _id: "$machine",
+        count:     { $sum: 1 },
+        openCount: { $sum: { $cond: [{ $in: ["$status", ["open", "acknowledged", "in_progress"]] }, 1, 0] } },
+    } },
+    { $match: { count: { $gte: threshold } } },
+    { $sort: { count: -1 } },
+    { $lookup: { from: "machines", localField: "_id", foreignField: "_id", as: "m" } },
+    { $unwind: { path: "$m", preserveNullAndEmptyArrays: true } },
+    { $project: { _id: 0, ID: "$m.ID", count: 1, openCount: 1 } },
+  ]);
+  return rows;
 }
 
 function _num(n) {
