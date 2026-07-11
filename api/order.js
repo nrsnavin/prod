@@ -11,6 +11,7 @@ const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
 const { requireReason } = require("../utils/auditReason.js");
+const { assertVersion } = require("../utils/versioning.js");
 const { applyMovement } = require("../utils/elasticStock.js");
 const ShiftDetail        = require("../models/ShiftDetail.js");
 const Attendance         = require("../models/Attendence.js");
@@ -890,6 +891,9 @@ router.post(
       await session.withTransaction(async () => {
         const order = await Order.findById(orderId).session(session);
         if (!order) throw new ErrorHandler("Order not found", 404);
+        // Optimistic lock: reject the edit if another user saved since
+        // this client loaded the order (409 → client reloads).
+        assertVersion(order, req);
         if (order.status !== "Open") {
           throw new ErrorHandler(
             `Only Open orders can be edited (current: "${order.status}"). ` +
@@ -946,6 +950,7 @@ router.post(
           },
         });
         order.fingerprints.push(fp);
+        order.increment(); // bump __v so concurrent editors get a 409
         await order.save({ session });
 
         resp = { order, fingerprint: fp };

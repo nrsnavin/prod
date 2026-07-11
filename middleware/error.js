@@ -1,8 +1,16 @@
 const ErrorHandler = require("../utils/ErrorHandler");
+const { CONFLICT_MESSAGE } = require("../utils/versioning");
 
 module.exports = (err, req, res, next) => {
   err.statusCode = err.statusCode || 500;
   err.message = err.message || "Internal server Error";
+
+  // Mongoose optimistic-lock failure (doc.increment() + save raced a
+  // concurrent write). Same meaning as an expectedVersion mismatch:
+  // the caller edited a stale copy → 409, reload and retry.
+  if (err.name === "VersionError") {
+    err = new ErrorHandler(CONFLICT_MESSAGE, 409);
+  }
 
   // Preserve route-supplied diagnostic fields so the frontend can
   // branch on them (e.g. INSUFFICIENT_STOCK → show force-approve

@@ -9,6 +9,7 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { assertVersion } = require("../utils/versioning");
 
 // All employee management routes are admin-only.
 router.use(isAuthenticated, isAdmin('admin'));
@@ -168,6 +169,9 @@ router.put(
 
     const employee = await Employee.findById(id);
     if (!employee) return next(new ErrorHandler("Employee not found", 404));
+    // Optimistic lock: reject the edit if another user saved since this
+    // client loaded the employee (409 → client reloads).
+    assertVersion(employee, req);
 
     const allowed = ["name", "phoneNumber", "role", "department", "aadhar", "skill"];
     for (const field of allowed) {
@@ -176,6 +180,7 @@ router.put(
       }
     }
 
+    employee.increment(); // bump __v so concurrent editors get a 409
     await employee.save();
 
     res.status(200).json({ success: true, employee });

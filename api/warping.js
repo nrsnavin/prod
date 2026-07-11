@@ -14,6 +14,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
 const { requireReason } = require("../utils/auditReason");
+const { assertVersion } = require("../utils/versioning");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
 // All warping routes require login. Workers in the `warping` department
@@ -341,6 +342,9 @@ router.put("/warpingPlan/:id", isAdmin('admin'), catchAsyncErrors(async (req, re
   const { remarks, beams } = req.body;
   const plan = await WarpingPlan.findById(req.params.id);
   if (!plan) return next(new ErrorHandler("Warping plan not found", 404));
+  // Optimistic lock: reject the edit if another user saved since this
+  // client loaded the plan (409 → client reloads).
+  assertVersion(plan, req);
 
   const warping = await Warping.findById(plan.warping);
   if (warping && warping.status !== "open") {
@@ -350,6 +354,7 @@ router.put("/warpingPlan/:id", isAdmin('admin'), catchAsyncErrors(async (req, re
   const before = { remarks: plan.remarks, noOfBeams: plan.noOfBeams };
   if (remarks !== undefined) plan.remarks = String(remarks);
   if (Array.isArray(beams) && beams.length > 0) { plan.beams = beams; plan.noOfBeams = beams.length; }
+  plan.increment(); // bump __v so concurrent editors get a 409
   await plan.save();
 
   const job = await JobOrder.findById(plan.job);

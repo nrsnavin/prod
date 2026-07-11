@@ -68,6 +68,34 @@ describe("migration chain (real CLI)", () => {
     expect(counter.seq).toBeGreaterThanOrEqual(1042); // next allocation > 1042
   }, 60_000);
 
+  it("installs DB validators that reject negative stock", async () => {
+    run(["up"]);
+
+    // Insert must fail schema validation — the DB is the last line of
+    // defense even if application code regresses.
+    await expect(
+      db.collection("rawmaterials").insertOne({ name: "Bad", stock: -5 })
+    ).rejects.toThrow(/Document failed validation/i);
+
+    // A valid insert still works.
+    await db.collection("rawmaterials").insertOne({ name: "Good", stock: 5 });
+  }, 60_000);
+
+  it("skips (not aborts) the unique name index when master data has dupes", async () => {
+    await db.collection("elastics").insertMany([
+      { name: "40mm Woven" },
+      { name: "40mm Woven" }, // duplicate master row
+    ]);
+    // Must complete — a master-data dupe must never block `npm start`.
+    run(["up"]);
+
+    const indexes = await db.collection("elastics").indexes();
+    expect(indexes.some((i) => i.name === "name_unique")).toBe(false);
+    // Clean collections still get the index.
+    const supIdx = await db.collection("suppliers").indexes();
+    expect(supIdx.some((i) => i.name === "name_unique" && i.unique)).toBe(true);
+  }, 60_000);
+
   it("aborts with a report when duplicate PO numbers exist", async () => {
     await db.collection("purchaseorders").insertMany([
       { poNo: 1010, status: "Open" },

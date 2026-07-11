@@ -28,6 +28,7 @@ const { isAuthenticated } = require("../middleware/auth");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { nextNumber } = require("../utils/sequence");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
+const { assertVersion } = require("../utils/versioning");
 
 // Race-free PO number: atomic counter, seeded once from the current max.
 // (The old read-max-then-+1 could give two concurrent creates the same poNo.)
@@ -164,6 +165,9 @@ router.put(
 
     const po = await PurchaseOrder.findById(poId);
     if (!po) return next(new ErrorHandler("Purchase order not found", 404));
+    // Optimistic lock: two admins editing the same PO — the second save
+    // gets a 409 instead of silently overwriting the first.
+    assertVersion(po, req);
     if (po.status !== "Open") {
       return next(new ErrorHandler(`Only Open purchase orders can be edited (current: "${po.status}").`, 400));
     }
@@ -201,6 +205,7 @@ router.put(
       } },
     });
     po.markModified("fingerprints");
+    po.increment(); // bump __v so concurrent editors get a 409
     await po.save();
 
     const populated = await PurchaseOrder.findById(po._id)
