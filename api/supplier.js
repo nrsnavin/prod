@@ -27,6 +27,7 @@ const { escapeRegex } = require("../utils/escapeRegex");
 const { isAuthenticated } = require("../middleware/auth");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { nextNumber } = require("../utils/sequence");
+const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
 
 // Race-free PO number: atomic counter, seeded once from the current max.
 // (The old read-max-then-+1 could give two concurrent creates the same poNo.)
@@ -410,7 +411,17 @@ router.post(
   "/inward-stock",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { poId, items } = req.body;
+      const { poId, items, requestId } = req.body;
+
+      // Idempotency: a retried inward (flaky network, double-tap) must
+      // not credit stock twice. Fast path here; the claim inside the
+      // transaction below is the guarantee under race.
+      if (requestId && (await isClaimed(requestId))) {
+        return res.status(200).json({
+          success: true, duplicate: true,
+          message: "Already recorded (duplicate submit ignored)",
+        });
+      }
 
       if (!poId)
         return next(new ErrorHandler("PO ID is required", 400));
@@ -527,11 +538,38 @@ router.post(
       let created;
       try {
         await session.withTransaction(async () => {
+          // Claim the idempotency key first: a concurrent replay's
+          // claim throws E11000 and aborts its transaction before any
+          // stock moves.
+          if (requestId) await claimKey(session, requestId, "inward-stock");
+
           po.status = deriveStatus(po.items);
+          // Audit: who received what against this PO, when.
+          stampFingerprint(po, ACTION_CODES.PO_STOCK_INWARD, {
+            req,
+            meta: {
+              poNo: po.poNo,
+              items: activeItems.map((i) => ({
+                rawMaterial: String(i.rawMaterial),
+                quantity: Number(i.quantity),
+                lotNo: i.lotNo ? String(i.lotNo) : undefined,
+              })),
+              newStatus: deriveStatus(po.items),
+            },
+          });
+          po.markModified("fingerprints");
           await po.save({ session });
           await RawMaterial.bulkWrite(bulkOps, { session });
           created = await MaterialInward.insertMany(inwardDocs, { session });
         });
+      } catch (err) {
+        if (isDuplicateKeyError(err) && requestId) {
+          return res.status(200).json({
+            success: true, duplicate: true,
+            message: "Already recorded (duplicate submit ignored)",
+          });
+        }
+        throw err;
       } finally {
         await session.endSession();
       }

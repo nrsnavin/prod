@@ -59,6 +59,14 @@ const DeliveryChallanSchema = new mongoose.Schema(
       trim: true,
     },
 
+    // Client-generated idempotency key — a retried create must not cut
+    // a second challan and double-move stock. sparse for legacy docs.
+    requestId: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
+
     type: {
       type: String,
       enum: ["elastic", "machine_part"],

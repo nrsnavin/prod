@@ -60,6 +60,7 @@ const ACTION_CODES = Object.freeze({
   SHIFT_PRODUCTION_DELETED: 'SHIFT_PRODUCTION_DELETED',
   PO_UPDATED:               'PO_UPDATED',
   PO_DELETED:               'PO_DELETED',
+  PO_STOCK_INWARD:          'PO_STOCK_INWARD',
   ELASTIC_STOCK_ADJUST:     'ELASTIC_STOCK_ADJUST',
   // Elastic reservation lifecycle (Order ↔ Elastic.reservedStock)
   STOCK_RESERVED:           'STOCK_RESERVED',
@@ -106,6 +107,7 @@ const ACTION_LABELS = Object.freeze({
   SHIFT_PRODUCTION_DELETED: 'Shift Production Deleted',
   PO_UPDATED:               'Purchase Order Edited',
   PO_DELETED:               'Purchase Order Deleted',
+  PO_STOCK_INWARD:          'Stock Received Against PO',
   ELASTIC_STOCK_ADJUST:     'Elastic Stock Adjusted',
   STOCK_RESERVED:           'Stock Reserved',
   STOCK_RELEASED:           'Stock Released',

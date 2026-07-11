@@ -201,7 +201,21 @@ router.post(
       vehicleNo, driverName, transporter, lrNumber,
       items = [],
       remarks,
+      requestId,
     } = req.body;
+
+    // Idempotency: a retried create must not cut a second challan and
+    // double-move stock. Fast path; the unique requestId index is the
+    // guarantee under race (also avoids burning a DC number on replays).
+    if (requestId) {
+      const existing = await DeliveryChallan.findOne({ requestId }).lean();
+      if (existing) {
+        return res.status(200).json({
+          success: true, duplicate: true, dc: existing,
+          message: "Already recorded (duplicate submit ignored)",
+        });
+      }
+    }
 
     if (!type || !["elastic", "machine_part"].includes(type)) {
       return next(new ErrorHandler("type must be 'elastic' or 'machine_part'", 400));
@@ -239,6 +253,7 @@ router.post(
           type,
           financialYear,
           sequence,
+          ...(requestId ? { requestId } : {}),
           order:           orderId   || undefined,
           orderNo:         orderNo   || undefined,
           customerName:    customerName.trim(),
@@ -399,6 +414,18 @@ router.post(
         }
       })();
     } catch (err) {
+      // Race with a concurrent duplicate submit: the unique requestId
+      // index aborted this transaction (nothing applied) — return the
+      // winner's challan idempotently.
+      if (err?.code === 11000 && requestId) {
+        const existing = await DeliveryChallan.findOne({ requestId }).lean();
+        if (existing) {
+          return res.status(200).json({
+            success: true, duplicate: true, dc: existing,
+            message: "Already recorded (duplicate submit ignored)",
+          });
+        }
+      }
       return next(err);
     } finally {
       session.endSession();
