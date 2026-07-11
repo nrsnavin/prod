@@ -6,7 +6,12 @@
 // trimmed reason, or null when it's missing/too short.
 
 function requireReason(req) {
-  const reason = String(req?.body?.auditReason || req?.query?.auditReason || "").trim();
+  // Accept `auditReason` (web + new mobile) or a plain `reason` fallback so
+  // older mobile builds that posted `reason` (e.g. order delete) keep working.
+  const reason = String(
+    req?.body?.auditReason || req?.query?.auditReason ||
+    req?.body?.reason || req?.query?.reason || ""
+  ).trim();
   if (reason.length < 3) return null;
   return reason;
 }
