@@ -106,7 +106,21 @@ router.post(
       job, elastic, meter, joints,
       tareWeight, netWeight, grossWeight,
       stretch, size, checkedBy, packedBy,
+      requestId,
     } = req.body;
+
+    // Idempotency: a retried submit (flaky factory network, double-tap)
+    // must not create a second box and double-count stock. Fast path
+    // here; the unique index on requestId is the guarantee under race.
+    if (requestId) {
+      const existing = await Packing.findOne({ requestId }).lean();
+      if (existing) {
+        return res.status(200).json({
+          success: true, duplicate: true, packing: existing,
+          message: "Already recorded (duplicate submit ignored)",
+        });
+      }
+    }
 
     if (!job)        return next(new ErrorHandler("job is required",     400));
     if (!elastic)    return next(new ErrorHandler("elastic is required", 400));
@@ -154,6 +168,7 @@ router.post(
           stretch:     stretch  || "",
           size:        size     || "",
           checkedBy, packedBy,
+          ...(requestId ? { requestId } : {}),
         }], { session });
 
         const idx = jobDoc.packedElastic.findIndex(
@@ -224,6 +239,18 @@ router.post(
       });
       res.status(201).json({ success: true, ...resp });
     } catch (err) {
+      // Race with a concurrent duplicate submit: the unique requestId
+      // index aborted this transaction, so NOTHING here was applied —
+      // the winner's create did the work. Report success idempotently.
+      if (err?.code === 11000 && requestId) {
+        const existing = await Packing.findOne({ requestId }).lean();
+        if (existing) {
+          return res.status(200).json({
+            success: true, duplicate: true, packing: existing,
+            message: "Already recorded (duplicate submit ignored)",
+          });
+        }
+      }
       return next(err);
     } finally {
       session.endSession();

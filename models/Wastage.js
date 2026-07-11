@@ -2,6 +2,14 @@ const mongoose = require("mongoose");
 
 const WastageSchema = new mongoose.Schema(
   {
+    // Client-generated idempotency key — a retried submit must not
+    // record the wastage (and its penalty) twice. sparse for legacy.
+    requestId: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
+
     job: {
       type: mongoose.Types.ObjectId,
       ref: "JobOrder",

@@ -2,6 +2,15 @@ const mongoose = require("mongoose");
 
 const PackingSchema = new mongoose.Schema(
   {
+    // Client-generated idempotency key. Factory networks retry: without
+    // this, a resubmitted create lands a second box and double-counts
+    // stock. sparse — legacy records and callers that don't send one.
+    requestId: {
+      type: String,
+      unique: true,
+      sparse: true,
+    },
+
     date: {
       type: Date,
       default: Date.now,

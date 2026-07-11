@@ -38,7 +38,24 @@ router.post(
   "/add-wastage",
   catchAsyncErrors(async (req, res, next) => {
     const { job: jobId, elastic: elasticId,
-            quantity, penalty, reason } = req.body;
+            quantity, penalty, reason, requestId } = req.body;
+
+    // Idempotency: a retried submit must not record the wastage (and
+    // its penalty) twice. Fast path here; the unique index on
+    // requestId is the guarantee under race.
+    if (requestId) {
+      const existing = await Wastage.findOne({ requestId })
+        .populate("job",      "jobOrderNo status")
+        .populate("elastic",  "name")
+        .populate("employee", "name department")
+        .lean();
+      if (existing) {
+        return res.status(200).json({
+          success: true, duplicate: true, wastage: existing,
+          message: "Already recorded (duplicate submit ignored)",
+        });
+      }
+    }
 
     // Non-admins may only record wastage under their own employee id;
     // admins may attribute it to anyone. This route's legacy field is
@@ -84,6 +101,7 @@ router.post(
         const [wastage] = await Wastage.create([{
           job: jobId, elastic: elasticId, employee: employeeId,
           quantity, penalty: penalty || 0, reason: reason.trim(),
+          ...(requestId ? { requestId } : {}),
         }], { session });
 
         job.wastageElastic[idx].quantity += quantity;
@@ -156,6 +174,22 @@ router.post(
         }
       })();
     } catch (err) {
+      // Race with a concurrent duplicate submit: the unique requestId
+      // index aborted this transaction (nothing applied) — the winner
+      // did the work. Report success idempotently.
+      if (err?.code === 11000 && requestId) {
+        const existing = await Wastage.findOne({ requestId })
+          .populate("job",      "jobOrderNo status")
+          .populate("elastic",  "name")
+          .populate("employee", "name department")
+          .lean();
+        if (existing) {
+          return res.status(200).json({
+            success: true, duplicate: true, wastage: existing,
+            message: "Already recorded (duplicate submit ignored)",
+          });
+        }
+      }
       return next(err);
     } finally {
       session.endSession();
