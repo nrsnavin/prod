@@ -158,26 +158,28 @@ router.patch(
       );
     }
 
-    // ── Load machine ────────────────────────────────────────
-    const machine = await Machine.findById(machineId);
-    if (!machine)
-      return next(new ErrorHandler('Machine not found.', 404));
-
-    // ── Guard: only free machines can be modified ───────────
-    if (machine.status !== 'free') {
+    // ── Atomic guarded update ───────────────────────────────
+    // The status guard lives IN the filter: a machine that starts
+    // running between a read and a write can no longer slip through
+    // (the old read-check-save had that TOCTOU window).
+    const machine = await Machine.findOneAndUpdate(
+      { _id: machineId, status: 'free' },
+      { $set: { NoOfHead: noOfHead } },
+      { new: false } // returns the pre-update doc → `old` for the log
+    );
+    if (!machine) {
+      const exists = await Machine.findById(machineId).select('status');
+      if (!exists) return next(new ErrorHandler('Machine not found.', 404));
       return next(
         new ErrorHandler(
           `Head count can only be updated when the machine is free ` +
-          `(current status: "${machine.status}").`,
+          `(current status: "${exists.status}").`,
           400
         )
       );
     }
-
-    // ── Persist ─────────────────────────────────────────────
     const old = machine.NoOfHead;
-    machine.NoOfHead = noOfHead;
-    await machine.save();
+    machine.NoOfHead = noOfHead; // reflect the new value in the response
 
     console.log(
       `[machine/update-heads] ${machine.ID}: NoOfHead ${old} → ${noOfHead}`

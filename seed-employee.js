@@ -40,9 +40,13 @@ const DEMO_USER = {
   role:     'employee',
 };
 
-const MONGO_URL =
-  process.env.MONGO_URL ||
-  'mongodb+srv://navin:navin@cluster0.ftoq7bw.mongodb.net/?appName=Cluster0';
+// Credentials come from config/.env — never hardcode a connection
+// string (it ends up in git history and hands out the database).
+const MONGO_URL = process.env.MONGO_URL;
+if (!MONGO_URL) {
+  console.error('MONGO_URL is not set — configure config/.env first.');
+  process.exit(1);
+}
 
 (async () => {
   try {

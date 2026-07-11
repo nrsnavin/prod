@@ -389,93 +389,95 @@ router.post(
     const updated = [];
     const errors  = [];
 
-    // Batch-fetch every material up front instead of issuing one
-    // findById per item in parallel — the old loop fired N round
-    // trips per request.
-    const ids = toProcess
-      .map((a) => a._id)
-      .filter((id) => mongoose.Types.ObjectId.isValid(id));
-    const materials = await RawMaterial.find({ _id: { $in: ids } });
-    const byId = new Map(materials.map((m) => [m._id.toString(), m]));
-
-    await Promise.all(
-      toProcess.map(async (item) => {
+    // One SHORT transaction per item — the stock write and its ledger
+    // row land or roll back together, and concurrent adjusts of the
+    // same material become write conflicts (retried by withTransaction)
+    // instead of silent lost updates. Per-item scope preserves this
+    // route's partial-success contract: one bad row doesn't void the
+    // rest of the batch. Sequential on purpose — parallel ops can't
+    // share a Mongo session.
+    const session = await mongoose.startSession();
+    try {
+      for (const item of toProcess) {
+        if (!mongoose.Types.ObjectId.isValid(item._id)) {
+          errors.push({ id: item._id, error: "Invalid id" });
+          continue;
+        }
         try {
-          const material = byId.get(String(item._id));
-          if (!material) {
-            errors.push({ id: item._id, error: "Not found" });
-            return;
-          }
+          let fired = null;
+          let row   = null; // collected inside, pushed after commit —
+                            // withTransaction may retry the callback on
+                            // write conflict, so no side-effects inside.
+          await session.withTransaction(async () => {
+            // Read INSIDE the transaction so the delta applies to the
+            // current stock, not a snapshot from before the batch.
+            const material = await RawMaterial.findById(item._id).session(session);
+            if (!material) throw new Error("Not found");
 
-          const oldStock  = material.stock;
-          const newStock  = Math.max(0, oldStock + item.adjustment);
+            const oldStock = material.stock;
+            const newStock = Math.max(0, oldStock + item.adjustment);
+            material.stock = newStock;
 
-          material.stock = newStock;
+            // Running balance log
+            material.stockMovements.push({
+              date:     new Date(),
+              type:     "STOCK_ADJUST",
+              quantity: item.adjustment,
+              balance:  newStock,
+            });
+            await material.save({ session });
 
-          // Running balance log
-          material.stockMovements.push({
-            date:     new Date(),
-            type:     "STOCK_ADJUST",
-            quantity: item.adjustment,
-            balance:  newStock,
-          });
-          await material.save();
+            const reason = item.reason?.trim() || globalReason;
 
-          const reason = item.reason?.trim() || globalReason;
-
-          // Create proper ledger record
-          if (item.adjustment > 0) {
-            // Positive adjustment → inward. Audit row creation is
-            // non-fatal (schema may require purchaseOrder), but we
-            // log so silent drops don't go unnoticed.
-            try {
-              await MaterialInward.create({
+            // Ledger record — atomic with the stock write. (Previously
+            // a failed inward row was tolerated, leaving stock credited
+            // with no audit trail; now the item rolls back instead.)
+            if (item.adjustment > 0) {
+              await MaterialInward.create([{
                 rawMaterial:   material._id,
                 purchaseOrder: item.purchaseOrderId || undefined,
                 quantity:      item.adjustment,
                 inwardDate:    new Date(),
                 remarks:       `Stock adjustment: ${reason}`,
-              });
-            } catch (inwardErr) {
-              console.warn(
-                `[bulk-adjust] MaterialInward audit row failed for ${material._id}: ${inwardErr.message}`
-              );
+              }], { session });
+            } else {
+              await MaterialOutward.create([{
+                rawMaterial: material._id,
+                quantity:    Math.abs(item.adjustment),
+                type:        "STOCK_ADJUST",
+                outwardDate: new Date(),
+                unitPrice:   material.price || 0,
+                remarks:     `Stock adjustment: ${reason}`,
+              }], { session });
             }
-          } else {
-            // Negative adjustment → outward
-            await MaterialOutward.create({
-              rawMaterial: material._id,
-              quantity:    Math.abs(item.adjustment),
-              type:        "STOCK_ADJUST",
-              outwardDate: new Date(),
-              unitPrice:   material.price || 0,
-              remarks:     `Stock adjustment: ${reason}`,
-            });
-          }
 
-          updated.push({
-            id:         material._id,
-            name:       material.name,
-            category:   material.category,
-            oldStock,
-            newStock,
-            adjustment: item.adjustment,
-          });
-
-          if (item.adjustment < 0) {
-            // Fire-and-forget; never blocks the bulk response.
-            maybeFireCriticalStockout({
-              material,
+            row = {
+              id:         material._id,
+              name:       material.name,
+              category:   material.category,
               oldStock,
               newStock,
+              adjustment: item.adjustment,
+            };
+            fired = item.adjustment < 0 ? { material, oldStock, newStock } : null;
+          });
+          if (row) updated.push(row);
+
+          // Alert only after the transaction committed — never inside
+          // it (external work in a txn is the anti-pattern).
+          if (fired) {
+            maybeFireCriticalStockout({
+              ...fired,
               reason: `Stock adjustment: ${item.reason?.trim() || globalReason}`,
             });
           }
         } catch (err) {
           errors.push({ id: item._id, error: err.message });
         }
-      })
-    );
+      }
+    } finally {
+      await session.endSession();
+    }
 
     res.status(200).json({
       success: true,

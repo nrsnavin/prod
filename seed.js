@@ -19,7 +19,13 @@ const DEMO_USER = {
 
 (async () => {
   try {
-    await mongoose.connect("mongodb+srv://navin:navin@cluster0.ftoq7bw.mongodb.net/?appName=Cluster0");
+    // Credentials come from config/.env — never hardcode a connection
+    // string (it ends up in git history and hands out the database).
+    if (!process.env.MONGO_URL) {
+      console.error('MONGO_URL is not set — configure config/.env first.');
+      process.exit(1);
+    }
+    await mongoose.connect(process.env.MONGO_URL);
     console.log('Connected to MongoDB');
 
     const existing = await User.findOne({ email: DEMO_USER.email });
