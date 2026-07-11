@@ -26,6 +26,16 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { isAuthenticated } = require("../middleware/auth");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
+const { nextNumber } = require("../utils/sequence");
+
+// Race-free PO number: atomic counter, seeded once from the current max.
+// (The old read-max-then-+1 could give two concurrent creates the same poNo.)
+async function nextPoNumber() {
+  return nextNumber("poNo", async () => {
+    const last = await PurchaseOrder.findOne({}, { poNo: 1 }).sort({ poNo: -1 });
+    return last?.poNo || 1000;
+  });
+}
 const { requireReason } = require("../utils/auditReason");
 
 // Every supplier / PO / material-inward route requires a logged-in
@@ -108,8 +118,7 @@ router.post(
         }
       }
 
-      const last     = await PurchaseOrder.findOne({}, { poNo: 1 }).sort({ poNo: -1 });
-      const nextPoNo = last ? (last.poNo || 1000) + 1 : 1001;
+      const nextPoNo = await nextPoNumber();
 
       const parsedDate = expectedDate ? new Date(expectedDate) : undefined;
       const po = await PurchaseOrder.create({
@@ -355,8 +364,7 @@ router.post(
       const source = await PurchaseOrder.findById(req.body.id);
       if (!source) return next(new ErrorHandler("Source PO not found", 404));
 
-      const last     = await PurchaseOrder.findOne({}, { poNo: 1 }).sort({ poNo: -1 });
-      const nextPoNo = last ? (last.poNo || 1000) + 1 : 1001;
+      const nextPoNo = await nextPoNumber();
 
       const cloned = await PurchaseOrder.create({
         supplier: source.supplier,

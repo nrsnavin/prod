@@ -40,6 +40,11 @@ const PurchaseOrderSchema = new mongoose.Schema(
     poNo: {
       type: Number,
       immutable: true,
+      // Last line of defense against duplicate PO numbers. Allocation is
+      // race-free via utils/sequence.js, but the DB enforces it too.
+      // sparse: legacy docs created before poNo existed may lack it.
+      unique: true,
+      sparse: true,
     },
     // Tamper-evident audit trail (edit/delete with reason). Same shape as
     // Order/JobOrder fingerprints so the UI can render them uniformly.

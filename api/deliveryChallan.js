@@ -15,6 +15,7 @@ const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/f
 const { applyMovement } = require("../utils/elasticStock");
 const Customer          = require("../models/Customer");
 const { notify }        = require("../utils/notify");
+const { nextNumber }    = require("../utils/sequence");
 
 // Every DC route requires a logged-in user. isAdmin gating is left
 // per-route at the admin app's call sites' discretion — accounts /
@@ -29,13 +30,19 @@ function currentFinancialYear() {
   return `${String(fyStart).slice(-2)}/${String(fyStart + 1).slice(-2)}`;
 }
 
+// Race-free per-(type, financial-year) sequence via an atomic counter,
+// seeded once from the max already in the collection. The old
+// read-max-then-+1 pattern let two concurrent creates draw the same
+// sequence — the unique dcNumber index then failed one of them.
 async function nextSeq(type, financialYear) {
-  const last = await DeliveryChallan
-    .findOne({ type, financialYear })
-    .sort({ sequence: -1 })
-    .select("sequence")
-    .lean();
-  return (last?.sequence ?? 0) + 1;
+  return nextNumber(`dc:${type}:${financialYear}`, async () => {
+    const last = await DeliveryChallan
+      .findOne({ type, financialYear })
+      .sort({ sequence: -1 })
+      .select("sequence")
+      .lean();
+    return last?.sequence ?? 0;
+  });
 }
 
 function buildDcNumber(type, financialYear, sequence) {

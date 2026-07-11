@@ -6,7 +6,11 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "test": "jest --runInBand",
-    "seed:demo": "node scripts/seedDemoCustomer.js"
+    "seed:demo": "node scripts/seedDemoCustomer.js",
+    "migrate": "migrate-mongo up",
+    "migrate:down": "migrate-mongo down",
+    "migrate:status": "migrate-mongo status",
+    "migrate:create": "migrate-mongo create"
   },
   "jest": {
     "testEnvironment": "node",
@@ -32,6 +36,7 @@
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.2",
     "lodash": "^4.17.21",
+    "migrate-mongo": "^14.0.7",
     "moment": "^2.30.1",
     "mongodb": "^6.8.0",
     "mongoose": "^8.5.1",
