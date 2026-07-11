@@ -127,17 +127,26 @@ async function applyProductionCascade(
 
   const order = await Order.findById(job.order).session(session);
   if (order) {
-    for (const p of job.producedElastic) {
-      const orderItem = order.producedElastic.find((o) => o.elastic.toString() === p.elastic.toString());
-      if (orderItem) orderItem.quantity += p.quantity;
-    }
-
-    for (const p of order.pendingElastic) {
-      const produced = order.producedElastic.find((o) => o.elastic.toString() === p.elastic.toString());
-      const ordered  = order.elasticOrdered.find((e) => e.elastic.toString() === p.elastic.toString());
-      if (produced && ordered) {
-        p.quantity = Math.max(0, ordered.quantity - produced.quantity);
+    // Recompute the order's produced rollup from the SUM of all its jobs.
+    // (Previously this did `orderItem.quantity += p.quantity` with p iterating
+    // the *cumulative* job total on every shift verify, which over-counted the
+    // order's produced meters as more shifts landed.) Summing the jobs is
+    // idempotent and correct regardless of how many shifts/jobs contribute.
+    const jobs = await JobOrder.find({ order: order._id }).session(session);
+    const producedSum = {};
+    for (const j of jobs) {
+      for (const p of j.producedElastic || []) {
+        const eid = p.elastic.toString();
+        producedSum[eid] = (producedSum[eid] || 0) + (p.quantity || 0);
       }
+    }
+    for (const row of order.producedElastic) {
+      row.quantity = producedSum[row.elastic.toString()] || 0;
+    }
+    for (const p of order.pendingElastic) {
+      const ordered = order.elasticOrdered.find((e) => e.elastic.toString() === p.elastic.toString());
+      const produced = producedSum[p.elastic.toString()] || 0;
+      if (ordered) p.quantity = Math.max(0, ordered.quantity - produced);
     }
 
     await order.save({ session });
@@ -1454,8 +1463,13 @@ async function _rederiveShiftProduction(session, { shift, newTotalMeters, req, a
   const newPerHead = Number(newTotalMeters) / heads;
   const deltaPerHead = newPerHead - oldPerHead;
 
+  // shift.job is captured at row creation from the machine's running job.
+  // In rare cases (a shift row created for a machine with no running job) it
+  // may not resolve to a JobOrder — fail cleanly rather than corrupt state.
   const job = shift.job ? await JobOrder.findById(shift.job).session(session) : null;
-  if (!job) throw new ErrorHandler("Shift has no linked job to re-derive", 400);
+  if (!job) throw new ErrorHandler(
+    "This shift isn't linked to a job order, so its production can't be re-derived. " +
+    "Correct it via the shift verification flow instead.", 400);
 
   // Fan the per-head delta across the shift's elastic snapshot.
   const deltaByElastic = {};

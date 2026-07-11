@@ -903,7 +903,8 @@ router.post(
         if (po !== undefined && po !== order.po) {
           previousValues.po = order.po;          order.po          = po;          changed.po          = po;
         }
-        if (supplyDate !== undefined && new Date(supplyDate).getTime() !== new Date(order.supplyDate).getTime()) {
+        if (supplyDate !== undefined && supplyDate !== "" && !isNaN(new Date(supplyDate).getTime())
+            && new Date(supplyDate).getTime() !== new Date(order.supplyDate).getTime()) {
           previousValues.supplyDate = order.supplyDate; order.supplyDate = new Date(supplyDate); changed.supplyDate = supplyDate;
         }
         if (description !== undefined && description !== order.description) {

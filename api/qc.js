@@ -22,10 +22,16 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
 const { classifyDefect } = require("../utils/qcVision");
 
+// Cap uploads so the base64 photo stored on the QcRecord stays well under
+// MongoDB's 16 MB per-document limit (base64 inflates the file ~1.33×).
+const QC_IMAGE_MAX_BYTES = 4 * 1024 * 1024;
 const imageUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 12 * 1024 * 1024 },
+  limits: { fileSize: QC_IMAGE_MAX_BYTES },
 });
+// data:<mime>;base64,<data> — a 4 MB file is ~5.6 MB of base64; reject
+// anything that would risk the BSON cap as defence-in-depth on /create.
+const QC_IMAGE_MAX_CHARS = 8 * 1024 * 1024;
 
 // ── Jobs eligible for a QC check (weaving → checking) ──────────────
 router.get(
@@ -212,6 +218,11 @@ router.post(
 
     const overallResult = cleanResults.every((r) => r.pass) ? "pass" : "fail";
 
+    // Guard the BSON 16 MB cap — drop an oversized photo rather than fail
+    // the whole QC save. The check is still recorded; just without the image.
+    let safeImage = typeof image === "string" ? image : "";
+    if (safeImage.length > QC_IMAGE_MAX_CHARS) safeImage = "";
+
     const record = await QcRecord.create({
       job: jobId,
       elastic: elasticId,
@@ -221,7 +232,7 @@ router.post(
       defectCode: overallResult === "fail" ? String(defectCode).trim() : "",
       rejectedMeters: Number(rejectedMeters) || 0,
       notes: String(notes).trim(),
-      image: typeof image === "string" ? image : "",
+      image: safeImage,
       aiAssisted: Boolean(aiAssisted),
     });
 
