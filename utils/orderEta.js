@@ -114,7 +114,9 @@ function band({ workingDays, today, consistencyScore, weeklyOff, holidays }) {
 //
 //   lines    — [{ elastic, quantity }]   meters per elastic
 //   machines — number of machines admin will dedicate (default:
-//              min(freeMachines, lines.length, WHATIF_MAX_MACHINES))
+//              spread across the currently-free machines, capped by
+//              WHATIF_MAX_MACHINES and by how many machines the job can
+//              actually keep busy — see the machine-count block below)
 //   supplyDate — admin-entered promised date (optional, for risk chip)
 //   today    — Date, defaults to now (injectable for tests)
 function estimateOrderEta({ lines, machines, supplyDate, today, aggregates, weeklyOff, holidays }) {
@@ -129,18 +131,6 @@ function estimateOrderEta({ lines, machines, supplyDate, today, aggregates, week
       quantity: Number(l.quantity),
     }));
   const totalMeters = cleanLines.reduce((s, l) => s + l.quantity, 0);
-
-  // Default machine count: prefer free machines, capped by line count
-  // (no point dedicating more machines than there are independent
-  // elastic lines, because one machine per job).
-  const defaultMachines = Math.min(
-    Math.max(1, Number(aggregates?.freeMachines) || 1),
-    Math.max(1, cleanLines.length),
-    C.WHATIF_MAX_MACHINES,
-  );
-  const M = Number.isFinite(machines) && machines > 0
-    ? Math.min(Math.floor(machines), C.WHATIF_MAX_MACHINES)
-    : defaultMachines;
 
   // Blended rate: weight per line by meters share so a 90/10 split
   // doesn't get dragged by a tiny line on a slow elastic.
@@ -174,6 +164,23 @@ function estimateOrderEta({ lines, machines, supplyDate, today, aggregates, week
     };
   }
 
+  // ── Machine count ────────────────────────────────────────────────
+  // Real-world: an order is spread across the machines that are free,
+  // running many looms in parallel — NOT one machine per elastic line.
+  // A single big single-elastic order still splits across free looms.
+  //
+  // Default = the currently-free machines, but never more than the job
+  // can actually keep busy: with `machineDays` machine-days of weaving,
+  // more than ceil(machineDays) machines would just sit idle (and can't
+  // make it finish in under a day anyway). Capped by WHATIF_MAX_MACHINES.
+  const machineDaysTotal = totalMeters / effRate;
+  const usefulMachines   = Math.max(1, Math.ceil(machineDaysTotal));
+  const freeMachines     = Math.max(1, Math.floor(Number(aggregates?.freeMachines) || 1));
+  const defaultMachines  = Math.min(freeMachines, usefulMachines, C.WHATIF_MAX_MACHINES);
+  const M = Number.isFinite(machines) && machines > 0
+    ? Math.min(Math.floor(machines), C.WHATIF_MAX_MACHINES)
+    : defaultMachines;
+
   const core = estimateForMachines({
     totalMeters, machines: M, effRate, today: t, weeklyOff: wOff, holidays: hol,
   });
@@ -205,6 +212,13 @@ function estimateOrderEta({ lines, machines, supplyDate, today, aggregates, week
   }
 
   const assumptions = [];
+  assumptions.push(
+    Number.isFinite(machines) && machines > 0
+      ? `Assumes ${M} machine${M === 1 ? '' : 's'} dedicated (as specified).`
+      : `Assumes the order runs across ${M} machine${M === 1 ? '' : 's'} in parallel ` +
+        `(${Math.max(1, Math.floor(Number(aggregates?.freeMachines) || 1))} currently free). ` +
+        `Fewer free machines → later; use the what-if curve to compare.`
+  );
   if (usedColdStart) {
     assumptions.push('Some elastic(s) had no recent production history — cold-start fallback rate applied.');
   }

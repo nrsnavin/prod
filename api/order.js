@@ -1304,7 +1304,7 @@ router.post(
 //  request can amortise the one expensive plant aggregation across
 //  many orders.
 // ═════════════════════════════════════════════════════════════════
-async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now) {
+async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now, freeMachines = 1) {
   const activeJobs = await Job.find({
     order: order._id,
     status: { $nin: ["completed", "cancelled"] },
@@ -1315,9 +1315,10 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now) 
   // No JobOrder yet — common for orders that were just approved but
   // haven't been planned, and for legacy orders that pre-date the ML
   // ETA layer. Fall back to an entry-time-style estimate so the UI
-  // can still show a forward date instead of an empty card.
+  // can still show a forward date instead of an empty card. The order
+  // will run across the free machines, so pass that count through.
   if (activeJobs.length === 0) {
-    return _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now);
+    return _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now, freeMachines);
   }
 
   const jobs = [];
@@ -1417,7 +1418,7 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now) 
 // (utils/orderEta.js) on the order's *remaining* quantities so the
 // shape matches the running-ETA contract the UI already renders.
 // ─────────────────────────────────────────────────────────────────
-function _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now) {
+function _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now, freeMachines = 1) {
   const producedMap = {};
   for (const p of order.producedElastic || []) {
     if (!p?.elastic) continue;
@@ -1443,7 +1444,10 @@ function _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now) {
     consistencyScore:   70,
     attendanceMomentum: 1,
     machineHealth:      1,
-    freeMachines:       1,
+    // Real-world: an approved order will be run across the machines that
+    // are free, not a single loom. estimateOrderEta caps this by how many
+    // machines the job can actually keep busy, so an over-count is safe.
+    freeMachines:       Math.max(1, Number(freeMachines) || 1),
     machineNoOfHeadAvg: 4,
   };
 
@@ -1509,6 +1513,15 @@ async function _loadPlantMetersPerMachineDay(now) {
     : null;
 }
 
+// Count the machines currently free to take on an order. Used to size
+// the parallelism for approved-but-unplanned orders so their ETA
+// reflects running across several looms, not a single machine. Loaded
+// once per request and threaded into the per-order estimator.
+async function _loadFreeMachineCount() {
+  const n = await Machine.countDocuments({ status: "free" });
+  return Math.max(1, n);
+}
+
 // ═════════════════════════════════════════════════════════════════
 //  GET /api/v2/order/:id/running-eta
 //
@@ -1535,8 +1548,11 @@ router.get(
     if (!order) return res.status(404).json({ success: false, message: "Order not found" });
 
     const now = new Date();
-    const plantMetersPerMachineDay = await _loadPlantMetersPerMachineDay(now);
-    const result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now);
+    const [plantMetersPerMachineDay, freeMachines] = await Promise.all([
+      _loadPlantMetersPerMachineDay(now),
+      _loadFreeMachineCount(),
+    ]);
+    const result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now, freeMachines);
 
     return res.json({
       success: true,
@@ -1592,9 +1608,9 @@ router.post(
     const inFlight = orders.filter(
       (o) => o.status === "Approved" || o.status === "InProgress"
     );
-    const plantMetersPerMachineDay = inFlight.length > 0
-      ? await _loadPlantMetersPerMachineDay(now)
-      : null;
+    const [plantMetersPerMachineDay, freeMachines] = inFlight.length > 0
+      ? await Promise.all([_loadPlantMetersPerMachineDay(now), _loadFreeMachineCount()])
+      : [null, 1];
 
     const etas = {};
     for (const id of orderIds) {
@@ -1612,7 +1628,7 @@ router.post(
       // row instead of every row failing.
       let result;
       try {
-        result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now);
+        result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now, freeMachines);
       } catch (err) {
         console.warn(
           "[running-eta-bulk] order", String(id), "failed:", err?.message
@@ -1678,12 +1694,15 @@ router.get(
       return res.json({ success: true, count: 0, generatedAt: now, risks: [] });
     }
 
-    const plantMetersPerMachineDay = await _loadPlantMetersPerMachineDay(now);
+    const [plantMetersPerMachineDay, freeMachines] = await Promise.all([
+      _loadPlantMetersPerMachineDay(now),
+      _loadFreeMachineCount(),
+    ]);
     const risks = [];
     for (const order of orders) {
       let result;
       try {
-        result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now);
+        result = await _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now, freeMachines);
       } catch (err) {
         console.warn('[eta-risks] order', String(order._id), 'failed:', err?.message);
         continue;
