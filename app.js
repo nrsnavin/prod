@@ -57,6 +57,7 @@ const webhookLimiter = rateLimit({
 const user     = require("./api/user.js");
 const advisor  = require("./api/advisor.js");
 const io       = require("./api/io.js");
+const audit    = require("./api/audit.js");
 const machine  = require("./api/machine.js");
 const shift    = require("./api/shift.js");
 const employee = require("./api/employee.js");
@@ -264,6 +265,7 @@ app.use("/api/v2/feedback",    feedback);
 app.use("/api/v2/dashboard",   dashboard);
 app.use("/api/v2/advisor",     advisor);
 app.use("/api/v2/io",          io);
+app.use("/api/v2/audit",       ADMIN_GATE, audit);
 
 // Cron-triggerable morning digest — authenticated by a shared secret
 // header instead of an admin session, so an external scheduler (system
