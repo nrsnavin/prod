@@ -20,6 +20,10 @@ if (process.env.NODE_ENV !== "PRODUCTION") {
 // connect db
 connectDatabase.connectDatabase();
 
+// Transactional-outbox dispatcher — delivers alerts enqueued inside
+// business transactions (utils/outbox.js), with retry + backoff.
+require("./utils/outbox").startOutboxDispatcher();
+
 // create server
 const server = app.listen(process.env.PORT, () => {
   console.log(

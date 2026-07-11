@@ -12,6 +12,7 @@ const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
 const { requireReason } = require("../utils/auditReason.js");
 const { assertVersion } = require("../utils/versioning.js");
+const { memoizeAsync } = require("../utils/memo.js");
 const { applyMovement } = require("../utils/elasticStock.js");
 const ShiftDetail        = require("../models/ShiftDetail.js");
 const Attendance         = require("../models/Attendence.js");
@@ -1495,9 +1496,12 @@ function _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now, freeMachine
 
 // ═════════════════════════════════════════════════════════════════
 // Shared helper — plant rate aggregation. One round-trip, used by
-// every running-ETA caller.
+// every running-ETA caller. Memoized (60s): this 30-day scan runs on
+// every ETA-bearing request and only moves when a shift is verified —
+// caching keeps the read side off the transactional path. TTL 0 under
+// jest so tests stay isolated.
 // ═════════════════════════════════════════════════════════════════
-async function _loadPlantMetersPerMachineDay(now) {
+const _loadPlantMetersPerMachineDay = memoizeAsync(async function (now) {
   const since = new Date(now.getTime() - C.RATE_LOOKBACK_DAYS * 86_400_000);
   const plantShiftAgg = await ShiftDetail.aggregate([
     { $match: { status: "closed", date: { $gte: since } } },
@@ -1516,7 +1520,7 @@ async function _loadPlantMetersPerMachineDay(now) {
   return (plantRow.machineDays || 0) > 0
     ? plantRow.totalMeters / plantRow.machineDays
     : null;
-}
+}, process.env.NODE_ENV === "test" ? 0 : 60_000);
 
 // Count the machines currently free to take on an order. Used to size
 // the parallelism for approved-but-unplanned orders so their ETA

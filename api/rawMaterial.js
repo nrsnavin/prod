@@ -18,6 +18,7 @@ const {
   maybeFirePriceChangeAlert,
   maybeFirePoReceivedForCritical,
 } = require("../utils/inventoryAlerts");
+const { enqueue } = require("../utils/outbox");
 
 // ══════════════════════════════════════════════════════════════
 //  1.  CREATE RAW MATERIAL
@@ -199,11 +200,14 @@ router.put(
         });
       }
       if (newStock !== _alertSnap.oldStock) {
-        await maybeFireCriticalStockout({
-          material,
-          oldStock: _alertSnap.oldStock,
+        // Durable path: the dispatcher re-checks the skip rules and
+        // retries on WhatsApp hiccups (fire-and-forget lost the alert
+        // on any crash). No session — the update above was atomic.
+        await enqueue(null, "inventory.stockoutCheck", {
+          materialId: material._id.toString(),
+          oldStock:   _alertSnap.oldStock,
           newStock,
-          reason:   `Manual edit: ${_alertSnap.reason}`,
+          reason:     `Manual edit: ${_alertSnap.reason}`,
         });
       }
     })();
@@ -404,10 +408,9 @@ router.post(
           continue;
         }
         try {
-          let fired = null;
-          let row   = null; // collected inside, pushed after commit —
-                            // withTransaction may retry the callback on
-                            // write conflict, so no side-effects inside.
+          let row = null; // collected inside, pushed after commit —
+                          // withTransaction may retry the callback on
+                          // write conflict, so no side-effects inside.
           await session.withTransaction(async () => {
             // Read INSIDE the transaction so the delta applies to the
             // current stock, not a snapshot from before the batch.
@@ -451,6 +454,17 @@ router.post(
               }], { session });
             }
 
+            // Outbox: the stockout alert commits WITH the adjustment —
+            // no fire-and-forget; the dispatcher re-checks the skip
+            // rules (min-stock floor, open PO) and delivers with retry.
+            if (item.adjustment < 0) {
+              await enqueue(session, "inventory.stockoutCheck", {
+                materialId: material._id.toString(),
+                oldStock, newStock,
+                reason: `Stock adjustment: ${item.reason?.trim() || globalReason}`,
+              });
+            }
+
             row = {
               id:         material._id,
               name:       material.name,
@@ -459,18 +473,8 @@ router.post(
               newStock,
               adjustment: item.adjustment,
             };
-            fired = item.adjustment < 0 ? { material, oldStock, newStock } : null;
           });
           if (row) updated.push(row);
-
-          // Alert only after the transaction committed — never inside
-          // it (external work in a txn is the anti-pattern).
-          if (fired) {
-            maybeFireCriticalStockout({
-              ...fired,
-              reason: `Stock adjustment: ${item.reason?.trim() || globalReason}`,
-            });
-          }
         } catch (err) {
           errors.push({ id: item._id, error: err.message });
         }

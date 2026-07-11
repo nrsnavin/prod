@@ -16,7 +16,7 @@ const StockMovement = require("../models/StockMovement");
 const Elastic       = require("../models/Elastic");
 const Machine       = require("../models/Machine");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
-const { notify }    = require("../utils/notify");
+const { enqueue }   = require("../utils/outbox");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { resolveEmployeeId } = require("../utils/resolveEmployee");
 const { applyMovement } = require("../utils/elasticStock");
@@ -108,6 +108,18 @@ router.post(
         job.wastages.push(wastage._id);
         await job.save({ session });
 
+        // Outbox: the high-wastage alert commits WITH the wastage —
+        // a crash/restart can no longer lose it, and a rollback can no
+        // longer fire it. The dispatcher runs the 10%-of-production
+        // threshold check and delivers (utils/outboxHandlers.js).
+        await enqueue(session, "wastage.highEventCheck", {
+          wastageId: wastage._id.toString(),
+          jobId:     String(jobId),
+          elasticId: String(elasticId),
+          quantity,
+          actor: { id: req.user?._id?.toString(), name: req.user?.name || "Admin" },
+        });
+
         wastageId = wastage._id;
       });
 
@@ -130,49 +142,8 @@ router.post(
         .populate("employee", "name department");
 
       res.status(201).json({ success: true, wastage: populated });
-
-      // High-wastage-event alert. Compares this wastage entry to
-      // today's production of the same elastic on the same job's
-      // machine. If the wastage is > 10% of today's production,
-      // fires a real-time owner ping — that's the "real loss, not
-      // normal variance" signal.
-      (async () => {
-        try {
-          const startToday = new Date(); startToday.setHours(0, 0, 0, 0);
-          const job = await JobOrder.findById(jobId).select("machine jobOrderNo").lean();
-          if (!job?.machine) return;
-
-          const rows = await ShiftDetail.aggregate([
-            { $match: {
-                status:  "closed",
-                machine: job.machine,
-                date:    { $gte: startToday },
-                "elastics.elastic": new mongoose.Types.ObjectId(elasticId),
-              } },
-            { $group: { _id: null, total: { $sum: "$productionMeters" } } },
-          ]);
-          const dailyProduction = rows[0]?.total || 0;
-          // Require some production today; otherwise % is meaningless.
-          if (dailyProduction < quantity * 2) return;
-          const pct = (quantity / dailyProduction) * 100;
-          if (pct < 10) return;
-
-          const result = await notify("wastageHighEvent", {
-            jobNo:           job.jobOrderNo,
-            elasticName:     populated.elastic?.name,
-            quantity,
-            dailyProduction,
-            percent:         pct,
-            reason:          populated.reason,
-            employee:        populated.employee?.name,
-            _entity: { type: "JobOrder", id: jobId },
-            _actor:  { id: req.user?._id, name: req.user?.name || "Admin" },
-          });
-          console.log(`[notify:wastageHighEvent] job=${job.jobOrderNo} →`, JSON.stringify(result));
-        } catch (err) {
-          console.warn(`[notify:wastageHighEvent] hook crashed: ${err?.message}`);
-        }
-      })();
+      // (High-wastage alert now travels through the transactional
+      // outbox — enqueued above, delivered by the dispatcher.)
     } catch (err) {
       // Race with a concurrent duplicate submit: the unique requestId
       // index aborted this transaction (nothing applied) — the winner

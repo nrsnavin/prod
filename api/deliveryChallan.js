@@ -14,7 +14,7 @@ const StockMovement   = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { applyMovement } = require("../utils/elasticStock");
 const Customer          = require("../models/Customer");
-const { notify }        = require("../utils/notify");
+const { enqueue }       = require("../utils/outbox");
 const { nextNumber }    = require("../utils/sequence");
 
 // Every DC route requires a logged-in user. isAdmin gating is left
@@ -372,47 +372,20 @@ router.post(
           }
         }
 
+        // Outbox: the late-dispatch alert commits WITH the challan —
+        // delivered (with retry) by the dispatcher, which re-checks
+        // the promised-vs-dispatch dates (utils/outboxHandlers.js).
+        if (orderId) {
+          await enqueue(session, "dc.delayedDeliveryCheck", {
+            dcId:    dc._id.toString(),
+            orderId: String(orderId),
+          });
+        }
+
         await dc.save({ session });
         resp = { dc, fingerprint: fp };
       });
       res.status(201).json({ success: true, ...resp });
-
-      // Late-DC owner ping: fire if the linked order was promised
-      // for an earlier date than the dispatch. Skipped silently for
-      // standalone DCs (no orderId) and on-time deliveries.
-      (async () => {
-        try {
-          if (!orderId) return;
-          const orderDoc = await Order.findById(orderId)
-            .select("orderNo supplyDate customer").lean();
-          if (!orderDoc?.supplyDate) return;
-
-          const dispatched = resp?.dc?.dispatchDate
-            ? new Date(resp.dc.dispatchDate)
-            : new Date();
-          const promised   = new Date(orderDoc.supplyDate);
-          const lateMs     = dispatched.getTime() - promised.setHours(23,59,59,999);
-          if (lateMs <= 0) return;
-
-          const lateDays = Math.ceil(lateMs / 86_400_000);
-          let custName = customerName;
-          if (orderDoc.customer) {
-            const c = await Customer.findById(orderDoc.customer).select("name").lean();
-            custName = c?.name || custName;
-          }
-          await notify("dcDelayedDelivery", {
-            dcNumber:     resp?.dc?.dcNumber,
-            orderNo:      orderDoc.orderNo,
-            customerName: custName,
-            supplyDate:   orderDoc.supplyDate,
-            dispatchDate: dispatched,
-            lateDays,
-            _entity: { type: "DeliveryChallan", id: String(resp?.dc?._id) },
-          });
-        } catch (err) {
-          console.warn(`[notify:dcDelayedDelivery] crashed: ${err?.message}`);
-        }
-      })();
     } catch (err) {
       // Race with a concurrent duplicate submit: the unique requestId
       // index aborted this transaction (nothing applied) — return the

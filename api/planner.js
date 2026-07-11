@@ -116,7 +116,11 @@ async function _rateForPair(elasticId, machine, plantRate) {
   };
 }
 
-async function _loadPlantRate(now) {
+// Memoized (60s): same 30-day scan as the ETA engine's plant rate —
+// read-side caching keeps regenerate-happy planner usage off the
+// transactional path. TTL 0 under jest so tests stay isolated.
+const { memoizeAsync } = require("../utils/memo.js");
+const _loadPlantRate = memoizeAsync(async function (now) {
   // Plant-wide meters per machine-day over the lookback window.
   const ShiftDetail = require("../models/ShiftDetail");
   const since = new Date(now.getTime() - C.RATE_LOOKBACK_DAYS * 86_400_000);
@@ -129,7 +133,7 @@ async function _loadPlantRate(now) {
   ]);
   const row = agg[0] || {};
   return (row.machineDays || 0) > 0 ? row.totalMeters / row.machineDays : null;
-}
+}, process.env.NODE_ENV === "test" ? 0 : 60_000);
 
 // ── Pure: evaluate a full assignment (lineId → machineId) ──────────
 // Returns per-assignment detail plus the scalar objective. Each machine
