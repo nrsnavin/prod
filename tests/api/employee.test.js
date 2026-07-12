@@ -1,5 +1,21 @@
 "use strict";
 
+// These suites predate the department auth gate — every route now sits
+// behind isAuthenticated/isAdmin, so stub auth exactly like the other
+// integration harnesses do (must be registered before app is required).
+jest.mock("../../middleware/auth.js", () => {
+  const stubAdmin = {
+    _id:  "000000000000000000000001",
+    name: "Test Admin",
+    role: "admin",
+  };
+  return {
+    isAuthenticated: (req, _res, next) => { req.user = stubAdmin; next(); },
+    isAdmin:         () => (_req, _res, next) => next(),
+    selfOrAdmin:     (_req, _res, next) => next(),
+  };
+});
+
 jest.mock("../../models/Employee");
 jest.mock("../../models/ShiftDetail");
 
@@ -8,6 +24,10 @@ const app = require("../../app");
 const Employee = require("../../models/Employee");
 
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+// Routes now reject non-hex ids with 400 before the 404 lookup, and the
+// update route bumps __v via doc.increment() (optimistic locking).
+const VALID_ID = "aaaaaaaaaaaaaaaaaaaaaaaa";
 
 const fakeEmployee = (overrides = {}) => ({
   _id: "emp1",
@@ -20,6 +40,7 @@ const fakeEmployee = (overrides = {}) => ({
   skill: 5,
   shifts: [],
   save: jest.fn().mockResolvedValue(true),
+  increment: jest.fn(),
   ...overrides,
 });
 
@@ -130,7 +151,7 @@ describe("GET /api/v2/employee/get-employee-detail", () => {
     const chain = { populate: jest.fn().mockReturnThis(), exec: jest.fn().mockResolvedValue(null) };
     Employee.findById = jest.fn().mockReturnValue(chain);
 
-    const res = await request(app).get("/api/v2/employee/get-employee-detail?id=nonexistent");
+    const res = await request(app).get("/api/v2/employee/get-employee-detail?id=" + VALID_ID + "");
     expect(res.status).toBe(404);
     expect(res.body.message).toMatch(/not found/i);
   });
@@ -144,7 +165,7 @@ describe("GET /api/v2/employee/get-employee-detail", () => {
     const chain = { populate: jest.fn().mockReturnThis(), exec: jest.fn().mockResolvedValue(emp) };
     Employee.findById = jest.fn().mockReturnValue(chain);
 
-    const res = await request(app).get("/api/v2/employee/get-employee-detail?id=emp1");
+    const res = await request(app).get("/api/v2/employee/get-employee-detail?id=" + VALID_ID + "");
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -165,7 +186,7 @@ describe("PUT /api/v2/employee/update", () => {
   it("returns 404 when employee not found", async () => {
     Employee.findById = jest.fn().mockResolvedValue(null);
 
-    const res = await request(app).put("/api/v2/employee/update?id=bad").send({ name: "X" });
+    const res = await request(app).put("/api/v2/employee/update?id=" + VALID_ID).send({ name: "X" });
     expect(res.status).toBe(404);
   });
 
@@ -174,7 +195,7 @@ describe("PUT /api/v2/employee/update", () => {
     Employee.findById = jest.fn().mockResolvedValue(emp);
 
     const res = await request(app)
-      .put("/api/v2/employee/update?id=emp1")
+      .put("/api/v2/employee/update?id=" + VALID_ID)
       .send({ name: "Jane Doe", role: "supervisor" });
 
     expect(res.status).toBe(200);
@@ -200,7 +221,7 @@ describe("PATCH /api/v2/employee/performance", () => {
   });
 
   it("returns 400 when performance is out of range", async () => {
-    const res = await request(app).patch("/api/v2/employee/performance").send({ id: "emp1", performance: 150 });
+    const res = await request(app).patch("/api/v2/employee/performance").send({ id: VALID_ID, performance: 150 });
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/0 and 100/i);
   });
@@ -208,7 +229,7 @@ describe("PATCH /api/v2/employee/performance", () => {
   it("returns 404 when employee not found", async () => {
     Employee.findByIdAndUpdate = jest.fn().mockResolvedValue(null);
 
-    const res = await request(app).patch("/api/v2/employee/performance").send({ id: "emp1", performance: 75 });
+    const res = await request(app).patch("/api/v2/employee/performance").send({ id: VALID_ID, performance: 75 });
     expect(res.status).toBe(404);
   });
 
@@ -216,7 +237,7 @@ describe("PATCH /api/v2/employee/performance", () => {
     const emp = { _id: "emp1", name: "John", performance: 75 };
     Employee.findByIdAndUpdate = jest.fn().mockResolvedValue(emp);
 
-    const res = await request(app).patch("/api/v2/employee/performance").send({ id: "emp1", performance: 75 });
+    const res = await request(app).patch("/api/v2/employee/performance").send({ id: VALID_ID, performance: 75 });
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);

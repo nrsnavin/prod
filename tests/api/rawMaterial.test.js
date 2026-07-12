@@ -1,10 +1,29 @@
 "use strict";
 
+// These suites predate the department auth gate — every route now sits
+// behind isAuthenticated/isAdmin, so stub auth exactly like the other
+// integration harnesses do (must be registered before app is required).
+jest.mock("../../middleware/auth.js", () => {
+  const stubAdmin = {
+    _id:  "000000000000000000000001",
+    name: "Test Admin",
+    role: "admin",
+  };
+  return {
+    isAuthenticated: (req, _res, next) => { req.user = stubAdmin; next(); },
+    isAdmin:         () => (_req, _res, next) => next(),
+    selfOrAdmin:     (_req, _res, next) => next(),
+  };
+});
+
 jest.mock("../../models/RawMaterial");
 jest.mock("../../models/PurchaseOrder");
 jest.mock("../../models/MaterialInward");
 jest.mock("../../models/MaterialOut.cjs");
 jest.mock("../../models/Supplier");
+// The stockout alert now goes through the transactional outbox; stub it
+// so this pure-mock suite never touches a real collection.
+jest.mock("../../utils/outbox.js", () => ({ enqueue: jest.fn().mockResolvedValue(undefined) }));
 
 const request = require("supertest");
 const app = require("../../app");
@@ -208,6 +227,10 @@ describe("PUT /api/v2/materials/edit-raw-material", () => {
   });
 
   it("returns 404 when material not found", async () => {
+    // The route pre-checks existence with findById (alert snapshot);
+    // mock it explicitly — clearAllMocks doesn't drop a previous
+    // describe's mockReturnValue.
+    RawMaterial.findById = jest.fn().mockResolvedValue(null);
     RawMaterial.findByIdAndUpdate = jest.fn().mockResolvedValue(null);
 
     const res = await request(app)
@@ -218,6 +241,7 @@ describe("PUT /api/v2/materials/edit-raw-material", () => {
   });
 
   it("updates material and returns 200", async () => {
+    RawMaterial.findById = jest.fn().mockResolvedValue(fakeMaterial());
     RawMaterial.findByIdAndUpdate = jest.fn().mockResolvedValue(fakeMaterial({ name: "Updated Thread" }));
 
     const res = await request(app)
@@ -248,7 +272,18 @@ describe("GET /api/v2/materials/suppliers", () => {
 // ─── POST /bulk-adjust-stock ────────────────────────────────────────────────
 
 describe("POST /api/v2/materials/bulk-adjust-stock", () => {
-  beforeEach(() => jest.clearAllMocks());
+  const MAT_ID = "aaaaaaaaaaaaaaaaaaaaaaaa"; // route validates hex ids first
+  const mongoose = require("mongoose");
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // The route now wraps each item in a short transaction; without a
+    // live replica set, fake the session and run the callback directly.
+    mongoose.startSession = jest.fn().mockResolvedValue({
+      withTransaction: async (fn) => fn(),
+      endSession: jest.fn(),
+    });
+  });
 
   it("returns 400 when adjustments array is empty", async () => {
     const res = await request(app)
@@ -271,11 +306,12 @@ describe("POST /api/v2/materials/bulk-adjust-stock", () => {
 
   it("adjusts stock and returns 200 with updated list", async () => {
     const mat = fakeMaterial({ stock: 500 });
-    RawMaterial.findById = jest.fn().mockResolvedValue(mat);
+    // Reads happen inside the transaction: findById(id).session(s)
+    RawMaterial.findById = jest.fn().mockReturnValue({ session: jest.fn().mockResolvedValue(mat) });
 
     const res = await request(app)
       .post("/api/v2/materials/bulk-adjust-stock")
-      .send({ adjustments: [{ _id: "mat1", adjustment: 50, reason: "Audit" }] });
+      .send({ adjustments: [{ _id: MAT_ID, adjustment: 50, reason: "Audit" }] });
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -285,11 +321,11 @@ describe("POST /api/v2/materials/bulk-adjust-stock", () => {
 
   it("clamps stock to 0 when adjustment would make it negative", async () => {
     const mat = fakeMaterial({ stock: 30 });
-    RawMaterial.findById = jest.fn().mockResolvedValue(mat);
+    RawMaterial.findById = jest.fn().mockReturnValue({ session: jest.fn().mockResolvedValue(mat) });
 
     const res = await request(app)
       .post("/api/v2/materials/bulk-adjust-stock")
-      .send({ adjustments: [{ _id: "mat1", adjustment: -100 }] });
+      .send({ adjustments: [{ _id: MAT_ID, adjustment: -100 }] });
 
     expect(res.status).toBe(200);
     expect(res.body.updated[0].newStock).toBe(0);

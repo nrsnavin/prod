@@ -83,6 +83,31 @@ describe("checkAndAdvanceToWeaving", () => {
   });
 
   it("advances job to weaving when both warping and covering are completed", async () => {
+    JobOrder.findById = jest.fn().mockReturnValue({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockResolvedValue({ _id: "job1", status: "preparatory", warping: "w1", covering: "c1" }),
+      }),
+    });
+
+    Warping.findById = jest.fn().mockReturnValue({ select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ status: "completed" }) }) });
+    Covering.findById = jest.fn().mockReturnValue({ select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ status: "completed" }) }) });
+
+    // The helper uses a GUARDED findOneAndUpdate (filter re-asserts
+    // status: "preparatory") so a concurrent transition can't clobber a
+    // status that already moved on — assert that contract.
+    JobOrder.findOneAndUpdate = jest.fn().mockResolvedValue({ status: "weaving" });
+
+    const result = await checkAndAdvanceToWeaving("job1");
+    expect(result).toEqual({ advanced: true, jobStatus: "weaving" });
+    expect(JobOrder.findOneAndUpdate).toHaveBeenCalledWith(
+      { _id: "job1", status: "preparatory" },
+      { status: "weaving" },
+      { new: true, select: "status" }
+    );
+  });
+
+  it("no-ops and reports truth when a concurrent transition wins the race", async () => {
+    // First read: preparatory. Re-read after losing the race: weaving.
     JobOrder.findById = jest.fn()
       .mockReturnValueOnce({
         select: jest.fn().mockReturnValue({
@@ -90,20 +115,18 @@ describe("checkAndAdvanceToWeaving", () => {
         }),
       })
       .mockReturnValueOnce({
-        // findByIdAndUpdate call
+        select: jest.fn().mockReturnValue({
+          lean: jest.fn().mockResolvedValue({ _id: "job1", status: "weaving" }),
+        }),
       });
 
     Warping.findById = jest.fn().mockReturnValue({ select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ status: "completed" }) }) });
     Covering.findById = jest.fn().mockReturnValue({ select: jest.fn().mockReturnValue({ lean: jest.fn().mockResolvedValue({ status: "completed" }) }) });
 
-    JobOrder.findByIdAndUpdate = jest.fn().mockResolvedValue({ status: "weaving" });
+    // Guarded update matches nothing — someone else already advanced it.
+    JobOrder.findOneAndUpdate = jest.fn().mockResolvedValue(null);
 
     const result = await checkAndAdvanceToWeaving("job1");
-    expect(result).toEqual({ advanced: true, jobStatus: "weaving" });
-    expect(JobOrder.findByIdAndUpdate).toHaveBeenCalledWith(
-      "job1",
-      { status: "weaving" },
-      { new: true, select: "status" }
-    );
+    expect(result).toEqual({ advanced: false, jobStatus: "weaving" });
   });
 });

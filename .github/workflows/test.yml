@@ -1,0 +1,31 @@
+# Backend test gate — every push and PR runs the full jest suite
+# (unit + integration against in-memory Mongo). A red run here means
+# the branch is not deployable; keep it green.
+name: backend tests
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+jobs:
+  jest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # mongodb-memory-server downloads a mongod binary on first run —
+      # cache it so CI doesn't re-fetch ~70MB every push.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/mongodb-binaries
+          key: mongodb-binaries-${{ runner.os }}
+
+      - run: npm ci
+      - run: npx jest --runInBand --forceExit
