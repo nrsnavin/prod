@@ -18,9 +18,10 @@ let mongo, buildDigestData;
 beforeAll(async () => {
   mongo = await MongoMemoryServer.create();
   await mongoose.connect(mongo.getUri());
-  // Stub out the api/order.js late-require for _predictedLate so the
-  // test doesn't drag the whole order router in.
-  jest.doMock("../../api/order.js", () => ({ _etaHelpers: null }));
+  // _predictedLate now imports the lightweight services/etaService.js
+  // directly (no Express router pulled in), so the pipeline runs for
+  // real against the empty DB — the aggregator returns [] with no
+  // orders present.
   buildDigestData = require("../../utils/digest.js").buildDigestData;
 }, 60_000);
 
