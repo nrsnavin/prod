@@ -19,7 +19,7 @@ const Order        = require("../models/Order");
 const ShiftDetail  = require("../models/ShiftDetail");
 const ShiftPlan    = require("../models/ShiftPlan");
 const JobOrder     = require("../models/JobOrder");
-const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
 const { updatePairPosterior } = require("../utils/etaPosterior.js");
 const { notify } = require("../utils/notify");
 
@@ -254,8 +254,91 @@ async function _checkMachineAnomaly(shift, machine, prodValue, req) {
   console.log(`[notify:anomalyDetected] machine=${machine.ID} →`, JSON.stringify(result));
 }
 
+// ═════════════════════════════════════════════════════════════════
+//  _rederiveShiftProduction — the CORRECTION path.
+//
+//  applyProductionCascade ADDS a freshly-verified shift's output. When
+//  an admin later corrects (PUT /production-entry) or deletes a shift's
+//  production, this re-derives the job/order/plan rollups from the
+//  per-head DELTA between the old and new totals, instead of double
+//  counting. Runs inside the correction transaction (takes `session`).
+// ═════════════════════════════════════════════════════════════════
+async function _rederiveShiftProduction(session, { shift, newTotalMeters, req, auditReason, code }) {
+  const heads = Array.isArray(shift.elastics) && shift.elastics.length > 0 ? shift.elastics.length : 1;
+  const oldTotal = Number(shift.productionMeters) || 0;
+  const oldPerHead = oldTotal / heads;
+  const newPerHead = Number(newTotalMeters) / heads;
+  const deltaPerHead = newPerHead - oldPerHead;
+
+  // shift.job is captured at row creation from the machine's running job.
+  // In rare cases (a shift row created for a machine with no running job) it
+  // may not resolve to a JobOrder — fail cleanly rather than corrupt state.
+  const job = shift.job ? await JobOrder.findById(shift.job).session(session) : null;
+  if (!job) throw new ErrorHandler(
+    "This shift isn't linked to a job order, so its production can't be re-derived. " +
+    "Correct it via the shift verification flow instead.", 400);
+
+  // Fan the per-head delta across the shift's elastic snapshot.
+  const deltaByElastic = {};
+  for (const head of shift.elastics || []) {
+    if (!head.elastic) continue;
+    const eid = head.elastic.toString();
+    deltaByElastic[eid] = (deltaByElastic[eid] || 0) + deltaPerHead;
+  }
+
+  const before = { productionMeters: oldTotal };
+
+  for (const [eid, d] of Object.entries(deltaByElastic)) {
+    const idx = job.producedElastic.findIndex((e) => e.elastic.toString() === eid);
+    if (idx >= 0) job.producedElastic[idx].quantity = Math.max(0, (job.producedElastic[idx].quantity || 0) + d);
+    else if (d > 0) job.producedElastic.push({ elastic: eid, quantity: d });
+  }
+  // Clamp each produced elastic to its planned quantity.
+  for (const e of job.elastics) {
+    const row = job.producedElastic.find((p) => p.elastic.toString() === e.elastic.toString());
+    if (row && row.quantity > e.quantity) row.quantity = e.quantity;
+  }
+
+  stampFingerprint(job, code, {
+    req,
+    meta: { shiftId: shift._id.toString(), auditReason, before, after: { productionMeters: Number(newTotalMeters) }, heads },
+  });
+  await job.save({ session });
+
+  // Recompute the parent order's produced rollup from the sum of ALL its
+  // jobs, then pending from ordered − produced. Correct regardless of how
+  // many shifts/jobs contributed.
+  const order = await Order.findById(job.order).session(session);
+  if (order) {
+    const jobs = await JobOrder.find({ order: order._id }).session(session);
+    const producedSum = {};
+    for (const j of jobs) {
+      for (const p of j.producedElastic || []) {
+        const eid = p.elastic.toString();
+        producedSum[eid] = (producedSum[eid] || 0) + (p.quantity || 0);
+      }
+    }
+    for (const row of order.producedElastic) {
+      row.quantity = producedSum[row.elastic.toString()] || 0;
+    }
+    for (const p of order.pendingElastic) {
+      const ordered = order.elasticOrdered.find((e) => e.elastic.toString() === p.elastic.toString());
+      const produced = producedSum[p.elastic.toString()] || 0;
+      if (ordered) p.quantity = Math.max(0, ordered.quantity - produced);
+    }
+    await order.save({ session });
+  }
+
+  const sp = await ShiftPlan.findById(shift.shiftPlan).session(session);
+  if (sp) {
+    sp.totalProduction = Math.max(0, (sp.totalProduction || 0) + deltaPerHead * heads);
+    await sp.save({ session });
+  }
+}
+
 module.exports = {
   applyProductionCascade,
   _checkLowOutputShift,
   _checkMachineAnomaly,
+  _rederiveShiftProduction,
 };
