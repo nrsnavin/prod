@@ -13,11 +13,7 @@ const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/f
 const { requireReason } = require("../utils/auditReason.js");
 const { assertVersion } = require("../utils/versioning.js");
 const { applyMovement } = require("../utils/elasticStock.js");
-const ShiftDetail        = require("../models/ShiftDetail.js");
-const Attendance         = require("../models/Attendence.js");
-const Machine            = require("../models/Machine.js");
 const { estimateOrderEta } = require("../utils/orderEta.js");
-const C                    = require("../utils/etaConfig.js");
 const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
 const Notification         = require("../models/Notification.js");
@@ -31,6 +27,7 @@ const {
   _fallbackEntryTimeEta,
   _loadPlantMetersPerMachineDay,
   _loadFreeMachineCount,
+  buildEntryTimeAggregates,
 } = require("../services/etaService.js");
 
 
@@ -1149,136 +1146,10 @@ router.post(
     }
 
     const now = new Date();
-    const since = new Date(now.getTime() - C.RATE_LOOKBACK_DAYS * 86_400_000);
-    const last7 = new Date(now.getTime() - 7 * 86_400_000);
-    const last30 = new Date(now.getTime() - 30 * 86_400_000);
 
-    // ── Aggregates (one round-trip block) ────────────────────────
-    const elasticIds = elasticOrdered
-      .map((l) => l && l.elastic)
-      .filter(Boolean)
-      .map((id) => {
-        try { return new mongoose.Types.ObjectId(id); } catch (_) { return null; }
-      })
-      .filter(Boolean);
-
-    const [
-      plantShiftAgg,
-      elasticShiftAgg,
-      machineAgg,
-      attLast7,
-      attLast30,
-    ] = await Promise.all([
-      // Plant-wide meters/machine active-day over the rate window.
-      ShiftDetail.aggregate([
-        { $match: { status: "closed", date: { $gte: since } } },
-        { $group: {
-            _id: { machine: "$machine", date: {
-              $dateToString: { format: "%Y-%m-%d", date: "$date" } } },
-            meters: { $sum: "$productionMeters" },
-          } },
-        { $group: {
-            _id: null,
-            totalMeters: { $sum: "$meters" },
-            machineDays: { $sum: 1 },
-          } },
-      ]),
-
-      // Per-elastic meters/machine active-day — same shape, filtered
-      // to shifts whose head map includes the elastic.
-      elasticIds.length > 0
-        ? ShiftDetail.aggregate([
-            { $match: {
-                status: "closed",
-                date: { $gte: since },
-                "elastics.elastic": { $in: elasticIds },
-              } },
-            { $unwind: "$elastics" },
-            { $match: { "elastics.elastic": { $in: elasticIds } } },
-            { $group: {
-                _id: { elastic: "$elastics.elastic", machine: "$machine", date: {
-                  $dateToString: { format: "%Y-%m-%d", date: "$date" } } },
-                meters: { $sum: "$productionMeters" },
-              } },
-            { $group: {
-                _id: "$_id.elastic",
-                totalMeters: { $sum: "$meters" },
-                machineDays: { $sum: 1 },
-              } },
-          ])
-        : [],
-
-      // Machine availability — free vs not maintenance, plus avg heads.
-      Machine.aggregate([
-        { $group: {
-            _id: null,
-            total:        { $sum: 1 },
-            free:         { $sum: { $cond: [{ $eq: ["$status", "free"] },        1, 0] } },
-            running:      { $sum: { $cond: [{ $eq: ["$status", "running"] },     1, 0] } },
-            maintenance:  { $sum: { $cond: [{ $eq: ["$status", "maintenance"] }, 1, 0] } },
-            headsAvg:     { $avg: "$NoOfHead" },
-          } },
-      ]),
-
-      // Attendance momentum — last 7 days effective-present count.
-      Attendance.aggregate([
-        { $match: { date: { $gte: last7 } } },
-        { $group: { _id: "$status", n: { $sum: 1 } } },
-      ]),
-      // ...vs trailing 30 days.
-      Attendance.aggregate([
-        { $match: { date: { $gte: last30 } } },
-        { $group: { _id: "$status", n: { $sum: 1 } } },
-      ]),
-    ]);
-
-    // ── Boil aggregates down to the shape orderEta wants ─────────
-    const effectivePresent = (rows) => {
-      const m = Object.fromEntries(rows.map((r) => [r._id, r.n]));
-      return (m.present || 0) + (m.late || 0) + 0.5 * (m.half_day || 0);
-    };
-    const present7  = effectivePresent(attLast7);
-    const present30 = effectivePresent(attLast30);
-    // Trailing 30 spans ~26 working days; last 7 spans ~6. Normalise
-    // to a daily rate before taking the ratio.
-    const trailing30Daily = present30 > 0 ? present30 / 26 : 0;
-    const last7Daily      = present7  > 0 ? present7  / 6  : 0;
-    const attendanceMomentum = trailing30Daily > 0 ? last7Daily / trailing30Daily : 1;
-
-    const machineRow = machineAgg[0] || {};
-    const totalMachines = machineRow.total || 0;
-    const freeMachines  = machineRow.free  || 0;
-    const availableMachines = totalMachines - (machineRow.maintenance || 0);
-    const machineHealth = totalMachines > 0
-      ? availableMachines / totalMachines
-      : 1;
-    const machineNoOfHeadAvg = machineRow.headsAvg || 1;
-
-    const plantRow = plantShiftAgg[0] || {};
-    const plantRate = (plantRow.machineDays || 0) > 0
-      ? plantRow.totalMeters / plantRow.machineDays
-      : null;
-
-    const elasticRate = {};
-    for (const r of elasticShiftAgg) {
-      if (r.machineDays > 0) {
-        elasticRate[String(r._id)] = r.totalMeters / r.machineDays;
-      }
-    }
-
-    // No consistency score endpoint exposed in a cheap form yet;
-    // approximate from sample size — more data → tighter band.
-    const consistencyScore = Math.min(95, 40 + (plantRow.machineDays || 0));
-
-    const aggregates = {
-      plantRate,
-      elasticRate,
-      consistencyScore,
-      attendanceMomentum,
-      machineHealth,
-      freeMachines,
-      machineNoOfHeadAvg,
-    };
+    // Gather + shape the plant/elastic/machine/attendance aggregates
+    // (services/etaService.js) — one round-trip block, no req/res.
+    const { aggregates, summary } = await buildEntryTimeAggregates(elasticOrdered, now);
 
     const result = estimateOrderEta({
       lines: elasticOrdered,
@@ -1291,16 +1162,7 @@ router.post(
     return res.json({
       success: true,
       ...result,
-      aggregates: {
-        plantRate:           plantRate ? Math.round(plantRate) : null,
-        attendanceMomentum:  Math.round(attendanceMomentum * 100) / 100,
-        machineHealth:       Math.round(machineHealth * 100) / 100,
-        freeMachines,
-        totalMachines,
-        availableMachines,
-        machineDaysSampled:  plantRow.machineDays || 0,
-        consistencyScore,
-      },
+      aggregates: summary,
     });
   }),
 );
