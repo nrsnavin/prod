@@ -337,9 +337,12 @@ async function _orderActivity(start, end) {
 // Reuses the same _computeRunningEtaForOrder + _loadPlantMetersPerMachineDay
 // the route uses, so the numbers match the order detail card.
 async function _predictedLate(now) {
-  // Late-require to avoid a circular require at module load.
+  // ETA engine now lives in its own service — import it directly rather
+  // than reaching through the order router. Kept as a local require so a
+  // load-order hiccup here degrades to "skip section" instead of crashing
+  // digest generation.
   const { _computeRunningEtaForOrder, _loadPlantMetersPerMachineDay } =
-    require("../api/order.js")._etaHelpers || {};
+    require("../services/etaService.js") || {};
   if (!_computeRunningEtaForOrder) return []; // helpers not exposed → skip section
 
   const orders = await Order.find({
