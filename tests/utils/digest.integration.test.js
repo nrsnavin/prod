@@ -44,6 +44,7 @@ describe("digest.buildDigestData (integration smoke)", () => {
       attendance:     expect.objectContaining({ totalEffective: 0 }),
       leave:         { pending: 0 },
       complaints:    { openCount: 0, newYesterday: 0 },
+      commercial:    { dispatchDcs: 0, dispatchValue: 0, openOrders: 0, overdueOrders: 0, pendingMeters: 0, lowStock: 0 },
     });
     expect(typeof data.dateLabel).toBe("string");
   });

@@ -70,6 +70,24 @@ describe('digest.formatDigest', () => {
     expect(some).toMatch(/Orders edited yesterday.*: 4/);
   });
 
+  test('renders the commercial glance (dispatch, backlog, low stock)', () => {
+    const t = formatDigest({
+      ...base,
+      commercial: { dispatchDcs: 3, dispatchValue: 125000, openOrders: 12, overdueOrders: 2, pendingMeters: 34000, lowStock: 4 },
+    });
+    expect(t).toMatch(/Commercial/);
+    expect(t).toMatch(/Dispatched: ₹1,25,000 · 3 DC/);
+    expect(t).toMatch(/12 open · 34,000 m pending · 2 overdue/);
+    expect(t).toMatch(/4 material\(s\) at\/below reorder/);
+    // Overdue + low-stock lines are conditional.
+    const clean = formatDigest({
+      ...base,
+      commercial: { dispatchDcs: 0, dispatchValue: 0, openOrders: 5, overdueOrders: 0, pendingMeters: 0, lowStock: 0 },
+    });
+    expect(clean).not.toMatch(/overdue/);
+    expect(clean).not.toMatch(/at\/below reorder/);
+  });
+
   test('renders posterior drift section when pairs slowed', () => {
     const t = formatDigest({
       ...base,

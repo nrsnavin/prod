@@ -21,6 +21,7 @@ const MaterialOutward = require("../models/MaterialOut.cjs");
 const Machine         = require("../models/Machine.js");
 const MachineIssue    = require("../models/MachineIssue.js");
 const Order           = require("../models/Order.js");
+const DeliveryChallan = require("../models/DeliveryChallan.js");
 const Attendance      = require("../models/Attendence.js");
 const LeaveRequest    = require("../models/LeaveRequest.js");
 const EmployeeFeedback= require("../models/EmployeeFeedback.js");
@@ -61,6 +62,16 @@ function formatDigest(d) {
   // Order activity (low-priority edits)
   if (d.orderActivity && d.orderActivity.edited > 0) {
     lines.push("", `✏️ *Orders edited yesterday*: ${d.orderActivity.edited}`);
+  }
+
+  // Commercial glance — dispatch value, order backlog, low stock.
+  if (d.commercial) {
+    const c = d.commercial;
+    lines.push("", "🧾 *Commercial*");
+    lines.push(`  Dispatched: ₹${_num(c.dispatchValue)} · ${c.dispatchDcs} DC(s)`);
+    lines.push(`  Order book: ${c.openOrders} open · ${_num(c.pendingMeters)} m pending` +
+      (c.overdueOrders > 0 ? ` · ${c.overdueOrders} overdue` : ""));
+    if (c.lowStock > 0) lines.push(`  ⚠️ ${c.lowStock} material(s) at/below reorder`);
   }
 
   // Predicted late (ML)
@@ -149,7 +160,7 @@ async function buildDigestData(now = new Date(), opts = {}) {
   const startYday  = new Date(startToday.getTime() - 86_400_000);
 
   const [production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift,
-         attendance, leave, complaints, repeatOffenders] =
+         attendance, leave, complaints, repeatOffenders, commercial] =
     await Promise.all([
       _production(startYday, startToday),
       _wastage(startYday, startToday),
@@ -162,12 +173,13 @@ async function buildDigestData(now = new Date(), opts = {}) {
       _leavePending(),
       _complaints(startYday, startToday),
       _repeatOffenders(now, issueWindow, issueThresh),
+      _commercial(startYday, startToday, now),
     ]);
 
   return {
     dateLabel: startYday.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
     production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift,
-    attendance, leave, complaints, repeatOffenders,
+    attendance, leave, complaints, repeatOffenders, commercial,
     issueWindow, issueThresh,
   };
 }
@@ -371,6 +383,40 @@ async function _predictedLate(now) {
   }
   out.sort((a, b) => (b.lateWorkingDays || 0) - (a.lateWorkingDays || 0));
   return out;
+}
+
+// Commercial glance — yesterday's dispatch value (from the reports
+// stack), the current open-order backlog (open / overdue / pending
+// meters, as of now), and the live low-stock count. Mirrors the
+// numbers the on-demand reports show so the morning digest and the
+// Reports section agree.
+async function _commercial(startYday, startToday, now) {
+  const [dcAgg, orderAgg, lowAgg] = await Promise.all([
+    DeliveryChallan.aggregate([
+      { $match: { status: { $in: ["dispatched", "delivered"] }, dispatchDate: { $gte: startYday, $lt: startToday } } },
+      { $group: { _id: null, dcs: { $sum: 1 }, amount: { $sum: "$totalAmount" } } },
+    ]),
+    Order.aggregate([
+      { $match: { status: { $in: ["Open", "Approved", "InProgress"] } } },
+      { $group: {
+          _id: null,
+          open: { $sum: 1 },
+          overdue: { $sum: { $cond: [{ $lt: ["$supplyDate", now] }, 1, 0] } },
+          pending: { $sum: { $sum: "$pendingElastic.quantity" } },
+      } },
+    ]),
+    RawMaterial.aggregate([
+      { $group: { _id: null, low: { $sum: { $cond: [{ $and: [{ $gt: ["$minStock", 0] }, { $lte: ["$stock", "$minStock"] }] }, 1, 0] } } } },
+    ]),
+  ]);
+  return {
+    dispatchDcs:   dcAgg[0]?.dcs || 0,
+    dispatchValue: Math.round(dcAgg[0]?.amount || 0),
+    openOrders:    orderAgg[0]?.open || 0,
+    overdueOrders: orderAgg[0]?.overdue || 0,
+    pendingMeters: Math.round(orderAgg[0]?.pending || 0),
+    lowStock:      lowAgg[0]?.low || 0,
+  };
 }
 
 async function _production(start, end) {
