@@ -26,6 +26,7 @@ const { productionReport } = require("../services/reports/productionReport.js");
 const { dispatchReport } = require("../services/reports/dispatchReport.js");
 const { orderBookReport } = require("../services/reports/orderBookReport.js");
 const { stockPurchasesReport } = require("../services/reports/stockPurchasesReport.js");
+const { stockMovementsReport } = require("../services/reports/stockMovementsReport.js");
 
 const asBool = (v) => v === true || v === "true" || v === "1";
 
@@ -63,5 +64,6 @@ router.get("/production", reportRoute(productionReport, { csvName: "production-r
 router.get("/dispatch", reportRoute(dispatchReport, { csvName: "dispatch-sales-report" }));
 router.get("/order-book", reportRoute(orderBookReport, { csvName: "order-book-report" }));
 router.get("/stock-purchases", reportRoute(stockPurchasesReport, { csvName: "stock-purchases-report" }));
+router.get("/stock-movements", reportRoute(stockMovementsReport, { csvName: "stock-movements-report" }));
 
 module.exports = router;
