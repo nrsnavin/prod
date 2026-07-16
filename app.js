@@ -256,6 +256,9 @@ app.use("/api/v2/covering",    covering);
 app.use("/api/v2/job",         gate('production'), job);
 app.use("/api/v2/packing",     packing);
 app.use("/api/v2/production",  gate('production'), production);
+// Management reports span operations, sales and stores — any of those
+// departments (or an admin) may pull them; each report is read-only.
+app.use("/api/v2/reports",     gate('production', 'sales', 'stores', 'accounts'), require("./api/reports.js"));
 app.use("/api/v2/qc",          gate('production'), require("./api/qc.js"));
 app.use("/api/v2/payroll",     payroll);
 app.use("/api/v2/leave",       leave);
