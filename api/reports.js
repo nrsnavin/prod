@@ -12,6 +12,7 @@
 //  Endpoints:
 //    GET /production   — meters produced (group: machine|shift|elastic|operator|day)
 //    GET /dispatch     — DC dispatches + value (group: customer|elastic|day)
+//    GET /order-book   — order intake + pending + OTD (group: customer|status|supplyMonth)
 // ══════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -22,6 +23,7 @@ const { resolveRange } = require("../services/reports/range.js");
 const { toCsv } = require("../services/reports/csv.js");
 const { productionReport } = require("../services/reports/productionReport.js");
 const { dispatchReport } = require("../services/reports/dispatchReport.js");
+const { orderBookReport } = require("../services/reports/orderBookReport.js");
 
 const asBool = (v) => v === true || v === "true" || v === "1";
 
@@ -57,5 +59,6 @@ function reportRoute(build, { csvName }) {
 
 router.get("/production", reportRoute(productionReport, { csvName: "production-report" }));
 router.get("/dispatch", reportRoute(dispatchReport, { csvName: "dispatch-sales-report" }));
+router.get("/order-book", reportRoute(orderBookReport, { csvName: "order-book-report" }));
 
 module.exports = router;
