@@ -124,3 +124,6 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+# Local secrets — provision via real env vars / a secret store, never commit
+.env
+config/.env

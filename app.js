@@ -53,6 +53,18 @@ const webhookLimiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, message: "Rate limit exceeded." },
 });
+// Defence-in-depth global ceiling across the whole API. Generous
+// enough that a normal admin session (dashboards fan out many reads)
+// never trips it, but it caps scraping / brute-force / DoS on the
+// endpoints that aren't individually throttled. The tighter
+// loginLimiter still applies on top for /login-user.
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,   // 15 min
+  max: 1500,                  // ~1.6 req/s sustained per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many requests — slow down and try again shortly." },
+});
 
 const user     = require("./api/user.js");
 const advisor  = require("./api/advisor.js");
@@ -234,6 +246,7 @@ const ADMIN_GATE = [isAuthenticated, isAdmin('admin')];
 const gate = (...roles) => [isAuthenticated, isAdmin('admin', ...roles)];
 
 // Throttle credential-guessing before the login handler runs.
+app.use("/api/v2", apiLimiter);
 app.use("/api/v2/user/login-user", loginLimiter);
 app.use("/api/v2/user", user);
 app.use("/api/v2/machine",     gate('production'), machine);
