@@ -1,5 +1,11 @@
 const mongoose = require("mongoose");
 
+// Skill knowledge levels from the "Elastic Manufacturing Employee Skill &
+// Performance Questionnaire" filled when onboarding an operator.
+const SKILL_LEVELS = ["not_known", "basic", "good", "expert"];
+const skillLevel = { type: String, enum: SKILL_LEVELS, default: "not_known" };
+const rating5 = { type: Number, min: 1, max: 5, default: null };
+
 const EmployeeSchema = new mongoose.Schema(
   {
     name: {
@@ -34,6 +40,42 @@ const EmployeeSchema = new mongoose.Schema(
     hourlyRate: {
       type: Number,
       default: 0,
+    },
+
+    // ── SKILL PROFILE ──────────────────────────────────────
+    // Answers from the onboarding skill & performance questionnaire.
+    // Editable later from the employee detail page.
+    skillProfile: {
+      machineType:       { type: String, default: "" },
+      yearsOfExperience: { type: Number, min: 0, default: 0 },
+      knotting: {
+        time100YarnsMin: { type: Number, min: 0, default: null }, // minutes to knot 100 yarns
+        quality:         { type: String, enum: ["", "poor", "average", "good", "excellent"], default: "" },
+        maxYarnsAtOnce:  { type: Number, min: 0, default: null },
+      },
+      production: {
+        minPerShift:          { type: Number, min: 0, default: null }, // meters/kg assured per shift
+        avgEfficiencyPct:     { type: Number, min: 0, max: 100, default: null },
+        machinesSimultaneous: { type: Number, min: 0, default: null },
+      },
+      skills: {
+        drawing:              skillLevel,
+        knotting:             skillLevel,
+        tapeSetting:          skillLevel,
+        chainLinkSetting:     skillLevel,
+        chainDesign:          skillLevel,
+        jacquardHookModule:   skillLevel, // Module-type jacquard hook problem
+        jacquardHookKarampal: skillLevel, // Karampal-type jacquard hook problem
+        timingBeltChange:     skillLevel,
+        timingSetting:        skillLevel,
+        machineRepair:        skillLevel,
+      },
+      supervisor: {
+        skillLevel:        rating5,
+        machineEfficiency: rating5,
+        problemSolving:    rating5,
+        discipline:        rating5,
+      },
     },
 
     // ── BONUS ──────────────────────────────────────────────

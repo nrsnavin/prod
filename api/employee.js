@@ -54,12 +54,18 @@ router.post(
       }
     }
 
+    const hourlyRate = Number(req.body.hourlyRate);
     const employee = await Employee.create({
       name:        name.trim(),
       phoneNumber: phoneNumber?.trim() || undefined,
       role:        role?.trim()        || undefined,
       department:  department.trim(),
       aadhar:      aadhar?.trim()      || undefined,
+      // Shift salary from the onboarding form (stored as ₹/hour; the
+      // web form converts a DAY-shift salary ÷ 12h).
+      hourlyRate:  Number.isFinite(hourlyRate) && hourlyRate >= 0 ? hourlyRate : 0,
+      // Skill & performance questionnaire — schema enums validate levels.
+      skillProfile: req.body.skillProfile || undefined,
     });
 
     console.log(`[employee/create] ${employee.name} registered`);
@@ -140,6 +146,8 @@ router.get(
         aadhar:      employee.aadhar      || "Not Provided",
         performance: employee.performance || 0,
         skill:       employee.skill       || 0,
+        hourlyRate:  employee.hourlyRate  || 0,
+        skillProfile: employee.skillProfile || null,
         totalShifts: employee.shifts.length,
         result,
       },
@@ -173,7 +181,7 @@ router.put(
     // client loaded the employee (409 → client reloads).
     assertVersion(employee, req);
 
-    const allowed = ["name", "phoneNumber", "role", "department", "aadhar", "skill"];
+    const allowed = ["name", "phoneNumber", "role", "department", "aadhar", "skill", "hourlyRate", "skillProfile"];
     for (const field of allowed) {
       if (req.body[field] !== undefined) {
         employee[field] = req.body[field];
