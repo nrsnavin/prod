@@ -179,6 +179,20 @@ app.get("/api/v2/health", (req, res) =>
   res.json({ status: "ok", uptime: process.uptime() })
 );
 
+// Readiness probe — unlike liveness, this reports whether the process
+// can actually serve traffic, i.e. the database connection is up. A
+// load balancer should route on THIS (503 → pull the instance out of
+// rotation) so requests aren't sent to a box that's up but can't reach
+// Mongo. mongoose.connection.readyState === 1 means connected.
+app.get("/api/v2/health/ready", (req, res) => {
+  const state = mongoose.connection.readyState; // 0=disconnected 1=connected 2=connecting 3=disconnecting
+  const ready = state === 1;
+  res.status(ready ? 200 : 503).json({
+    status: ready ? "ready" : "not-ready",
+    db: ["disconnected", "connected", "connecting", "disconnecting"][state] || "unknown",
+  });
+});
+
 // Build-info probe — exposes the commit SHA + start time + a quick
 // inventory of marker routes so you can verify what's actually
 // running on this host. Unauthenticated so a curl from any machine

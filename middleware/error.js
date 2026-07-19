@@ -1,9 +1,17 @@
 const ErrorHandler = require("../utils/ErrorHandler");
 const { CONFLICT_MESSAGE } = require("../utils/versioning");
+const { reportError } = require("../utils/errorReporter");
 
 module.exports = (err, req, res, next) => {
   err.statusCode = err.statusCode || 500;
   err.message = err.message || "Internal server Error";
+
+  // Report genuine server faults (5xx) to the error sink BEFORE the
+  // status-remapping below rewrites some of them down to 4xx. A stale
+  // read that a route surfaced as a 500 is a real fault worth seeing;
+  // a VersionError that becomes a 409 is expected traffic and is not
+  // reported. Reporting is fail-open and never touches the response.
+  if (err.statusCode >= 500) reportError(err, req);
 
   // Mongoose optimistic-lock failure (doc.increment() + save raced a
   // concurrent write). Same meaning as an expectedVersion mismatch:

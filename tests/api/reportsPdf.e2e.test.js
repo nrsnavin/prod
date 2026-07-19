@@ -93,6 +93,21 @@ describe("GET /api/v2/reports/dispatch (through the app)", () => {
   });
 });
 
+describe("health probes", () => {
+  test("liveness /health is public and 200", async () => {
+    const res = await request(app).get("/api/v2/health");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ok");
+  });
+
+  test("readiness /health/ready reports the DB as connected", async () => {
+    const res = await request(app).get("/api/v2/health/ready");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("ready");
+    expect(res.body.db).toBe("connected");
+  });
+});
+
 describe("every report endpoint answers PDF + JSON", () => {
   const paths = ["production", "dispatch", "order-book", "stock-purchases", "stock-movements"];
   test.each(paths)("GET /reports/%s serves JSON and a PDF", async (p) => {
