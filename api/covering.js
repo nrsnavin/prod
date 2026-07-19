@@ -114,7 +114,7 @@ router.get(
 
 router.post(
   "/start",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.body;
     if (!id) return next(new ErrorHandler("Covering ID required", 400));
@@ -159,7 +159,7 @@ router.post(
 
 router.post(
   "/complete",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { id, remarks } = req.body;
     if (!id) return next(new ErrorHandler("Covering ID required", 400));
@@ -243,7 +243,7 @@ router.post(
 
 router.post(
   "/cancel",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { id, remarks } = req.body;
     if (!id) return next(new ErrorHandler("Covering ID required", 400));
@@ -355,7 +355,7 @@ router.post(
 
 router.delete(
   "/beam-entry",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { coveringId, entryId } = req.query;
 

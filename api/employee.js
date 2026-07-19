@@ -12,7 +12,7 @@ const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { assertVersion } = require("../utils/versioning");
 
 // All employee management routes are admin-only.
-router.use(isAuthenticated, isAdmin('admin'));
+router.use(isAuthenticated, isAdmin('admin', 'accounts', 'production'));
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS

@@ -22,7 +22,7 @@ const { isAuthenticated, isAdmin } = require("../middleware/auth");
 // their assigned jobs in the employee app. Mutations stay admin-only.
 router.use(isAuthenticated);
 
-router.post("/create", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+router.post("/create", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   const { jobId, elasticOrdered } = req.body;
   if (!jobId) return next(new ErrorHandler("Job ID is required", 400));
   if (!mongoose.Types.ObjectId.isValid(jobId)) {
@@ -166,7 +166,7 @@ router.get("/detail/:id", catchAsyncErrors(async (req, res, next) => {
   res.json({ success: true, warping });
 }));
 
-router.post("/start", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+router.post("/start", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   const id = req.body.id ?? req.query.id;
   if (!id) return next(new ErrorHandler("id is required", 400));
 
@@ -206,7 +206,7 @@ router.post("/start", isAdmin('admin'), catchAsyncErrors(async (req, res, next) 
   }
 }));
 
-router.post("/complete", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+router.post("/complete", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   const id = req.body.id ?? req.query.id;
   if (!id) return next(new ErrorHandler("id is required", 400));
 
@@ -281,7 +281,7 @@ router.post("/complete", isAdmin('admin'), catchAsyncErrors(async (req, res, nex
   }
 }));
 
-router.patch("/cancel/:id", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+router.patch("/cancel/:id", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   const warping = await Warping.findById(req.params.id);
   if (!warping) return next(new ErrorHandler("Warping not found", 404));
   warping.status = "cancelled";
@@ -300,7 +300,7 @@ router.get("/warpingPlan", catchAsyncErrors(async (req, res, next) => {
   res.json({ exists: true, plan });
 }));
 
-router.post("/warpingPlan/create", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   const { warpingId, beams, remarks } = req.body;
   if (!warpingId)     return next(new ErrorHandler("warpingId is required", 400));
   if (!beams?.length) return next(new ErrorHandler("At least one beam is required", 400));
@@ -332,7 +332,7 @@ router.post("/warpingPlan/create", isAdmin('admin'), catchAsyncErrors(async (req
 // Only while the parent warping is still open. Requires an audit reason;
 // stamps a WARPING_PLAN_UPDATED fingerprint on the parent job.
 // ─────────────────────────────────────────────────────────────────────────
-router.put("/warpingPlan/:id", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+router.put("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     return next(new ErrorHandler("Invalid plan id", 400));
   }
@@ -377,7 +377,7 @@ router.put("/warpingPlan/:id", isAdmin('admin'), catchAsyncErrors(async (req, re
 // corrected one can be created. Requires an audit reason; stamps a
 // WARPING_PLAN_DELETED fingerprint on the parent job.
 // ─────────────────────────────────────────────────────────────────────────
-router.delete("/warpingPlan/:id", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+router.delete("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     return next(new ErrorHandler("Invalid plan id", 400));
   }
@@ -443,7 +443,7 @@ function _packBeams(items, capacity) {
   return { beams, capacity: C };
 }
 
-router.get("/optimize-layout/:warpingId", isAdmin('admin'), catchAsyncErrors(async (req, res, next) => {
+router.get("/optimize-layout/:warpingId", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.warpingId)) {
     return next(new ErrorHandler("Invalid warping id", 400));
   }

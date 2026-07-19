@@ -47,7 +47,7 @@ function _normalisePlan(template) {
 
 router.post(
   "/create-elastic",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     try {
       const elasticData = req.body;
@@ -124,7 +124,7 @@ router.get(
 
 router.get(
   "/stock-summary",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const elastics = await Elastic.find(
       req.query.includeArchived === "true" ? {} : { archived: { $ne: true } }
@@ -173,7 +173,7 @@ router.get(
 
 router.get(
   "/reconcile",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const elastics = await Elastic.find().select("name stock").lean();
     if (elastics.length === 0) {
@@ -285,7 +285,7 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 router.post(
   "/:id/adjust-stock",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.params;
     const { delta, reason, force } = req.body;
@@ -365,7 +365,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 router.patch(
   "/:id/min-stock",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -414,7 +414,7 @@ router.patch(
 // ─────────────────────────────────────────────────────────────
 router.patch(
   "/:id/archive",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -452,7 +452,7 @@ router.patch(
 
 router.put(
   "/update-elastic",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     try {
       const elasticData = req.body;
@@ -538,7 +538,7 @@ router.put(
 
 router.put(
   "/warping-plan-template",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const { elasticId, template } = req.body;
     if (!elasticId) return next(new ErrorHandler("elasticId is required", 400));
@@ -561,7 +561,7 @@ router.put(
 
 router.post(
   "/recalculate-elastic-cost",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const { elasticId, conversionCost: convCostOverride } = req.body;
 
@@ -644,7 +644,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/delete-elastic",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const elastic = await Elastic.findById(req.query.id);
     if (!elastic) return next(new ErrorHandler("Elastic not found", 404));

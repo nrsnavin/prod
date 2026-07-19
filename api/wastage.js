@@ -186,7 +186,7 @@ router.post(
 // ═══════════════════════════════════════════════════════════
 router.put(
   "/:id",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -249,7 +249,7 @@ router.put(
 
 router.delete(
   "/:id",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -380,7 +380,7 @@ router.get(
 
 router.get(
   "/jobs-wastage-list",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { status, search } = req.query;
 
@@ -470,7 +470,7 @@ router.get(
 
 router.get(
   "/analytics",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const days  = Math.min(Number(req.query.days) || 30, 365);
     const since = moment().subtract(days, "days").toDate();
@@ -531,7 +531,7 @@ router.get(
 
 router.get(
   "/get-in-range",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     // Validate the date params before they reach moment — invalid
     // strings produce Invalid Date silently and `$gte/$lte` then
@@ -590,7 +590,7 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/root-cause",
-  isAdmin("admin"),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res) => {
     const days  = Math.min(Number(req.query.days) || 30, 365);
     const since = moment().subtract(days, "days").toDate();

@@ -12,7 +12,7 @@ const CustomerUser = require("../models/CustomerUser");
 const Order        = require("../models/Order");
 
 // All customer management routes are admin-only.
-router.use(isAuthenticated, isAdmin('admin'));
+router.use(isAuthenticated, isAdmin('admin', 'sales', 'accounts'));
 
 // Fields a client is allowed to set on a customer. Everything else
 // (audit fields, anything future/internal) is ignored so the raw body

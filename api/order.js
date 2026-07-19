@@ -1135,7 +1135,7 @@ router.get('/delivery-risk', async (req, res) => {
 // ═════════════════════════════════════════════════════════════════
 router.post(
   "/estimate-completion",
-  isAuthenticated, isAdmin('admin'),
+  isAuthenticated, isAdmin('admin', 'sales', 'accounts'),
   catchAsyncErrors(async (req, res) => {
     const { elasticOrdered, supplyDate, machines } = req.body || {};
     if (!Array.isArray(elasticOrdered) || elasticOrdered.length === 0) {
@@ -1186,7 +1186,7 @@ router.post(
 // ═════════════════════════════════════════════════════════════════
 router.get(
   "/:id/running-eta",
-  isAuthenticated, isAdmin('admin'),
+  isAuthenticated, isAdmin('admin', 'sales', 'accounts'),
   catchAsyncErrors(async (req, res) => {
     const orderId = req.params.id;
     if (!mongoose.Types.ObjectId.isValid(orderId)) {
@@ -1225,7 +1225,7 @@ router.get(
 // ═════════════════════════════════════════════════════════════════
 router.post(
   "/running-eta-bulk",
-  isAuthenticated, isAdmin('admin'),
+  isAuthenticated, isAdmin('admin', 'sales', 'accounts'),
   catchAsyncErrors(async (req, res) => {
     const orderIds = Array.isArray(req.body?.orderIds) ? req.body.orderIds : null;
     if (!orderIds || orderIds.length === 0) {
@@ -1331,7 +1331,7 @@ function _draftCustomerUpdate({ customerName, orderNo, expectedDate, promised, l
 
 router.get(
   '/eta-risks',
-  isAuthenticated, isAdmin('admin'),
+  isAuthenticated, isAdmin('admin', 'sales', 'accounts'),
   catchAsyncErrors(async (req, res) => {
     const now = new Date();
     const orders = await Order.find({ status: { $in: ['Approved', 'InProgress'] } })

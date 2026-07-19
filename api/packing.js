@@ -50,7 +50,7 @@ router.get(
 
 router.get(
   "/grouped",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const grouped = await Packing.aggregate([
       { $group: { _id: "$job", totalBoxes: { $sum: 1 }, totalMeters: { $sum: "$meter" } } },
@@ -71,7 +71,7 @@ router.get(
 
 router.get(
   "/by-job/:jobId",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { jobId } = req.params;
 
@@ -85,7 +85,7 @@ router.get(
 
 router.get(
   "/detail/:id",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const packing = await packingDetailQuery(
       Packing.findById(req.params.id)
@@ -271,7 +271,7 @@ router.get(
 
 router.get(
   "/all",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { limit = 50, skip = 0 } = req.query;
 
@@ -306,7 +306,7 @@ router.get(
 // ═══════════════════════════════════════════════════════════
 router.put(
   "/:id",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const auditReason = requireReason(req);
     if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
@@ -372,7 +372,7 @@ router.put(
 
 router.delete(
   "/:id",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const auditReason = requireReason(req);
     if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to delete", 400));
