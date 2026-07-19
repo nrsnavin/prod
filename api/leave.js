@@ -96,7 +96,7 @@ router.post('/request', isAuthenticated, async (req, res) => {
 // ─────────────────────────────────────────────────────────────
 // GET /pending
 // ─────────────────────────────────────────────────────────────
-router.get('/pending', isAuthenticated, isAdmin('admin'), async (req, res) => {
+router.get('/pending', isAuthenticated, isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const leaves = await LeaveRequest.find({ status:'pending' })
       .populate('employee','name department skill role')
@@ -136,7 +136,7 @@ router.get('/employee/:empId', isAuthenticated, selfOrAdmin, async (req, res) =>
 // ─────────────────────────────────────────────────────────────
 // PUT /:id/approve
 // ─────────────────────────────────────────────────────────────
-router.put('/:id/approve', isAuthenticated, isAdmin('admin'), async (req, res) => {
+router.put('/:id/approve', isAuthenticated, isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { reviewNotes='' } = req.body;
     const leave = await LeaveRequest.findById(req.params.id)
@@ -178,7 +178,7 @@ router.put('/:id/approve', isAuthenticated, isAdmin('admin'), async (req, res) =
 // ─────────────────────────────────────────────────────────────
 // PUT /:id/reject
 // ─────────────────────────────────────────────────────────────
-router.put('/:id/reject', isAuthenticated, isAdmin('admin'), async (req, res) => {
+router.put('/:id/reject', isAuthenticated, isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { reviewNotes='' } = req.body;
     const leave = await LeaveRequest.findById(req.params.id)
@@ -222,7 +222,7 @@ router.delete('/:id', isAuthenticated, async (req, res) => {
 // non-closed shift for the same employee. Powers the AIAdvisor
 // "schedule conflict" card on the admin dashboard.
 // ─────────────────────────────────────────────────────────────
-router.get('/conflicts', isAuthenticated, isAdmin('admin'), async (_req, res) => {
+router.get('/conflicts', isAuthenticated, isAdmin('admin', 'accounts'), async (_req, res) => {
   try {
     // We only care about leaves that haven't yet finished — historical
     // overlaps are noise.

@@ -80,7 +80,7 @@ function fmtRecord(a) {
   };
 }
 
-router.post('/mark', isAdmin('admin'), async (req, res) => {
+router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { date, shift, records = [], markedBy = 'admin' } = req.body;
 
@@ -154,7 +154,7 @@ router.post('/mark', isAdmin('admin'), async (req, res) => {
   }
 });
 
-router.put('/:id', isAdmin('admin'), async (req, res) => {
+router.put('/:id', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { id } = req.params;
     const allowed = ['status','checkIn','checkOut','lateMinutes','leaveType','notes','markedBy'];
@@ -178,7 +178,7 @@ router.put('/:id', isAdmin('admin'), async (req, res) => {
   }
 });
 
-router.get('/date', isAdmin('admin'), async (req, res) => {
+router.get('/date', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { date, shift = 'all' } = req.query;
     if (!date)
@@ -281,7 +281,7 @@ router.get('/employee/:empId', selfOrAdmin, async (req, res) => {
   }
 });
 
-router.get('/summary', isAdmin('admin'), async (req, res) => {
+router.get('/summary', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { startDate, endDate, shift = 'all' } = req.query;
     if (!startDate || !endDate)
@@ -422,7 +422,7 @@ router.get('/monthly/:empId', selfOrAdmin, async (req, res) => {
 // last `days` window. Powers the AIAdvisor latecomer card.
 // Defaults match the gap-audit recommendation: > 3 in 30 days.
 // ─────────────────────────────────────────────────────────────
-router.get('/recurring-latecomers', isAdmin('admin'), async (req, res) => {
+router.get('/recurring-latecomers', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const days      = Math.max(1, parseInt(req.query.days, 10)      || 30);
     const threshold = Math.max(1, parseInt(req.query.threshold, 10) || 3);
@@ -472,7 +472,7 @@ router.get('/recurring-latecomers', isAdmin('admin'), async (req, res) => {
 // to encode a separate holiday model).
 // Defaults match the audit recommendation: > 2 missed in 7 days.
 // ─────────────────────────────────────────────────────────────
-router.get('/repeatedly-unmarked', isAdmin('admin'), async (req, res) => {
+router.get('/repeatedly-unmarked', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const days      = Math.max(1, parseInt(req.query.days, 10)      || 7);
     const threshold = Math.max(1, parseInt(req.query.threshold, 10) || 2);

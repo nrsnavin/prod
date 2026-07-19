@@ -48,7 +48,7 @@ function normDate(raw) {
 
 router.get(
   "/today",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const today    = normDate(new Date());
     const tomorrow = new Date(today);
@@ -104,7 +104,7 @@ router.get(
 
 router.get(
   "/shiftPlanToday",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { date } = req.query;
     if (!date) return next(new ErrorHandler("date is required", 400));
@@ -131,7 +131,7 @@ router.get(
 
 router.get(
   "/shiftPlanById",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));
@@ -264,7 +264,7 @@ router.post('/bulk-enter-production', async (req, res) => {
 
 router.get(
   "/shiftPLan",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));
@@ -287,7 +287,7 @@ router.get(
 
 router.get(
   "/get-in-range",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { start, less } = req.query;
     if (!start || !less) {
@@ -399,7 +399,7 @@ router.post(
 // ────────────────────────────────────────────────────────────────
 router.get(
   "/pending-verification",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const shifts = await ShiftDetail.find({ status: "pending_verification" })
       .populate("employee", "name department role")
@@ -439,7 +439,7 @@ router.get(
 // ────────────────────────────────────────────────────────────────
 router.post(
   "/verify-production",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { shiftId, productionMeters, timer, feedback, note } = req.body;
 
@@ -556,7 +556,7 @@ router.get(
 
 router.get(
   "/all-open-shifts",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const shifts = await ShiftDetail.find({ status: "open" })
       .populate("employee")
@@ -570,7 +570,7 @@ router.get(
 
 router.get(
   "/open",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const shifts = await ShiftDetail.find({ status: "open" })
       .populate("employee")
@@ -722,7 +722,7 @@ router.get(
 
 router.get(
   "/shiftPlanOnDate",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { date } = req.query;
     if (!date) return next(new ErrorHandler("date is required", 400));
@@ -748,7 +748,7 @@ router.get(
 
 router.delete(
   "/deletePlan",
-  isAdmin('admin'),
+  isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));
@@ -789,7 +789,7 @@ router.delete(
   })
 );
 
-router.post('/create-shift-plan', isAdmin('admin'), async (req, res) => {
+router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, res) => {
   try {
     const { date, shiftType, description = '', machines = [] } = req.body;
 
@@ -855,7 +855,7 @@ router.post('/create-shift-plan', isAdmin('admin'), async (req, res) => {
   }
 });
 
-router.post('/confirm-shift-plan', isAdmin('admin'), async (req, res) => {
+router.post('/confirm-shift-plan', isAdmin('admin', 'production'), async (req, res) => {
   try {
     const { id } = req.body;
 
@@ -894,7 +894,7 @@ router.post('/confirm-shift-plan', isAdmin('admin'), async (req, res) => {
 //    - today's productionMeters < (1 - dropPct/100) × the avg
 //  Powers the AIAdvisor "production drop" card.
 // ══════════════════════════════════════════════════════════════
-router.get("/production-anomalies", isAdmin('admin'), async (req, res) => {
+router.get("/production-anomalies", isAdmin('admin', 'production'), async (req, res) => {
   try {
     const dropPct   = Math.max(1, parseFloat(req.query.dropPct)   || 30);
     const minShifts = Math.max(1, parseInt(req.query.minShifts, 10) || 5);
@@ -976,7 +976,7 @@ router.get("/production-anomalies", isAdmin('admin'), async (req, res) => {
 //
 //  Powers the AIAdvisor "shift ↔ attendance mismatch" card.
 // ══════════════════════════════════════════════════════════════
-router.get("/attendance-mismatch", isAdmin('admin'), async (req, res) => {
+router.get("/attendance-mismatch", isAdmin('admin', 'production'), async (req, res) => {
   try {
     const days = Math.max(1, parseInt(req.query.days, 10) || 7);
     const since = new Date(Date.now() - days * 86_400_000);

@@ -57,7 +57,7 @@ async function getOrCreateConfig(year) {
 
 router.get(
   "/config",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res) => {
     const year = parseInt(req.query.year) || currentYear();
     const config = await getOrCreateConfig(year);
@@ -84,7 +84,7 @@ router.get(
 
 router.put(
   "/config",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const year = parseInt(req.body.year) || currentYear();
     const cfg  = await getOrCreateConfig(year);
@@ -113,7 +113,7 @@ router.put(
 
 router.post(
   "/trigger",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const year = parseInt(req.body.year) || currentYear();
     const cfg  = await getOrCreateConfig(year);
@@ -210,7 +210,7 @@ router.post(
 
 router.get(
   "/records",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res) => {
     const year    = parseInt(req.query.year) || currentYear();
     const status  = req.query.status || "all";
@@ -363,7 +363,7 @@ router.get(
 
 router.put(
   "/records/:id/pay",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const record = await BonusRecord.findById(req.params.id);
     if (!record) return next(new ErrorHandler("Bonus record not found", 404));
@@ -386,7 +386,7 @@ router.put(
 
 router.delete(
   "/year/:year/reset",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const year = parseInt(req.params.year);
     if (isNaN(year)) return next(new ErrorHandler("Invalid year", 400));
@@ -412,7 +412,7 @@ router.delete(
 
 router.put(
   "/employee/:id/percent",
-  isAdmin('admin'),
+  isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const emp = await Employee.findById(req.params.id);
     if (!emp) return next(new ErrorHandler("Employee not found", 404));
