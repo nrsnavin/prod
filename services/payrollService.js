@@ -153,8 +153,15 @@ async function computePayroll(empId, year, month) {
     });
   }
 
-  let lateDeductions   = r2(lateDeductionTotal);
-  let totalDeductions  = r2(lateDeductionTotal + excessPenalty + wastagePenalty);
+  // Late deductions are ALREADY reflected in grossEarnings — each late
+  // shift's pay was reduced (pay -= ded) before being summed, exactly
+  // like an absent shift's lost pay. Adding lateDeductionTotal into
+  // totalDeductions as well double-subtracted it in
+  //   netPay = grossEarnings - totalDeductions + bonuses
+  // so any late employee was short-paid by their late deduction. The
+  // late line item stays for display, mirroring the (display-only)
+  // absent line which is likewise NOT in totalDeductions.
+  let totalDeductions  = r2(excessPenalty + wastagePenalty);
 
   let noLeaveBonusAmt       = 0;
   let perfectAttBonusAmt    = 0;
@@ -198,12 +205,21 @@ async function computePayroll(empId, year, month) {
 
   const bonusBeforeAdvance = r2(noLeaveBonusAmt + perfectAttBonusAmt + streakBonusTotal);
 
+  // Scope advances to THIS pay month via deductMonth/deductYear only —
+  // NOT deductedInPayroll. An advance earmarked for June belongs to
+  // June's payroll every time June is computed. Filtering on the
+  // already-deducted flag made regeneration silently DROP the recovery:
+  // the first /generate flipped the flag, so a re-run found no advance
+  // and net pay jumped back up by the advance amount (company loses the
+  // recovery). deductMonth/deductYear already pins each advance to
+  // exactly one payroll month, so this can never double-recover across
+  // months. The route still flips the flag for the outstanding-advances
+  // view.
   const advances = await AdvanceRequest.find({
-    employee:          empId,
-    status:            'approved',
-    deductMonth:       month,
-    deductYear:        year,
-    deductedInPayroll: false,
+    employee:    empId,
+    status:      'approved',
+    deductMonth: month,
+    deductYear:  year,
   }).lean();
 
   let totalAdvanceDeduction = 0;

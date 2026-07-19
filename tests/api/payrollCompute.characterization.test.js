@@ -175,3 +175,39 @@ describe('computePayroll — advance recovery + netPay', () => {
     expect(p.netPay).toBe(0);
   });
 });
+
+describe('computePayroll — regression guards (bug fixes)', () => {
+  // Bug 1: the late cut was reflected in grossEarnings AND added to
+  // totalDeductions, so netPay = gross - deductions + bonus subtracted it
+  // twice. A late employee was short-paid by exactly the late amount.
+  test('late deduction is NOT double-counted in netPay', async () => {
+    const emp = await makeEmp();
+    // 40 late, 10 grace → 30 billable → ₹50 off the ₹1200 DAY shift.
+    await att(emp._id, 2, { status: 'present', lateMinutes: 40 });
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.grossEarnings).toBeCloseTo(1150, 2); // late already applied here
+    // No excess-absent / wastage deductions, so totalDeductions must be 0 —
+    // the late must not appear here a second time.
+    expect(p.totalDeductions).toBe(0);
+    // one clean shift → no-leave(300) + perfect(500) bonuses.
+    // net = 1150 (gross, late already off) + 800 bonus = 1950.
+    expect(p.netPay).toBeCloseTo(1950, 2);
+  });
+
+  // Bug 2: filtering advances on deductedInPayroll:false meant a payroll
+  // RE-generation (after the first run flipped the flag) found no advance
+  // and net pay jumped up by the advance amount — the recovery was lost.
+  // computePayroll must recover a month's advance even once flagged.
+  test('an already-flagged advance for the month is still recovered on re-compute', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await att(emp._id, 3);
+    await AdvanceRequest.create({
+      employee: emp._id, amount: 500, status: 'approved',
+      deductMonth: MONTH, deductYear: YEAR, deductedInPayroll: true, // already flipped
+    });
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.totalAdvanceDeduction).toBe(500);
+    expect(p.netPay).toBe(2700); // gross 2400 + bonus 800 − advance 500
+  });
+});

@@ -99,6 +99,18 @@ router.post('/generate', isAdmin('admin'), async (req, res) => {
 
     const results = [], errors = [];
     for (const id of empIds) {
+      // Never overwrite a finalized/paid payroll. /generate upserts with
+      // $set:data (status:'draft'), so a re-run would silently revert a
+      // paid slip to draft and recompute the amount AFTER payment. Only
+      // draft (or not-yet-existing) rows may be regenerated.
+      const existing = await Payroll.findOne(
+        { employee: id, year: +year, month: +month }, 'status'
+      ).lean();
+      if (existing && ['finalized', 'paid'].includes(existing.status)) {
+        errors.push({ employeeId: id, error: `Payroll already ${existing.status} — not regenerated` });
+        continue;
+      }
+
       const session = await mongoose.startSession();
       try {
         // Payroll upsert + advance flip must land or roll back as one
