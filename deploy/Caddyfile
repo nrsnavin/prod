@@ -33,3 +33,28 @@ api.baluelastics.com {
 		header_up Host {host}
 	}
 }
+
+# ── React web app (prod_web) ───────────────────────────────────────
+# Serves the built SPA (dist/) as static files with its own auto-TLS
+# cert. The app itself calls the API cross-origin at
+# https://api.baluelastics.com — so the backend's CORS_ORIGINS env MUST
+# include https://erp.baluelastics.com (the auth cookie is
+# SameSite=None; Secure, which allows the cross-subdomain request).
+#
+# Deploy: build prod_web (`npm run build`) and put the contents of dist/
+# into /var/www/erp on this box. See deploy/WEB_DEPLOY.md.
+erp.baluelastics.com {
+	encode gzip
+	root * /var/www/erp
+
+	# Long-cache the fingerprinted assets; never cache index.html so a
+	# new deploy is picked up immediately.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	header /index.html Cache-Control "no-cache"
+
+	# SPA fallback — client-side routes (/orders, /reports/...) resolve
+	# to index.html instead of 404ing.
+	try_files {path} /index.html
+	file_server
+}
