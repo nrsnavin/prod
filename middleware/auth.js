@@ -54,7 +54,9 @@ exports.isAdmin = (...roles) => {
 // Compares with `req.user.employee` (the Employee ObjectId linked
 // to the requesting User account).
 exports.selfOrAdmin = (req, res, next) => {
-    if (req.user?.role === 'admin') return next();
+    // `accounts` (finance) administers payroll/HR, so it reads any
+    // employee's records just like admin; everyone else only their own.
+    if (req.user?.role === 'admin' || req.user?.role === 'accounts') return next();
     const wantEmp =
         req.params?.empId ??
         req.params?.id    ??
