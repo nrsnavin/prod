@@ -25,11 +25,20 @@ connectDatabase.connectDatabase();
 require("./utils/outbox").startOutboxDispatcher();
 
 // create server
-const server = app.listen(process.env.PORT, () => {
+//
+// HOST controls the bind address. Left unset it binds all interfaces
+// (0.0.0.0) — the historical behaviour, fine for direct access. Behind
+// a TLS reverse proxy (nginx/Caddy) set HOST=127.0.0.1 so the plaintext
+// port is reachable ONLY from the proxy on the same box and never from
+// the public internet. See deploy/TLS_SETUP.md.
+const HOST = process.env.HOST;
+const onListen = () =>
   console.log(
-    `Server is running on http://localhost:${process.env.PORT}`
+    `Server is running on http://${HOST || "0.0.0.0"}:${process.env.PORT}`
   );
-});
+const server = HOST
+  ? app.listen(process.env.PORT, HOST, onListen)
+  : app.listen(process.env.PORT, onListen);
 
 // unhandled promise rejection
 process.on("unhandledRejection", (err) => {

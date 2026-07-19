@@ -1,0 +1,35 @@
+# ── systemd unit for the Jarvis Node backend ──────────────────────
+#
+# Runs the API as a managed service that restarts on crash and on boot,
+# bound to localhost so only the TLS proxy can reach it. This also fixes
+# the "the deploy didn't take because nobody restarted node" class of
+# incident — `systemctl restart jarvis` is the one command after a pull.
+#
+# Install:
+#   sudo cp deploy/jarvis.service /etc/systemd/system/jarvis.service
+#   # edit User / WorkingDirectory / EnvironmentFile below to match the box
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now jarvis
+#   systemctl status jarvis
+#   journalctl -u jarvis -f          # tail logs (request + error JSON lines)
+
+[Unit]
+Description=Jarvis ERP API
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/prod
+# Secrets live here, OUTSIDE git (untracked). Provision this file on the
+# box; never commit it. Must define PORT, MONGO_URL, JWT_SECRET_KEY, etc.
+EnvironmentFile=/home/ubuntu/prod/config/.env
+# Bind to localhost — the TLS proxy is the only public entry point.
+Environment=NODE_ENV=PRODUCTION
+Environment=HOST=127.0.0.1
+ExecStart=/usr/bin/node index.js
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

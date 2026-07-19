@@ -1,0 +1,35 @@
+# ── Jarvis ERP — Caddy reverse proxy with automatic HTTPS ──────────
+#
+# Recommended TLS front end. Caddy obtains and auto-renews a Let's
+# Encrypt certificate on its own — no certbot, no cron, no renewal
+# script. It listens on 443 (and redirects 80→443) and forwards to the
+# Node app on localhost:2701.
+#
+# Prerequisites:
+#   1. A DNS A record: api.yourdomain.com → 13.233.117.153
+#   2. AWS security group / firewall: inbound 80 and 443 open;
+#      2701 NOT open to the public (proxy reaches it on localhost).
+#   3. Node bound to localhost: set HOST=127.0.0.1 in the app's env.
+#
+# Replace api.yourdomain.com with your real hostname, then:
+#   sudo caddy run --config deploy/Caddyfile        # foreground test
+#   sudo caddy start --config deploy/Caddyfile      # background
+# or install as a service (see deploy/TLS_SETUP.md).
+
+api.yourdomain.com {
+	encode gzip
+
+	# Allow the 5 MB multer file uploads (OCR / data import). The Node
+	# app enforces its own 1 MB JSON cap and 5 MB file cap.
+	request_body {
+		max_size 6MB
+	}
+
+	reverse_proxy 127.0.0.1:2701 {
+		# Preserve the real client info so the app's `trust proxy` sees
+		# the true protocol/IP (rate-limit keying, secure-cookie check).
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-For {remote_host}
+		header_up Host {host}
+	}
+}
