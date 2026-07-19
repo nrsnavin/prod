@@ -15,10 +15,10 @@ them on the EC2 box.
 Let's Encrypt issues certs for **domain names**, not IPs. You need a
 hostname pointing at the server:
 
-- Add a DNS **A record**: `api.yourdomain.com → 13.233.117.153`
-- Confirm it resolves: `dig +short api.yourdomain.com` → `13.233.117.153`
+- Add a DNS **A record**: `api.nhstyx.in → 13.233.117.153`
+- Confirm it resolves: `dig +short api.nhstyx.in` → `13.233.117.153`
 
-Replace `api.yourdomain.com` in the configs below with your real host.
+Replace `api.nhstyx.in` in the configs below with your real host.
 
 ## Firewall / AWS security group
 
@@ -47,8 +47,7 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
 sudo apt update && sudo apt install -y caddy
 
 # Use our config (edit the hostname first)
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
-sudo nano /etc/caddy/Caddyfile          # set api.yourdomain.com
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # already set to api.nhstyx.in
 sudo systemctl restart caddy
 sudo systemctl status caddy
 ```
@@ -61,13 +60,12 @@ forever. Done.
 ```sh
 sudo apt install -y nginx certbot python3-certbot-nginx
 
-sudo cp deploy/nginx-jarvis.conf /etc/nginx/sites-available/jarvis
-sudo nano /etc/nginx/sites-available/jarvis     # set api.yourdomain.com
+sudo cp deploy/nginx-jarvis.conf /etc/nginx/sites-available/jarvis   # already set to api.nhstyx.in
 sudo ln -s /etc/nginx/sites-available/jarvis /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 
 # Provision the cert (edits the config in place, installs a renew timer)
-sudo certbot --nginx -d api.yourdomain.com
+sudo certbot --nginx -d api.nhstyx.in
 
 sudo nginx -t && sudo systemctl reload nginx
 ```
@@ -92,11 +90,11 @@ restart jarvis`.
 
 ## Point the clients at HTTPS
 
-- **Web** (`prod_web`): set the API base to `https://api.yourdomain.com`
+- **Web** (`prod_web`): set the API base to `https://api.nhstyx.in`
   and add that origin to the backend `CORS_ORIGINS` env
   (comma-separated), then rebuild/redeploy the web app.
 - **Mobile** (`flu`): rebuild with
-  `--dart-define=API_BASE_URL=https://api.yourdomain.com/api/v2` and
+  `--dart-define=API_BASE_URL=https://api.nhstyx.in/api/v2` and
   block cleartext — see `flu/MOBILE_TLS.md`. Then resubmit.
 - **Twilio/WhatsApp**: the public report PDFs under `/public` are now
   served over HTTPS through the proxy — update any configured media base
@@ -105,9 +103,9 @@ restart jarvis`.
 ## Verify
 
 ```sh
-curl -I https://api.yourdomain.com/api/v2/health          # 200, valid cert
-curl    https://api.yourdomain.com/api/v2/health/ready     # {"status":"ready","db":"connected"}
-curl -I http://api.yourdomain.com/api/v2/health           # 301 → https
+curl -I https://api.nhstyx.in/api/v2/health          # 200, valid cert
+curl    https://api.nhstyx.in/api/v2/health/ready     # {"status":"ready","db":"connected"}
+curl -I http://api.nhstyx.in/api/v2/health           # 301 → https
 # From another machine, confirm the plaintext port is now closed:
 curl --max-time 5 http://13.233.117.153:2701/api/v2/health # should hang / refuse
 ```
