@@ -15,10 +15,11 @@ them on the EC2 box.
 Let's Encrypt issues certs for **domain names**, not IPs. You need a
 hostname pointing at the server:
 
-- Add a DNS **A record**: `api.nhstyx.in → 13.233.117.153`
-- Confirm it resolves: `dig +short api.nhstyx.in` → `13.233.117.153`
+- Add a DNS **A record**: `api.baluelastics.com → 13.233.117.153`
+- Confirm it resolves: `dig +short api.baluelastics.com` → `13.233.117.153`
 
-Replace `api.nhstyx.in` in the configs below with your real host.
+This is already configured and live — the committed configs use
+`api.baluelastics.com`, so there's nothing to edit.
 
 ## Firewall / AWS security group
 
@@ -46,8 +47,8 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
   | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt update && sudo apt install -y caddy
 
-# Use our config (edit the hostname first)
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # already set to api.nhstyx.in
+# Use our config — already set to api.baluelastics.com, nothing to edit
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
 sudo systemctl restart caddy
 sudo systemctl status caddy
 ```
@@ -60,12 +61,12 @@ forever. Done.
 ```sh
 sudo apt install -y nginx certbot python3-certbot-nginx
 
-sudo cp deploy/nginx-jarvis.conf /etc/nginx/sites-available/jarvis   # already set to api.nhstyx.in
+sudo cp deploy/nginx-jarvis.conf /etc/nginx/sites-available/jarvis   # already set to api.baluelastics.com
 sudo ln -s /etc/nginx/sites-available/jarvis /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 
 # Provision the cert (edits the config in place, installs a renew timer)
-sudo certbot --nginx -d api.nhstyx.in
+sudo certbot --nginx -d api.baluelastics.com
 
 sudo nginx -t && sudo systemctl reload nginx
 ```
@@ -90,11 +91,11 @@ restart jarvis`.
 
 ## Point the clients at HTTPS
 
-- **Web** (`prod_web`): set the API base to `https://api.nhstyx.in`
+- **Web** (`prod_web`): set the API base to `https://api.baluelastics.com`
   and add that origin to the backend `CORS_ORIGINS` env
   (comma-separated), then rebuild/redeploy the web app.
 - **Mobile** (`flu`): rebuild with
-  `--dart-define=API_BASE_URL=https://api.nhstyx.in/api/v2` and
+  `--dart-define=API_BASE_URL=https://api.baluelastics.com/api/v2` and
   block cleartext — see `flu/MOBILE_TLS.md`. Then resubmit.
 - **Twilio/WhatsApp**: the public report PDFs under `/public` are now
   served over HTTPS through the proxy — update any configured media base
@@ -103,9 +104,9 @@ restart jarvis`.
 ## Verify
 
 ```sh
-curl -I https://api.nhstyx.in/api/v2/health          # 200, valid cert
-curl    https://api.nhstyx.in/api/v2/health/ready     # {"status":"ready","db":"connected"}
-curl -I http://api.nhstyx.in/api/v2/health           # 301 → https
+curl -I https://api.baluelastics.com/api/v2/health          # 200, valid cert
+curl    https://api.baluelastics.com/api/v2/health/ready     # {"status":"ready","db":"connected"}
+curl -I http://api.baluelastics.com/api/v2/health           # 301 → https
 # From another machine, confirm the plaintext port is now closed:
 curl --max-time 5 http://13.233.117.153:2701/api/v2/health # should hang / refuse
 ```
