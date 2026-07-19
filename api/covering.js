@@ -31,12 +31,17 @@ router.get(
 
     const skip = (Number(page) - 1) * Number(limit);
 
+    // "all" (the default tab in the web UI) means no status filter; any
+    // other value must be a real status. Mirrors api/warping.js so the two
+    // sibling list endpoints behave the same.
     const validStatuses = ["open", "in_progress", "completed", "cancelled"];
-    if (!validStatuses.includes(status)) {
-      return next(new ErrorHandler(`Invalid status: ${status}`, 400));
+    const filter = {};
+    if (status && status !== "all") {
+      if (!validStatuses.includes(status)) {
+        return next(new ErrorHandler(`Invalid status: ${status}`, 400));
+      }
+      filter.status = status;
     }
-
-    let filter = { status };
 
     if (search && search.trim()) {
       const jobNo = parseInt(search.trim(), 10);
