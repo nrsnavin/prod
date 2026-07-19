@@ -6,7 +6,7 @@
 # Node app on localhost:2701.
 #
 # Prerequisites:
-#   1. A DNS A record: api.baluelastics.com → 13.233.117.153
+#   1. A DNS A record: api.baluelastics.com → 3.6.171.27
 #   2. AWS security group / firewall: inbound 80 and 443 open;
 #      2701 NOT open to the public (proxy reaches it on localhost).
 #   3. Node bound to localhost: set HOST=127.0.0.1 in the app's env.

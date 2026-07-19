@@ -1,6 +1,6 @@
 # Standing up TLS in front of Jarvis (go-live)
 
-The API currently listens on `http://13.233.117.153:2701` in the clear —
+The API currently listens on `http://3.6.171.27:2701` in the clear —
 auth cookies and all business data are interceptable on any shared
 network. This puts an auto-renewing HTTPS proxy in front so every client
 (web + mobile) talks encrypted.
@@ -15,8 +15,8 @@ them on the EC2 box.
 Let's Encrypt issues certs for **domain names**, not IPs. You need a
 hostname pointing at the server:
 
-- Add a DNS **A record**: `api.baluelastics.com → 13.233.117.153`
-- Confirm it resolves: `dig +short api.baluelastics.com` → `13.233.117.153`
+- Add a DNS **A record**: `api.baluelastics.com → 3.6.171.27`
+- Confirm it resolves: `dig +short api.baluelastics.com` → `3.6.171.27`
 
 This is already configured and live — the committed configs use
 `api.baluelastics.com`, so there's nothing to edit.
@@ -108,7 +108,7 @@ curl -I https://api.baluelastics.com/api/v2/health          # 200, valid cert
 curl    https://api.baluelastics.com/api/v2/health/ready     # {"status":"ready","db":"connected"}
 curl -I http://api.baluelastics.com/api/v2/health           # 301 → https
 # From another machine, confirm the plaintext port is now closed:
-curl --max-time 5 http://13.233.117.153:2701/api/v2/health # should hang / refuse
+curl --max-time 5 http://3.6.171.27:2701/api/v2/health # should hang / refuse
 ```
 
 An A/A+ at https://www.ssllabs.com/ssltest/ confirms the TLS config is

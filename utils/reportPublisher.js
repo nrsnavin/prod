@@ -18,8 +18,12 @@ const REPORTS_DIR = path.join(__dirname, "..", "public", "reports");
 const RETENTION_DAYS = 14;       // sweep out PDFs older than this on each run
 
 function _baseUrl() {
+  // Public base for the report-PDF links Twilio fetches to attach to
+  // WhatsApp messages. Set PUBLIC_BASE_URL in the environment; the
+  // default is the production HTTPS host so links are secure by default
+  // once TLS is up. (Behind the proxy, /public is served over HTTPS.)
   return (process.env.PUBLIC_BASE_URL
-    || "http://13.233.117.153:2701").replace(/\/$/, "");
+    || "https://api.baluelastics.com").replace(/\/$/, "");
 }
 
 async function publishPdf(buffer, filename) {
