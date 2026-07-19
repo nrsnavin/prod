@@ -55,9 +55,16 @@ exceljs@4.4.0  →  uuid@^8.3.0   (installed 8.3.2)
 
 ## Web (`prod_web`) — separate checkout
 
-The 2 web advisories flagged in the security review live in the web repo
-(likely a `vite`/build-chain major). Same discipline applies: bump on a
-branch, run `npm run build` + the app, then merge. Not a backend blocker.
+The 2 web advisories are `esbuild` (GHSA-67mh-4wv8-2f99) → `vite`. This is
+a **dev-server-only** issue: it lets a website talk to the running
+`vite dev` server and read responses. It does **not** affect the
+production build — the shipped app is static files served by a real web
+server, with no esbuild dev server in the picture. So it is **not a
+production risk** and does not block launch.
+
+Fixing it requires `vite@8` (a breaking major from the current version),
+which needs a real `npm run build` + smoke pass. Do it as a fast-follow
+on a branch, not on launch eve. Do **not** `--force` it blind.
 
 ## Standing policy
 
