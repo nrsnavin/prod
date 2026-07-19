@@ -30,14 +30,14 @@ router.use(isAuthenticated);
 const r2 = (n) => Math.round(n * 100) / 100;
 
 
-router.get('/settings', isAdmin('admin'), async (req, res) => {
+router.get('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const s = await PayrollSettings.findOne({}).lean() ?? {};
     res.json({ success: true, data: s });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.post('/settings', isAdmin('admin'), async (req, res) => {
+router.post('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const allowed = ['casualLeavesPerMonth','sickLeavesPerMonth','lateGracePeriodMinutes',
                      'penaltyPerExcessAbsent','noLeaveBonus','perfectAttendanceBonus','streakBonusPer7Shifts'];
@@ -48,7 +48,7 @@ router.post('/settings', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.get('/employees', isAdmin('admin'), async (req, res) => {
+router.get('/employees', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const emps = await Employee.find({})
       .select('name department role skill hourlyRate').sort({ name: 1 }).lean();
@@ -65,7 +65,7 @@ router.get('/employees', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.post('/employees/:id/rate', isAdmin('admin'), async (req, res) => {
+router.post('/employees/:id/rate', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const rate = Number(req.body.hourlyRate);
     if (isNaN(rate) || rate < 0)
@@ -84,7 +84,7 @@ router.post('/employees/:id/rate', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.post('/generate', isAdmin('admin'), async (req, res) => {
+router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { year, month, employeeId } = req.body;
     if (!year || !month)
@@ -158,7 +158,7 @@ router.post('/generate', isAdmin('admin'), async (req, res) => {
   }
 });
 
-router.get('/dashboard', isAdmin('admin'), async (req, res) => {
+router.get('/dashboard', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const year  = +(req.query.year  || new Date().getFullYear());
     const month = +(req.query.month || new Date().getMonth() + 1);
@@ -222,7 +222,7 @@ router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/:id/finalize', isAdmin('admin'), async (req, res) => {
+router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const p = await Payroll.findByIdAndUpdate(req.params.id,
       { $set: { status: 'finalized', finalizedAt: new Date() } }, { new: true })
@@ -232,7 +232,7 @@ router.put('/:id/finalize', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/:id/pay', isAdmin('admin'), async (req, res) => {
+router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { paidBy = 'admin', paymentNote = '' } = req.body;
     const p = await Payroll.findByIdAndUpdate(req.params.id,
@@ -243,7 +243,7 @@ router.put('/:id/pay', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.get('/advance', isAdmin('admin'), async (req, res) => {
+router.get('/advance', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const filter = {};
     if (req.query.employeeId) filter.employee = req.query.employeeId;
@@ -275,7 +275,7 @@ router.post('/advance', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/advance/:id/approve', isAdmin('admin'), async (req, res) => {
+router.put('/advance/:id/approve', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { deductMonth, deductYear, adminNotes = '', approvedBy = 'admin' } = req.body;
     if (!deductMonth || !deductYear)
@@ -291,7 +291,7 @@ router.put('/advance/:id/approve', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/advance/:id/reject', isAdmin('admin'), async (req, res) => {
+router.put('/advance/:id/reject', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const adv = await AdvanceRequest.findByIdAndUpdate(req.params.id, {
       $set: { status: 'rejected', adminNotes: req.body.adminNotes || '' },
@@ -301,7 +301,7 @@ router.put('/advance/:id/reject', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.post('/yearly-bonus/compute', isAdmin('admin'), async (req, res) => {
+router.post('/yearly-bonus/compute', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const year = +(req.query.year || req.body.year || new Date().getFullYear());
     const payrolls = await Payroll.find({ year, status: { $in: ['finalized','paid'] } }).lean();
@@ -340,7 +340,7 @@ router.post('/yearly-bonus/compute', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.get('/yearly-bonus', isAdmin('admin'), async (req, res) => {
+router.get('/yearly-bonus', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const year = +(req.query.year || new Date().getFullYear());
     const docs = await YearlyBonus.find({ year })
@@ -349,7 +349,7 @@ router.get('/yearly-bonus', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.put('/yearly-bonus/:id/pay', isAdmin('admin'), async (req, res) => {
+router.put('/yearly-bonus/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { paidBy = 'admin', paymentNote = '' } = req.body;
     const doc = await YearlyBonus.findByIdAndUpdate(req.params.id,
@@ -361,7 +361,7 @@ router.put('/yearly-bonus/:id/pay', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.get('/analytics', isAdmin('admin'), async (req, res) => {
+router.get('/analytics', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const year  = +(req.query.year  || new Date().getFullYear());
     const month = req.query.month ? +req.query.month : null;
@@ -427,7 +427,7 @@ router.get('/analytics', isAdmin('admin'), async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.get('/attendance', isAdmin('admin'), async (req, res) => {
+router.get('/attendance', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { employeeId, year, month } = req.query;
     if (!employeeId || !year || !month)
@@ -497,7 +497,7 @@ router.get('/attendance', isAdmin('admin'), async (req, res) => {
 //       yet have a payroll row (so a partial prior run can finish
 //       cleanly on retry).
 // ══════════════════════════════════════════════════════════════
-router.post('/auto-generate', isAdmin('admin'), async (req, res) => {
+router.post('/auto-generate', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     // Default to the last completed month so the typical "1st of
     // the month" trigger does the right thing without the client
@@ -634,7 +634,7 @@ router.post('/auto-generate', isAdmin('admin'), async (req, res) => {
 //  card pointing back at the payroll module so the admin can
 //  re-run / investigate.
 // ══════════════════════════════════════════════════════════════
-router.get('/outstanding-advances', isAdmin('admin'), async (_req, res) => {
+router.get('/outstanding-advances', isAdmin('admin', 'accounts'), async (_req, res) => {
   try {
     const now = new Date();
     const curYear  = now.getFullYear();

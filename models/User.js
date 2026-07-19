@@ -26,6 +26,15 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    // Shop-floor department that drives the web app's nav + route access
+    // (preparatory / weaving / packing / finance / admin). The coarser
+    // `role` above is DERIVED from this (see utils/roles.js) and is what
+    // the backend RBAC gates enforce. Optional so pre-existing users
+    // (which only carry `role`) remain valid.
+    department: {
+      type: String,
+      enum: ["admin", "preparatory", "weaving", "packing", "finance"],
+    },
     // Optional link to the Employee document. Set on User creation
     // for any user that's also a workforce member, so the mobile
     // employee app can look up their wastage / shift / payroll

@@ -8,6 +8,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const sendToken = require("../utils/jwtToken.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
+const { DEPARTMENTS, roleForDepartment, isDepartment } = require("../utils/roles");
 var jwt = require('jsonwebtoken');
 
 
@@ -69,6 +70,7 @@ router.post(
           username: user.name,
           id: user._id,
           role: user.role,
+          department: user.department || null,
           token: token,
         });
     } catch (error) {
@@ -119,11 +121,12 @@ router.get(
     res.status(200).json({
       success: true,
       user: {
-        id:       user._id,
-        name:     user.name,
-        email:    user.email,
-        role:     user.role,
-        employee: user.employee || null,
+        id:         user._id,
+        name:       user.name,
+        email:      user.email,
+        role:       user.role,
+        department: user.department || null,
+        employee:   user.employee || null,
       },
     });
   })
@@ -284,5 +287,109 @@ function generateToken(user) {
   };
   return jwt.sign(payload, process.env.JWT_SECRET_KEY, options);
 }
+
+// ══════════════════════════════════════════════════════════════
+//  USER MANAGEMENT (admin-only) — backs the web app's Users screen.
+//  Departments drive the web nav; the backend `role` is derived from
+//  the department (utils/roles.js) and is what the RBAC gates enforce.
+// ══════════════════════════════════════════════════════════════
+
+// List all users (no password) for the admin Users screen.
+router.get(
+  "/manage/list",
+  isAuthenticated, isAdmin("admin"),
+  catchAsyncErrors(async (req, res) => {
+    const users = await User.find({})
+      .select("name email role department createdAt")
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, departments: DEPARTMENTS, users });
+  })
+);
+
+// Create a user with a department; role is derived, never taken raw.
+router.post(
+  "/manage/create",
+  isAuthenticated, isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const name       = typeof req.body.name === "string" ? req.body.name.trim() : "";
+    const email      = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const password   = typeof req.body.password === "string" ? req.body.password : "";
+    const department = typeof req.body.department === "string" ? req.body.department : "";
+
+    if (!name || !email || !password || !department)
+      return next(new ErrorHandler("name, email, password and department are required", 400));
+    if (!isDepartment(department))
+      return next(new ErrorHandler(`Invalid department: ${department}`, 400));
+    if (password.length < 4)
+      return next(new ErrorHandler("Password must be at least 4 characters", 400));
+
+    const exists = await User.findOne({ email }).lean();
+    if (exists) return next(new ErrorHandler("A user with this email already exists", 409));
+
+    const user = await User.create({
+      name, email, password, department, role: roleForDepartment(department),
+    });
+    res.status(201).json({
+      success: true,
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department },
+    });
+  })
+);
+
+// Update a user's department (role re-derived), name, email, or password.
+router.put(
+  "/manage/:id",
+  isAuthenticated, isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const user = await User.findById(req.params.id).select("+password");
+    if (!user) return next(new ErrorHandler("User not found", 404));
+
+    if (typeof req.body.name === "string" && req.body.name.trim())
+      user.name = req.body.name.trim();
+    if (typeof req.body.email === "string" && req.body.email.trim())
+      user.email = req.body.email.trim().toLowerCase();
+    if (typeof req.body.department === "string" && req.body.department) {
+      if (!isDepartment(req.body.department))
+        return next(new ErrorHandler(`Invalid department: ${req.body.department}`, 400));
+      // Guard: don't strip the last admin of their admin department.
+      if (user.department === "admin" && req.body.department !== "admin") {
+        const admins = await User.countDocuments({ department: "admin" });
+        if (admins <= 1) return next(new ErrorHandler("Cannot remove the last admin", 400));
+      }
+      user.department = req.body.department;
+      user.role       = roleForDepartment(req.body.department);
+    }
+    if (typeof req.body.password === "string" && req.body.password) {
+      if (req.body.password.length < 4)
+        return next(new ErrorHandler("Password must be at least 4 characters", 400));
+      user.password = req.body.password; // pre-save hook re-hashes
+    }
+
+    await user.save();
+    res.json({
+      success: true,
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department },
+    });
+  })
+);
+
+// Delete a user. Can't delete yourself or the last admin.
+router.delete(
+  "/manage/:id",
+  isAuthenticated, isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    if (String(req.params.id) === String(req.user._id || req.user.id))
+      return next(new ErrorHandler("You cannot delete your own account", 400));
+    const user = await User.findById(req.params.id);
+    if (!user) return next(new ErrorHandler("User not found", 404));
+    if (user.department === "admin" || user.role === "admin") {
+      const admins = await User.countDocuments({ $or: [{ department: "admin" }, { role: "admin" }] });
+      if (admins <= 1) return next(new ErrorHandler("Cannot delete the last admin", 400));
+    }
+    await user.deleteOne();
+    res.json({ success: true, message: "User deleted" });
+  })
+);
 
 module.exports = router;
