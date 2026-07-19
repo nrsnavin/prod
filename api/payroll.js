@@ -17,6 +17,8 @@ const Payroll          = require('../models/Payroll');
 const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
 const YearlyBonus      = require('../models/YearlyBonus');
+const ShiftDetail      = require('../models/ShiftDetail');
+const Wastage          = require('../models/Wastage');
 const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 const { EMPLOYEE_CARD_FIELDS } = require('../utils/populateFields');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
@@ -254,6 +256,31 @@ router.get('/advance', isAdmin('admin', 'accounts'), async (req, res) => {
       .limit(+(req.query.limit || 100))
       .lean();
     res.json({ success: true, data: advances });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// Admin/finance entry — record an advance GIVEN to any employee, born
+// approved with its deduction month set (no separate approval step:
+// the person entering it IS the approver). Distinct from the
+// worker-facing POST /advance below, which creates a pending request.
+router.post('/advance/admin-create', isAdmin('admin', 'accounts'), async (req, res) => {
+  try {
+    const { employee, amount, deductMonth, deductYear, reason = '' } = req.body;
+    if (!employee || !amount)
+      return res.status(400).json({ success: false, message: 'employee and amount required' });
+    if (!deductMonth || !deductYear)
+      return res.status(400).json({ success: false, message: 'deductMonth and deductYear required (which payroll month recovers it)' });
+    const emp = await Employee.findById(employee, 'name').lean();
+    if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
+
+    const adv = await AdvanceRequest.create({
+      employee, amount: +amount, reason,
+      status: 'approved',
+      deductMonth: +deductMonth, deductYear: +deductYear,
+      approvedBy: req.user?.name || 'admin',
+      approvedAt: new Date(),
+    });
+    res.status(201).json({ success: true, message: `Advance of ₹${adv.amount} recorded for ${emp.name}`, data: adv });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
@@ -688,6 +715,79 @@ router.get('/outstanding-advances', isAdmin('admin', 'accounts'), async (_req, r
 
 // Exported for characterization/unit tests (Phase B0.4) — the pure
 // read-only pay computation the /generate routes build on.
+// ── EMPLOYEE PAYROLL OVERVIEW ─────────────────────────────────
+// GET /employee-overview/:empId?year=&month=
+// One call backing the employee detail page's pay section: shift
+// rates, the month's computed payroll (attendance counts, earnings,
+// bonuses, deductions, net), the employee's production output, and
+// their wastage entries for the month. Read-only — nothing is saved.
+router.get('/employee-overview/:empId', isAdmin('admin', 'accounts'), async (req, res) => {
+  try {
+    const empId = req.params.empId;
+    const now   = new Date();
+    const year  = +(req.query.year  || now.getFullYear());
+    const month = +(req.query.month || now.getMonth() + 1);
+    if (!(month >= 1 && month <= 12) || !(year >= 2000 && year <= 2100))
+      return res.status(400).json({ success: false, message: 'Invalid year/month' });
+
+    const emp = await Employee.findById(empId, 'name department role skill hourlyRate').lean();
+    if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
+    const rate = emp.hourlyRate ?? 0;
+
+    const start = new Date(year, month - 1, 1);
+    const end   = new Date(year, month, 0, 23, 59, 59, 999);
+
+    const [payroll, prodAgg, wastage] = await Promise.all([
+      computePayroll(empId, year, month),
+      ShiftDetail.aggregate([
+        {
+          $match: {
+            employee: new mongoose.Types.ObjectId(String(empId)),
+            date: { $gte: start, $lte: end },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalMeters: { $sum: { $ifNull: ['$productionMeters', 0] } },
+            shifts:      { $sum: 1 },
+          },
+        },
+      ]),
+      Wastage.find({ employee: empId, createdAt: { $gte: start, $lte: end } })
+        .select('reason penalty meters weight type createdAt')
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean(),
+    ]);
+
+    // _advanceIds is an internal handle for /generate — not for clients.
+    delete payroll._advanceIds;
+
+    res.json({
+      success: true,
+      data: {
+        employee: {
+          id: emp._id, name: emp.name, department: emp.department,
+          role: emp.role ?? '', hourlyRate: rate,
+        },
+        // DAY runs 12h, NIGHT 8h (see services/payrollService.js).
+        shiftRates: { DAY: r2(rate * 12), NIGHT: r2(rate * 8) },
+        period: { year, month },
+        payroll,
+        production: {
+          totalMeters: r2(prodAgg[0]?.totalMeters ?? 0),
+          shifts:      prodAgg[0]?.shifts ?? 0,
+        },
+        wastage: {
+          entries: wastage,
+          totalPenalty: r2(wastage.reduce((s, w) => s + (w.penalty || 0), 0)),
+        },
+      },
+    });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
 router.computePayroll = computePayroll;
 
 module.exports = router;

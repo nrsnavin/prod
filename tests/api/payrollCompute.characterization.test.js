@@ -194,6 +194,21 @@ describe('computePayroll — regression guards (bug fixes)', () => {
     expect(p.netPay).toBeCloseTo(1950, 2);
   });
 
+  // Admin/finance-entered advances (POST /advance/admin-create) are born
+  // approved with deductMonth/deductYear set — computePayroll must pick
+  // them up exactly like an approved worker request.
+  test('an admin-entered (born-approved) advance is recovered', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await AdvanceRequest.create({
+      employee: emp._id, amount: 300, status: 'approved',
+      deductMonth: MONTH, deductYear: YEAR,
+      approvedBy: 'finance', approvedAt: new Date(),
+    });
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.totalAdvanceDeduction).toBe(300);
+  });
+
   // Bug 2: filtering advances on deductedInPayroll:false meant a payroll
   // RE-generation (after the first run flipped the flag) found no advance
   // and net pay jumped up by the advance amount — the recovery was lost.
