@@ -35,6 +35,15 @@ const ShiftPlanSchema = new mongoose.Schema(
       default: "draft",
     },
 
+    // ── Finalisation (post-verification lock) ──────────────
+    // After the admin has verified every production entry, the shift
+    // can be FINALISED: corrections, deletions and new entries are
+    // rejected from then on, freezing the day's numbers for payroll
+    // and reports. Reversible only by an admin (unfinalize).
+    finalized:   { type: Boolean, default: false },
+    finalizedAt: { type: Date },
+    finalizedBy: { type: String },
+
     plan: [
       {
         type: mongoose.Types.ObjectId,

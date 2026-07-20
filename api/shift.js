@@ -463,6 +463,7 @@ router.post(
         if (shift.status === "closed") {
           throw new ErrorHandler("Shift is already closed", 400);
         }
+        await assertPlanNotFinalized(shift, session);
 
         const machine = await Machine.findById(shift.machine).session(session);
 
@@ -1237,6 +1238,77 @@ router.post(
 // _rederiveShiftProduction (the delta correction path) moved to
 // services/shiftCascadeService.js — imported at the top of this file.
 
+// ════════════════════════════════════════════════════════════════
+//  FINALISE / UNFINALISE a shift plan (post-verification lock)
+//
+//  POST /finalize-plan/:shiftPlanId    — allowed only when every
+//  production entry in the plan is verified (closed). From then on
+//  corrections, deletions, new entries and re-verification are all
+//  rejected: the day's numbers are frozen for payroll and reports.
+//  POST /unfinalize-plan/:shiftPlanId  — admin-only undo.
+// ════════════════════════════════════════════════════════════════
+router.post(
+  "/finalize-plan/:shiftPlanId",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { shiftPlanId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(shiftPlanId)) return next(new ErrorHandler("Invalid shift plan id", 400));
+
+    const plan = await ShiftPlan.findById(shiftPlanId).populate("plan", "status");
+    if (!plan) return next(new ErrorHandler("Shift plan not found", 404));
+    if (plan.finalized) return next(new ErrorHandler("Shift is already finalised", 400));
+
+    const details = plan.plan || [];
+    if (details.length === 0) return next(new ErrorHandler("Nothing to finalise — the shift has no production entries", 400));
+    const unverified = details.filter((d) => d.status !== "closed").length;
+    if (unverified > 0) {
+      return next(new ErrorHandler(
+        `Cannot finalise — ${unverified} entr${unverified > 1 ? "ies are" : "y is"} not verified yet. Verify every entry first.`,
+        400
+      ));
+    }
+
+    plan.finalized   = true;
+    plan.finalizedAt = new Date();
+    plan.finalizedBy = req.user?.name || "admin";
+    await plan.save();
+
+    res.json({
+      success: true,
+      message: "Shift finalised — production entries are now locked",
+      finalized: true, finalizedAt: plan.finalizedAt, finalizedBy: plan.finalizedBy,
+    });
+  })
+);
+
+router.post(
+  "/unfinalize-plan/:shiftPlanId",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { shiftPlanId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(shiftPlanId)) return next(new ErrorHandler("Invalid shift plan id", 400));
+    const plan = await ShiftPlan.findById(shiftPlanId);
+    if (!plan) return next(new ErrorHandler("Shift plan not found", 404));
+    if (!plan.finalized) return next(new ErrorHandler("Shift is not finalised", 400));
+    plan.finalized = false;
+    plan.finalizedAt = undefined;
+    plan.finalizedBy = undefined;
+    await plan.save();
+    res.json({ success: true, message: "Shift reopened — entries can be corrected again", finalized: false });
+  })
+);
+
+// Throws when the given ShiftDetail belongs to a finalised plan — used
+// by every route that would change a locked shift's numbers.
+async function assertPlanNotFinalized(shift, session) {
+  if (!shift?.shiftPlan) return;
+  const q = ShiftPlan.findById(shift.shiftPlan).select("finalized");
+  const plan = session ? await q.session(session) : await q;
+  if (plan?.finalized) {
+    throw new ErrorHandler("This shift is finalised — its production entries are locked. An admin must reopen (unfinalise) it first.", 400);
+  }
+}
+
 router.put(
   "/production-entry/:shiftId",
   isAdmin("admin"),
@@ -1256,6 +1328,7 @@ router.put(
         const shift = await ShiftDetail.findById(shiftId).session(session);
         if (!shift) throw new ErrorHandler("Shift not found", 404);
         if (shift.status !== "closed") throw new ErrorHandler("Only verified (closed) production entries can be corrected", 400);
+        await assertPlanNotFinalized(shift, session);
 
         await _rederiveShiftProduction(session, {
           shift, newTotalMeters: newTotal, req, auditReason, code: ACTION_CODES.SHIFT_PRODUCTION_EDITED,
@@ -1285,6 +1358,7 @@ router.delete(
         const shift = await ShiftDetail.findById(shiftId).session(session);
         if (!shift) throw new ErrorHandler("Shift not found", 404);
         if (shift.status !== "closed") throw new ErrorHandler("Only verified (closed) production entries can be deleted", 400);
+        await assertPlanNotFinalized(shift, session);
 
         // Reverse the full contribution, then un-verify so it can be re-entered.
         await _rederiveShiftProduction(session, {

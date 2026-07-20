@@ -67,7 +67,7 @@ router.get('/date-range', async (req, res) => {
     } catch(e) { return res.status(400).json({ success:false, message:e.message }); }
 
     const shiftPlans = await ShiftPlan.find({ date:{ $gte:rangeStart, $lte:rangeEnd } })
-      .select('date shift description totalProduction plan')
+      .select('date shift description totalProduction plan finalized finalizedAt finalizedBy')
       .populate({
         path: 'plan', model:'ShiftDetail',
         select:'machine employee status productionMeters',
@@ -144,7 +144,7 @@ router.get('/shift-detail/:shiftPlanId', async (req, res) => {
       return res.status(400).json({ success:false, message:'Invalid shiftPlanId.' });
 
     const sp = await ShiftPlan.findById(shiftPlanId)
-      .select('date shift description totalProduction plan')
+      .select('date shift description totalProduction plan finalized finalizedAt finalizedBy')
       .populate({
         path:'plan', model:'ShiftDetail',
         populate:[
@@ -210,6 +210,7 @@ router.get('/shift-detail/:shiftPlanId', async (req, res) => {
         date:toISODate(sp.date), dateLabel:toDateLabel(sp.date),
         shiftType:sp.shift, description:sp.description,
         totalProduction:sp.totalProduction||0,
+        finalized: !!sp.finalized, finalizedAt: sp.finalizedAt || null, finalizedBy: sp.finalizedBy || null,
         summary:{
           totalMachines:machineIds.size, totalOperators:employeeIds.size,
           totalProduction:sp.totalProduction||0, totalRunMinutes:Math.round(totalTimerSec/60),
