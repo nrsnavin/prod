@@ -60,7 +60,11 @@ const webhookLimiter = rateLimit({
 // loginLimiter still applies on top for /login-user.
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,   // 15 min
-  max: 1500,                  // ~1.6 req/s sustained per IP
+  // The web app live-polls every mounted query every 10s, and a whole
+  // office can sit behind one NAT IP — e.g. 5 users × 3 queries/10s
+  // ≈ 1350 req/15min. Ceiling sized so normal polling never trips it
+  // while still capping scraping/brute-force.
+  max: 4000,                  // ~4.4 req/s sustained per IP
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: "Too many requests — slow down and try again shortly." },
