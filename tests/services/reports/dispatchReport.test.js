@@ -21,7 +21,10 @@ const TO   = new Date("2026-07-08T00:00:00.000Z");
 
 let mongo;
 
-beforeAll(async () => {
+// A fresh mongod can stall mid-seed when the whole suite runs serially
+// on a loaded box (observed as a network timeout inside insertMany).
+// Boot + seed retries once before declaring failure.
+async function bootAndSeed() {
   mongo = await MongoMemoryServer.create();
   await mongoose.connect(mongo.getUri());
 
@@ -45,7 +48,20 @@ beforeAll(async () => {
     // Excluded: well before any window.
     { dispatchDate: new Date("2026-06-01T09:00:00Z"), status: "delivered", customer: c1, customerName: "Acme", totalQuantity: 1, totalAmount: 88888, items: [] },
   ]);
-}, 60_000);
+}
+
+beforeAll(async () => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await bootAndSeed();
+      break;
+    } catch (e) {
+      try { await mongoose.disconnect(); } catch (_) { /* noop */ }
+      try { if (mongo) await mongo.stop(); } catch (_) { /* noop */ }
+      if (attempt >= 2) throw e;
+    }
+  }
+}, 120_000);
 
 afterAll(async () => {
   await mongoose.disconnect();

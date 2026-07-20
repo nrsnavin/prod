@@ -100,7 +100,10 @@ async function computePayroll(empId, year, month) {
     const lateMins     = rec.lateMinutes ?? 0;
     const billableMins = Math.max(0, lateMins - settings.lateGracePeriodMinutes);
     if (billableMins > 0) {
-      const ded        = (billableMins / 60) * hourlyRate;
+      // Cap the cut at the shift's pay — a data-entry error (or being
+      // later than the shift is long) must never produce a NEGATIVE
+      // shift earning that silently eats other shifts' pay.
+      const ded        = Math.min(fullPay, (billableMins / 60) * hourlyRate);
       pay             -= ded;
       totalLateMinutes += lateMins;
       lateDeductionTotal += ded;
@@ -174,7 +177,11 @@ async function computePayroll(empId, year, month) {
     lineItems.push({ label: '🌟 No-Leave Bonus', amount: noLeaveBonusAmt, type: 'bonus' });
   }
 
-  if (unapprovedAbsents === 0 && totalShifts > 0 && settings.perfectAttendanceBonus > 0) {
+  // "Perfect attendance" requires actually working — an all-approved-
+  // leave month has zero absents and non-zero shifts but nobody showed
+  // up, so it must not earn the bonus.
+  if (unapprovedAbsents === 0 && totalShifts > 0 && (presentShifts > 0 || halfDayShifts > 0)
+      && settings.perfectAttendanceBonus > 0) {
     perfectAttendance  = true;
     perfectAttBonusAmt = settings.perfectAttendanceBonus;
     lineItems.push({ label: '🏆 Perfect Attendance Bonus', amount: perfectAttBonusAmt, type: 'bonus' });

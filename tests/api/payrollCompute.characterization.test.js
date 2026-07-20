@@ -194,6 +194,29 @@ describe('computePayroll — regression guards (bug fixes)', () => {
     expect(p.netPay).toBeCloseTo(1950, 2);
   });
 
+  // Edge: the late cut is capped at the shift's own pay — a garbage
+  // lateMinutes value (longer than the shift) must not go negative and
+  // eat other shifts' earnings.
+  test('late deduction never exceeds the shift pay', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2, { status: 'present', lateMinutes: 2000 }); // > 12h late
+    await att(emp._id, 3, { status: 'present' });
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    // day 2 floors at ₹0 (not negative), day 3 pays fully.
+    expect(p.grossEarnings).toBe(1200);
+  });
+
+  // Edge: an all-approved-leave month is paid but is NOT "perfect
+  // attendance" — nobody worked a single shift.
+  test('all-approved-leave month earns no perfect-attendance bonus', async () => {
+    const emp = await makeEmp();
+    for (const d of [2, 3, 4]) await att(emp._id, d, { status: 'absent', isApprovedLeave: true });
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.approvedLeaveShifts).toBe(3);
+    expect(p.perfectAttendance).toBe(false);
+    expect(p.perfectAttendanceBonus).toBe(0);
+  });
+
   // Admin/finance-entered advances (POST /advance/admin-create) are born
   // approved with deductMonth/deductYear set — computePayroll must pick
   // them up exactly like an approved worker request.
