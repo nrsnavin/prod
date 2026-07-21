@@ -9,7 +9,10 @@ const sendToken = require("../utils/jwtToken.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 const { DEPARTMENTS, roleForDepartment, isDepartment } = require("../utils/roles");
+const { sendPasswordResetEmail } = require("../utils/mailer");
 var jwt = require('jsonwebtoken');
+
+const RESET_TTL_MINUTES = 30;
 
 
 // Sign-up is admin-only — accepting `role` from req.body otherwise lets
@@ -76,6 +79,109 @@ router.post(
     } catch (error) {
       return next(new ErrorHandler(error.message, 500));
     }
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  FORGOT PASSWORD  —  POST /user/forgot-password  { email }
+//
+//  Emails a one-time reset link to the account (if it exists). Always
+//  returns the SAME generic 200 whether or not the email matched a
+//  user, so the endpoint can't be used to discover which emails have
+//  accounts (user-enumeration), mirroring how /login-user unifies its
+//  errors. A mail-send failure is swallowed for the same reason — the
+//  client never learns anything about the target address.
+//
+//  Rate-limited at the app.js mount (loginLimiter) since it's an
+//  unauthenticated, abuse-prone surface.
+// ══════════════════════════════════════════════════════════════
+router.post(
+  "/forgot-password",
+  catchAsyncErrors(async (req, res, next) => {
+    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    if (!email) {
+      return next(new ErrorHandler("Email is required", 400));
+    }
+
+    const generic = {
+      success: true,
+      message: "If an account exists for that email, a reset link has been sent.",
+    };
+
+    const user = await User.findOne({ email });
+    // No user, or a user with no deliverable email → return generic
+    // success without sending anything.
+    if (!user) {
+      return res.status(200).json(generic);
+    }
+
+    const rawToken = user.createPasswordResetToken();
+    await user.save({ validateBeforeSave: false });
+
+    const base = (process.env.WEB_URL || "https://erp.baluelastics.com").replace(/\/+$/, "");
+    const resetUrl = `${base}/reset-password?token=${rawToken}`;
+
+    try {
+      await sendPasswordResetEmail({
+        to: user.email,
+        name: user.name,
+        resetUrl,
+        ttlMinutes: RESET_TTL_MINUTES,
+      });
+    } catch (err) {
+      // Roll back the token so a transient mail outage doesn't leave a
+      // live reset token stranded on the account, then still return
+      // generic success (never leak the failure to the caller).
+      user.resetPasswordToken = undefined;
+      user.resetPasswordExpire = undefined;
+      await user.save({ validateBeforeSave: false });
+      console.error("[forgot-password] mail send failed:", err.message);
+    }
+
+    return res.status(200).json(generic);
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  RESET PASSWORD  —  POST /user/reset-password  { token, password }
+//
+//  Consumes the raw token from the emailed link, verifies its hash is
+//  on some user and not expired, sets the new password (the model's
+//  pre-save hook re-hashes it) and clears the token so it can't be
+//  reused.
+// ══════════════════════════════════════════════════════════════
+router.post(
+  "/reset-password",
+  catchAsyncErrors(async (req, res, next) => {
+    const rawToken = typeof req.body.token === "string" ? req.body.token.trim() : "";
+    const password = typeof req.body.password === "string" ? req.body.password : "";
+
+    if (!rawToken || !password) {
+      return next(new ErrorHandler("Token and new password are required", 400));
+    }
+    if (password.length < 4) {
+      return next(new ErrorHandler("Password should be greater than 4 characters", 400));
+    }
+
+    const hashed = User.hashResetToken(rawToken);
+    const user = await User.findOne({
+      resetPasswordToken: hashed,
+      resetPasswordExpire: { $gt: new Date() },
+    }).select("+resetPasswordToken +resetPasswordExpire +password");
+
+    if (!user) {
+      return next(new ErrorHandler("This reset link is invalid or has expired. Request a new one.", 400));
+    }
+
+    user.password = password;            // pre-save hook hashes it
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpire = undefined;
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Password updated. You can now sign in with your new password.",
+    });
   })
 );
 

@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 const userSchema = new mongoose.Schema(
   {
@@ -43,6 +44,18 @@ const userSchema = new mongoose.Schema(
       type: mongoose.Types.ObjectId,
       ref: "Employee",
     },
+    // Password-reset flow. We store only the SHA-256 HASH of the token
+    // that was emailed — never the raw token — so a database leak can't
+    // be replayed to reset anyone's password. `select:false` keeps both
+    // out of normal query results.
+    resetPasswordToken: {
+      type: String,
+      select: false,
+    },
+    resetPasswordExpire: {
+      type: Date,
+      select: false,
+    },
   },
   { timestamps: true }
 );
@@ -65,6 +78,29 @@ userSchema.methods.getJwtToken = function () {
 // compare password
 userSchema.methods.comparePassword = async function (enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
+};
+
+// ─────────────────────────────────────────────────────────────
+//  Password reset token
+//
+//  Returns the RAW token (goes in the emailed link) and stores its
+//  SHA-256 hash + a 30-minute expiry on the document. Caller must
+//  save() the user afterwards. Verification hashes the incoming raw
+//  token and matches the hash — the raw value never touches the DB.
+// ─────────────────────────────────────────────────────────────
+userSchema.methods.createPasswordResetToken = function () {
+  const rawToken = crypto.randomBytes(32).toString("hex");
+  this.resetPasswordToken = crypto
+    .createHash("sha256")
+    .update(rawToken)
+    .digest("hex");
+  this.resetPasswordExpire = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+  return rawToken;
+};
+
+// Static helper: hash a raw token the same way for lookup.
+userSchema.statics.hashResetToken = function (rawToken) {
+  return crypto.createHash("sha256").update(String(rawToken)).digest("hex");
 };
 
 const User = mongoose.model("User", userSchema);
