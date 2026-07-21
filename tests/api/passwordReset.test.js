@@ -54,6 +54,23 @@ describe('POST /user/forgot-password', () => {
     expect(res.status).toBe(400);
   });
 
+  test('finds an account stored with a MIXED-case email (legacy /sign-up data)', async () => {
+    const u = await User.create({ name: 'Legacy', email: 'Navin@Baluelastics.com', password: 'pass1234', role: 'admin', department: 'admin' });
+    const res = await request(app)
+      .post('/api/v2/user/forgot-password')
+      .send({ email: 'navin@baluelastics.com' });
+    expect(res.status).toBe(200);
+    const fresh = await User.findById(u._id).select('+resetPasswordToken');
+    expect(fresh.resetPasswordToken).toBeTruthy(); // matched despite case difference
+  });
+
+  test('regex metacharacters in the email cannot break the lookup', async () => {
+    const res = await request(app)
+      .post('/api/v2/user/forgot-password')
+      .send({ email: 'a+b.*@t.co' });
+    expect(res.status).toBe(200); // generic success, no 500
+  });
+
   test('stamps a hashed token + expiry for a real user, and returns the same generic message', async () => {
     const u = await User.create({ name: 'Reset Me', email: 'reset@t.co', password: 'pass1234', role: 'admin', department: 'admin' });
     const res = await request(app)

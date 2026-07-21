@@ -10,6 +10,7 @@ const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 const { DEPARTMENTS, roleForDepartment, isDepartment } = require("../utils/roles");
 const { sendPasswordResetEmail } = require("../utils/mailer");
+const { escapeRegex } = require("../utils/escapeRegex");
 var jwt = require('jsonwebtoken');
 
 const RESET_TTL_MINUTES = 30;
@@ -20,6 +21,11 @@ const RESET_TTL_MINUTES = 30;
 router.post("/sign-up",
   isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
+  // Store emails lowercase — mixed-case emails break the exact-match
+  // lookups in login and (before it went case-insensitive) forgot-password.
+  if (typeof req.body.email === "string") {
+    req.body.email = req.body.email.trim().toLowerCase();
+  }
   const user = await User.create(req.body);
   try {
     res.status(200).json({
@@ -108,9 +114,13 @@ router.post(
       message: "If an account exists for that email, a reset link has been sent.",
     };
 
-    const user = await User.findOne({ email });
-    // No user, or a user with no deliverable email → return generic
-    // success without sending anything.
+    // Case-insensitive match: accounts created through the legacy
+    // /sign-up path may be stored with mixed-case emails, and an exact
+    // match on the lowercased input would silently never find them.
+    const user = await User.findOne({
+      email: { $regex: `^${escapeRegex(email)}$`, $options: "i" },
+    });
+    // No user → return generic success without sending anything.
     if (!user) {
       return res.status(200).json(generic);
     }
