@@ -45,7 +45,10 @@ function fmtCell(value, format) {
  * @param {Array<object>} o.rows
  * @returns {Promise<Buffer>}
  */
-function renderReportPdf({ title, rangeLabel, summaryLine, company = "Jarvis ERP", columns, rows }) {
+function renderReportPdf({ title, rangeLabel, summaryLine, company = "Balu Elastics", accent, columns, rows }) {
+  // Accent (header + table-header colour) is configurable via Document
+  // Settings; fall back to the built-in brand blue.
+  const brand = accent && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(accent) ? accent : BRAND;
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: "A4", margin: 40 });
     const chunks = [];
@@ -68,7 +71,7 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Jarvis ERP
 
     // ── Header block ────────────────────────────────────────────────
     function drawDocHeader() {
-      doc.fillColor(BRAND).font("Helvetica-Bold").fontSize(16).text(company, left, 40);
+      doc.fillColor(brand).font("Helvetica-Bold").fontSize(16).text(company, left, 40);
       doc.fillColor(INK).font("Helvetica-Bold").fontSize(15).text(title, left, 62);
       doc.fillColor(MUTE).font("Helvetica").fontSize(9)
         .text(`Period: ${rangeLabel || "—"}`, left, 84)
@@ -85,7 +88,7 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Jarvis ERP
     const bottom = doc.page.height - doc.page.margins.bottom - 20;
 
     function drawTableHeader(y) {
-      doc.rect(left, y, contentW, HEADER_H).fill(BRAND);
+      doc.rect(left, y, contentW, HEADER_H).fill(brand);
       doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(9);
       cols.forEach((c, i) => {
         doc.text(String(c.header || ""), xAt(i) + 6, y + 6, {

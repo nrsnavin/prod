@@ -71,6 +71,7 @@ const apiLimiter = rateLimit({
 });
 
 const user     = require("./api/user.js");
+const settings = require("./api/settings.js");
 const advisor  = require("./api/advisor.js");
 const io       = require("./api/io.js");
 const audit    = require("./api/audit.js");
@@ -273,6 +274,7 @@ app.use("/api/v2/user/forgot-password", loginLimiter);
 app.use("/api/v2/user/request-otp", loginLimiter);
 app.use("/api/v2/user/verify-otp", loginLimiter);
 app.use("/api/v2/user", user);
+app.use("/api/v2/settings",    settings);
 app.use("/api/v2/machine",     gate('production'), machine);
 app.use("/api/v2/shift",       shift);
 app.use("/api/v2/customer",    gate('sales', 'accounts'), customer);

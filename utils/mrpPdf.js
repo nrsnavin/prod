@@ -52,6 +52,12 @@ async function buildMrpPdf(data) {
   const width = right - left;
 
   // ── Header ──────────────────────────────────────────────────────
+  // Company name from Document Settings (data.branding), with a default.
+  const brand = data.branding || {};
+  const accent = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(brand.accent || "") ? brand.accent : ACCENT;
+  doc.fillColor(accent).font("Helvetica-Bold").fontSize(11)
+    .text(brand.company || "Balu Elastics", left, doc.y);
+  doc.moveDown(0.15);
   doc.fillColor(DARK).font("Helvetica-Bold").fontSize(20)
     .text("Material Requirement Program", left, doc.y);
   doc.moveDown(0.2);

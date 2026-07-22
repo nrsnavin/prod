@@ -79,10 +79,15 @@ async function buildShiftSheetPdf(plan) {
   // Header + column header, drawn on every page so each scanned sheet
   // carries the plan identity.
   function drawPageHead(pageNo, pageCount) {
-    doc.fillColor(RED).rect(left, 30, 6, 24).fill();
+    // Branding from Document Settings (plan.branding), with a safe default.
+    const brand = plan.branding || {};
+    const accent = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(brand.accent || '') ? brand.accent : RED;
+    const strip = [brand.company || 'Balu Elastics', brand.tagline || 'Elastic Manufacturing']
+      .filter(Boolean).join('  ·  ');
+    doc.fillColor(accent).rect(left, 30, 6, 24).fill();
     doc.fillColor(INK).font('Helvetica-Bold').fontSize(16).text('Shift Production Sheet', left + 14, 32);
     doc.font('Helvetica').fontSize(8.5).fillColor(MUT)
-      .text('Jarvis ERP  ·  Elastic Manufacturing', left + 14, 50);
+      .text(strip, left + 14, 50);
 
     const meta = [['Date', plan.dateLabel || ''], ['Shift', plan.shift || ''], ['Plan', plan.planNo || '']];
     let my = 30;

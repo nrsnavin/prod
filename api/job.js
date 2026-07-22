@@ -19,6 +19,7 @@ const ShiftDetail = require('../models/ShiftDetail');
 const { buildFingerprint, stampFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
 const { computeMaterialRequirement } = require('../utils/materialRequirement');
 const { buildMrpPdf } = require('../utils/mrpPdf');
+const { getPdfBranding } = require('../services/documentSettings.js');
 
 // Every job route requires a logged-in user. The previous setup left
 // the whole router anonymous, including the alternate `/:jobId`
@@ -951,6 +952,7 @@ router.get('/:jobId/mrp.pdf', async (req, res) => {
     const data = await _buildMrpData(jobId);
     if (!data) return res.status(404).json({ success: false, message: 'Job not found.' });
 
+    data.branding = await getPdfBranding();
     const pdf = await buildMrpPdf(data);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(

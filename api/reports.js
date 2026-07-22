@@ -23,6 +23,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { resolveRange } = require("../services/reports/range.js");
 const { toCsv } = require("../services/reports/csv.js");
 const { renderReportPdf } = require("../services/reports/reportPdf.js");
+const { getPdfBranding } = require("../services/documentSettings.js");
 const { productionReport } = require("../services/reports/productionReport.js");
 const { dispatchReport } = require("../services/reports/dispatchReport.js");
 const { orderBookReport } = require("../services/reports/orderBookReport.js");
@@ -62,10 +63,13 @@ function reportRoute(build, { csvName, title, summaryLine }) {
     }
 
     if (format === "pdf") {
+      const branding = await getPdfBranding();
       const pdf = await renderReportPdf({
         title,
         rangeLabel: range.label,
         summaryLine: summaryLine ? summaryLine(report.summary) : undefined,
+        company: branding.company,
+        accent: branding.accent,
         columns: report.columns,
         rows: report.rows,
       });

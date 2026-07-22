@@ -27,6 +27,7 @@ const {
 } = require("../services/shiftCascadeService.js");
 const multer = require("multer");
 const { buildShiftSheetPdf, shortCode } = require("../utils/shiftSheetPdf");
+const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
 
 // Scanned 200-machine sheets run ~19 pages; allow up to 25 MB in memory.
@@ -1077,11 +1078,13 @@ router.get(
     }));
 
     const dateLabel = moment(sp.date).format("DD-MMM-YYYY");
+    const branding = await getPdfBranding();
     const pdf = await buildShiftSheetPdf({
       dateLabel,
       shift: sp.shift,
       planNo: `SP-${moment(sp.date).format("YYYYMMDD")}-${sp.shift === "NIGHT" ? "N" : "D"}`,
       rows,
+      branding,
     });
 
     res.setHeader("Content-Type", "application/pdf");
