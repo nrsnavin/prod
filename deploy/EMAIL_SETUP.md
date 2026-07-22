@@ -1,8 +1,16 @@
-# Email setup — password reset links (Hostinger SMTP)
+# Email setup — sign-in codes & password reset (Hostinger SMTP)
 
-The forgot-password / reset-password flow emails a one-time reset link. It
-sends through plain SMTP via `nodemailer` (`utils/mailer.js`). Any SMTP
-mailbox works; below is the Hostinger path since the domain is on Hostinger.
+Two flows email through this SMTP mailbox: **email-OTP login** (the primary
+sign-in — a 6-digit code) and the older forgot-password / reset-password
+link. Both send through plain SMTP via `nodemailer` (`utils/mailer.js`).
+Any SMTP mailbox works; below is the Hostinger path since the domain is on
+Hostinger.
+
+> **Login now depends on this mailbox.** Email-OTP is the primary sign-in,
+> so if SMTP is misconfigured or down, users can't get a code. The
+> password endpoint (`/user/login-user`) stays mounted as an unlisted
+> emergency fallback — nothing in the UI links to it, but an admin can
+> still `curl` it or you can point someone at it in a pinch.
 
 ## 1. Create the mailbox
 

@@ -109,4 +109,43 @@ async function sendPasswordResetEmail({ to, name, resetUrl, ttlMinutes }) {
   return sendMail({ to, subject, text, html });
 }
 
-module.exports = { sendMail, sendPasswordResetEmail, isConfigured };
+// ─────────────────────────────────────────────────────────────
+//  Login OTP email
+// ─────────────────────────────────────────────────────────────
+async function sendLoginOtpEmail({ to, name, code, ttlMinutes }) {
+  const who = name ? name.split(" ")[0] : "there";
+  const subject = `${code} is your Balu Elastics ERP sign-in code`;
+  const text = [
+    `Hi ${who},`,
+    ``,
+    `Your sign-in code for Balu Elastics ERP is:`,
+    ``,
+    `    ${code}`,
+    ``,
+    `It expires in ${ttlMinutes} minutes. If you didn't try to sign in, you can ignore this email.`,
+    ``,
+    `— Balu Elastics ERP`,
+  ].join("\n");
+
+  const html = `
+  <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:480px;margin:0 auto;color:#0f172a">
+    <h2 style="font-size:18px;margin:0 0 12px">Your sign-in code</h2>
+    <p style="font-size:14px;line-height:1.6;margin:0 0 16px">
+      Hi ${who}, use this code to sign in to <strong>Balu Elastics ERP</strong>.
+      It expires in <strong>${ttlMinutes} minutes</strong>.
+    </p>
+    <p style="margin:0 0 20px">
+      <span style="display:inline-block;background:#f1f5f9;border:1px solid #e2e8f0;
+                   border-radius:10px;padding:14px 28px;font-size:28px;font-weight:800;
+                   letter-spacing:8px;color:#1e3a5f">${code}</span>
+    </p>
+    <p style="font-size:12px;line-height:1.6;color:#64748b;margin:0">
+      If you didn't try to sign in, ignore this email — nobody can access your
+      account without this code.
+    </p>
+  </div>`;
+
+  return sendMail({ to, subject, text, html });
+}
+
+module.exports = { sendMail, sendPasswordResetEmail, sendLoginOtpEmail, isConfigured };

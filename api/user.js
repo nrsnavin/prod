@@ -9,7 +9,7 @@ const sendToken = require("../utils/jwtToken.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 const { DEPARTMENTS, roleForDepartment, isDepartment } = require("../utils/roles");
-const { sendPasswordResetEmail } = require("../utils/mailer");
+const { sendPasswordResetEmail, sendLoginOtpEmail } = require("../utils/mailer");
 const { escapeRegex } = require("../utils/escapeRegex");
 var jwt = require('jsonwebtoken');
 
@@ -192,6 +192,132 @@ router.post(
       success: true,
       message: "Password updated. You can now sign in with your new password.",
     });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  EMAIL-OTP LOGIN
+//
+//  The primary sign-in for web + mobile: request a 6-digit code by
+//  email, then exchange it for the same JWT cookie /login-user issues.
+//  /login-user itself stays mounted as an unlisted emergency fallback
+//  (e.g. SMTP outage) — nothing in the UI links to it.
+//
+//  POST /user/request-otp  { email }
+//  Same anti-enumeration contract as forgot-password: identical generic
+//  200 whether or not the email matches an account, mail failures
+//  swallowed. Both routes sit behind loginLimiter in app.js.
+// ══════════════════════════════════════════════════════════════
+const OTP_TTL_MINUTES = 10;
+const OTP_MAX_ATTEMPTS = 5;
+
+router.post(
+  "/request-otp",
+  catchAsyncErrors(async (req, res, next) => {
+    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    if (!email) {
+      return next(new ErrorHandler("Email is required", 400));
+    }
+
+    const generic = {
+      success: true,
+      message: "If an account exists for that email, a sign-in code has been sent.",
+    };
+
+    const user = await User.findOne({
+      email: { $regex: `^${escapeRegex(email)}$`, $options: "i" },
+    });
+    if (!user) {
+      return res.status(200).json(generic);
+    }
+
+    const code = user.createLoginOtp();
+    await user.save({ validateBeforeSave: false });
+
+    try {
+      await sendLoginOtpEmail({
+        to: user.email,
+        name: user.name,
+        code,
+        ttlMinutes: OTP_TTL_MINUTES,
+      });
+    } catch (err) {
+      user.clearLoginOtp();
+      await user.save({ validateBeforeSave: false });
+      console.error("[request-otp] mail send failed:", err.message);
+    }
+
+    return res.status(200).json(generic);
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  POST /user/verify-otp  { email, otp }
+//
+//  On success issues the SAME cookie + JSON shape as /login-user so the
+//  web and mobile session code is reused unchanged. The code is
+//  single-use (cleared on success) and dies after OTP_MAX_ATTEMPTS
+//  wrong guesses or OTP_TTL_MINUTES, whichever comes first.
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/verify-otp",
+  catchAsyncErrors(async (req, res, next) => {
+    const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const otp   = typeof req.body.otp === "string" ? req.body.otp.trim()
+                : typeof req.body.otp === "number" ? String(req.body.otp) : "";
+
+    if (!email || !otp) {
+      return next(new ErrorHandler("Email and code are required", 400));
+    }
+
+    const user = await User.findOne({
+      email: { $regex: `^${escapeRegex(email)}$`, $options: "i" },
+    }).select("+otpCode +otpExpire +otpAttempts");
+
+    // One generic 401 for every failure mode — no oracle for which part
+    // was wrong (missing account, stale code, bad guess).
+    const fail = () => next(new ErrorHandler("Invalid or expired code — request a new one.", 401));
+
+    if (!user || !user.otpCode || !user.otpExpire) return fail();
+
+    if (user.otpExpire.getTime() < Date.now()) {
+      user.clearLoginOtp();
+      await user.save({ validateBeforeSave: false });
+      return fail();
+    }
+
+    if ((user.otpAttempts || 0) >= OTP_MAX_ATTEMPTS) {
+      user.clearLoginOtp();
+      await user.save({ validateBeforeSave: false });
+      return fail();
+    }
+
+    const hashed = User.hashResetToken(otp); // same sha256 helper
+    if (hashed !== user.otpCode) {
+      user.otpAttempts = (user.otpAttempts || 0) + 1;
+      await user.save({ validateBeforeSave: false });
+      return fail();
+    }
+
+    user.clearLoginOtp();
+    await user.save({ validateBeforeSave: false });
+
+    const token = generateToken(user);
+    res
+      .status(201)
+      .cookie("token", token, {
+        httpOnly: true,
+        sameSite: "none",
+        secure: true,
+        maxAge: 24 * 60 * 60 * 1000, // 24h — matches /login-user
+      })
+      .json({
+        username: user.name,
+        id: user._id,
+        role: user.role,
+        department: user.department || null,
+        token: token,
+      });
   })
 );
 

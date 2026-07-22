@@ -266,9 +266,12 @@ const gate = (...roles) => [isAuthenticated, isAdmin('admin', ...roles)];
 // Throttle credential-guessing before the login handler runs.
 app.use("/api/v2", apiLimiter);
 app.use("/api/v2/user/login-user", loginLimiter);
-// forgot-password is unauthenticated and triggers an email send — throttle
-// it on the same tight per-IP limiter as login to cap abuse/enumeration.
+// Unauthenticated, abuse-prone surfaces: forgot-password and both OTP
+// legs trigger emails / accept guesses — throttle them on the same tight
+// per-IP limiter as login to cap abuse/enumeration/brute-force.
 app.use("/api/v2/user/forgot-password", loginLimiter);
+app.use("/api/v2/user/request-otp", loginLimiter);
+app.use("/api/v2/user/verify-otp", loginLimiter);
 app.use("/api/v2/user", user);
 app.use("/api/v2/machine",     gate('production'), machine);
 app.use("/api/v2/shift",       shift);

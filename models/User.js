@@ -56,6 +56,22 @@ const userSchema = new mongoose.Schema(
       type: Date,
       select: false,
     },
+    // Email-OTP login. Same hashing discipline as the reset token: only
+    // the SHA-256 hash of the 6-digit code is stored. otpAttempts caps
+    // brute-force guessing of a live code (cleared on success/expiry).
+    otpCode: {
+      type: String,
+      select: false,
+    },
+    otpExpire: {
+      type: Date,
+      select: false,
+    },
+    otpAttempts: {
+      type: Number,
+      select: false,
+      default: 0,
+    },
   },
   { timestamps: true }
 );
@@ -101,6 +117,27 @@ userSchema.methods.createPasswordResetToken = function () {
 // Static helper: hash a raw token the same way for lookup.
 userSchema.statics.hashResetToken = function (rawToken) {
   return crypto.createHash("sha256").update(String(rawToken)).digest("hex");
+};
+
+// ─────────────────────────────────────────────────────────────
+//  Login OTP
+//
+//  Returns the RAW 6-digit code (goes in the email) and stores its
+//  SHA-256 hash + a 10-minute expiry + a reset attempt counter on the
+//  document. Caller must save() afterwards.
+// ─────────────────────────────────────────────────────────────
+userSchema.methods.createLoginOtp = function () {
+  const code = String(crypto.randomInt(100000, 1000000)); // 6 digits, crypto RNG
+  this.otpCode = crypto.createHash("sha256").update(code).digest("hex");
+  this.otpExpire = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+  this.otpAttempts = 0;
+  return code;
+};
+
+userSchema.methods.clearLoginOtp = function () {
+  this.otpCode = undefined;
+  this.otpExpire = undefined;
+  this.otpAttempts = 0;
 };
 
 const User = mongoose.model("User", userSchema);
