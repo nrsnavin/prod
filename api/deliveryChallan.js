@@ -16,6 +16,11 @@ const { applyMovement } = require("../utils/elasticStock");
 const Customer          = require("../models/Customer");
 const { enqueue }       = require("../utils/outbox");
 const { nextNumber }    = require("../utils/sequence");
+const PdfTemplate       = require("../models/PdfTemplate");
+const { renderTemplatePdf } = require("../services/pdf/templateRenderer");
+const { starterTemplate }   = require("../services/pdf/docTypes");
+const { getPdfBranding }     = require("../services/documentSettings");
+const { dcToContext }        = require("../services/pdf/dcContext");
 
 // Every DC route requires a logged-in user. isAdmin gating is left
 // per-route at the admin app's call sites' discretion — accounts /
@@ -456,6 +461,45 @@ router.get(
       .sort((a, b) => new Date(b.at) - new Date(a.at));
 
     res.json({ success: true, dc: { ...dc, fingerprints } });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  GET /dc/:id/pdf
+//
+//  Renders the delivery challan as a PDF using the visual template
+//  designed in Settings → PDF Designer. Uses the admin's saved template
+//  when it's enabled, otherwise the built-in starter layout — so a DC
+//  PDF always downloads, and a custom design takes over once enabled.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/:id/pdf",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(id)) {
+      return next(new ErrorHandler("Invalid delivery challan id", 400));
+    }
+
+    const dc = await DeliveryChallan.findById(id)
+      .populate("items.elastic", "name")
+      .lean();
+    if (!dc) return next(new ErrorHandler("Delivery Challan not found", 404));
+
+    const [branding, saved] = await Promise.all([
+      getPdfBranding(),
+      PdfTemplate.findOne({ docType: "delivery-challan" }).lean(),
+    ]);
+    const template = saved && saved.enabled ? saved : starterTemplate("delivery-challan");
+
+    const context = dcToContext(dc, branding);
+    const pdf = await renderTemplatePdf(template, context);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="DC-${(dc.dcNumber || id).replace(/[^\w.-]/g, "_")}.pdf"`
+    );
+    return res.send(pdf);
   })
 );
 
