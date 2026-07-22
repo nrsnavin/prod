@@ -28,6 +28,11 @@ const { isAuthenticated } = require("../middleware/auth");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { nextNumber } = require("../utils/sequence");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
+const PdfTemplate = require("../models/PdfTemplate");
+const { renderTemplatePdf } = require("../services/pdf/templateRenderer");
+const { starterTemplate }   = require("../services/pdf/docTypes");
+const { getPdfBranding }     = require("../services/documentSettings");
+const { poToContext }        = require("../services/pdf/poContext");
 const { assertVersion } = require("../utils/versioning");
 
 // Race-free PO number: atomic counter, seeded once from the current max.
@@ -317,6 +322,45 @@ router.get(
     } catch (error) {
       return next(new ErrorHandler(error.message, 500));
     }
+  })
+);
+
+// ─────────────────────────────────────────────────────────────────────────
+// GET /po/:id/pdf
+//
+// Renders the purchase order as a PDF using the visual template designed in
+// Settings → PDF Designer. Uses the admin's saved 'purchase-order' template
+// when enabled, otherwise the built-in starter layout.
+// ─────────────────────────────────────────────────────────────────────────
+router.get(
+  "/po/:id/pdf",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(id)) {
+      return next(new ErrorHandler("Invalid purchase order id", 400));
+    }
+
+    const po = await PurchaseOrder.findById(id)
+      .populate("supplier", "name phoneNumber gstin email address contactPerson")
+      .populate("items.rawMaterial", "name unit")
+      .lean();
+    if (!po) return next(new ErrorHandler("Purchase Order not found", 404));
+
+    const [branding, saved] = await Promise.all([
+      getPdfBranding(),
+      PdfTemplate.findOne({ docType: "purchase-order" }).lean(),
+    ]);
+    const template = saved && saved.enabled ? saved : starterTemplate("purchase-order");
+
+    const context = poToContext(po, branding);
+    const pdf = await renderTemplatePdf(template, context);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="PO-${po.poNo != null ? po.poNo : id}.pdf"`
+    );
+    return res.send(pdf);
   })
 );
 
