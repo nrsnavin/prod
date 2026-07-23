@@ -36,6 +36,15 @@ const userSchema = new mongoose.Schema(
       type: String,
       enum: ["admin", "preparatory", "weaving", "packing", "finance"],
     },
+    // Per-user custom feature access (keys mirror the web nav paths, e.g.
+    // "/orders", "/wastage"). When set, this is the source of truth for
+    // what the user can SEE/open. Empty/unset → the app falls back to the
+    // department-derived default set (utils/features.js), so pre-existing
+    // users keep working. `admin` always has everything regardless.
+    features: {
+      type: [String],
+      default: [],
+    },
     // Optional link to the Employee document. Set on User creation
     // for any user that's also a workforce member, so the mobile
     // employee app can look up their wastage / shift / payroll
