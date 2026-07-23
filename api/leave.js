@@ -94,6 +94,80 @@ router.post('/request', isAuthenticated, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// POST /admin-request — admin creates a leave request FOR any
+// employee (unlike /request, which is self-only). Pass
+// autoApprove:true to create it already approved (and sync the
+// employee's attendance, mirroring the /:id/approve route).
+// ─────────────────────────────────────────────────────────────
+router.post('/admin-request', isAuthenticated, isAdmin('admin', 'accounts'), async (req, res) => {
+  try {
+    const {
+      employeeId, date, shift='BOTH', leaveType, reason,
+      documentUrl='', autoApprove=false,
+    } = req.body;
+
+    if (!employeeId || !date || !leaveType || !reason)
+      return res.status(400).json({ success:false,
+        message:'employeeId, date, leaveType, reason are required.' });
+
+    const emp = await Employee.findById(employeeId, 'name department').lean();
+    if (!emp) return res.status(404).json({ success:false, message:'Employee not found.' });
+
+    const dateObj = new Date(date);
+    if (Number.isNaN(dateObj.getTime()))
+      return res.status(400).json({ success:false, message:'date is not a valid date.' });
+    dateObj.setHours(0,0,0,0);
+
+    const doc = {
+      employee: employeeId,
+      date: dateObj,
+      shift: String(shift).toUpperCase(),
+      leaveType, reason, documentUrl,
+    };
+    if (autoApprove) {
+      doc.status      = 'approved';
+      doc.reviewedBy  = req.user?._id || null;
+      doc.reviewedAt  = new Date();
+      doc.reviewNotes = 'Created & approved by admin';
+    }
+
+    const leave = await LeaveRequest.create(doc);
+
+    // On auto-approve, update any existing Attendance rows to on_leave —
+    // same semantics as PUT /:id/approve (upsert:false).
+    if (autoApprove) {
+      const shiftsToUpdate = leave.shift === 'BOTH' ? ['DAY','NIGHT'] : [leave.shift];
+      for (const s of shiftsToUpdate) {
+        await Attendance.findOneAndUpdate(
+          { employee: leave.employee, date: dateObj, shift: s },
+          { $set: {
+            status:          'on_leave',
+            leaveType:       leave.leaveType,
+            leaveRequestId:  leave._id,
+            isApprovedLeave: true,
+          }},
+          { upsert: false }
+        );
+      }
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: autoApprove
+        ? 'Leave created and approved.'
+        : 'Leave request created. Pending approval.',
+      data: fmtLeave({ ...leave.toObject(), employee: emp }),
+    });
+  } catch(err) {
+    if (err.code === 11000)
+      return res.status(409).json({ success:false,
+        message:'A leave request already exists for this date and shift.' });
+    console.error('[POST /admin-request]', err);
+    return res.status(500).json({ success:false, message:err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // GET /pending
 // ─────────────────────────────────────────────────────────────
 router.get('/pending', isAuthenticated, isAdmin('admin', 'accounts'), async (req, res) => {
