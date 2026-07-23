@@ -224,6 +224,44 @@ router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
+// ─────────────────────────────────────────────────────────────
+// GET /history/:empId?limit=6
+//   Recent payslips (most recent first) plus the total salary still
+//   owed — the sum of net pay on every payslip not yet marked 'paid'.
+//   selfOrAdmin: a worker can read their own history, admins anyone's.
+// ─────────────────────────────────────────────────────────────
+router.get('/history/:empId', selfOrAdmin, async (req, res) => {
+  try {
+    const { empId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(empId))
+      return res.status(400).json({ success: false, message: 'Invalid employee id' });
+
+    const limit = Math.min(Math.max(+(req.query.limit || 6), 1), 24);
+
+    const payslips = await Payroll.find({ employee: empId })
+      .sort({ year: -1, month: -1 })
+      .limit(limit)
+      .select('year month netPay grossEarnings totalDeductions status finalizedAt paidAt createdAt')
+      .lean();
+
+    // Unpaid salary left = net pay on every non-'paid' payslip.
+    const agg = await Payroll.aggregate([
+      { $match: { employee: new mongoose.Types.ObjectId(empId), status: { $ne: 'paid' } } },
+      { $group: { _id: null, total: { $sum: '$netPay' }, count: { $sum: 1 } } },
+    ]);
+    const unpaid = agg[0] || { total: 0, count: 0 };
+
+    res.json({
+      success: true,
+      data: {
+        payslips,
+        unpaidTotal: unpaid.total || 0,
+        unpaidCount: unpaid.count || 0,
+      },
+    });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
 router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const p = await Payroll.findByIdAndUpdate(req.params.id,
