@@ -21,7 +21,7 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const sanitizeMongo = require("./middleware/sanitizeMongo.js");
 const { setUserContext } = require("./middleware/userContext.js");
-const { isAuthenticated, isAdmin } = require("./middleware/auth.js");
+const { isAuthenticated, isAdmin, requireFeature } = require("./middleware/auth.js");
 
 // Trust the reverse proxy (nginx/ALB) so req.protocol, req.ip, and the
 // `secure` cookie flag reflect the real client connection rather than
@@ -265,6 +265,18 @@ const ADMIN_GATE = [isAuthenticated, isAdmin('admin')];
 // Assign via User.role: admin | sales | stores | production | accounts
 const gate = (...roles) => [isAuthenticated, isAdmin('admin', ...roles)];
 
+// Phase 4 — per-user FEATURE enforcement (requireFeature, below).
+// Layered ON TOP of the role gate for LEAF routers only: planner,
+// production, reports, qc, audit here, plus warping/covering/wastage/
+// packing which gate themselves inside the router. Leaf = the router's
+// data isn't read by other features' screens. Shared master-data routers
+// (machine, employee, customer, supplier, order, materials, job, dc,
+// elastic) are deliberately NOT feature-gated: their data is fetched
+// cross-feature (e.g. Jobs & Planning read /machine; HR & Shifts read
+// /employee), so a mount-level feature gate would 403 legitimate reads.
+// Those stay on the coarse role gate. requireFeature is also a no-op for
+// users with no explicit feature list, so legacy accounts are unaffected.
+
 // Throttle credential-guessing before the login handler runs.
 app.use("/api/v2", apiLimiter);
 app.use("/api/v2/user/login-user", loginLimiter);
@@ -287,7 +299,7 @@ app.use("/api/v2/dc",          gate('sales', 'stores', 'accounts'), deliveryChal
 app.use("/api/v2/supplier",    gate('stores', 'accounts'), supplier);
 app.use("/api/v2/bonus",       bonus);
 app.use("/api/v2/order",       gate('sales', 'accounts'), order);
-app.use("/api/v2/planner",     gate('production'), planner);
+app.use("/api/v2/planner",     gate('production'), requireFeature('/planner'), planner);
 app.use("/api/v2/assistant",   assistant);
 app.use("/api/v2/materials",   gate('stores', 'production', 'accounts'), material);
 app.use("/api/v2/warping",     warping);
@@ -296,11 +308,14 @@ app.use("/api/v2/attendance",  attendence);
 app.use("/api/v2/covering",    covering);
 app.use("/api/v2/job",         gate('production'), job);
 app.use("/api/v2/packing",     packing);
-app.use("/api/v2/production",  gate('production'), production);
+// Production View feeds the Analytics dashboards too, so a user with
+// either feature may read it.
+app.use("/api/v2/production",  gate('production'), requireFeature('/production', '/analytics'), production);
 // Management reports span operations, sales and stores — any of those
 // departments (or an admin) may pull them; each report is read-only.
-app.use("/api/v2/reports",     gate('production', 'sales', 'stores', 'accounts'), require("./api/reports.js"));
-app.use("/api/v2/qc",          gate('production'), require("./api/qc.js"));
+app.use("/api/v2/reports",     gate('production', 'sales', 'stores', 'accounts'), requireFeature('/reports'), require("./api/reports.js"));
+// QC is a leaf, but the Jobs screen reads QC results, so /jobs passes too.
+app.use("/api/v2/qc",          gate('production'), requireFeature('/qc', '/jobs'), require("./api/qc.js"));
 app.use("/api/v2/payroll",     payroll);
 app.use("/api/v2/leave",       leave);
 app.use("/api/v2/machine-issue", machineIssue);
@@ -309,7 +324,7 @@ app.use("/api/v2/feedback",    feedback);
 app.use("/api/v2/dashboard",   dashboard);
 app.use("/api/v2/advisor",     advisor);
 app.use("/api/v2/io",          io);
-app.use("/api/v2/audit",       ADMIN_GATE, audit);
+app.use("/api/v2/audit",       ADMIN_GATE, requireFeature('/audit'), audit);
 
 // Cron-triggerable morning digest — authenticated by a shared secret
 // header instead of an admin session, so an external scheduler (system
