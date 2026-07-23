@@ -129,6 +129,7 @@ router.get("/list", catchAsyncErrors(async (req, res, next) => {
   const [warpings, total] = await Promise.all([
     Warping.find(filter)
       .populate({ path: "job", select: "jobOrderNo status date customer" })
+      .populate({ path: "elasticOrdered.elastic", select: "name" })
       .populate("warpingPlan", "_id noOfBeams")
       .sort({ createdAt: -1 })
       .skip(skip)

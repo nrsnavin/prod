@@ -58,6 +58,7 @@ router.get(
           select: "jobOrderNo status customer",
           populate: { path: "customer", select: "name" },
         })
+        .populate({ path: "elasticPlanned.elastic", select: "name" })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit)),
