@@ -9,6 +9,7 @@ const sendToken = require("../utils/jwtToken.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 const { DEPARTMENTS, roleForDepartment, isDepartment } = require("../utils/roles");
+const { FEATURES, featuresForDepartment, sanitizeFeatures } = require("../utils/features");
 const { sendPasswordResetEmail, sendLoginOtpEmail } = require("../utils/mailer");
 const { escapeRegex } = require("../utils/escapeRegex");
 var jwt = require('jsonwebtoken');
@@ -80,6 +81,9 @@ router.post(
           id: user._id,
           role: user.role,
           department: user.department || null,
+          features: (user.features && user.features.length)
+            ? user.features
+            : featuresForDepartment(user.department || user.role),
           token: token,
         });
     } catch (error) {
@@ -536,16 +540,48 @@ function generateToken(user) {
 //  the department (utils/roles.js) and is what the RBAC gates enforce.
 // ══════════════════════════════════════════════════════════════
 
+// Current user's identity + effective feature set — lets the web/mobile
+// app refresh access without re-login (features fall back to the
+// department default when none are stored).
+router.get(
+  "/me",
+  isAuthenticated,
+  catchAsyncErrors(async (req, res) => {
+    const u = req.user;
+    res.json({
+      success: true,
+      user: {
+        id: u._id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        department: u.department || null,
+        features: (u.features && u.features.length)
+          ? u.features
+          : featuresForDepartment(u.department || u.role),
+      },
+    });
+  })
+);
+
 // List all users (no password) for the admin Users screen.
 router.get(
   "/manage/list",
   isAuthenticated, isAdmin("admin"),
   catchAsyncErrors(async (req, res) => {
     const users = await User.find({})
-      .select("name email role department createdAt")
+      .select("name email role department features createdAt")
       .sort({ createdAt: -1 })
       .lean();
-    res.json({ success: true, departments: DEPARTMENTS, users });
+    // Backfill an effective feature set for legacy users with none stored,
+    // so the admin screen shows what they can actually access.
+    const withFeatures = users.map((u) => ({
+      ...u,
+      features: (u.features && u.features.length)
+        ? u.features
+        : featuresForDepartment(u.department || u.role),
+    }));
+    res.json({ success: true, departments: DEPARTMENTS, features: FEATURES, users: withFeatures });
   })
 );
 
@@ -569,12 +605,17 @@ router.post(
     const exists = await User.findOne({ email }).lean();
     if (exists) return next(new ErrorHandler("A user with this email already exists", 409));
 
+    // Explicit custom feature list if supplied, else the department default.
+    const features = Array.isArray(req.body.features)
+      ? sanitizeFeatures(req.body.features)
+      : featuresForDepartment(department);
+
     const user = await User.create({
-      name, email, password, department, role: roleForDepartment(department),
+      name, email, password, department, role: roleForDepartment(department), features,
     });
     res.status(201).json({
       success: true,
-      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department, features: user.features },
     });
   })
 );
@@ -607,11 +648,14 @@ router.put(
         return next(new ErrorHandler("Password must be at least 4 characters", 400));
       user.password = req.body.password; // pre-save hook re-hashes
     }
+    if (Array.isArray(req.body.features)) {
+      user.features = sanitizeFeatures(req.body.features);
+    }
 
     await user.save();
     res.json({
       success: true,
-      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department, features: user.features },
     });
   })
 );
