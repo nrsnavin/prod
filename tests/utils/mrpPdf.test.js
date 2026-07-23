@@ -17,7 +17,28 @@ const base = {
   ],
 };
 
+// Authoritative page count from the PDF page tree's /Count.
+function pageCount(buf) {
+  const m = buf.toString('latin1').match(/\/Count\s+(\d+)/);
+  return m ? Number(m[1]) : 0;
+}
+
 describe('mrpPdf.buildMrpPdf', () => {
+  test('a small job renders on a single page (no blank footer pages)', async () => {
+    const buf = await buildMrpPdf(base);
+    expect(pageCount(buf)).toBe(1);
+  });
+
+  test('a large material list paginates to a bounded number of pages', async () => {
+    const materials = Array.from({ length: 45 }, (_, i) => ({
+      name: `Material ${i}`, category: 'Yarn',
+      requiredWeight: i + 1, inStock: i, shortfall: i > 25 ? 1 : 0,
+    }));
+    const pages = pageCount(await buildMrpPdf({ ...base, materials }));
+    expect(pages).toBeGreaterThan(1);
+    expect(pages).toBeLessThanOrEqual(4);
+  });
+
   test('returns a valid PDF buffer for an in-house job', async () => {
     const buf = await buildMrpPdf(base);
     expect(Buffer.isBuffer(buf)).toBe(true);
