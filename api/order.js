@@ -235,7 +235,10 @@ router.get(
     if (!status) {
       return next(new ErrorHandler("Status is required", 400));
     }
-    const orders = await Order.find({ status })
+    // "All" (case-insensitive) lists every order regardless of status;
+    // any other value filters to that exact status.
+    const filter = String(status).toLowerCase() === "all" ? {} : { status };
+    const orders = await Order.find(filter)
       .populate("customer",  "name")
       .populate("createdBy", "name role")
       .populate("updatedBy", "name role")
