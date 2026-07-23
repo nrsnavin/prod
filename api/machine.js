@@ -212,6 +212,7 @@ router.get(
         ],
       })
       .populate("orderRunning", "jobOrderNo")
+      .populate({ path: "elastics.elastic", model: "Elastic", select: "name" })
       .exec();
 
     if (!machine) return next(new ErrorHandler("Machine not found", 404));
@@ -246,12 +247,26 @@ router.get(
       machine: {
         id:           machine.ID,
         status:       machine.status,
-        elastics:     machine.elastics,
+        // Head → elastic map, sorted by head, with the elastic populated
+        // to { _id, name } so the UI can show which elastic runs on each head.
+        elastics:     [...(machine.elastics || [])]
+          .sort((a, b) => (a.head ?? 0) - (b.head ?? 0))
+          .map((e) => ({
+            head:    e.head ?? null,
+            elastic: e.elastic
+              ? { _id: e.elastic._id ?? e.elastic, name: e.elastic.name ?? null }
+              : null,
+          })),
         manufacturer: machine.manufacturer,
         heads:        machine.NoOfHead,
         hooks:        machine.NoOfHooks,
         dateOfPurchase: machine.DateOfPurchase || null,
         currentJobNo: machine.orderRunning?.jobOrderNo?.toString() ?? null,
+        // Running job's id + number so the UI can link to the job page.
+        currentJob:   machine.orderRunning
+          ? { id: machine.orderRunning._id?.toString?.() ?? null,
+              jobOrderNo: machine.orderRunning.jobOrderNo ?? null }
+          : null,
         result,
         serviceLogs:  [...machine.serviceLogs]
           .sort((a, b) => new Date(b.date) - new Date(a.date)),
