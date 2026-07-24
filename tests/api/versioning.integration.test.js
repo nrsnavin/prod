@@ -13,6 +13,7 @@ jest.mock("../../middleware/auth.js", () => ({
     next();
   },
   isAdmin: () => (_req, _res, next) => next(),
+  requireFeature:  () => (_req, _res, next) => next(),
 }));
 
 const express  = require("express");

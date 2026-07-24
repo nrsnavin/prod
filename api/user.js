@@ -373,6 +373,13 @@ router.get(
         role:       user.role,
         department: user.department || null,
         employee:   user.employee || null,
+        // Effective per-user feature set (falls back to the department
+        // default for legacy users with none stored) so the client can
+        // refresh access on load without re-login. NOTE: this is the one
+        // live GET /me — do not add a second, it would be shadowed.
+        features:   (user.features && user.features.length)
+          ? user.features
+          : featuresForDepartment(user.department || user.role),
       },
     });
   })
@@ -540,29 +547,9 @@ function generateToken(user) {
 //  the department (utils/roles.js) and is what the RBAC gates enforce.
 // ══════════════════════════════════════════════════════════════
 
-// Current user's identity + effective feature set — lets the web/mobile
-// app refresh access without re-login (features fall back to the
-// department default when none are stored).
-router.get(
-  "/me",
-  isAuthenticated,
-  catchAsyncErrors(async (req, res) => {
-    const u = req.user;
-    res.json({
-      success: true,
-      user: {
-        id: u._id,
-        name: u.name,
-        email: u.email,
-        role: u.role,
-        department: u.department || null,
-        features: (u.features && u.features.length)
-          ? u.features
-          : featuresForDepartment(u.department || u.role),
-      },
-    });
-  })
-);
+// NOTE: GET /user/me lives above (near the profile routes) and already
+// returns the effective feature set. A second /me here would be shadowed
+// by Express (first match wins), so it is intentionally not redefined.
 
 // List all users (no password) for the admin Users screen.
 router.get(

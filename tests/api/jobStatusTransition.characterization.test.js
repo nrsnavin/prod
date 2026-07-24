@@ -14,6 +14,7 @@
 jest.mock('../../middleware/auth.js', () => ({
   isAuthenticated: (req, _res, next) => { req.user = { _id: '507f1f77bcf86cd799439011', role: 'admin', name: 'Tester' }; next(); },
   isAdmin:         () => (_req, _res, next) => next(),
+  requireFeature:  () => (_req, _res, next) => next(),
   selfOrAdmin:     (_req, _res, next) => next(),
 }));
 
