@@ -61,6 +61,17 @@ describe('admin configures features on create', () => {
     expect(res.body.user.features).toEqual(['/jobs']);
   });
 
+  test('features outside the role/department scope are dropped', async () => {
+    // '/orders' is a valid feature key but NOT in a weaving user's scope
+    // (it's admin/finance) — it must not be stored on a weaving account.
+    const res = await createUser({
+      name: 'Scoped', email: 'scoped@t.co', password: 'pass1234',
+      department: 'weaving', features: ['/jobs', '/orders', '/reports'],
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.user.features).toEqual(['/jobs']);
+  });
+
   test('omitting features falls back to the department default', async () => {
     const res = await createUser({
       name: 'Betty', email: 'betty@t.co', password: 'pass1234', department: 'finance',

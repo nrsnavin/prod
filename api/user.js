@@ -593,8 +593,12 @@ router.post(
     if (exists) return next(new ErrorHandler("A user with this email already exists", 409));
 
     // Explicit custom feature list if supplied, else the department default.
+    // A user's features are a SUBSET of what their department/role can
+    // reach — intersect so a feature the role gate would block can never
+    // be stored (keeps the per-user set and the role gate consistent).
+    const scope = new Set(featuresForDepartment(department));
     const features = Array.isArray(req.body.features)
-      ? sanitizeFeatures(req.body.features)
+      ? sanitizeFeatures(req.body.features).filter((k) => scope.has(k))
       : featuresForDepartment(department);
 
     const user = await User.create({
@@ -636,7 +640,9 @@ router.put(
       user.password = req.body.password; // pre-save hook re-hashes
     }
     if (Array.isArray(req.body.features)) {
-      user.features = sanitizeFeatures(req.body.features);
+      // Scope to the user's (possibly just-changed) department/role.
+      const scope = new Set(featuresForDepartment(user.department || user.role));
+      user.features = sanitizeFeatures(req.body.features).filter((k) => scope.has(k));
     }
 
     await user.save();
