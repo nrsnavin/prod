@@ -317,9 +317,9 @@ app.use("/api/v2/supplier",    gate('accounts'), supplier);
 app.use("/api/v2/bonus",       gate('accounts', 'production'), bonus);
 app.use("/api/v2/order",       gate('accounts'), order);
 app.use("/api/v2/planner",     gate('production'), requireFeature('/planner'), planner);
-// Ask Jarvis spends LLM tokens and its one route is admin-only inside
-// the router — keep the mount admin-only to match (see note re: nav).
-app.use("/api/v2/assistant",   gate(), assistant);
+// Ask Jarvis is an always-on feature — open to any authenticated user
+// (no role gate), matching the nav. Still requires login.
+app.use("/api/v2/assistant",   isAuthenticated, assistant);
 app.use("/api/v2/materials",   gate('production', 'accounts'), material);
 app.use("/api/v2/warping",     gate('production'), warping);
 app.use("/api/v2/wastage",     gate('production'), wastage);

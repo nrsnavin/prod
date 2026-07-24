@@ -20,7 +20,7 @@ const Elastic      = require("../models/Elastic");
 const MachineModel = require("../models/Machine");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { isAuthenticated } = require("../middleware/auth");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 
 // ── Tool implementations (read-only Mongo queries) ─────────────────
@@ -135,8 +135,9 @@ const SYSTEM =
 
 router.post(
   "/chat",
+  // Ask Jarvis is open to any authenticated user (always-on feature).
+  // The tools it can call are read-only, so no role gate is needed here.
   isAuthenticated,
-  isAdmin("admin"),
   catchAsyncErrors(async (req, res) => {
     const claude = anthropic();
     if (!claude) return res.status(503).json({ success: false, message: "AI assistant is not configured (no API key)." });
