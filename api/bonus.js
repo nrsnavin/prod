@@ -28,6 +28,7 @@ const BonusConfig      = require("../models/BonusConfig");
 const BonusRecord      = require("../models/BonusRecord");
 const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
+const Payroll          = require("../models/Payroll");
 const PDFDocument      = require("pdfkit");
 const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
@@ -53,6 +54,78 @@ async function getOrCreateConfig(year) {
   let cfg = await BonusConfig.findOne({ year });
   if (!cfg) cfg = await BonusConfig.create({ year });
   return cfg;
+}
+
+// The Diwali-bonus salary window: the 12 months ENDING with the configured
+// Diwali month (BonusConfig.bonusDate) — i.e. last Diwali → this Diwali.
+// Falls back to the calendar year when no Diwali date is set.
+function diwaliWindow(cfg, year) {
+  let endYear = year, endMonth = 12;
+  if (cfg?.bonusDate) {
+    const d = new Date(cfg.bonusDate);
+    endYear = d.getFullYear();
+    endMonth = d.getMonth() + 1; // 1–12
+  }
+  const months = [];
+  for (let i = 11; i >= 0; i--) {
+    let m = endMonth - i, y = endYear;
+    while (m <= 0) { m += 12; y -= 1; }
+    months.push({ y, m });
+  }
+  const start = new Date(months[0].y, months[0].m - 1, 1);
+  const end   = new Date(endYear, endMonth, 0, 23, 59, 59, 999);
+  return { months, start, end, diwaliMonth: endMonth, diwaliYear: endYear };
+}
+
+function isDiwaliMonth(cfg) {
+  if (!cfg?.bonusDate) return false;
+  const d = new Date(cfg.bonusDate), now = new Date();
+  return now.getFullYear() === d.getFullYear() && now.getMonth() === d.getMonth();
+}
+
+// Compute one employee's Diwali bonus:
+//   bonus = (salary received in the window) × bonusPercent × attendanceMultiplier
+// "Salary received" is the sum of payroll net pay across the window months;
+// before payroll exists it falls back to an hourlyRate × hours estimate so
+// the preview still works.
+async function computeEmployeeBonus(emp, cfg, win) {
+  const payrolls = await Payroll.find({
+    employee: emp._id,
+    $or: win.months.map(w => ({ year: w.y, month: w.m })),
+  }).select("netPay").lean();
+  const salaryReceived = payrolls.reduce((s, p) => s + (p.netPay || 0), 0);
+
+  const shifts = await ShiftDetail.find({
+    employee: emp._id, date: { $gte: win.start, $lte: win.end },
+  }).select("shift date").lean();
+  const uniqueDates = new Set(shifts.map(s => {
+    const d = new Date(s.date); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  }));
+  const attendanceDays = uniqueDates.size;
+  const hoursWorked = shifts.reduce((sum, s) => sum + shiftHours(s.shift), 0);
+  const estimatedEarnings = (emp.hourlyRate || 0) * hoursWorked;
+
+  const basedOn = salaryReceived > 0 ? "salary_received" : "estimated";
+  const base    = salaryReceived > 0 ? salaryReceived : estimatedEarnings;
+
+  const bonusPercent   = emp.bonusPercent ?? 10;
+  const rawBonusAmount = base * (bonusPercent / 100);
+
+  const totalWorkingDays = cfg.yearlyWorkingDays;
+  const attendanceRate   = Math.min(100, totalWorkingDays > 0 ? (attendanceDays / totalWorkingDays) * 100 : 0);
+  const { tier, multiplier } = attendanceTier(attendanceRate);
+  const bonusAmount = Math.round(rawBonusAmount * multiplier);
+
+  return {
+    hourlyRate: emp.hourlyRate || 0, hoursWorked,
+    salaryReceived: Math.round(salaryReceived),
+    annualEarnings: Math.round(base),   // the bonus base (window salary)
+    basedOn,
+    bonusPercent, rawBonusAmount,
+    attendanceDays, totalWorkingDays,
+    attendanceRate: parseFloat(attendanceRate.toFixed(1)),
+    attendanceTier: tier, multiplier, bonusAmount,
+  };
 }
 
 router.get(
@@ -124,11 +197,22 @@ router.post(
       ));
     }
 
+    // Generate ONLY in the configured Diwali month — before that, the admin
+    // sees the approximate figures via GET /bonus/preview.
+    if (!cfg.bonusDate) {
+      return next(new ErrorHandler("Set the Diwali date in the bonus config before generating.", 400));
+    }
+    if (!isDiwaliMonth(cfg)) {
+      const d = new Date(cfg.bonusDate);
+      return next(new ErrorHandler(
+        `Bonus can only be generated in the Diwali month (${d.toLocaleString("en-IN", { month: "long", year: "numeric" })}). Use the preview until then.`,
+        400
+      ));
+    }
+
     await BonusRecord.deleteMany({ year, status: "pending" });
 
-    const yearStart = new Date(`${year}-01-01T00:00:00.000Z`);
-    const yearEnd   = new Date(`${year}-12-31T23:59:59.999Z`);
-
+    const win = diwaliWindow(cfg, year);
     const employees = await Employee.find().select("name department hourlyRate bonusPercent");
 
     if (employees.length === 0) {
@@ -136,46 +220,9 @@ router.post(
     }
 
     const records = [];
-
     for (const emp of employees) {
-      const shifts = await ShiftDetail.find({
-        employee: emp._id,
-        date: { $gte: yearStart, $lte: yearEnd },
-      }).select("shift date");
-
-      const uniqueDates = new Set(
-        shifts.map((s) => {
-          const d = new Date(s.date);
-          return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-        })
-      );
-      const attendanceDays = uniqueDates.size;
-
-      const hoursWorked = shifts.reduce((sum, s) => sum + shiftHours(s.shift), 0);
-
-      const hourlyRate      = emp.hourlyRate || 0;
-      const annualEarnings  = hourlyRate * hoursWorked;
-
-      const bonusPercent   = emp.bonusPercent ?? 10;
-      const rawBonusAmount = annualEarnings * (bonusPercent / 100);
-
-      const totalWorkingDays = cfg.yearlyWorkingDays;
-      const attendanceRate   = Math.min(100,
-        totalWorkingDays > 0 ? (attendanceDays / totalWorkingDays) * 100 : 0
-      );
-      const { tier, multiplier } = attendanceTier(attendanceRate);
-
-      const bonusAmount = Math.round(rawBonusAmount * multiplier);
-
-      records.push({
-        employee: emp._id, year,
-        hourlyRate, hoursWorked, annualEarnings,
-        bonusPercent, rawBonusAmount,
-        attendanceDays, totalWorkingDays,
-        attendanceRate: parseFloat(attendanceRate.toFixed(1)),
-        attendanceTier: tier, multiplier,
-        bonusAmount, status: "pending",
-      });
+      const c = await computeEmployeeBonus(emp, cfg, win);
+      records.push({ employee: emp._id, year, ...c, status: "pending" });
     }
 
     const ops = records.map((r) => ({
@@ -204,6 +251,40 @@ router.post(
       recordCount: created.length,
       totalPayout,
       records: created,
+    });
+  })
+);
+
+// Approximate bonus preview — computed live from salary received so far in
+// the Diwali window, WITHOUT persisting. `approximate` is true until the
+// Diwali month; `canGenerate` tells the UI when the real trigger is allowed.
+router.get(
+  "/preview",
+  isAdmin('admin', 'accounts'),
+  catchAsyncErrors(async (req, res) => {
+    const year = parseInt(req.query.year) || currentYear();
+    const cfg  = await getOrCreateConfig(year);
+    const win  = diwaliWindow(cfg, year);
+
+    const employees = await Employee.find().select("name department hourlyRate bonusPercent");
+    const rows = [];
+    for (const emp of employees) {
+      const c = await computeEmployeeBonus(emp, cfg, win);
+      rows.push({ employeeId: emp._id, name: emp.name, department: emp.department, ...c });
+    }
+    rows.sort((a, b) => b.bonusAmount - a.bonusAmount);
+
+    const onMonth = isDiwaliMonth(cfg);
+    res.status(200).json({
+      success:     true,
+      year,
+      approximate: !onMonth,           // true = figures will still change
+      canGenerate: onMonth && cfg.status !== "completed",
+      diwaliDate:  cfg.bonusDate,
+      bonusLabel:  cfg.bonusLabel,
+      window:      { start: win.start, end: win.end, months: win.months },
+      totalPayout: rows.reduce((s, r) => s + r.bonusAmount, 0),
+      rows,
     });
   })
 );
