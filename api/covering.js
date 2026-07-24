@@ -11,13 +11,16 @@ const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
-const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, requireFeature } = require("../middleware/auth");
 
 // All covering routes require login. Workers in the `covering` (and
 // `warping`) departments need to read /list and /detail to monitor
 // their jobs; covering operators also POST /beam-entry to record their
 // own work. Mutations stay admin-only.
 router.use(isAuthenticated);
+// Per-user feature gate (Phase 4): the Covering data backs both the
+// Warping and Covering screens, so either feature grants access.
+router.use(requireFeature('/warping', '/covering'));
 
 router.get(
   "/list",

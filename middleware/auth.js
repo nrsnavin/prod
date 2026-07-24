@@ -43,6 +43,42 @@ exports.isAdmin = (...roles) => {
     }
 }
 
+// Per-user FEATURE guard (Phase 4 — fine-grained access). Use AFTER
+// isAuthenticated, layered on top of the coarse isAdmin(...) role gate,
+// to enforce the same per-user feature list the web/mobile nav uses.
+//
+// Access rules (a request passes if ANY holds):
+//   • the user is an admin — admins bypass every feature gate;
+//   • the user has NO explicit feature list — legacy users (created
+//     before the feature system) are left to the coarse role gate that
+//     already precedes this middleware, so enforcement never NARROWS
+//     access for anyone who predates the feature system;
+//   • the user's explicit `features` list includes ANY of `keys`.
+//
+// This is layered AFTER the existing isAdmin(...) role gate — it only
+// ever tightens access for users who carry an explicit feature list
+// (everyone created/edited through the Users screen, and everyone the
+// backfill migration touched) whose list omits the feature. `keys`
+// accepts the feature itself plus any sibling feature that legitimately
+// reads the same router (e.g. Jobs reads /qc), so a user with a
+// consuming feature isn't blocked.
+exports.requireFeature = (...keys) => {
+    return (req, res, next) => {
+        if (!req.user) {
+            return next(new ErrorHandler("Please login to continue", 401));
+        }
+        if (req.user.role === "admin") return next();
+
+        const explicit = Array.isArray(req.user.features) ? req.user.features : [];
+        // No explicit customization → defer to the preceding role gate.
+        if (explicit.length === 0) return next();
+
+        if (keys.some((k) => explicit.includes(k))) return next();
+
+        return next(new ErrorHandler("You don't have access to this feature", 403));
+    };
+};
+
 // Per-employee ownership guard. Use after isAuthenticated on routes
 // whose path/query carries an :empId — admins pass through, but a
 // worker can only access their own employee record. Closes the
