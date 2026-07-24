@@ -304,28 +304,32 @@ app.use("/api/v2/user/verify-otp", loginLimiter);
 app.use("/api/v2/user", user);
 app.use("/api/v2/settings",    gate('production', 'accounts'), settings);
 app.use("/api/v2/pdf-templates", gate('production', 'accounts'), pdfTemplates);
-app.use("/api/v2/machine",     gate('production'), machine);
-app.use("/api/v2/shift",       gate('production'), shift);
-app.use("/api/v2/customer",    gate('accounts'), customer);
-app.use("/api/v2/employee",    gate('accounts', 'production'), employee);
-app.use("/api/v2/elastic",     gate('accounts', 'production'), elastic);
-// Elastic groups: list/detail are read by the Order form and Customer
-// detail (finance flows); only mutations are admin-only (inside router).
-app.use("/api/v2/elastic-group", gate('accounts'), elasticGroup);
-app.use("/api/v2/dc",          gate('accounts'), deliveryChallanRouter);
-app.use("/api/v2/supplier",    gate('accounts'), supplier);
-app.use("/api/v2/bonus",       gate('accounts', 'production'), bonus);
-app.use("/api/v2/order",       gate('accounts'), order);
+// Per-user feature enforcement (writes only — requireFeature passes all
+// reads). Machine head assignment is also written from the Jobs screen,
+// so /jobs may write here too.
+app.use("/api/v2/machine",     gate('production'), requireFeature('/machines', '/jobs'), machine);
+app.use("/api/v2/shift",       gate('production'), requireFeature('/shift-plans', '/shift-verification', '/production'), shift);
+app.use("/api/v2/customer",    gate('accounts'), requireFeature('/customers'), customer);
+app.use("/api/v2/employee",    gate('accounts', 'production'), requireFeature('/employees'), employee);
+app.use("/api/v2/elastic",     gate('accounts', 'production'), requireFeature('/elastics'), elastic);
+// Elastic groups can be created from the Order form and Customer detail
+// (finance flows), so those features may write here too.
+app.use("/api/v2/elastic-group", gate('accounts'), requireFeature('/elastic-groups', '/orders', '/customers'), elasticGroup);
+app.use("/api/v2/dc",          gate('accounts'), requireFeature('/delivery-challans'), deliveryChallanRouter);
+// Purchase orders live on the supplier router, so /purchase-orders writes here.
+app.use("/api/v2/supplier",    gate('accounts'), requireFeature('/suppliers', '/purchase-orders'), supplier);
+app.use("/api/v2/bonus",       gate('accounts', 'production'), requireFeature('/bonus'), bonus);
+app.use("/api/v2/order",       gate('accounts'), requireFeature('/orders'), order);
 app.use("/api/v2/planner",     gate('production'), requireFeature('/planner'), planner);
 // Ask Jarvis is an always-on feature — open to any authenticated user
 // (no role gate), matching the nav. Still requires login.
 app.use("/api/v2/assistant",   isAuthenticated, assistant);
-app.use("/api/v2/materials",   gate('production', 'accounts'), material);
+app.use("/api/v2/materials",   gate('production', 'accounts'), requireFeature('/materials'), material);
 app.use("/api/v2/warping",     gate('production'), warping);
 app.use("/api/v2/wastage",     gate('production'), wastage);
-app.use("/api/v2/attendance",  gate('accounts', 'production'), attendence);
+app.use("/api/v2/attendance",  gate('accounts', 'production'), requireFeature('/attendance'), attendence);
 app.use("/api/v2/covering",    gate('production'), covering);
-app.use("/api/v2/job",         gate('production'), job);
+app.use("/api/v2/job",         gate('production'), requireFeature('/jobs'), job);
 app.use("/api/v2/packing",     gate('production'), packing);
 // Production View feeds the Analytics dashboards too, so a user with
 // either feature may read it.

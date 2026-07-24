@@ -17,8 +17,18 @@ const LeaveRequest = require('../models/LeaveRequest');
 const Attendance   = require('../models/Attendence.js');
 const ShiftDetail  = require('../models/ShiftDetail');
 const Employee     = require('../models/Employee');
-const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature } = require('../middleware/auth');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
+
+// Per-user feature gate (writes only). Worker self-service is exempt:
+// submitting your own request (POST /request) and cancelling your own
+// pending request (DELETE /:id) don't need the /leave management feature.
+// (req.user is set by the mount-level isAuthenticated in app.js.)
+router.use((req, res, next) => {
+  if (req.method === 'POST' && req.path === '/request') return next();
+  if (req.method === 'DELETE') return next();
+  return requireFeature('/leave')(req, res, next);
+});
 
 function toISODate(d)   { return new Date(d).toISOString().split('T')[0]; }
 function toDateLabel(d) {

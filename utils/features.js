@@ -15,23 +15,23 @@
 
 const FEATURES = [
   { key: "/",                    label: "Dashboard",           section: "Overview",       depts: "all" },
-  { key: "/analytics",           label: "Analytics",           section: "Overview",       depts: ["admin", "weaving"] },
+  { key: "/analytics",           label: "Analytics",           section: "Overview",       depts: ["admin", "production"] },
   { key: "/reports",             label: "Reports",             section: "Overview",       depts: ["admin", "finance"] },
   { key: "/audit",               label: "Audit Trail",         section: "Overview",       depts: ["admin"] },
 
   { key: "/orders",              label: "Orders",              section: "Sales",          depts: ["admin", "finance"] },
-  { key: "/jobs",                label: "Job Orders",          section: "Sales",          depts: ["admin", "preparatory", "weaving", "packing"] },
+  { key: "/jobs",                label: "Job Orders",          section: "Sales",          depts: ["admin", "production", "packing"] },
   { key: "/delivery-challans",   label: "Delivery Challans",   section: "Sales",          depts: ["admin", "finance"] },
 
-  { key: "/planner",             label: "Auto Planner",        section: "Production",     depts: ["admin", "weaving"] },
-  { key: "/warping",             label: "Warping",             section: "Production",     depts: ["admin", "preparatory"] },
-  { key: "/covering",            label: "Covering",            section: "Production",     depts: ["admin", "preparatory"] },
+  { key: "/planner",             label: "Auto Planner",        section: "Production",     depts: ["admin", "production"] },
+  { key: "/warping",             label: "Warping",             section: "Production",     depts: ["admin", "production"] },
+  { key: "/covering",            label: "Covering",            section: "Production",     depts: ["admin", "production"] },
   { key: "/packing",             label: "Packing",             section: "Production",     depts: ["admin", "packing"] },
   { key: "/qc",                  label: "Quality Control",     section: "Production",     depts: ["admin", "packing"] },
-  { key: "/shift-plans",         label: "Shift Plans",         section: "Production",     depts: ["admin", "weaving"] },
-  { key: "/shift-verification",  label: "Shift Verification",  section: "Production",     depts: ["admin", "weaving"] },
-  { key: "/production",          label: "Production View",     section: "Production",     depts: ["admin", "weaving"] },
-  { key: "/wastage",             label: "Wastage",             section: "Production",     depts: ["admin", "weaving"] },
+  { key: "/shift-plans",         label: "Shift Plans",         section: "Production",     depts: ["admin", "production"] },
+  { key: "/shift-verification",  label: "Shift Verification",  section: "Production",     depts: ["admin", "production"] },
+  { key: "/production",          label: "Production View",     section: "Production",     depts: ["admin", "production"] },
+  { key: "/wastage",             label: "Wastage",             section: "Production",     depts: ["admin", "production"] },
 
   { key: "/customers",           label: "Customers",           section: "Masters",        depts: ["admin", "finance"] },
   { key: "/suppliers",           label: "Suppliers",           section: "Masters",        depts: ["admin", "finance"] },
@@ -39,7 +39,7 @@ const FEATURES = [
   { key: "/materials",           label: "Raw Materials",       section: "Masters",        depts: ["admin", "finance"] },
   { key: "/elastics",            label: "Elastic Products",    section: "Masters",        depts: ["admin", "finance"] },
   { key: "/elastic-groups",      label: "Elastic Groups",      section: "Masters",        depts: ["admin"] },
-  { key: "/machines",            label: "Machines",            section: "Masters",        depts: ["admin", "weaving"] },
+  { key: "/machines",            label: "Machines",            section: "Masters",        depts: ["admin", "production"] },
   { key: "/employees",           label: "Employees",           section: "Masters",        depts: ["admin", "finance"] },
 
   { key: "/attendance",          label: "Attendance",          section: "HR & Payroll",   depts: ["admin", "finance"] },
@@ -64,16 +64,18 @@ const FEATURE_KEYS = FEATURES.map((f) => f.key);
 const FEATURE_KEY_SET = new Set(FEATURE_KEYS);
 const ALWAYS_ON = FEATURES.filter((f) => f.depts === "all").map((f) => f.key);
 
-const FLOOR_DEPTS = ["preparatory", "weaving", "packing"];
+// Legacy departments (pre-merge) alias to the merged "production"
+// department so accounts not yet migrated still resolve their features.
+const LEGACY_DEPT_ALIAS = { preparatory: "production", weaving: "production" };
 
 // Default feature set for a department/role — used to backfill users who
 // have no explicit list yet. Admin gets everything.
 function featuresForDepartment(department) {
-  if (department === "admin") return [...FEATURE_KEYS];
+  const dept = LEGACY_DEPT_ALIAS[department] || department;
+  if (dept === "admin") return [...FEATURE_KEYS];
   const match = (f) => {
     if (f.depts === "all") return true;
-    if (department === "production") return f.depts.some((d) => FLOOR_DEPTS.includes(d));
-    return !!department && f.depts.includes(department);
+    return !!dept && Array.isArray(f.depts) && f.depts.includes(dept);
   };
   return FEATURES.filter(match).map((f) => f.key);
 }
