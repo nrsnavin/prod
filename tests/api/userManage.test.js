@@ -26,7 +26,7 @@ beforeAll(async () => {
 
   admin1 = await User.create({ name: 'Owner', email: 'owner@t.co', password: 'pass1234', role: 'admin', department: 'admin' });
   admin2 = await User.create({ name: 'Second', email: 'second@t.co', password: 'pass1234', role: 'admin', department: 'admin' });
-  worker = await User.create({ name: 'Weaver', email: 'weaver@t.co', password: 'pass1234', role: 'production', department: 'weaving' });
+  worker = await User.create({ name: 'Weaver', email: 'weaver@t.co', password: 'pass1234', role: 'production', department: 'production' });
 }, 60_000);
 
 afterAll(async () => {

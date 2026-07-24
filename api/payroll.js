@@ -19,7 +19,7 @@ const AdvanceRequest   = require('../models/Advance');
 const YearlyBonus      = require('../models/YearlyBonus');
 const ShiftDetail      = require('../models/ShiftDetail');
 const Wastage          = require('../models/Wastage');
-const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature } = require('../middleware/auth');
 const { EMPLOYEE_CARD_FIELDS } = require('../utils/populateFields');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
 // The ~200-line pure pay computation lives in services/payrollService.js.
@@ -28,6 +28,13 @@ const { resolveEmployeeId } = require('../utils/resolveEmployee');
 const { computePayroll } = require('../services/payrollService');
 
 router.use(isAuthenticated);
+// Per-user feature gate (writes only). The worker self-service advance
+// request (POST /advance) is exempt — an employee requests their own
+// advance without holding the /payroll management feature.
+router.use((req, res, next) => {
+  if (req.method === 'POST' && req.path === '/advance') return next();
+  return requireFeature('/payroll')(req, res, next);
+});
 
 const r2 = (n) => Math.round(n * 100) / 100;
 

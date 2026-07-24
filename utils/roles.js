@@ -13,20 +13,26 @@
 // they SEE (web nav + route guards); their derived `role` drives what
 // the API lets them DO.
 //
-// preparatory / weaving / packing all map to `production` — the backend
-// can't tell them apart (accepted trade-off of "map onto existing
-// roles"); the web separates them by department. finance maps to
-// `accounts`, and the finance-area gates (DC, materials, supplier/PO,
-// payroll) accept `accounts`.
+// production and packing both map to `production` — the backend can't
+// tell them apart (accepted trade-off of "map onto existing roles"); the
+// web separates them by department. finance maps to `accounts`, and the
+// finance-area gates (DC, materials, supplier/PO, payroll) accept
+// `accounts`.
 
-const DEPARTMENTS = ["admin", "preparatory", "weaving", "packing", "finance"];
+// Preparatory and weaving were merged into a single "production"
+// department (they always shared the production role). Packing stays
+// separate — it's a distinct downstream stage with its own features.
+const DEPARTMENTS = ["admin", "production", "packing", "finance"];
 
 const DEPARTMENT_ROLE = {
   admin:       "admin",
-  preparatory: "production",
-  weaving:     "production",
+  production:  "production",
   packing:     "production",
   finance:     "accounts",
+  // Legacy (pre-merge) departments still resolve to the production role,
+  // so any account not yet migrated keeps working.
+  preparatory: "production",
+  weaving:     "production",
 };
 
 // Derive the backend role for a department. Unknown/empty department

@@ -43,7 +43,7 @@ describe('admin configures features on create', () => {
   test('an explicit feature list is stored (sanitized) and returned', async () => {
     const res = await createUser({
       name: 'Wilma', email: 'wilma@t.co', password: 'pass1234',
-      department: 'weaving', features: ['/jobs', '/wastage'],
+      department: 'production', features: ['/jobs', '/wastage'],
     });
     expect(res.status).toBe(201);
     expect(res.body.user.role).toBe('production');       // derived from dept
@@ -55,18 +55,18 @@ describe('admin configures features on create', () => {
   test('unknown feature keys are dropped', async () => {
     const res = await createUser({
       name: 'Fred', email: 'fred@t.co', password: 'pass1234',
-      department: 'weaving', features: ['/jobs', '/not-a-real-feature', 42],
+      department: 'production', features: ['/jobs', '/not-a-real-feature', 42],
     });
     expect(res.status).toBe(201);
     expect(res.body.user.features).toEqual(['/jobs']);
   });
 
   test('features outside the role/department scope are dropped', async () => {
-    // '/orders' is a valid feature key but NOT in a weaving user's scope
-    // (it's admin/finance) — it must not be stored on a weaving account.
+    // '/orders' is a valid feature key but NOT in a production user's scope
+    // (it's admin/finance) — it must not be stored on a production account.
     const res = await createUser({
       name: 'Scoped', email: 'scoped@t.co', password: 'pass1234',
-      department: 'weaving', features: ['/jobs', '/orders', '/reports'],
+      department: 'production', features: ['/jobs', '/orders', '/reports'],
     });
     expect(res.status).toBe(201);
     expect(res.body.user.features).toEqual(['/jobs']);
@@ -85,7 +85,7 @@ describe('admin edits features', () => {
   test('PUT replaces the feature list and the change persists', async () => {
     const created = await createUser({
       name: 'Barney', email: 'barney@t.co', password: 'pass1234',
-      department: 'weaving', features: ['/jobs'],
+      department: 'production', features: ['/jobs'],
     });
     const id = created.body.user.id;
 
@@ -115,38 +115,77 @@ describe('/user/me effective features', () => {
   });
 });
 
-describe('feature config drives API enforcement', () => {
-  test('a user WITHOUT the feature is blocked from that route (403)', async () => {
+describe('feature config drives API enforcement (writes only)', () => {
+  test('a WRITE is blocked (403) when the user lacks the feature', async () => {
     const c = await createUser({
       name: 'NoWaste', email: 'nowaste@t.co', password: 'pass1234',
-      department: 'weaving', features: ['/jobs'],   // explicit, no /wastage
+      department: 'production', features: ['/jobs'],   // explicit, no /wastage
     });
     const res = await request(app)
-      .get('/api/v2/wastage/jobs-for-wastage')
-      .set('Cookie', cookie(c.body.user.id, 'production'));
+      .post('/api/v2/wastage/anything')
+      .set('Cookie', cookie(c.body.user.id, 'production'))
+      .send({});
     expect(res.status).toBe(403);
   });
 
-  test('a user WITH the feature is not blocked', async () => {
+  test('a WRITE is allowed when the user has the feature', async () => {
     const c = await createUser({
       name: 'YesWaste', email: 'yeswaste@t.co', password: 'pass1234',
-      department: 'weaving', features: ['/jobs', '/wastage'],
+      department: 'production', features: ['/jobs', '/wastage'],
     });
     const res = await request(app)
-      .get('/api/v2/wastage/jobs-for-wastage')
-      .set('Cookie', cookie(c.body.user.id, 'production'));
+      .post('/api/v2/wastage/anything')
+      .set('Cookie', cookie(c.body.user.id, 'production'))
+      .send({});
     expect(res.status).not.toBe(403);
   });
 
-  test('a user with an empty feature list defers to the role gate (not blocked)', async () => {
+  test('READS are never feature-gated (GET passes without the feature)', async () => {
     const c = await createUser({
-      name: 'Empty', email: 'empty@t.co', password: 'pass1234',
-      department: 'weaving', features: [],
+      name: 'Reader', email: 'reader@t.co', password: 'pass1234',
+      department: 'production', features: ['/jobs'],   // no /wastage
     });
-    expect(c.body.user.features).toEqual([]);
     const res = await request(app)
       .get('/api/v2/wastage/jobs-for-wastage')
       .set('Cookie', cookie(c.body.user.id, 'production'));
+    expect(res.status).not.toBe(403); // read allowed despite missing feature
+  });
+
+  test('an empty feature list defers to the role gate (write not blocked)', async () => {
+    const c = await createUser({
+      name: 'Empty', email: 'empty@t.co', password: 'pass1234',
+      department: 'production', features: [],
+    });
+    expect(c.body.user.features).toEqual([]);
+    const res = await request(app)
+      .post('/api/v2/wastage/anything')
+      .set('Cookie', cookie(c.body.user.id, 'production'))
+      .send({});
     expect(res.status).not.toBe(403);
+  });
+
+  // The exact case reported: an ADMIN-role user whose custom features omit
+  // /attendance must not be able to write attendance (no admin bypass),
+  // but WITH it, they can — and reads are always fine.
+  test('an admin without /attendance cannot write attendance; with it, can', async () => {
+    const denied = await createUser({
+      name: 'AdminNoAtt', email: 'adminnoatt@t.co', password: 'pass1234',
+      department: 'admin', features: ['/orders'],   // admin, but no /attendance
+    });
+    const dRes = await request(app)
+      .post('/api/v2/attendance/mark')
+      .set('Cookie', cookie(denied.body.user.id, 'admin'))
+      .send({});
+    expect(dRes.status).toBe(403);
+
+    const allowed = await createUser({
+      name: 'AdminAtt', email: 'adminatt@t.co', password: 'pass1234',
+      department: 'admin', features: ['/attendance'],
+    });
+    const aRes = await request(app)
+      .post('/api/v2/attendance/mark')
+      .set('Cookie', cookie(allowed.body.user.id, 'admin'))
+      .send({});
+    expect(aRes.status).not.toBe(403);
   });
 });

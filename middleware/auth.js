@@ -43,31 +43,32 @@ exports.isAdmin = (...roles) => {
     }
 }
 
-// Per-user FEATURE guard (Phase 4 — fine-grained access). Use AFTER
-// isAuthenticated, layered on top of the coarse isAdmin(...) role gate,
-// to enforce the same per-user feature list the web/mobile nav uses.
+// Per-user FEATURE guard. Use AFTER isAuthenticated, layered on top of
+// the coarse isAdmin(...) role gate, to enforce the same per-user feature
+// list the web/mobile nav uses — for EVERYONE, admins included.
 //
-// Access rules (a request passes if ANY holds):
-//   • the user is an admin — admins bypass every feature gate;
-//   • the user has NO explicit feature list — legacy users (created
-//     before the feature system) are left to the coarse role gate that
-//     already precedes this middleware, so enforcement never NARROWS
-//     access for anyone who predates the feature system;
+// It gates WRITES ONLY (POST/PUT/PATCH/DELETE). Reads (GET/HEAD/OPTIONS)
+// always pass, so cross-feature reads (e.g. the Customer page pulling a
+// customer's recent orders from /order) and worker self-service reads
+// (own payslip/leave/attendance) can never be blocked by a feature gate.
+//
+// A write passes when ANY holds:
+//   • the user has NO explicit feature list — the owner / legacy accounts
+//     defer to the preceding role gate (an admin with no custom list
+//     keeps everything);
 //   • the user's explicit `features` list includes ANY of `keys`.
-//
-// This is layered AFTER the existing isAdmin(...) role gate — it only
-// ever tightens access for users who carry an explicit feature list
-// (everyone created/edited through the Users screen, and everyone the
-// backfill migration touched) whose list omits the feature. `keys`
-// accepts the feature itself plus any sibling feature that legitimately
-// reads the same router (e.g. Jobs reads /qc), so a user with a
-// consuming feature isn't blocked.
+// Otherwise the write is 403 — including for an admin whose custom list
+// omits the feature. `keys` accepts the owning feature plus any sibling
+// feature that legitimately writes through the same router (e.g. an
+// elastic group created from the Order form → also accept /orders).
 exports.requireFeature = (...keys) => {
     return (req, res, next) => {
+        const m = req.method;
+        if (m === "GET" || m === "HEAD" || m === "OPTIONS") return next();
+
         if (!req.user) {
             return next(new ErrorHandler("Please login to continue", 401));
         }
-        if (req.user.role === "admin") return next();
 
         const explicit = Array.isArray(req.user.features) ? req.user.features : [];
         // No explicit customization → defer to the preceding role gate.

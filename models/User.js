@@ -33,8 +33,10 @@ const userSchema = new mongoose.Schema(
     // the backend RBAC gates enforce. Optional so pre-existing users
     // (which only carry `role`) remain valid.
     department: {
+      // preparatory + weaving were merged into "production"; the legacy
+      // values stay enum-valid so pre-migration accounts still save.
       type: String,
-      enum: ["admin", "preparatory", "weaving", "packing", "finance"],
+      enum: ["admin", "production", "packing", "finance", "preparatory", "weaving"],
     },
     // Per-user custom feature access (keys mirror the web nav paths, e.g.
     // "/orders", "/wastage"). When set, this is the source of truth for

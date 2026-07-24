@@ -89,38 +89,48 @@ describe("isAdmin", () => {
   });
 });
 
-describe("requireFeature", () => {
-  const run = (user, ...keys) => {
+describe("requireFeature (writes only, admins included)", () => {
+  const run = (user, method, ...keys) => {
     const next = buildNext();
-    requireFeature(...keys)({ user }, {}, next);
+    requireFeature(...keys)({ user, method }, {}, next);
     return next;
   };
   // A denial calls next(err); a pass calls next() with no args.
   const passed = (next) =>
     next.mock.calls.length === 1 && next.mock.calls[0].length === 0;
 
-  it("401s when there is no authenticated user", () => {
-    const next = run(undefined, "/reports");
+  it("never gates reads — GET passes regardless of features or user", () => {
+    expect(passed(run(undefined, "GET", "/reports"))).toBe(true);
+    expect(passed(run({ role: "production", features: ["/jobs"] }, "GET", "/reports"))).toBe(true);
+  });
+
+  it("401s on a write with no authenticated user", () => {
+    const next = run(undefined, "POST", "/reports");
     expect(next.mock.calls[0][0].statusCode).toBe(401);
   });
 
-  it("lets admins bypass every feature gate", () => {
-    expect(passed(run({ role: "admin", features: [] }, "/reports"))).toBe(true);
+  it("enforces writes for admins too (no bypass)", () => {
+    // admin whose custom list omits the feature is blocked from writing
+    const denied = run({ role: "admin", features: ["/orders"] }, "POST", "/reports");
+    expect(passed(denied)).toBe(false);
+    expect(denied.mock.calls[0][0].statusCode).toBe(403);
+    // admin who holds it may write
+    expect(passed(run({ role: "admin", features: ["/reports"] }, "POST", "/reports"))).toBe(true);
   });
 
-  it("defers to the role gate when the user has no explicit features", () => {
-    expect(passed(run({ role: "production", features: [] }, "/reports"))).toBe(true);
-    expect(passed(run({ role: "production" }, "/reports"))).toBe(true); // absent list
+  it("defers when the user has no explicit features (owner / legacy)", () => {
+    expect(passed(run({ role: "admin", features: [] }, "POST", "/reports"))).toBe(true);
+    expect(passed(run({ role: "production" }, "PUT", "/reports"))).toBe(true); // absent list
   });
 
-  it("passes when an explicit list includes any required key", () => {
-    expect(passed(run({ role: "production", features: ["/qc", "/jobs"] }, "/qc", "/jobs"))).toBe(true);
-    // holds only the consuming feature — still allowed
-    expect(passed(run({ role: "production", features: ["/jobs"] }, "/qc", "/jobs"))).toBe(true);
+  it("passes a write when the explicit list includes any required key", () => {
+    expect(passed(run({ features: ["/qc", "/jobs"] }, "POST", "/qc", "/jobs"))).toBe(true);
+    // holds only the sibling/consuming feature — still allowed
+    expect(passed(run({ features: ["/jobs"] }, "DELETE", "/qc", "/jobs"))).toBe(true);
   });
 
-  it("403s when an explicit list omits every required key", () => {
-    const next = run({ role: "production", features: ["/jobs", "/machines"] }, "/reports");
+  it("403s a write when the explicit list omits every required key", () => {
+    const next = run({ role: "production", features: ["/jobs", "/machines"] }, "PUT", "/reports");
     expect(passed(next)).toBe(false);
     expect(next.mock.calls[0][0].statusCode).toBe(403);
   });
