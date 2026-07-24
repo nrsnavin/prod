@@ -10,13 +10,13 @@
 
 const express          = require('express');
 const mongoose         = require('mongoose');
+const PDFDocument      = require('pdfkit');
 const router           = express.Router();
 const Attendance       = require('../models/Attendence');
 const Employee         = require('../models/Employee');
 const Payroll          = require('../models/Payroll');
 const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
-const YearlyBonus      = require('../models/YearlyBonus');
 const ShiftDetail      = require('../models/ShiftDetail');
 const Wastage          = require('../models/Wastage');
 const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature } = require('../middleware/auth');
@@ -49,7 +49,9 @@ router.get('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
 router.post('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const allowed = ['casualLeavesPerMonth','sickLeavesPerMonth','lateGracePeriodMinutes',
-                     'penaltyPerExcessAbsent','noLeaveBonus','perfectAttendanceBonus','streakBonusPer7Shifts'];
+                     'penaltyPerExcessAbsent','noLeaveBonus','perfectAttendanceBonus','streakBonusPer7Shifts',
+                     'overtimeMultiplier','overtimeGraceMinutes',
+                     'pfPercent','pfWageCeiling','esiPercent','esiWageCeiling'];
     const update = {};
     for (const k of allowed) if (req.body[k] !== undefined) update[k] = Number(req.body[k]);
     const s = await PayrollSettings.findOneAndUpdate({}, { $set: update }, { upsert: true, new: true });
@@ -99,12 +101,20 @@ router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
     if (!year || !month)
       return res.status(400).json({ success: false, message: 'year and month required' });
 
-    let empIds = employeeId
-      ? [employeeId]
-      : (await Employee.find({ hourlyRate: { $gt: 0 } }, '_id').lean()).map(e => e._id.toString());
+    let empIds, skipped = [];
+    if (employeeId) {
+      empIds = [employeeId];
+    } else {
+      const all = await Employee.find({}, '_id name hourlyRate').lean();
+      empIds  = all.filter(e => (e.hourlyRate ?? 0) > 0).map(e => e._id.toString());
+      // Report (don't silently drop) employees with no rate — a missing
+      // rate = a missing paycheck, so surface exactly who was skipped.
+      skipped = all.filter(e => (e.hourlyRate ?? 0) <= 0)
+        .map(e => ({ employeeId: e._id, name: e.name, reason: 'no hourlyRate set' }));
+    }
 
     if (!empIds.length)
-      return res.status(400).json({ success: false, message: 'No employees with hourlyRate set' });
+      return res.status(400).json({ success: false, message: 'No employees with hourlyRate set', skipped });
 
     const results = [], errors = [];
     for (const id of empIds) {
@@ -120,46 +130,34 @@ router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
         continue;
       }
 
-      const session = await mongoose.startSession();
       try {
-        // Payroll upsert + advance flip must land or roll back as one
-        // unit. Without a transaction, two parallel /generate calls
-        // could each see the same advance unflagged and deduct it
-        // twice. The advance flip filter additionally re-asserts
-        // `deductedInPayroll: { $ne: true }` so a stale read on this
-        // side becomes a no-op instead of a double write.
-        await session.withTransaction(async () => {
-          const data   = await computePayroll(id, +year, +month);
-          const advIds = data._advanceIds || [];
-          delete data._advanceIds;
+        const data = await computePayroll(id, +year, +month);
+        // Draft is a PREVIEW: store the per-advance recovery plan but do
+        // NOT touch advance balances — regenerating a draft must never
+        // double-recover. The recovery is committed to the advances only
+        // at /finalize (which is a guarded one-way transition).
+        data.advanceRecoveries = (data._advanceRecoveries || [])
+          .map(r => ({ advance: r.id, amount: r.recovered }));
+        delete data._advanceRecoveries;
 
-          await Payroll.findOneAndUpdate(
-            { employee: id, year: +year, month: +month },
-            { $set: data },
-            { upsert: true, new: true, session }
-          );
+        await Payroll.findOneAndUpdate(
+          { employee: id, year: +year, month: +month },
+          { $set: data },
+          { upsert: true, new: true }
+        );
 
-          if (advIds.length) {
-            await AdvanceRequest.updateMany(
-              { _id: { $in: advIds }, deductedInPayroll: { $ne: true } },
-              { $set: { deductedInPayroll: true } },
-              { session }
-            );
-          }
-
-          results.push({ employeeId: id, netPay: data.netPay, status: data.status });
-        });
+        results.push({ employeeId: id, netPay: data.netPay, status: data.status });
       } catch (err) {
         errors.push({ employeeId: id, error: err.message });
-      } finally {
-        await session.endSession();
       }
     }
 
     res.json({
       success: true,
-      message: `Generated ${results.length} payroll(s)`,
+      message: `Generated ${results.length} payroll(s)`
+        + (skipped.length ? ` — ${skipped.length} skipped (no rate)` : ''),
       data: results,
+      skipped: skipped.length ? skipped : undefined,
       errors: errors.length ? errors : undefined,
     });
   } catch (e) {
@@ -231,6 +229,80 @@ router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
+// Printable payslip PDF for a month. selfOrAdmin — workers get their own.
+const MONTHS_PDF = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
+  try {
+    const year  = +(req.query.year  || new Date().getFullYear());
+    const month = +(req.query.month || new Date().getMonth() + 1);
+    const p = await Payroll.findOne({ employee: req.params.empId, year, month })
+      .populate('employee', EMPLOYEE_CARD_FIELDS).lean();
+    if (!p) return res.status(404).json({ success: false, message: 'Payroll not generated for that month' });
+
+    const rupee = (n) => `Rs. ${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const fileName = `payslip-${(p.employee?.name || 'employee').replace(/\s+/g, '_')}-${MONTHS_PDF[month - 1]}-${year}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    doc.pipe(res);
+
+    // Header band
+    doc.fillColor('#0D1B2A').rect(0, 0, doc.page.width, 96).fill();
+    doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(20).text('Payslip', 50, 30);
+    doc.font('Helvetica').fontSize(11).fillColor('#A8C0E0')
+       .text(`${MONTHS_PDF[month - 1]} ${year}`, 50, 58);
+    doc.fillColor(p.status === 'paid' ? '#22C55E' : p.status === 'finalized' ? '#38BDF8' : '#FBBF24')
+       .font('Helvetica-Bold').fontSize(11)
+       .text((p.status || 'draft').toUpperCase(), 0, 40, { align: 'right', width: doc.page.width - 50 });
+
+    // Employee block
+    doc.fillColor('#0D1B2A').font('Helvetica').fontSize(11);
+    doc.text(`Employee : ${p.employee?.name || '—'}`, 50, 118)
+       .text(`Department : ${p.employee?.department || '—'}`)
+       .text(`Hourly rate : ${rupee(p.hourlyRate)}   |   Shifts: ${p.presentShifts} present, ${p.absentShifts} absent, ${p.approvedLeaveShifts} leave`);
+
+    // Line items table
+    let y = 180;
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('#1B2B45').text('DETAILS', 50, y);
+    y += 20;
+    doc.font('Helvetica').fontSize(10).fillColor('#0D1B2A');
+    for (const li of p.lineItems || []) {
+      if (y > doc.page.height - 120) { doc.addPage(); y = 50; }
+      doc.fillColor(li.amount < 0 ? '#B91C1C' : '#166534')
+         .text(li.label, 55, y, { width: 360 });
+      doc.text(`${li.amount < 0 ? '-' : '+'}${rupee(Math.abs(li.amount))}`, 415, y, { width: 130, align: 'right' });
+      y += 16;
+    }
+
+    // Totals
+    y += 10;
+    doc.moveTo(50, y).lineTo(doc.page.width - 50, y).strokeColor('#CBD5E1').stroke();
+    y += 12;
+    const totalRow = (label, val, bold) => {
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 12 : 10).fillColor('#0D1B2A');
+      doc.text(label, 55, y, { width: 360 });
+      doc.text(rupee(val), 415, y, { width: 130, align: 'right' });
+      y += bold ? 20 : 15;
+    };
+    totalRow('Gross earnings', p.grossEarnings);
+    totalRow('Total deductions', p.totalDeductions);
+    totalRow('Total bonuses', p.totalBonuses);
+    if (p.totalAdvanceDeduction) totalRow('  incl. advance recovery', p.totalAdvanceDeduction);
+
+    // Net pay banner
+    y += 8;
+    doc.fillColor('#1D6FEB').rect(50, y, doc.page.width - 100, 56).fill();
+    doc.fillColor('#FFFFFF').font('Helvetica').fontSize(12).text('NET PAY', 70, y + 10);
+    doc.font('Helvetica-Bold').fontSize(24).text(rupee(p.netPay), 70, y + 24);
+
+    doc.fillColor('#94A3B8').font('Helvetica').fontSize(9)
+       .text('System-generated payslip. For queries contact your supervisor.',
+             50, doc.page.height - 60, { width: doc.page.width - 100, align: 'center' });
+    doc.end();
+  } catch (e) { next(e); }
+});
+
 // ─────────────────────────────────────────────────────────────
 // GET /history/:empId?limit=6
 //   Recent payslips (most recent first) plus the total salary still
@@ -269,23 +341,62 @@ router.get('/history/:empId', selfOrAdmin, async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
+// draft → finalized. Commits the advance recovery to the advances'
+// remainingBalance (capped at what each advance still owes, so a stale
+// preview can never over-recover), then locks the slip.
 router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
+  const session = await mongoose.startSession();
   try {
-    const p = await Payroll.findByIdAndUpdate(req.params.id,
-      { $set: { status: 'finalized', finalizedAt: new Date() } }, { new: true })
-      .populate('employee','name');
-    if (!p) return res.status(404).json({ success: false, message: 'Not found' });
-    res.json({ success: true, data: p });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+    let out;
+    await session.withTransaction(async () => {
+      const p = await Payroll.findById(req.params.id).session(session);
+      if (!p) { out = { code: 404, body: { success: false, message: 'Not found' } }; return; }
+      if (p.status !== 'draft') {
+        out = { code: 400, body: { success: false, message: `Only a draft payroll can be finalized (this one is ${p.status})` } };
+        return;
+      }
+
+      for (const rec of p.advanceRecoveries || []) {
+        const adv = await AdvanceRequest.findById(rec.advance).session(session);
+        if (!adv) continue;
+        const current = adv.remainingBalance != null ? adv.remainingBalance : adv.amount;
+        const take = Math.min(rec.amount, current);         // never over-recover
+        adv.remainingBalance = r2(current - take);
+        if (adv.remainingBalance <= 0) adv.deductedInPayroll = true;
+        await adv.save({ session });
+      }
+
+      p.status = 'finalized';
+      p.finalizedAt = new Date();
+      await p.save({ session });
+      await p.populate('employee', 'name');
+      out = { code: 200, body: { success: true, data: p } };
+    });
+    return res.status(out.code).json(out.body);
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  } finally {
+    await session.endSession();
+  }
 });
 
+// finalized → paid. Must be finalized first; can't be paid twice. The
+// payer is the authenticated user, not a client-supplied name.
 router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const { paidBy = 'admin', paymentNote = '' } = req.body;
-    const p = await Payroll.findByIdAndUpdate(req.params.id,
-      { $set: { status: 'paid', paidAt: new Date(), paidBy, paymentNote } }, { new: true })
-      .populate('employee','name');
+    const { paymentNote = '' } = req.body;
+    const p = await Payroll.findById(req.params.id);
     if (!p) return res.status(404).json({ success: false, message: 'Not found' });
+    if (p.status === 'paid') return res.status(400).json({ success: false, message: 'Already paid' });
+    if (p.status !== 'finalized')
+      return res.status(400).json({ success: false, message: `Finalize before paying (this one is ${p.status})` });
+
+    p.status = 'paid';
+    p.paidAt = new Date();
+    p.paidBy = req.user?.name || 'admin';
+    p.paymentNote = paymentNote;
+    await p.save();
+    await p.populate('employee', 'name');
     res.json({ success: true, data: p });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -373,65 +484,10 @@ router.put('/advance/:id/reject', isAdmin('admin', 'accounts'), async (req, res)
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
-router.post('/yearly-bonus/compute', isAdmin('admin', 'accounts'), async (req, res) => {
-  try {
-    const year = +(req.query.year || req.body.year || new Date().getFullYear());
-    const payrolls = await Payroll.find({ year, status: { $in: ['finalized','paid'] } }).lean();
-
-    const empMap = {};
-    for (const p of payrolls) {
-      const id = p.employee.toString();
-      if (!empMap[id]) empMap[id] = { total: 0, count: 0 };
-      empMap[id].total += p.netPay;
-      empMap[id].count++;
-    }
-
-    const results = [];
-    for (const [empId, { total, count }] of Object.entries(empMap)) {
-      const bonus = r2(total * 0.10);
-      const doc   = await YearlyBonus.findOneAndUpdate(
-        { employee: empId, year },
-        { $set: { totalAnnualPay: r2(total), bonusAmount: bonus, monthsCounted: count } },
-        { upsert: true, new: true }
-      ).populate('employee', 'name department');
-      results.push({
-        employeeId:     empId,
-        name:           doc.employee?.name ?? '–',
-        totalAnnualPay: r2(total),
-        bonusAmount:    bonus,
-        monthsCounted:  count,
-        status:         doc.status,
-      });
-    }
-
-    res.json({
-      success: true,
-      message: `Yearly bonus computed for ${results.length} employee(s) (${year})`,
-      data:    results.sort((a,b) => b.bonusAmount - a.bonusAmount),
-    });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
-});
-
-router.get('/yearly-bonus', isAdmin('admin', 'accounts'), async (req, res) => {
-  try {
-    const year = +(req.query.year || new Date().getFullYear());
-    const docs = await YearlyBonus.find({ year })
-      .populate('employee', 'name department').sort({ bonusAmount: -1 }).lean();
-    res.json({ success: true, data: docs });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
-});
-
-router.put('/yearly-bonus/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
-  try {
-    const { paidBy = 'admin', paymentNote = '' } = req.body;
-    const doc = await YearlyBonus.findByIdAndUpdate(req.params.id,
-      { $set: { status: 'paid', paidAt: new Date(), paidBy, paymentNote } },
-      { new: true }
-    ).populate('employee', 'name');
-    if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
-    res.json({ success: true, data: doc });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
-});
+// NOTE: the flat 10%-of-net-pay "yearly bonus" was removed. The
+// attendance-tiered bonus (api/bonus.js — BonusConfig/BonusRecord, the
+// Diwali bonus with a per-employee editable %) is the single yearly-bonus
+// system now, so there are no longer two competing sources of truth.
 
 router.get('/analytics', isAdmin('admin', 'accounts'), async (req, res) => {
   try {

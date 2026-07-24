@@ -54,10 +54,27 @@ const PayrollSchema = new mongoose.Schema(
     overtimeEarnings:     { type: Number, default: 0 },
 
     // ── Pay components ─────────────────────────────────────────
-    grossEarnings:    { type: Number, default: 0 },  // raw hours × rate
-    totalDeductions:  { type: Number, default: 0 },  // late cuts + excess absent penalty
+    grossEarnings:    { type: Number, default: 0 },  // raw hours × rate (incl. overtime)
+    totalDeductions:  { type: Number, default: 0 },  // penalties + advances + PF/ESI
     totalBonuses:     { type: Number, default: 0 },  // no-leave + perfect + streak
     netPay:           { type: Number, default: 0 },  // gross − deductions + bonuses
+
+    // Advance salary recovered this month (portion of the total deductions).
+    totalAdvanceDeduction: { type: Number, default: 0 },
+    // Per-advance recovery plan for THIS month. Computed at generate as a
+    // preview; committed to the advances' remainingBalance at FINALIZE
+    // (so re-generating a draft never double-recovers).
+    advanceRecoveries: {
+      type: [{
+        advance: { type: mongoose.Types.ObjectId, ref: 'AdvanceRequest' },
+        amount:  { type: Number, default: 0 },
+        _id: false,
+      }],
+      default: [],
+    },
+    // Statutory deductions (0 unless configured in PayrollSettings).
+    pfDeduction:  { type: Number, default: 0 },
+    esiDeduction: { type: Number, default: 0 },
 
     // ── Leave detail ───────────────────────────────────────────
     unapprovedAbsents:  { type: Number, default: 0 },  // absents with no approved leave

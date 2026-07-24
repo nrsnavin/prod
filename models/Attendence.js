@@ -30,6 +30,9 @@ const AttendanceSchema = new mongoose.Schema({
   checkIn:     { type: String, default: '' },   // "HH:mm"
   checkOut:    { type: String, default: '' },   // "HH:mm"
   lateMinutes: { type: Number, default: 0 },
+  // Minutes worked BEYOND the shift's scheduled hours. Payroll pays these
+  // (past an optional grace window) at PayrollSettings.overtimeMultiplier.
+  overtimeMinutes: { type: Number, default: 0, min: 0 },
 
   // Shift hours (auto-computed on save: DAY=12, NIGHT=8, half=6/4, absent=0)
   shiftHours:  { type: Number, default: 0 },

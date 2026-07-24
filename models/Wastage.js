@@ -38,6 +38,14 @@ const WastageSchema = new mongoose.Schema(
       default: 0,
     },
 
+    // When the wastage actually occurred (the shift/incident date), used
+    // to attribute the penalty to the correct payroll month. Falls back to
+    // createdAt for legacy rows that never set it.
+    incidentDate: {
+      type: Date,
+      default: null,
+    },
+
     reason: {
       type: String,
       required: true,

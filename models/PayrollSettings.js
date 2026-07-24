@@ -33,6 +33,22 @@ const PayrollSettingsSchema = new mongoose.Schema(
     noLeaveBonus:             { type: Number, default: 300 },   // zero leaves all month
     perfectAttendanceBonus:   { type: Number, default: 500 },   // zero absents all month
     streakBonusPer7Shifts:    { type: Number, default: 100 },   // per 7-shift streak
+
+    // ── Overtime ──────────────────────────────────────────────
+    // Minutes beyond the shift, past the grace window, are paid at
+    // rate × overtimeMultiplier. Multiplier 1 = straight time.
+    overtimeMultiplier:   { type: Number, default: 1.5, min: 0 },
+    overtimeGraceMinutes: { type: Number, default: 0,   min: 0 },
+
+    // ── Statutory deductions (default OFF — 0% deducts nothing) ─
+    // PF: pfPercent of the wage, capped at pfWageCeiling (0 = no cap).
+    // ESI: esiPercent of the wage, only when wage ≤ esiWageCeiling
+    //      (0 ceiling = always applies). Fill these with YOUR rates;
+    //      nothing is deducted until you do.
+    pfPercent:      { type: Number, default: 0, min: 0, max: 100 },
+    pfWageCeiling:  { type: Number, default: 0, min: 0 },
+    esiPercent:     { type: Number, default: 0, min: 0, max: 100 },
+    esiWageCeiling: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
 );

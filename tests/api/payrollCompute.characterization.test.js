@@ -165,7 +165,8 @@ describe('computePayroll — advance recovery + netPay', () => {
     expect(p.totalAdvanceDeduction).toBe(500);
     // gross 2400 + bonuses(300+500=800) − advance 500 = 2700
     expect(p.netPay).toBe(2700);
-    expect(p._advanceIds).toHaveLength(1);
+    expect(p._advanceRecoveries).toHaveLength(1);
+    expect(p._advanceRecoveries[0].recovered).toBe(500);
   });
 
   test('netPay is floored at 0', async () => {
