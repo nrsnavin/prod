@@ -5,7 +5,7 @@ jest.mock("../../models/User");
 
 const jwt = require("jsonwebtoken");
 const User = require("../../models/User");
-const { isAuthenticated, isAdmin } = require("../../middleware/auth");
+const { isAuthenticated, isAdmin, requireFeature } = require("../../middleware/auth");
 
 const buildNext = () => jest.fn();
 
@@ -86,5 +86,42 @@ describe("isAdmin", () => {
     const next = buildNext();
     isAdmin("admin", "manager")({ user: { role: "manager" } }, {}, next);
     expect(next).toHaveBeenCalledWith();
+  });
+});
+
+describe("requireFeature", () => {
+  const run = (user, ...keys) => {
+    const next = buildNext();
+    requireFeature(...keys)({ user }, {}, next);
+    return next;
+  };
+  // A denial calls next(err); a pass calls next() with no args.
+  const passed = (next) =>
+    next.mock.calls.length === 1 && next.mock.calls[0].length === 0;
+
+  it("401s when there is no authenticated user", () => {
+    const next = run(undefined, "/reports");
+    expect(next.mock.calls[0][0].statusCode).toBe(401);
+  });
+
+  it("lets admins bypass every feature gate", () => {
+    expect(passed(run({ role: "admin", features: [] }, "/reports"))).toBe(true);
+  });
+
+  it("defers to the role gate when the user has no explicit features", () => {
+    expect(passed(run({ role: "production", features: [] }, "/reports"))).toBe(true);
+    expect(passed(run({ role: "production" }, "/reports"))).toBe(true); // absent list
+  });
+
+  it("passes when an explicit list includes any required key", () => {
+    expect(passed(run({ role: "production", features: ["/qc", "/jobs"] }, "/qc", "/jobs"))).toBe(true);
+    // holds only the consuming feature — still allowed
+    expect(passed(run({ role: "production", features: ["/jobs"] }, "/qc", "/jobs"))).toBe(true);
+  });
+
+  it("403s when an explicit list omits every required key", () => {
+    const next = run({ role: "production", features: ["/jobs", "/machines"] }, "/reports");
+    expect(passed(next)).toBe(false);
+    expect(next.mock.calls[0][0].statusCode).toBe(403);
   });
 });
