@@ -286,44 +286,65 @@ app.use("/api/v2/user/login-user", loginLimiter);
 app.use("/api/v2/user/forgot-password", loginLimiter);
 app.use("/api/v2/user/request-otp", loginLimiter);
 app.use("/api/v2/user/verify-otp", loginLimiter);
+// ── Every route carries a role gate ─────────────────────────────────
+// Live roles are only admin / production / accounts (roleForDepartment
+// derives them from the 5 departments — see utils/roles.js). The old
+// 'sales' and 'stores' roles are RETIRED: no department maps to them, so
+// any gate that still listed them was dead weight and is removed here.
+//
+// Each mount's gate is the UNION of the roles its routes actually use,
+// so worker (production) and finance (accounts) self-service routes —
+// own payslip/leave/attendance/bonus, machine-issue reports, and the
+// open reads (settings, elastic stock, announcements, feedback,
+// dashboard, PDF templates, Ask Jarvis) — keep working. The routers'
+// own per-route isAdmin(...)/selfOrAdmin still enforce the fine grain.
+//
+// `user` is the one exception: it can't be mount-gated because it hosts
+// the public login / OTP / forgot-password endpoints, so it self-gates.
 app.use("/api/v2/user", user);
-app.use("/api/v2/settings",    settings);
-app.use("/api/v2/pdf-templates", pdfTemplates);
+app.use("/api/v2/settings",    gate('production', 'accounts'), settings);
+app.use("/api/v2/pdf-templates", gate('production', 'accounts'), pdfTemplates);
 app.use("/api/v2/machine",     gate('production'), machine);
-app.use("/api/v2/shift",       shift);
-app.use("/api/v2/customer",    gate('sales', 'accounts'), customer);
+app.use("/api/v2/shift",       gate('production'), shift);
+app.use("/api/v2/customer",    gate('accounts'), customer);
 app.use("/api/v2/employee",    gate('accounts', 'production'), employee);
-app.use("/api/v2/elastic",     elastic);
-app.use("/api/v2/elastic-group", elasticGroup);
-app.use("/api/v2/dc",          gate('sales', 'stores', 'accounts'), deliveryChallanRouter);
-app.use("/api/v2/supplier",    gate('stores', 'accounts'), supplier);
-app.use("/api/v2/bonus",       bonus);
-app.use("/api/v2/order",       gate('sales', 'accounts'), order);
+app.use("/api/v2/elastic",     gate('accounts', 'production'), elastic);
+// Elastic groups: list/detail are read by the Order form and Customer
+// detail (finance flows); only mutations are admin-only (inside router).
+app.use("/api/v2/elastic-group", gate('accounts'), elasticGroup);
+app.use("/api/v2/dc",          gate('accounts'), deliveryChallanRouter);
+app.use("/api/v2/supplier",    gate('accounts'), supplier);
+app.use("/api/v2/bonus",       gate('accounts', 'production'), bonus);
+app.use("/api/v2/order",       gate('accounts'), order);
 app.use("/api/v2/planner",     gate('production'), requireFeature('/planner'), planner);
-app.use("/api/v2/assistant",   assistant);
-app.use("/api/v2/materials",   gate('stores', 'production', 'accounts'), material);
-app.use("/api/v2/warping",     warping);
-app.use("/api/v2/wastage",     wastage);
-app.use("/api/v2/attendance",  attendence);
-app.use("/api/v2/covering",    covering);
+// Ask Jarvis spends LLM tokens and its one route is admin-only inside
+// the router — keep the mount admin-only to match (see note re: nav).
+app.use("/api/v2/assistant",   gate(), assistant);
+app.use("/api/v2/materials",   gate('production', 'accounts'), material);
+app.use("/api/v2/warping",     gate('production'), warping);
+app.use("/api/v2/wastage",     gate('production'), wastage);
+app.use("/api/v2/attendance",  gate('accounts', 'production'), attendence);
+app.use("/api/v2/covering",    gate('production'), covering);
 app.use("/api/v2/job",         gate('production'), job);
-app.use("/api/v2/packing",     packing);
+app.use("/api/v2/packing",     gate('production'), packing);
 // Production View feeds the Analytics dashboards too, so a user with
 // either feature may read it.
 app.use("/api/v2/production",  gate('production'), requireFeature('/production', '/analytics'), production);
-// Management reports span operations, sales and stores — any of those
-// departments (or an admin) may pull them; each report is read-only.
-app.use("/api/v2/reports",     gate('production', 'sales', 'stores', 'accounts'), requireFeature('/reports'), require("./api/reports.js"));
+// Management reports span operations and finance — either (or an admin)
+// may pull them; each report is read-only.
+app.use("/api/v2/reports",     gate('production', 'accounts'), requireFeature('/reports'), require("./api/reports.js"));
 // QC is a leaf, but the Jobs screen reads QC results, so /jobs passes too.
 app.use("/api/v2/qc",          gate('production'), requireFeature('/qc', '/jobs'), require("./api/qc.js"));
-app.use("/api/v2/payroll",     payroll);
-app.use("/api/v2/leave",       leave);
-app.use("/api/v2/machine-issue", machineIssue);
-app.use("/api/v2/announcement", announcement);
-app.use("/api/v2/feedback",    feedback);
-app.use("/api/v2/dashboard",   dashboard);
-app.use("/api/v2/advisor",     advisor);
-app.use("/api/v2/io",          io);
+app.use("/api/v2/payroll",     gate('accounts', 'production'), payroll);
+app.use("/api/v2/leave",       gate('accounts', 'production'), leave);
+app.use("/api/v2/machine-issue", gate('production', 'accounts'), machineIssue);
+app.use("/api/v2/announcement", gate('production', 'accounts'), announcement);
+app.use("/api/v2/feedback",    gate('production', 'accounts'), feedback);
+app.use("/api/v2/dashboard",   gate('production', 'accounts'), dashboard);
+// AI Advisor aggregates across every router, which only admin can
+// reach, so it stays admin-only (see note re: feature catalog).
+app.use("/api/v2/advisor",     gate(), advisor);
+app.use("/api/v2/io",          gate(), io);
 app.use("/api/v2/audit",       ADMIN_GATE, requireFeature('/audit'), audit);
 
 // Cron-triggerable morning digest — authenticated by a shared secret

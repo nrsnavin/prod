@@ -25,8 +25,8 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 const { resolveEmployeeId } = require("../utils/resolveEmployee");
 
-// Every machine-issue route requires login. Admin-only routes
-// additionally chain isAdmin('admin', 'production', 'accounts', 'sales', 'stores') in-line below.
+// Every machine-issue route requires login. Staff routes additionally
+// chain isAdmin('admin', 'production', 'accounts') in-line below.
 router.use(isAuthenticated);
 
 const SEVERITIES = ["low", "medium", "high", "critical"];
@@ -98,7 +98,7 @@ router.get(
 
 router.get(
   "/",
-  isAdmin('admin', 'production', 'accounts', 'sales', 'stores'),
+  isAdmin('admin', 'production', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const { status, machineId } = req.query;
     const filter = {};
@@ -170,7 +170,7 @@ router.get(
 
 router.put(
   "/:id/status",
-  isAdmin('admin', 'production', 'accounts', 'sales', 'stores'),
+  isAdmin('admin', 'production', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
     const { status, resolutionNotes = "" } = req.body;
     if (!STATUSES.includes(status)) {

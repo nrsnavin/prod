@@ -33,7 +33,7 @@ const ACTIVE_JOB_STATUSES = [
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/kpis",
-  isAuthenticated, isAdmin('admin', 'production', 'accounts', 'sales', 'stores'),
+  isAuthenticated, isAdmin('admin', 'production', 'accounts'),
   catchAsyncErrors(async (req, res) => {
     const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
     const endOfToday   = new Date(); endOfToday.setHours(23, 59, 59, 999);

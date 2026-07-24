@@ -25,7 +25,9 @@ const MODEL = TEXT_MODEL;
 //    1. max_tokens = 220 caps output cost at fractions of a cent.
 //    2. cards array is sliced to the top 8 — input cost is capped
 //       regardless of client behaviour.
-//    3. isAdmin gate — only authenticated admins can spend tokens.
+//    3. isAdmin gate — only authenticated admins can spend tokens. The
+//       advisor aggregates across every router (shift, job, materials,
+//       payroll…), which only admin can reach, so it stays admin-only.
 //    4. Missing key → 503; failed call → 502. Client falls back.
 //    5. (Out of band) set a $5/mo budget cap on platform.openai.com.
 // ═════════════════════════════════════════════════════════════════
