@@ -19,10 +19,23 @@ const AdvanceRequestSchema = new mongoose.Schema(
     approvedBy: { type: String, default: '' },
     approvedAt: { type: Date,   default: null },
 
-    // Set by payroll engine when the deduction is applied
+    // Set by payroll engine when the advance is FULLY recovered.
     deductedInPayroll: { type: Boolean, default: false },
+
+    // Amount still to be recovered. Starts equal to `amount`; each payroll
+    // run that recovers this advance decrements it. When it reaches 0 the
+    // advance is fully recovered (deductedInPayroll = true). A larger-than-
+    // net-pay advance recovers what fits each month and carries the rest
+    // forward — no more silent write-offs.
+    remainingBalance: { type: Number, default: null, min: 0 },
   },
   { timestamps: true }
 );
+
+// New advances start with the full amount outstanding.
+AdvanceRequestSchema.pre('save', function (next) {
+  if (this.remainingBalance == null) this.remainingBalance = this.amount;
+  next();
+});
 
 module.exports = mongoose.model('AdvanceRequest', AdvanceRequestSchema);

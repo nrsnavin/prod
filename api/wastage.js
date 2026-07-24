@@ -41,7 +41,7 @@ router.post(
   "/add-wastage",
   catchAsyncErrors(async (req, res, next) => {
     const { job: jobId, elastic: elasticId,
-            quantity, penalty, reason, requestId } = req.body;
+            quantity, penalty, reason, requestId, incidentDate } = req.body;
 
     // Idempotency: a retried submit must not record the wastage (and
     // its penalty) twice. Fast path here; the unique index on
@@ -104,6 +104,9 @@ router.post(
         const [wastage] = await Wastage.create([{
           job: jobId, elastic: elasticId, employee: employeeId,
           quantity, penalty: penalty || 0, reason: reason.trim(),
+          // When the wastage happened — drives which payroll month the
+          // penalty lands in. Defaults to now if the client doesn't send it.
+          incidentDate: incidentDate ? new Date(incidentDate) : new Date(),
           ...(requestId ? { requestId } : {}),
         }], { session });
 

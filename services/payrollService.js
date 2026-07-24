@@ -1,13 +1,10 @@
 'use strict';
 //
-// Payroll domain service. Extracts the ~200-line pure pay computation
-// out of api/payroll.js so the routes shrink to orchestration. It's
-// read-only (Attendance / Employee / PayrollSettings / AdvanceRequest)
-// and returns a plain payroll object; behaviour is byte-for-byte
-// identical to the previous inline function (pinned by the B0.4
-// characterization tests). SHIFT_HOURS/shiftHours moved with it (they
-// were computePayroll-only); r2 is duplicated as a trivial rounding
-// helper (the route file keeps its own copy — used in many places).
+// Payroll domain service — the pure monthly pay computation used by the
+// /generate + /auto-generate routes. Read-only (Attendance / Employee /
+// PayrollSettings / AdvanceRequest / Wastage / ShiftDetail); returns a
+// plain payroll object plus an `_advanceRecoveries` plan the route applies
+// transactionally.
 
 const mongoose        = require('mongoose');
 const Attendance      = require('../models/Attendence');
@@ -15,10 +12,12 @@ const Employee        = require('../models/Employee');
 const PayrollSettings = require('../models/PayrollSettings');
 const AdvanceRequest  = require('../models/Advance');
 const Wastage         = require('../models/Wastage');
+const ShiftDetail     = require('../models/ShiftDetail');
 
 const SHIFT_HOURS = { DAY: 12, NIGHT: 8 };
 const r2 = (n) => Math.round(n * 100) / 100;
 const shiftHours = (s) => SHIFT_HOURS[s] ?? 8;
+const dayKey = (d, sh) => `${new Date(d).toISOString().slice(0, 10)}|${sh}`;
 
 async function computePayroll(empId, year, month) {
 
@@ -35,6 +34,12 @@ async function computePayroll(empId, year, month) {
     noLeaveBonus:           s.noLeaveBonus           ?? 300,
     perfectAttendanceBonus: s.perfectAttendanceBonus ?? 500,
     streakBonusPer7Shifts:  s.streakBonusPer7Shifts  ?? 100,
+    overtimeMultiplier:     s.overtimeMultiplier     ?? 1.5,
+    overtimeGraceMinutes:   s.overtimeGraceMinutes   ?? 0,
+    pfPercent:      s.pfPercent      ?? 0,
+    pfWageCeiling:  s.pfWageCeiling  ?? 0,
+    esiPercent:     s.esiPercent     ?? 0,
+    esiWageCeiling: s.esiWageCeiling ?? 0,
   };
   const leaveQuota = settings.casualLeavesPerMonth + settings.sickLeavesPerMonth;
 
@@ -57,6 +62,8 @@ async function computePayroll(empId, year, month) {
   let dayShiftEarnings    = 0;
   let nightShiftEarnings  = 0;
   let lateDeductionTotal  = 0;
+  let totalOvertimeMinutes = 0;
+  let overtimeEarnings     = 0;
 
   for (const rec of records) {
     const sh      = shiftHours(rec.shift);
@@ -120,9 +127,47 @@ async function computePayroll(empId, year, month) {
       amount: pay,
       type:   'earning',
     });
+
+    // Overtime — minutes beyond the shift, past the grace window, paid at
+    // rate × multiplier. Tracked separately from base shift earnings.
+    const otMins = Math.max(0, (rec.overtimeMinutes ?? 0) - settings.overtimeGraceMinutes);
+    if (otMins > 0 && hourlyRate > 0) {
+      const otPay = (otMins / 60) * hourlyRate * settings.overtimeMultiplier;
+      totalOvertimeMinutes += otMins;
+      overtimeEarnings     += otPay;
+      lineItems.push({
+        label:  `Overtime ${otMins}m ×${settings.overtimeMultiplier} (${rec.shift} ${dateStr})`,
+        amount: otPay,
+        type:   'earning',
+      });
+    }
   }
 
-  const grossEarnings = r2(dayShiftEarnings + nightShiftEarnings);
+  // ── Unmarked scheduled shifts count as unapproved absents ────────────
+  // A ShiftDetail (the employee was on a scheduled shift) with no matching
+  // Attendance row means attendance was never recorded — treat it as an
+  // absent so the pay isn't silently skipped. De-duped to unique (date,shift).
+  const attSet = new Set(records.map((r) => dayKey(r.date, r.shift)));
+  const scheduled = await ShiftDetail.find({
+    employee: empId,
+    date: { $gte: start, $lte: end },
+  }).select('date shift').lean();
+  const schedSeen = new Set();
+  for (const sd of scheduled) {
+    const k = dayKey(sd.date, sd.shift);
+    if (schedSeen.has(k) || attSet.has(k)) continue;
+    schedSeen.add(k);
+    unapprovedAbsents++;
+    totalShifts++;
+    const fullPay = hourlyRate * shiftHours(sd.shift);
+    lineItems.push({
+      label:  `Absent — no attendance for scheduled ${sd.shift} (${new Date(sd.date).toISOString().slice(0, 10)})`,
+      amount: -fullPay,
+      type:   'deduction',
+    });
+  }
+
+  const grossEarnings = r2(dayShiftEarnings + nightShiftEarnings + overtimeEarnings);
 
   const excessAbsents = Math.max(0, unapprovedAbsents - leaveQuota);
   const excessPenalty = excessAbsents * settings.penaltyPerExcessAbsent;
@@ -134,17 +179,12 @@ async function computePayroll(empId, year, month) {
     });
   }
 
-  // Wastage penalties recorded against this employee in the pay month.
-  // Previously these were captured on wastage entries but never left
-  // them — recorded money that was never deducted.
+  // Wastage penalties attributed to the pay month by INCIDENT date
+  // (falls back to createdAt for legacy rows that never set incidentDate).
   const wastageAgg = await Wastage.aggregate([
-    {
-      $match: {
-        employee:  new mongoose.Types.ObjectId(String(empId)),
-        createdAt: { $gte: start, $lte: end },
-        penalty:   { $gt: 0 },
-      },
-    },
+    { $match: { employee: new mongoose.Types.ObjectId(String(empId)), penalty: { $gt: 0 } } },
+    { $addFields: { effDate: { $ifNull: ['$incidentDate', '$createdAt'] } } },
+    { $match: { effDate: { $gte: start, $lte: end } } },
     { $group: { _id: null, total: { $sum: '$penalty' }, count: { $sum: 1 } } },
   ]);
   const wastagePenalty = r2(wastageAgg[0]?.total ?? 0);
@@ -156,15 +196,19 @@ async function computePayroll(empId, year, month) {
     });
   }
 
-  // Late deductions are ALREADY reflected in grossEarnings — each late
-  // shift's pay was reduced (pay -= ded) before being summed, exactly
-  // like an absent shift's lost pay. Adding lateDeductionTotal into
-  // totalDeductions as well double-subtracted it in
-  //   netPay = grossEarnings - totalDeductions + bonuses
-  // so any late employee was short-paid by their late deduction. The
-  // late line item stays for display, mirroring the (display-only)
-  // absent line which is likewise NOT in totalDeductions.
-  let totalDeductions  = r2(excessPenalty + wastagePenalty);
+  // Statutory deductions (0 unless configured). PF on wage capped at the
+  // PF ceiling; ESI only when wage is within the ESI ceiling.
+  const pfBase = settings.pfWageCeiling > 0 ? Math.min(grossEarnings, settings.pfWageCeiling) : grossEarnings;
+  const pfDeduction = settings.pfPercent > 0 ? r2(pfBase * settings.pfPercent / 100) : 0;
+  const esiApplies  = settings.esiPercent > 0 && (settings.esiWageCeiling <= 0 || grossEarnings <= settings.esiWageCeiling);
+  const esiDeduction = esiApplies ? r2(grossEarnings * settings.esiPercent / 100) : 0;
+  if (pfDeduction > 0)  lineItems.push({ label: `PF (${settings.pfPercent}%)`,  amount: -pfDeduction,  type: 'deduction' });
+  if (esiDeduction > 0) lineItems.push({ label: `ESI (${settings.esiPercent}%)`, amount: -esiDeduction, type: 'deduction' });
+
+  // Late deductions are ALREADY reflected in grossEarnings (each late
+  // shift's pay was reduced before summing), so they are NOT added to
+  // totalDeductions — only the penalties/statutory that live outside gross.
+  let totalDeductions = r2(excessPenalty + wastagePenalty + pfDeduction + esiDeduction);
 
   let noLeaveBonusAmt       = 0;
   let perfectAttBonusAmt    = 0;
@@ -212,33 +256,38 @@ async function computePayroll(empId, year, month) {
 
   const bonusBeforeAdvance = r2(noLeaveBonusAmt + perfectAttBonusAmt + streakBonusTotal);
 
-  // Scope advances to THIS pay month via deductMonth/deductYear only —
-  // NOT deductedInPayroll. An advance earmarked for June belongs to
-  // June's payroll every time June is computed. Filtering on the
-  // already-deducted flag made regeneration silently DROP the recovery:
-  // the first /generate flipped the flag, so a re-run found no advance
-  // and net pay jumped back up by the advance amount (company loses the
-  // recovery). deductMonth/deductYear already pins each advance to
-  // exactly one payroll month, so this can never double-recover across
-  // months. The route still flips the flag for the outstanding-advances
-  // view.
+  // ── Advance recovery with carry-forward (installments) ───────────────
+  // Recover from every approved advance whose deduct period has ARRIVED
+  // (this month or earlier) and still has an outstanding balance, oldest
+  // first, but only up to what this month's pay can absorb. Whatever can't
+  // be recovered stays as remainingBalance and carries into next month —
+  // no more silent write-offs when an advance exceeds a month's net.
   const advances = await AdvanceRequest.find({
-    employee:    empId,
-    status:      'approved',
-    deductMonth: month,
-    deductYear:  year,
-  }).lean();
+    employee: empId,
+    status:   'approved',
+    $or: [
+      { deductYear: { $lt: year } },
+      { deductYear: year, deductMonth: { $lte: month } },
+    ],
+  }).sort({ deductYear: 1, deductMonth: 1, createdAt: 1 }).lean();
 
+  let available = Math.max(0, grossEarnings - totalDeductions + bonusBeforeAdvance);
   let totalAdvanceDeduction = 0;
+  const advanceRecoveries = [];
   for (const adv of advances) {
-    totalAdvanceDeduction += adv.amount;
+    const remaining = adv.remainingBalance != null ? adv.remainingBalance : adv.amount;
+    if (remaining <= 0) continue;
+    if (available <= 0) break;
+    const rec = r2(Math.min(remaining, available));
+    available = r2(available - rec);
+    totalAdvanceDeduction = r2(totalAdvanceDeduction + rec);
+    advanceRecoveries.push({ id: adv._id, recovered: rec, remaining: r2(remaining - rec) });
     lineItems.push({
-      label:  `Advance Salary Recovery (requested ${new Date(adv.createdAt).toISOString().slice(0,10)})`,
-      amount: -adv.amount,
+      label:  `Advance Salary Recovery ₹${rec}${remaining - rec > 0 ? ` (₹${r2(remaining - rec)} carried forward)` : ''}`,
+      amount: -rec,
       type:   'deduction',
     });
   }
-
   if (totalAdvanceDeduction > 0) {
     totalDeductions = r2(totalDeductions + totalAdvanceDeduction);
   }
@@ -254,8 +303,12 @@ async function computePayroll(empId, year, month) {
     dayShiftsWorked, nightShiftsWorked,
     dayShiftEarnings:    r2(dayShiftEarnings),
     nightShiftEarnings:  r2(nightShiftEarnings),
+    totalOvertimeMinutes,
+    overtimeEarnings:    r2(overtimeEarnings),
     grossEarnings,
     totalDeductions,
+    pfDeduction,
+    esiDeduction,
     totalBonuses:        bonusBeforeAdvance,
     noLeaveBonus:        noLeaveBonusAmt,
     perfectAttendanceBonus: perfectAttBonusAmt,
@@ -263,7 +316,7 @@ async function computePayroll(empId, year, month) {
     totalAdvanceDeduction: r2(totalAdvanceDeduction),
     longestStreak, perfectAttendance,
     netPay, lineItems, status: 'draft',
-    _advanceIds: advances.map(a => a._id),
+    _advanceRecoveries: advanceRecoveries,
   };
 }
 
