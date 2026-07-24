@@ -30,8 +30,13 @@ const BonusRecordSchema = new mongoose.Schema(
     // Total hours actually worked in the year (from ShiftDetails)
     hoursWorked: { type: Number, default: 0 },
 
-    // Gross annual earnings = hourlyRate × hoursWorked
+    // The bonus BASE — salary received in the Diwali window (or an
+    // hourlyRate × hours estimate before payroll exists).
     annualEarnings: { type: Number, default: 0 },
+    // Actual net salary paid across the window (0 if payroll not yet run).
+    salaryReceived: { type: Number, default: 0 },
+    // 'salary_received' when based on real payroll, else 'estimated'.
+    basedOn:        { type: String, default: "estimated" },
 
     // Per-employee bonus %  (copied at time of trigger)
     bonusPercent: { type: Number, default: 10 },
