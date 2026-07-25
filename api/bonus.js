@@ -30,6 +30,7 @@ const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
 const Payroll          = require("../models/Payroll");
 const PDFDocument      = require("pdfkit");
+const ledger           = require("../services/ledgerService");
 const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 
@@ -233,11 +234,29 @@ router.post(
         upsert: true,
       },
     }));
-    await BonusRecord.bulkWrite(ops);
 
-    cfg.status      = "triggered";
-    cfg.triggeredAt = new Date();
-    await cfg.save();
+    // Records + their ledger rows land together, so a triggered bonus can
+    // never exist without the matching entry in each employee's ledger.
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await BonusRecord.bulkWrite(ops, { session });
+        cfg.status      = "triggered";
+        cfg.triggeredAt = new Date();
+        await cfg.save({ session });
+
+        // The bonus belongs on the Diwali date itself, not the run date.
+        const diwaliDate = cfg.bonusDate
+          ? new Date(cfg.bonusDate)
+          : new Date(win.diwaliYear, win.diwaliMonth - 1, 1);
+        const posted = await BonusRecord.find({ year }).session(session);
+        for (const rec of posted) {
+          await ledger.postDiwaliBonus(rec, diwaliDate, session, {
+            postedBy: req.user?.name || 'admin',
+          });
+        }
+      });
+    } finally { await session.endSession(); }
 
     const created = await BonusRecord.find({ year })
       .populate("employee", "name department")
@@ -453,9 +472,16 @@ router.put(
       return next(new ErrorHandler("Already marked as paid", 400));
     }
 
-    record.status = "paid";
-    record.paidAt = new Date();
-    await record.save();
+    // Marking paid + the ledger payment row are one atomic step.
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        record.status = "paid";
+        record.paidAt = new Date();
+        await record.save({ session });
+        await ledger.postBonusPaid(record, session, { postedBy: req.user?.name || 'admin' });
+      });
+    } finally { await session.endSession(); }
 
     const pendingCount = await BonusRecord.countDocuments({ year: record.year, status: "pending" });
     if (pendingCount === 0) {

@@ -26,6 +26,8 @@ const { resolveEmployeeId } = require('../utils/resolveEmployee');
 // Re-exported below (router.computePayroll) so existing callers/tests
 // that reach it via the payroll router keep working.
 const { computePayroll } = require('../services/payrollService');
+const ledger = require('../services/ledgerService');
+const LedgerEntry = require('../models/LedgerEntry');
 
 router.use(isAuthenticated);
 // Per-user feature gate (writes only). The worker self-service advance
@@ -213,6 +215,9 @@ router.get('/dashboard', isAdmin('admin', 'accounts'), async (req, res) => {
         totalAdvanceDeduction: p.totalAdvanceDeduction ?? 0,
         netPay:          p.netPay,
         amountPaid:      p.amountPaid ?? 0,
+        totalCashPaid:   p.totalCashPaid ?? 0,
+        advanceRecoveredAtPayment: p.advanceRecoveredAtPayment ?? 0,
+        payouts:         p.payouts ?? [],
         perfectAttendance: p.perfectAttendance,
         status:          p.status,
       })).sort((a,b) => b.netPay - a.netPay),
@@ -308,6 +313,45 @@ router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
 
 // Printable payslip PDF for a month. selfOrAdmin — workers get their own.
 const MONTHS_PDF = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+// ─────────────────────────────────────────────────────────────
+// GET /ledger/:empId?from=YYYY-MM-DD&to=YYYY-MM-DD
+//   One employee's full money trail over a date range: every shift's
+//   salary, overtime, bonuses, penalties, statutory cuts, advances given
+//   and recovered, salary payments, and the Diwali bonus (dated on the
+//   festival). Oldest first with a running balance, plus the opening
+//   balance carried in from before `from`. selfOrAdmin.
+// ─────────────────────────────────────────────────────────────
+router.get('/ledger/:empId', selfOrAdmin, async (req, res) => {
+  try {
+    const { empId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(empId))
+      return res.status(400).json({ success: false, message: 'Invalid employee id' });
+
+    const parseDay = (s, endOfDay) => {
+      if (!s) return null;
+      const d = new Date(s);
+      if (isNaN(d.getTime())) return null;
+      d.setHours(endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
+      return d;
+    };
+    // Default window: the last 3 months.
+    const to   = parseDay(req.query.to, true) || parseDay(new Date(), true);
+    const dflt = new Date(to); dflt.setMonth(dflt.getMonth() - 3);
+    const from = parseDay(req.query.from, false) || parseDay(dflt, false);
+    if (from > to)
+      return res.status(400).json({ success: false, message: '`from` is after `to`' });
+
+    const data = await ledger.getLedger(empId, { from, to });
+    const emp = await Employee.findById(empId, 'name department hourlyRate').lean();
+    return res.json({
+      success: true,
+      employee: emp ? { id: emp._id, name: emp.name, department: emp.department } : null,
+      range: { from, to },
+      ...data,
+    });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
 router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
   try {
     const year  = +(req.query.year  || new Date().getFullYear());
@@ -321,24 +365,23 @@ router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
 
-    // ── Minimal, margin-respecting payslip ─────────────────────
-    const M = 56;                              // uniform page margin
-    const doc = new PDFDocument({ size: 'A4', margin: M });
+    // ── Printable payslip: A4, uniform margins, ruled tables ───
+    const M = 50;                               // uniform page margin (all sides)
+    const doc = new PDFDocument({ size: 'A4', margin: M, bufferPages: true });
     doc.pipe(res);
 
-    const W        = doc.page.width;
-    const H        = doc.page.height;
-    const RIGHT    = W - M;                     // right content edge
-    const CW       = W - 2 * M;                 // content width
-    const AMT_W    = 130;                       // amount column width
-    const AMT_X    = RIGHT - AMT_W;             // amount column left edge
+    const W     = doc.page.width;
+    const H     = doc.page.height;
+    const RIGHT = W - M;
+    const CW    = W - 2 * M;                    // content width
+    const BOTTOM = H - M - 28;                  // keep clear of the footer
 
-    // Restrained, mostly-monochrome palette.
-    const INK   = '#1F2430';
-    const MUTE  = '#8A909C';
-    const FAINT = '#B4B9C4';
-    const LINE  = '#E4E6EC';
-    const NEG   = '#B42318';                    // deduction amounts only
+    const INK   = '#1A1D24';
+    const MUTE  = '#6B7280';
+    const LINE  = '#C9CDD6';                    // table rules (print-safe grey)
+    const HAIR  = '#E5E7EB';                    // inner row rules
+    const HEAD  = '#F1F3F7';                    // table header fill
+    const NEG   = '#B42318';
 
     // pdfkit's built-in Helvetica is WinAnsi-only: strip emoji / non-Latin1
     // glyphs and spell ₹ as "Rs." so nothing renders as a blank box.
@@ -348,92 +391,142 @@ router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
       .replace(/\s{2,}/g, ' ')
       .trim();
 
-    const rule = (yy, color = LINE, lw = 0.75) => {
-      doc.moveTo(M, yy).lineTo(RIGHT, yy).lineWidth(lw).strokeColor(color).stroke();
-    };
-    const label = (text, x, y, w) =>
-      doc.font('Helvetica').fontSize(7.5).fillColor(MUTE)
-         .text(String(text).toUpperCase(), x, y, { width: w, characterSpacing: 0.8 });
-
-    // ── Header ─────────────────────────────────────────────────
     let y = M;
-    doc.font('Helvetica-Bold').fontSize(19).fillColor(INK)
-       .text('Payslip', M, y, { characterSpacing: 0.3 });
-    doc.font('Helvetica').fontSize(10.5).fillColor(MUTE)
-       .text(`${MONTHS_PDF[month - 1]} ${year}`, M, y + 26);
-    // Status, top-right, quiet.
-    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(FAINT)
-       .text((p.status || 'draft').toUpperCase(), AMT_X, y + 6, { width: AMT_W, align: 'right', characterSpacing: 1 });
-    y += 52;
-    rule(y);
-    y += 22;
 
-    // ── Employee meta (two columns) ────────────────────────────
-    const shiftsLine = `${p.presentShifts ?? 0} present · ${p.absentShifts ?? 0} absent · ${p.approvedLeaveShifts ?? 0} leave`;
-    const colW = CW / 2 - 8;
-    const colX2 = M + CW / 2 + 8;
-    const metaCell = (x, w, lab, val) => {
-      label(lab, x, y, w);
-      doc.font('Helvetica-Bold').fontSize(11).fillColor(INK)
-         .text(String(val), x, y + 11, { width: w });
-    };
-    metaCell(M, colW, 'Employee', p.employee?.name || '—');
-    metaCell(colX2, colW, 'Department', p.employee?.department || '—');
-    y += 38;
-    metaCell(M, colW, 'Hourly rate', rupee(p.hourlyRate));
-    metaCell(colX2, colW, 'Shifts', shiftsLine);
-    y += 44;
-
-    // ── Earnings & deductions ──────────────────────────────────
-    label('Earnings & deductions', M, y);
+    // ── Title bar ──────────────────────────────────────────────
+    doc.font('Helvetica-Bold').fontSize(16).fillColor(INK)
+       .text('PAYSLIP', M, y, { characterSpacing: 1 });
+    doc.font('Helvetica').fontSize(10).fillColor(MUTE)
+       .text(`${MONTHS_PDF[month - 1]} ${year}`, M, y + 20);
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(MUTE)
+       .text(clean((p.status || 'draft').replace('_', ' ')).toUpperCase(),
+             RIGHT - 160, y + 4, { width: 160, align: 'right', characterSpacing: 1 });
+    y += 40;
+    doc.moveTo(M, y).lineTo(RIGHT, y).lineWidth(1.2).strokeColor(INK).stroke();
     y += 16;
-    rule(y);
-    y += 12;
-    doc.fontSize(10);
+
+    // ── Employee details table (2 columns of label/value) ──────
+    const detail = [
+      ['Employee',    clean(p.employee?.name) || '-'],
+      ['Department',  clean(p.employee?.department) || '-'],
+      ['Hourly rate', rupee(p.hourlyRate)],
+      ['Shifts',      `${p.presentShifts ?? 0} present / ${p.absentShifts ?? 0} absent / ${p.approvedLeaveShifts ?? 0} leave`],
+    ];
+    const dRowH = 20, dCol = CW / 2, dLabW = 78;
+    const dRows = Math.ceil(detail.length / 2);
+    doc.lineWidth(0.6).strokeColor(LINE);
+    doc.rect(M, y, CW, dRowH * dRows).stroke();
+    detail.forEach(([lab, val], i) => {
+      const col = i % 2, row = Math.floor(i / 2);
+      const x = M + col * dCol, ry = y + row * dRowH;
+      doc.font('Helvetica').fontSize(8.5).fillColor(MUTE)
+         .text(lab.toUpperCase(), x + 8, ry + 6.5, { width: dLabW });
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK)
+         .text(val, x + 8 + dLabW, ry + 5.5, { width: dCol - dLabW - 16, ellipsis: true, lineBreak: false });
+    });
+    for (let r = 1; r < dRows; r++)
+      doc.moveTo(M, y + r * dRowH).lineTo(RIGHT, y + r * dRowH).lineWidth(0.5).strokeColor(HAIR).stroke();
+    doc.moveTo(M + dCol, y).lineTo(M + dCol, y + dRowH * dRows).lineWidth(0.5).strokeColor(HAIR).stroke();
+    y += dRowH * dRows + 20;
+
+    // ── Earnings & deductions table ────────────────────────────
+    // Columns: description | earnings | deductions
+    const C2 = 110, C3 = 110;                   // amount column widths
+    const C1 = CW - C2 - C3;
+    const X1 = M, X2 = M + C1, X3 = M + C1 + C2;
+    const ROW = 19, HEADH = 22;
+
+    const tableHeader = () => {
+      doc.rect(M, y, CW, HEADH).fillAndStroke(HEAD, LINE);
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(INK);
+      doc.text('DESCRIPTION', X1 + 8, y + 7, { width: C1 - 16 });
+      doc.text('EARNINGS',    X2 + 8, y + 7, { width: C2 - 16, align: 'right' });
+      doc.text('DEDUCTIONS',  X3 + 8, y + 7, { width: C3 - 16, align: 'right' });
+      y += HEADH;
+    };
+    const vRules = (fromY, toY) => {
+      doc.lineWidth(0.5).strokeColor(LINE);
+      [M, X2, X3, RIGHT].forEach((x) => doc.moveTo(x, fromY).lineTo(x, toY).stroke());
+    };
+
+    tableHeader();
+    let secTop = y;
     for (const li of p.lineItems || []) {
-      if (y > H - 150) { doc.addPage(); y = M; }
+      if (y + ROW > BOTTOM) {                   // page break: close + repeat header
+        vRules(secTop, y);
+        doc.addPage(); y = M; tableHeader(); secTop = y;
+      }
       const neg = li.amount < 0;
-      doc.font('Helvetica').fontSize(10).fillColor(INK)
-         .text(clean(li.label), M, y, { width: AMT_X - M - 12 });
-      doc.font('Helvetica').fontSize(10).fillColor(neg ? NEG : INK)
-         .text(`${neg ? '- ' : ''}${rupee(Math.abs(li.amount))}`, AMT_X, y, { width: AMT_W, align: 'right' });
-      y += 17;
+      doc.font('Helvetica').fontSize(9).fillColor(INK)
+         .text(clean(li.label), X1 + 8, y + 5.5, { width: C1 - 16, ellipsis: true, lineBreak: false });
+      doc.fillColor(neg ? NEG : INK)
+         .text(rupee(Math.abs(li.amount)), neg ? X3 + 8 : X2 + 8, y + 5.5,
+               { width: (neg ? C3 : C2) - 16, align: 'right' });
+      y += ROW;
+      doc.moveTo(M, y).lineTo(RIGHT, y).lineWidth(0.4).strokeColor(HAIR).stroke();
+    }
+    // Column totals row
+    const totalEarn = (p.lineItems || []).filter(l => l.amount > 0).reduce((s, l) => s + l.amount, 0);
+    const totalDed  = (p.lineItems || []).filter(l => l.amount < 0).reduce((s, l) => s - l.amount, 0);
+    if (y + ROW + 4 > BOTTOM) { vRules(secTop, y); doc.addPage(); y = M; tableHeader(); secTop = y; }
+    doc.rect(M, y, CW, ROW + 3).fillAndStroke(HEAD, LINE);
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(INK);
+    doc.text('Total', X1 + 8, y + 6, { width: C1 - 16 });
+    doc.text(rupee(totalEarn), X2 + 8, y + 6, { width: C2 - 16, align: 'right' });
+    doc.text(rupee(totalDed),  X3 + 8, y + 6, { width: C3 - 16, align: 'right' });
+    y += ROW + 3;
+    vRules(secTop, y);
+    y += 20;
+
+    // ── Summary table ──────────────────────────────────────────
+    const sum = [
+      ['Gross earnings',   rupee(p.grossEarnings)],
+      ['Total bonuses',    rupee(p.totalBonuses)],
+      ['Total deductions', rupee(p.totalDeductions)],
+    ];
+    if (p.totalAdvanceDeduction) sum.push(['   incl. advance recovery', rupee(p.totalAdvanceDeduction)]);
+    if (p.amountPaid)            sum.push(['Amount already paid', rupee(p.amountPaid)]);
+
+    const sW = 260, sX = RIGHT - sW, sRow = 19;
+    const sH = sRow * sum.length;
+    if (y + sH + 46 > BOTTOM) { doc.addPage(); y = M; }
+    doc.lineWidth(0.6).strokeColor(LINE).rect(sX, y, sW, sH).stroke();
+    sum.forEach(([lab, val], i) => {
+      const ry = y + i * sRow;
+      if (i) doc.moveTo(sX, ry).lineTo(RIGHT, ry).lineWidth(0.4).strokeColor(HAIR).stroke();
+      doc.font('Helvetica').fontSize(9).fillColor(MUTE).text(lab, sX + 10, ry + 5.5, { width: sW - 130 });
+      doc.font('Helvetica').fontSize(9).fillColor(INK)
+         .text(val, sX + sW - 118, ry + 5.5, { width: 108, align: 'right' });
+    });
+    y += sH;
+
+    // Net pay row — the emphasised bottom row of the summary table
+    doc.rect(sX, y, sW, 30).fillAndStroke(HEAD, INK);
+    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK)
+       .text('NET PAY', sX + 10, y + 10, { characterSpacing: 0.8 });
+    doc.font('Helvetica-Bold').fontSize(14).fillColor(INK)
+       .text(rupee(p.netPay), sX + sW - 148, y + 7.5, { width: 138, align: 'right' });
+    y += 30 + 34;
+
+    // ── Signature line ─────────────────────────────────────────
+    if (y + 40 < BOTTOM) {
+      doc.moveTo(RIGHT - 170, y).lineTo(RIGHT, y).lineWidth(0.6).strokeColor(LINE).stroke();
+      doc.font('Helvetica').fontSize(8).fillColor(MUTE)
+         .text('Authorised signatory', RIGHT - 170, y + 5, { width: 170, align: 'center' });
     }
 
-    // ── Summary ────────────────────────────────────────────────
-    y += 6;
-    rule(y);
-    y += 14;
-    const sumRow = (lab, val) => {
-      doc.font('Helvetica').fontSize(10).fillColor(MUTE).text(lab, M, y, { width: AMT_X - M - 12 });
-      doc.font('Helvetica').fontSize(10).fillColor(INK).text(rupee(val), AMT_X, y, { width: AMT_W, align: 'right' });
-      y += 17;
-    };
-    sumRow('Gross earnings', p.grossEarnings);
-    sumRow('Total bonuses', p.totalBonuses);
-    sumRow('Total deductions', p.totalDeductions);
-    if (p.totalAdvanceDeduction)
-      sumRow('   incl. advance recovery', p.totalAdvanceDeduction);
-
-    // ── Net pay box ────────────────────────────────────────────
-    y += 10;
-    const boxH = 58;
-    if (y > H - boxH - 70) { doc.addPage(); y = M; }
-    doc.lineWidth(0.75);
-    doc.roundedRect(M, y, CW, boxH, 6).fillAndStroke('#FAFBFC', LINE);
-    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(MUTE)
-       .text('NET PAY', M + 18, y + 22, { characterSpacing: 1.2 });
-    doc.font('Helvetica-Bold').fontSize(21).fillColor(INK)
-       .text(rupee(p.netPay), AMT_X - 18, y + 17, { width: AMT_W, align: 'right' });
-
-    // ── Footer ─────────────────────────────────────────────────
-    const footY = H - 54;
-    rule(footY, LINE, 0.5);
-    doc.font('Helvetica').fontSize(8).fillColor(FAINT)
-       .text('System-generated payslip · Contact your supervisor for any queries.', M, footY + 10, { width: CW });
-    doc.font('Helvetica').fontSize(8).fillColor(FAINT)
-       .text(`Generated ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`,
-             AMT_X, footY + 10, { width: AMT_W, align: 'right' });
+    // ── Footer on every page ───────────────────────────────────
+    const pages = doc.bufferedPageRange();
+    for (let i = 0; i < pages.count; i++) {
+      doc.switchToPage(pages.start + i);
+      const fy = H - M - 14;
+      doc.moveTo(M, fy - 6).lineTo(RIGHT, fy - 6).lineWidth(0.5).strokeColor(HAIR).stroke();
+      doc.font('Helvetica').fontSize(7.5).fillColor(MUTE)
+         .text('System-generated payslip - contact your supervisor for any queries.', M, fy, { width: CW - 120 });
+      doc.font('Helvetica').fontSize(7.5).fillColor(MUTE)
+         .text(`Page ${i + 1} of ${pages.count}`, RIGHT - 120, fy, { width: 120, align: 'right' });
+    }
+    doc.flushPages();
     doc.end();
   } catch (e) { next(e); }
 });
@@ -531,7 +624,11 @@ async function finalizeDraft(p, session) {
     shortfall = r2(shortfall + (rec.amount - take));
     rec.amount = take;                                  // record what was actually taken
     adv.remainingBalance = r2(current - take);
-    if (adv.remainingBalance <= 0) adv.deductedInPayroll = true;
+    if (adv.remainingBalance <= 0) {
+      adv.deductedInPayroll = true;
+      adv.status      = 'recovered';
+      adv.recoveredAt = new Date();
+    }
     await adv.save({ session });
   }
 
@@ -554,6 +651,13 @@ async function finalizeDraft(p, session) {
   p.finalizedAt = new Date();
 }
 
+// Post a finalized slip to the employee ledger. Separate from finalizeDraft
+// so it runs AFTER the slip is saved (the rows reference its final line
+// items) but inside the same transaction.
+async function postPayrollToLedger(p, session, createdBy) {
+  await ledger.postPayroll(p, session, { postedBy: createdBy });
+}
+
 router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
@@ -567,6 +671,7 @@ router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
       }
       await finalizeDraft(p, session);
       await p.save({ session });
+      await postPayrollToLedger(p, session, req.user?.name || 'admin');
       await p.populate('employee', 'name');
       out = { code: 200, body: { success: true, data: p } };
     });
@@ -593,28 +698,110 @@ router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
       if (p.status === 'paid') { out = { code: 400, body: { success: false, message: 'Already fully paid' } }; return; }
 
       // One-step pay: finalize the draft (commits advances) before disbursing.
-      if (p.status === 'draft') await finalizeDraft(p, session);
+      const wasDraft = p.status === 'draft';
+      if (wasDraft) await finalizeDraft(p, session);
 
       const alreadyPaid = r2(p.amountPaid || 0);
       const remaining   = r2(Math.max(0, (p.netPay || 0) - alreadyPaid));
-      // Default to clearing the balance; otherwise pay the requested amount,
-      // capped at what's still owed (never overpay the slip).
-      const requested = req.body.amount != null ? Number(req.body.amount) : remaining;
-      if (!Number.isFinite(requested) || requested <= 0) {
+      if (remaining <= 0) { out = { code: 400, body: { success: false, message: 'Nothing left to pay' } }; return; }
+
+      // ── Recover advances out of THIS payment ────────────────────
+      // Settling the slip = cash handed over + advance recovered. The
+      // recovery reduces the cash the employee receives, not what they
+      // earned, so netPay/totalDeductions are untouched; each recovery is
+      // capped at the advance's outstanding balance AND the slip's
+      // remaining balance, all inside this transaction.
+      const wanted = Array.isArray(req.body.recoverAdvances) ? req.body.recoverAdvances : [];
+      let budget = remaining;
+      let recovered = 0;
+      const recoveredRows = [];
+      for (const w of wanted) {
+        if (budget <= 0) break;
+        const advId = w?.advance ?? w?._id;
+        if (!advId || !mongoose.Types.ObjectId.isValid(String(advId))) continue;
+        const adv = await AdvanceRequest.findById(advId).session(session);
+        if (!adv || !AdvanceRequest.RECOVERABLE_STATUSES.includes(adv.status)) continue;
+        if (String(adv.employee) !== String(p.employee)) continue;   // never touch another worker's advance
+        const bal = adv.remainingBalance != null ? adv.remainingBalance : adv.amount;
+        if (bal <= 0) continue;
+        const ask  = Number(w?.amount);
+        const take = r2(Math.min(Number.isFinite(ask) && ask > 0 ? ask : bal, bal, budget));
+        if (take <= 0) continue;
+        adv.remainingBalance = r2(bal - take);
+        if (adv.remainingBalance <= 0) {
+          adv.deductedInPayroll = true;
+          adv.status      = 'recovered';
+          adv.recoveredAt = new Date();
+        }
+        await adv.save({ session });
+        budget    = r2(budget - take);
+        recovered = r2(recovered + take);
+        recoveredRows.push({ advance: adv._id, amount: take, balance: adv.remainingBalance });
+        p.advanceRecoveries.push({ advance: adv._id, amount: take });
+        p.lineItems.push({
+          label:  `${ledger.PAYMENT_RECOVERY_PREFIX} Rs.${take}${adv.remainingBalance > 0 ? ` (Rs.${adv.remainingBalance} still outstanding)` : ''}`,
+          amount: -take,
+          type:   'deduction',
+        });
+      }
+      if (recoveredRows.length) {
+        p.totalAdvanceDeduction = r2((p.totalAdvanceDeduction || 0) + recovered);
+        p.markModified('advanceRecoveries');
+        p.markModified('lineItems');
+      }
+
+      // Cash paid out — defaults to whatever is left after recoveries.
+      const requested = req.body.amount != null ? Number(req.body.amount) : budget;
+      if (!Number.isFinite(requested) || requested < 0) {
+        out = { code: 400, body: { success: false, message: 'Payment amount must be a positive number' } };
+        return;
+      }
+      const pay = r2(Math.min(requested, budget));
+      if (pay <= 0 && recovered <= 0) {
         out = { code: 400, body: { success: false, message: 'Payment amount must be greater than 0' } };
         return;
       }
-      const pay = r2(Math.min(requested, remaining));
-      if (pay <= 0) { out = { code: 400, body: { success: false, message: 'Nothing left to pay' } }; return; }
 
-      p.amountPaid  = r2(alreadyPaid + pay);
+      p.amountPaid    = r2(alreadyPaid + pay + recovered);
+      p.totalCashPaid = r2((p.totalCashPaid || 0) + pay);
+      p.advanceRecoveredAtPayment = r2((p.advanceRecoveredAtPayment || 0) + recovered);
       p.status      = p.amountPaid >= (p.netPay || 0) ? 'paid' : 'partially_paid';
       p.paidAt      = new Date();
       p.paidBy      = req.user?.name || 'admin';
       if (paymentNote) p.paymentNote = paymentNote;
+      // Record this payout so the slip carries a full payment history:
+      // how much cash went out and how much was held back against advances.
+      p.payouts.push({
+        at: p.paidAt,
+        cash: pay,
+        advanceRecovered: recovered,
+        total: r2(pay + recovered),
+        paidBy: p.paidBy,
+        note: paymentNote || '',
+        advances: recoveredRows.map((rr) => ({ advance: rr.advance, amount: rr.amount })),
+      });
+      p.markModified('payouts');
       await p.save({ session });
+
+      // ── Ledger (same transaction) ───────────────────────────────
+      const who = req.user?.name || 'admin';
+      // A slip paid straight from draft was only just finalized, so its
+      // earnings/deductions still need posting.
+      if (wasDraft) await postPayrollToLedger(p, session, who);
+      await ledger.postPayment(p, { cash: pay, recovered, at: p.paidAt, postedBy: who }, session);
+      // Advance recovered at payment time reduces what the worker owes.
+      for (const rr of recoveredRows) {
+        await LedgerEntry.create([{
+          employee: p.employee, date: p.paidAt, kind: 'advance_recovered',
+          amount: rr.amount, // +ve: cancels the negative advance_issued row
+          label: `Advance recovered from ${MONTHS_PDF[(p.month || 1) - 1]} ${p.year} pay`,
+          year: p.year, month: p.month,
+          source: 'advance', sourceId: rr.advance, postedBy: who,
+        }], { session });
+      }
+
       await p.populate('employee', 'name');
-      out = { code: 200, body: { success: true, data: p } };
+      out = { code: 200, body: { success: true, data: p, cashPaid: pay, advanceRecovered: recovered } };
     });
     return res.status(out.code).json(out.body);
   } catch (e) {
@@ -652,13 +839,28 @@ router.post('/advance/admin-create', isAdmin('admin', 'accounts'), async (req, r
     const emp = await Employee.findById(employee, 'name').lean();
     if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
 
-    const adv = await AdvanceRequest.create({
-      employee, amount: +amount, reason,
-      status: 'approved',
-      deductMonth: +deductMonth, deductYear: +deductYear,
-      approvedBy: req.user?.name || 'admin',
-      approvedAt: new Date(),
-    });
+    // Creating the advance and booking it to the ledger must be atomic —
+    // cash handed over with no ledger row would silently under-state what
+    // the worker owes back.
+    const session = await mongoose.startSession();
+    let adv;
+    try {
+      await session.withTransaction(async () => {
+        // Admin/finance entry records cash handed over at the counter, so
+        // it is born already paid out (approver and payer are the same act).
+        const [created] = await AdvanceRequest.create([{
+          employee, amount: +amount, reason,
+          status: 'paid_out',
+          deductMonth: +deductMonth, deductYear: +deductYear,
+          approvedBy: req.user?.name || 'admin',
+          approvedAt: new Date(),
+          paidOutAt:  new Date(),
+          paidOutBy:  req.user?.name || 'admin',
+        }], { session });
+        adv = created;
+        await ledger.postAdvanceIssued(adv, session, { postedBy: req.user?.name || "admin" });
+      });
+    } finally { await session.endSession(); }
     res.status(201).json({ success: true, message: `Advance of ₹${adv.amount} recorded for ${emp.name}`, data: adv });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -686,6 +888,8 @@ router.put('/advance/:id/approve', isAdmin('admin', 'accounts'), async (req, res
     const { deductMonth, deductYear, adminNotes = '', approvedBy = 'admin' } = req.body;
     if (!deductMonth || !deductYear)
       return res.status(400).json({ success: false, message: 'deductMonth and deductYear required' });
+    // Approval commits to the advance but no cash has moved yet, so nothing
+    // is booked to the ledger until it is paid out (PUT /advance/:id/pay-out).
     const adv = await AdvanceRequest.findByIdAndUpdate(req.params.id, {
       $set: {
         status: 'approved', deductMonth: +deductMonth, deductYear: +deductYear,
@@ -695,6 +899,35 @@ router.put('/advance/:id/approve', isAdmin('admin', 'accounts'), async (req, res
     if (!adv) return res.status(404).json({ success: false, message: 'Not found' });
     res.json({ success: true, message: `Approved ₹${adv.amount} for ${adv.employee?.name}`, data: adv });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// approved → paid_out. Hands the cash over: this is the moment the
+// employee owes it back, so it is booked to their ledger here, atomically.
+router.put('/advance/:id/pay-out', isAdmin('admin', 'accounts'), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    let out;
+    await session.withTransaction(async () => {
+      const adv = await AdvanceRequest.findById(req.params.id).session(session);
+      if (!adv) { out = { code: 404, body: { success: false, message: 'Not found' } }; return; }
+      if (adv.status === 'paid_out' || adv.status === 'recovered') {
+        out = { code: 400, body: { success: false, message: `Already paid out (${adv.status})` } }; return;
+      }
+      if (adv.status !== 'approved') {
+        out = { code: 400, body: { success: false, message: `Approve before paying out (this one is ${adv.status})` } }; return;
+      }
+      adv.status    = 'paid_out';
+      adv.paidOutAt = new Date();
+      adv.paidOutBy = req.user?.name || 'admin';
+      await adv.save({ session });
+      await ledger.postAdvanceIssued(adv, session, { postedBy: adv.paidOutBy });
+      await adv.populate('employee', 'name');
+      out = { code: 200, body: { success: true, message: `Paid out ₹${adv.amount}`, data: adv } };
+    });
+    return res.status(out.code).json(out.body);
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  } finally { await session.endSession(); }
 });
 
 router.put('/advance/:id/reject', isAdmin('admin', 'accounts'), async (req, res) => {
