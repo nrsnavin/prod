@@ -356,14 +356,36 @@ router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
         return;
       }
 
+      // Commit each recovery, capped at what the advance still owes so a
+      // stale draft can't over-recover. Track any shortfall (planned minus
+      // actually taken) so we can refund it below — otherwise the slip
+      // would keep the over-planned deduction and short-pay the employee.
+      let shortfall = 0;
       for (const rec of p.advanceRecoveries || []) {
         const adv = await AdvanceRequest.findById(rec.advance).session(session);
-        if (!adv) continue;
+        if (!adv) { shortfall = r2(shortfall + rec.amount); continue; }
         const current = adv.remainingBalance != null ? adv.remainingBalance : adv.amount;
-        const take = Math.min(rec.amount, current);         // never over-recover
+        const take = Math.min(rec.amount, current);
+        shortfall = r2(shortfall + (rec.amount - take));
+        rec.amount = take;                                  // record what was actually taken
         adv.remainingBalance = r2(current - take);
         if (adv.remainingBalance <= 0) adv.deductedInPayroll = true;
         await adv.save({ session });
+      }
+
+      // The draft over-deducted by `shortfall` — give it back so net pay
+      // reflects what was actually recovered.
+      if (shortfall > 0) {
+        p.totalAdvanceDeduction = r2((p.totalAdvanceDeduction || 0) - shortfall);
+        p.totalDeductions       = r2((p.totalDeductions || 0) - shortfall);
+        p.netPay                = r2(Math.max(0, (p.grossEarnings || 0) - p.totalDeductions + (p.totalBonuses || 0)));
+        p.lineItems.push({
+          label:  `Advance recovery capped — ₹${shortfall} carried to next month`,
+          amount: shortfall,
+          type:   'earning',
+        });
+        p.markModified('advanceRecoveries');
+        p.markModified('lineItems');
       }
 
       p.status = 'finalized';

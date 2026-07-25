@@ -147,10 +147,18 @@ async function computePayroll(empId, year, month) {
   // A ShiftDetail (the employee was on a scheduled shift) with no matching
   // Attendance row means attendance was never recorded — treat it as an
   // absent so the pay isn't silently skipped. De-duped to unique (date,shift).
+  //
+  // Only ELAPSED, CLOSED shifts count: a shift whose day hasn't finished
+  // yet (generating mid-month) or that is still open/running/awaiting
+  // verification is not "unmarked" — it just hasn't happened / been closed
+  // — so it must never be penalised as an absent.
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
   const attSet = new Set(records.map((r) => dayKey(r.date, r.shift)));
   const scheduled = await ShiftDetail.find({
     employee: empId,
-    date: { $gte: start, $lte: end },
+    date: { $gte: start, $lte: end, $lt: startOfToday }, // only fully-past days
+    status: 'closed',                                    // only completed shifts
   }).select('date shift').lean();
   const schedSeen = new Set();
   for (const sd of scheduled) {
