@@ -222,6 +222,79 @@ router.get('/dashboard', isAdmin('admin', 'accounts'), async (req, res) => {
 
 // Worker-facing — employees view their own payslip.
 // selfOrAdmin blocks one worker from reading another's slip by id swap.
+// A month is comparable as year*12 + (month-1) so a [from, to] window is a
+// simple numeric range regardless of year boundaries.
+const monthKey = (y, m) => y * 12 + (m - 1);
+function parseRange(req) {
+  const now = new Date();
+  const toYear   = +(req.query.toYear   || now.getFullYear());
+  const toMonth  = +(req.query.toMonth  || now.getMonth() + 1);
+  // Default window: the trailing 6 months ending at `to`.
+  const def = new Date(toYear, toMonth - 1 - 5, 1);
+  const fromYear  = +(req.query.fromYear  || def.getFullYear());
+  const fromMonth = +(req.query.fromMonth || def.getMonth() + 1);
+  return { fromYear, fromMonth, toYear, toMonth,
+    fromKey: monthKey(fromYear, fromMonth), toKey: monthKey(toYear, toMonth) };
+}
+
+// Aggregated payroll across a month range — one summed row per employee.
+// Powers the payroll page's "Range" view.
+router.get('/dashboard-range', isAdmin('admin', 'accounts'), async (req, res) => {
+  try {
+    const rg = parseRange(req);
+    if (rg.fromKey > rg.toKey)
+      return res.status(400).json({ success: false, message: '`from` month is after `to` month' });
+
+    const rows = await Payroll.aggregate([
+      { $addFields: { _key: { $add: [{ $multiply: ['$year', 12] }, { $subtract: ['$month', 1] }] } } },
+      { $match: { _key: { $gte: rg.fromKey, $lte: rg.toKey } } },
+      { $group: {
+          _id: '$employee',
+          grossEarnings:   { $sum: '$grossEarnings' },
+          totalDeductions: { $sum: '$totalDeductions' },
+          totalBonuses:    { $sum: '$totalBonuses' },
+          totalAdvanceDeduction: { $sum: '$totalAdvanceDeduction' },
+          netPay:          { $sum: '$netPay' },
+          amountPaid:      { $sum: '$amountPaid' },
+          months:          { $sum: 1 },
+          paidMonths:      { $sum: { $cond: [{ $eq: ['$status', 'paid'] }, 1, 0] } },
+      } },
+      { $lookup: { from: 'employees', localField: '_id', foreignField: '_id', as: 'emp' } },
+      { $unwind: { path: '$emp', preserveNullAndEmptyArrays: true } },
+    ]);
+
+    const employees = rows.map(r => ({
+      employeeId:      r._id,
+      name:            r.emp?.name ?? '-',
+      department:      r.emp?.department ?? '-',
+      grossEarnings:   r2(r.grossEarnings),
+      totalDeductions: r2(r.totalDeductions),
+      totalBonuses:    r2(r.totalBonuses),
+      totalAdvanceDeduction: r2(r.totalAdvanceDeduction),
+      netPay:          r2(r.netPay),
+      amountPaid:      r2(r.amountPaid),
+      months:          r.months,
+      paidMonths:      r.paidMonths,
+      fullyPaid:       r.paidMonths === r.months,
+    })).sort((a, b) => b.netPay - a.netPay);
+
+    const sum = (k) => employees.reduce((s, e) => s + (Number.isFinite(e[k]) ? e[k] : 0), 0);
+    res.json({
+      success: true,
+      range: { fromYear: rg.fromYear, fromMonth: rg.fromMonth, toYear: rg.toYear, toMonth: rg.toMonth },
+      summary: {
+        totalEmployees:  employees.length,
+        totalNetPay:     r2(sum('netPay')),
+        totalGross:      r2(sum('grossEarnings')),
+        totalDeductions: r2(sum('totalDeductions')),
+        totalBonuses:    r2(sum('totalBonuses')),
+        totalPaid:       r2(sum('amountPaid')),
+      },
+      employees,
+    });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
 router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
   try {
     const year  = +(req.query.year  || new Date().getFullYear());
@@ -398,6 +471,45 @@ router.get('/history/:empId', selfOrAdmin, async (req, res) => {
         payslips,
         unpaidTotal: unpaid.total || 0,
         unpaidCount: unpaid.count || 0,
+      },
+    });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /range/:empId?fromYear&fromMonth&toYear&toMonth
+//   Every payslip for one employee within a month window, oldest first,
+//   plus the range totals. selfOrAdmin — a worker can read their own.
+// ─────────────────────────────────────────────────────────────
+router.get('/range/:empId', selfOrAdmin, async (req, res) => {
+  try {
+    const { empId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(empId))
+      return res.status(400).json({ success: false, message: 'Invalid employee id' });
+    const rg = parseRange(req);
+    if (rg.fromKey > rg.toKey)
+      return res.status(400).json({ success: false, message: '`from` month is after `to` month' });
+
+    const all = await Payroll.find({ employee: empId })
+      .select('year month netPay grossEarnings totalBonuses totalDeductions totalAdvanceDeduction amountPaid status paidAt finalizedAt')
+      .lean();
+    const slips = all
+      .filter(p => { const k = monthKey(p.year, p.month); return k >= rg.fromKey && k <= rg.toKey; })
+      .sort((a, b) => monthKey(a.year, a.month) - monthKey(b.year, b.month));
+
+    const sum = (k) => slips.reduce((s, p) => s + (Number.isFinite(p[k]) ? p[k] : 0), 0);
+    res.json({
+      success: true,
+      range: { fromYear: rg.fromYear, fromMonth: rg.fromMonth, toYear: rg.toYear, toMonth: rg.toMonth },
+      slips,
+      totals: {
+        months:          slips.length,
+        grossEarnings:   r2(sum('grossEarnings')),
+        totalBonuses:    r2(sum('totalBonuses')),
+        totalDeductions: r2(sum('totalDeductions')),
+        totalAdvanceDeduction: r2(sum('totalAdvanceDeduction')),
+        netPay:          r2(sum('netPay')),
+        amountPaid:      r2(sum('amountPaid')),
       },
     });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
