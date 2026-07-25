@@ -248,3 +248,65 @@ describe('per-employee live prediction', () => {
     expect(res.body.prediction.minDaysForEligibility).toBe(30);
   });
 });
+
+describe('reset unlocks the settings', () => {
+  const trigger = () => request(app).post('/api/v2/bonus/trigger').set('Cookie', cookie()).send({ year: curYear });
+  const setDays = (n) => request(app).put('/api/v2/bonus/config').set('Cookie', cookie())
+    .send({ year: curYear, yearlyWorkingDays: n });
+
+  test('working days lock once generated, and reset unlocks them', async () => {
+    const emp = await makeEmp();
+    await paidMonth(emp);
+    await marked(emp, [3, 4], 'present');
+    await makeCfg();
+
+    // editable before generating
+    expect((await setDays(5)).status).toBe(200);
+    expect((await BonusConfig.findOne({ year: curYear })).yearlyWorkingDays).toBe(5);
+
+    await trigger();
+    const locked = await setDays(7);
+    expect(locked.status).toBe(400);
+    expect(locked.body.message).toMatch(/Reset/i);          // tells you what to do
+
+    // reset clears the unpaid records and unlocks
+    const rst = await request(app).delete(`/api/v2/bonus/year/${curYear}/reset`).set('Cookie', cookie());
+    expect(rst.status).toBe(200);
+    expect((await BonusConfig.findOne({ year: curYear })).status).toBe('pending');
+
+    const after = await setDays(7);
+    expect(after.status).toBe(200);
+    expect((await BonusConfig.findOne({ year: curYear })).yearlyWorkingDays).toBe(7);
+
+    // and the year can be generated again
+    expect((await trigger()).status).toBe(200);
+  });
+
+  test('a year with PAID records stays locked even after reset', async () => {
+    const emp = await makeEmp();
+    await paidMonth(emp);
+    await marked(emp, [3, 4], 'present');
+    await makeCfg();
+    await trigger();
+    const rec = await BonusRecord.findOne({ year: curYear });
+    await request(app).put(`/api/v2/bonus/records/${rec._id}/pay`).set('Cookie', cookie());
+
+    await request(app).delete(`/api/v2/bonus/year/${curYear}/reset`).set('Cookie', cookie());
+    const res = await setDays(9);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/already paid/i);
+  });
+
+  test('re-saving the SAME working days is not treated as a change', async () => {
+    const emp = await makeEmp();
+    await paidMonth(emp);
+    await marked(emp, [3, 4], 'present');
+    await makeCfg();                       // yearlyWorkingDays: 2
+    await trigger();
+    // saving other fields must not trip the lock
+    const res = await request(app).put('/api/v2/bonus/config').set('Cookie', cookie())
+      .send({ year: curYear, yearlyWorkingDays: 2, bonusLabel: 'Diwali X' });
+    expect(res.status).toBe(200);
+    expect((await BonusConfig.findOne({ year: curYear })).bonusLabel).toBe('Diwali X');
+  });
+});
