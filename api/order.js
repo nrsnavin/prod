@@ -5,6 +5,7 @@ const router = express.Router();
 const Order = require("../models/Order.js");
 const Job = require("../models/JobOrder.js");
 const Elastic = require("../models/Elastic.js");
+const { computeMaterialRequirement } = require("../utils/materialRequirement.js");
 const ErrorHandler = require("../utils/ErrorHandler.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
@@ -34,48 +35,13 @@ const {
 // ════════════════════════════════════════════════════════════════
 //  SHARED — BOM EXPANSION
 // ════════════════════════════════════════════════════════════════
+// Delegates to the shared MRP calculator (utils/materialRequirement.js) so
+// the order and the job MRP sheet can never drift apart. That version also
+// survives a deleted RawMaterial: this one crashed on `material._id` when
+// populate handed back null for a dangling reference, and silently dropped
+// the line when it didn't.
 async function computeRawMaterialRequired(elasticOrdered) {
-  const elasticIds = elasticOrdered.map((e) => e.elastic);
-  const elastics = await Elastic.find({ _id: { $in: elasticIds } })
-    .populate("warpSpandex.id")
-    .populate("spandexCovering.id")
-    .populate("weftYarn.id")
-    .populate("warpYarn.id")
-    .lean();
-
-  const rawMap = new Map();
-  const addMaterial = (material, weightKg) => {
-    const key = material._id.toString();
-    if (!rawMap.has(key)) {
-      rawMap.set(key, {
-        rawMaterial:    material._id,
-        name:           material.name,
-        requiredWeight: 0,
-        inStock:        material.stock || 0,
-      });
-    }
-    rawMap.get(key).requiredWeight += weightKg;
-  };
-
-  elasticOrdered.forEach((orderItem) => {
-    const elastic = elastics.find(
-      (e) => e._id.toString() === orderItem.elastic.toString()
-    );
-    if (!elastic) return;
-    const qty = orderItem.quantity;
-
-    if (elastic.warpSpandex?.id)
-      addMaterial(elastic.warpSpandex.id, (elastic.warpSpandex.weight * qty) / 1000);
-    if (elastic.spandexCovering?.id)
-      addMaterial(elastic.spandexCovering.id, (elastic.spandexCovering.weight * qty) / 1000);
-    if (elastic.weftYarn?.id)
-      addMaterial(elastic.weftYarn.id, (elastic.weftYarn.weight * qty) / 1000);
-    (elastic.warpYarn || []).forEach((wy) => {
-      if (wy.id) addMaterial(wy.id, (wy.weight * qty) / 1000);
-    });
-  });
-
-  return Array.from(rawMap.values());
+  return computeMaterialRequirement(elasticOrdered);
 }
 
 

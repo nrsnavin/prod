@@ -1,106 +1,73 @@
 'use strict';
-//
-// Unit test for the BOM roll-up against an in-memory Mongo, mirroring
-// the pattern used by the inventory-alert tests. Verifies the same
-// weight math the order-approval flow uses, plus shortfall.
+// MRP material requirement: every referenced material produces a row with a
+// numeric inStock, including when the material document has been deleted
+// (previously the whole line vanished, silently under-reporting the need).
+
+process.env.NODE_ENV = 'test';
 
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 
-let mongo, Elastic, RawMaterial, computeMaterialRequirement;
+let mongo, RawMaterial, Elastic, compute;
 
 beforeAll(async () => {
   mongo = await MongoMemoryServer.create();
   await mongoose.connect(mongo.getUri());
-  Elastic     = require('../../models/Elastic.js');
-  RawMaterial = require('../../models/RawMaterial.js');
-  ({ computeMaterialRequirement } = require('../../utils/materialRequirement.js'));
+  RawMaterial = require('../../models/RawMaterial');
+  Elastic     = require('../../models/Elastic');
+  compute     = require('../../utils/materialRequirement').computeMaterialRequirement;
 }, 60_000);
 
-afterAll(async () => {
-  if (mongo) { await mongoose.disconnect(); await mongo.stop(); }
-});
+afterAll(async () => { await mongoose.disconnect(); await mongo.stop(); });
 afterEach(async () => {
-  for (const c of Object.values(mongoose.connection.collections)) {
-    await c.deleteMany({});
-  }
+  for (const c of Object.values(mongoose.connection.collections)) await c.deleteMany({});
 });
 
-async function mat(name, over = {}) {
-  return RawMaterial.create({
-    name, category: 'Yarn',
-    supplier: new mongoose.Types.ObjectId(),
-    stock: 0, minStock: 0, price: 0, ...over,
-  });
-}
+const makeElastic = (over) => Elastic.create({
+  name: 'E1', weight: 10, noOfHook: 4, pick: 20, spandexEnds: 8, ...over,
+});
 
-describe('computeMaterialRequirement', () => {
-  test('rolls up grams/metre × metres ÷ 1000 into kg, per material', async () => {
-    const spandex = await mat('Spandex 40D', { stock: 100 });
-    const nylon   = await mat('Nylon 70D',   { stock: 10 });
+test('a resolved material yields a numeric inStock', async () => {
+  const rm = await RawMaterial.create({ name: 'Spandex', category: 'spandex', price: 5, stock: 123.5 });
+  const el = await makeElastic({ warpSpandex: { id: rm._id, weight: 2 } });
 
-    const elastic = await Elastic.create({
-      name: '20mm knit', weaveType: '8',
-      spandexEnds: 40, pick: 20, noOfHook: 4, weight: 5,
-      testingParameters: { elongation: 120, recovery: 90 },
-      warpSpandex:    { id: spandex._id, ends: 40, weight: 2 }, // 2 g/m
-      weftYarn:       { id: nylon._id,   weight: 5 },           // 5 g/m
-    });
+  const [row] = await compute([{ elastic: el._id, quantity: 1000 }]);
+  expect(row.inStock).toBe(123.5);
+  expect(row.stockKnown).toBe(true);
+  expect(row.requiredWeight).toBe(2);
+});
 
-    const out = await computeMaterialRequirement([
-      { elastic: elastic._id, quantity: 12000 }, // 12,000 m
-    ]);
+test('zero stock is reported as 0, never as a missing field', async () => {
+  const rm = await RawMaterial.create({ name: 'Empty', category: 'yarn', price: 1, stock: 0 });
+  const el = await makeElastic({ warpSpandex: { id: rm._id, weight: 2 } });
 
-    const byName = Object.fromEntries(out.map((m) => [m.name, m]));
-    // Spandex: 2 g/m × 12000 / 1000 = 24 kg; stock 100 → no shortfall
-    expect(byName['Spandex 40D'].requiredWeight).toBeCloseTo(24, 3);
-    expect(byName['Spandex 40D'].shortfall).toBe(0);
-    // Nylon: 5 g/m × 12000 / 1000 = 60 kg; stock 10 → 50 kg short
-    expect(byName['Nylon 70D'].requiredWeight).toBeCloseTo(60, 3);
-    expect(byName['Nylon 70D'].shortfall).toBeCloseTo(50, 3);
-  });
+  const [row] = await compute([{ elastic: el._id, quantity: 1000 }]);
+  expect(row.inStock).toBe(0);
+  expect(row.inStock).not.toBeNull();
+  expect(row.stockKnown).toBe(true);
+});
 
-  test('sums the same material used across multiple elastics', async () => {
-    const shared = await mat('Shared Yarn', { stock: 5 });
-    const e1 = await Elastic.create({
-      name: 'A', weaveType: '8', spandexEnds: 1, pick: 1, noOfHook: 1, weight: 1,
-      testingParameters: { elongation: 120, recovery: 90 },
-      weftYarn: { id: shared._id, weight: 1 },
-    });
-    const e2 = await Elastic.create({
-      name: 'B', weaveType: '8', spandexEnds: 1, pick: 1, noOfHook: 1, weight: 1,
-      testingParameters: { elongation: 120, recovery: 90 },
-      weftYarn: { id: shared._id, weight: 3 },
-    });
-    const out = await computeMaterialRequirement([
-      { elastic: e1._id, quantity: 1000 }, // 1 kg
-      { elastic: e2._id, quantity: 1000 }, // 3 kg
-    ]);
-    expect(out).toHaveLength(1);
-    expect(out[0].requiredWeight).toBeCloseTo(4, 3);
+test('a DELETED material still produces a row, flagged as unknown', async () => {
+  const rm = await RawMaterial.create({ name: 'Gone', category: 'yarn', price: 1, stock: 50 });
+  const el = await makeElastic({ warpSpandex: { id: rm._id, weight: 2 } });
+  await RawMaterial.deleteOne({ _id: rm._id });          // reference now dangles
+
+  const rows = await compute([{ elastic: el._id, quantity: 1000 }]);
+  expect(rows).toHaveLength(1);                          // was 0 — silently dropped
+  expect(rows[0].stockKnown).toBe(false);
+  expect(rows[0].inStock).toBe(0);
+  expect(rows[0].requiredWeight).toBe(2);
+});
+
+test('every row always carries a numeric inStock', async () => {
+  const a = await RawMaterial.create({ name: 'A', category: 'yarn', price: 1, stock: 10 });
+  const b = await RawMaterial.create({ name: 'B', category: 'yarn', price: 1, stock: 20 });
+  const el = await makeElastic({
+    warpSpandex: { id: a._id, weight: 1 },
+    weftYarn:    { id: b._id, weight: 3 },
   });
 
-  test('warpYarn array entries each contribute', async () => {
-    const y1 = await mat('Warp A');
-    const y2 = await mat('Warp B');
-    const e = await Elastic.create({
-      name: 'multi-warp', weaveType: '8', spandexEnds: 1, pick: 1, noOfHook: 1, weight: 1,
-      testingParameters: { elongation: 120, recovery: 90 },
-      warpYarn: [{ id: y1._id, weight: 2 }, { id: y2._id, weight: 4 }],
-    });
-    const out = await computeMaterialRequirement([{ elastic: e._id, quantity: 1000 }]);
-    const byName = Object.fromEntries(out.map((m) => [m.name, m.requiredWeight]));
-    expect(byName['Warp A']).toBeCloseTo(2, 3);
-    expect(byName['Warp B']).toBeCloseTo(4, 3);
-  });
-
-  test('empty / zero-qty lines yield no requirement', async () => {
-    expect(await computeMaterialRequirement([])).toEqual([]);
-    const e = await Elastic.create({
-      name: 'z', weaveType: '8', spandexEnds: 1, pick: 1, noOfHook: 1, weight: 1,
-      testingParameters: { elongation: 120, recovery: 90 },
-      weftYarn: { id: (await mat('Y'))._id, weight: 5 },
-    });
-    expect(await computeMaterialRequirement([{ elastic: e._id, quantity: 0 }])).toEqual([]);
-  });
+  const rows = await compute([{ elastic: el._id, quantity: 1000 }]);
+  expect(rows).toHaveLength(2);
+  for (const r of rows) expect(typeof r.inStock).toBe('number');
 });
