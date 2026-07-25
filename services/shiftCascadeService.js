@@ -21,6 +21,7 @@ const ShiftPlan    = require("../models/ShiftPlan");
 const JobOrder     = require("../models/JobOrder");
 const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
 const { updatePairPosterior } = require("../utils/etaPosterior.js");
+const { recomputePending } = require("../services/orderPending.js");
 const { notify } = require("../utils/notify");
 
 // ────────────────────────────────────────────────────────────────
@@ -131,11 +132,10 @@ async function applyProductionCascade(
     for (const row of order.producedElastic) {
       row.quantity = producedSum[row.elastic.toString()] || 0;
     }
-    for (const p of order.pendingElastic) {
-      const ordered = order.elasticOrdered.find((e) => e.elastic.toString() === p.elastic.toString());
-      const produced = producedSum[p.elastic.toString()] || 0;
-      if (ordered) p.quantity = Math.max(0, ordered.quantity - produced);
-    }
+    // Pending is ordered MINUS PLANNED, not minus produced — production
+    // must not move it (see services/orderPending.js). Recomputing it from
+    // produced here used to undo the job's planning deduction.
+    await recomputePending(order, session);
 
     await order.save({ session });
   }
@@ -321,11 +321,10 @@ async function _rederiveShiftProduction(session, { shift, newTotalMeters, req, a
     for (const row of order.producedElastic) {
       row.quantity = producedSum[row.elastic.toString()] || 0;
     }
-    for (const p of order.pendingElastic) {
-      const ordered = order.elasticOrdered.find((e) => e.elastic.toString() === p.elastic.toString());
-      const produced = producedSum[p.elastic.toString()] || 0;
-      if (ordered) p.quantity = Math.max(0, ordered.quantity - produced);
-    }
+    // Pending is ordered MINUS PLANNED, not minus produced — production
+    // must not move it (see services/orderPending.js). Recomputing it from
+    // produced here used to undo the job's planning deduction.
+    await recomputePending(order, session);
     await order.save({ session });
   }
 

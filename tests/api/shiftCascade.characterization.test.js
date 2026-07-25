@@ -118,8 +118,9 @@ describe('applyProductionCascade — accumulation + fan-out', () => {
 
     const order = await Order.findById(s.order._id);
     expect(order.producedElastic[0].quantity).toBe(100);
-    // pending recomputed as ordered − produced.
-    expect(order.pendingElastic[0].quantity).toBe(900);
+    // Pending is ordered MINUS PLANNED — production does not move it.
+    // The job plans the full 1000, so nothing still needs a job raised.
+    expect(order.pendingElastic[0].quantity).toBe(0);
 
     const sp = await ShiftPlan.findById(s.sp._id);
     expect(sp.totalProduction).toBe(400); // 100 × NoOfHead(4)

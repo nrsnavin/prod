@@ -103,7 +103,10 @@ describe('_rederiveShiftProduction — correction (edit up/down)', () => {
 
     const order = await Order.findById(s.order._id);
     expect(order.producedElastic[0].quantity).toBe(800);
-    expect(order.pendingElastic[0].quantity).toBe(4200); // 5000 − 800
+    // Pending is ordered MINUS PLANNED, not minus produced: the job plans
+    // the whole 5000, so nothing is left needing a job raised for it.
+    // Production only moves producedElastic.
+    expect(order.pendingElastic[0].quantity).toBe(0);
 
     const sp = await ShiftPlan.findById(s.sp._id);
     expect(sp.totalProduction).toBe(800); // 400 + deltaPerHead(100) × heads(4)
@@ -122,7 +125,8 @@ describe('_rederiveShiftProduction — correction (edit up/down)', () => {
 
     const order = await Order.findById(s.order._id);
     expect(order.producedElastic[0].quantity).toBe(0);
-    expect(order.pendingElastic[0].quantity).toBe(5000);
+    // Unchanged by the correction — the job still holds the planned 5000.
+    expect(order.pendingElastic[0].quantity).toBe(0);
 
     const sp = await ShiftPlan.findById(s.sp._id);
     expect(sp.totalProduction).toBe(0); // 800 + (−200 × 4), floored at 0
