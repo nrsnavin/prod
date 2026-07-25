@@ -51,6 +51,19 @@ describe('#5 overtime', () => {
     expect(p.overtimeEarnings).toBe(150);
     expect(p.grossEarnings).toBe(1350); // 1200 base + 150 OT
   });
+
+  test('overtime entered via POST /attendance/mark flows into pay', async () => {
+    await PayrollSettings.create({ overtimeMultiplier: 1.5 });
+    const emp = await makeEmp();
+    const res = await request(app).post('/api/v2/attendance/mark').set('Cookie', adminCookie()).send({
+      date: `${YEAR}-${String(MONTH).padStart(2, '0')}-02`,
+      shift: 'DAY',
+      records: [{ employeeId: emp._id, status: 'present', overtimeMinutes: 60 }],
+    });
+    expect(res.status).toBeLessThan(300);
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.overtimeEarnings).toBe(150);   // 60m × ₹100 × 1.5
+  });
 });
 
 describe('#7 statutory PF/ESI', () => {
@@ -73,12 +86,31 @@ describe('#11 unmarked scheduled shift = absent', () => {
   test('a ShiftDetail with no attendance counts as an absent', async () => {
     const emp = await makeEmp();
     await att(emp._id, 2); // one real present shift
-    // scheduled DAY shift on day 5 with NO attendance row (insert raw)
-    await ShiftDetail.collection.insertOne({ employee: emp._id, date: new Date(YEAR, MONTH - 1, 5), shift: 'DAY' });
+    // a CLOSED, fully-past DAY shift with no attendance row → absent
+    await ShiftDetail.collection.insertOne({ employee: emp._id, date: new Date(YEAR, MONTH - 1, 5), shift: 'DAY', status: 'closed' });
     const p = await computePayroll(emp._id, YEAR, MONTH);
     expect(p.absentShifts).toBe(1);
     expect(p.presentShifts).toBe(1);
     expect(p.perfectAttendance).toBe(false);
+  });
+
+  test('does NOT penalise open / not-yet-closed scheduled shifts', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    // scheduled but still open (in-progress / not closed) → not an absent
+    await ShiftDetail.collection.insertOne({ employee: emp._id, date: new Date(YEAR, MONTH - 1, 6), shift: 'DAY', status: 'open' });
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.absentShifts).toBe(0);
+    expect(p.perfectAttendance).toBe(true);
+  });
+
+  test('does NOT penalise shifts scheduled in the future', async () => {
+    const emp = await makeEmp();
+    // period is next month, closed shift dated in the future → not counted
+    const future = new Date(); future.setMonth(future.getMonth() + 1);
+    await ShiftDetail.collection.insertOne({ employee: emp._id, date: new Date(future.getFullYear(), future.getMonth(), 15), shift: 'DAY', status: 'closed' });
+    const p = await computePayroll(emp._id, future.getFullYear(), future.getMonth() + 1);
+    expect(p.absentShifts).toBe(0);
   });
 });
 
@@ -141,6 +173,26 @@ describe('#2/#3 finalize + pay workflow', () => {
     // double-pay blocked
     const repay = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({});
     expect(repay.status).toBe(400);
+  });
+
+  test('finalize refunds an over-planned advance recovery (no short-pay)', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2); // gross 1200 + 800 bonus → 2000 available
+    const adv = await AdvanceRequest.create({ employee: emp._id, amount: 3000, status: 'approved', deductMonth: MONTH, deductYear: YEAR });
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id, year: YEAR, month: MONTH });
+    expect(slip.totalAdvanceDeduction).toBe(2000);   // draft planned to take 2000
+    expect(slip.netPay).toBe(0);
+
+    // Simulate the advance already recovered elsewhere — only ₹500 left.
+    await AdvanceRequest.updateOne({ _id: adv._id }, { $set: { remainingBalance: 500 } });
+
+    const fin = await request(app).put(`/api/v2/payroll/${slip._id}/finalize`).set('Cookie', adminCookie()).send({});
+    expect(fin.status).toBe(200);
+    expect(fin.body.data.totalAdvanceDeduction).toBe(500);  // only 500 could be taken
+    expect(fin.body.data.netPay).toBe(1500);                // 1000 shortfall refunded
+    const after = await AdvanceRequest.findById(adv._id);
+    expect(after.remainingBalance).toBe(0);
   });
 });
 

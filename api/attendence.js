@@ -99,6 +99,7 @@ router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
     const ops = records.map(r => {
       const status     = r.status || 'present';
       const lateMinutes = r.lateMinutes || 0;
+      const overtimeMinutes = Math.max(0, Number(r.overtimeMinutes) || 0);
       const { shiftHours, hoursWorked } = computeHours(shiftUp, status, lateMinutes);
 
       return {
@@ -110,6 +111,7 @@ router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
               checkIn:     r.checkIn   || '',
               checkOut:    r.checkOut  || '',
               lateMinutes,
+              overtimeMinutes,
               leaveType:   r.leaveType || '',
               notes:       r.notes     || '',
               markedBy,
@@ -157,7 +159,7 @@ router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
 router.put('/:id', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { id } = req.params;
-    const allowed = ['status','checkIn','checkOut','lateMinutes','leaveType','notes','markedBy'];
+    const allowed = ['status','checkIn','checkOut','lateMinutes','overtimeMinutes','leaveType','notes','markedBy'];
     const update  = {};
     for (const k of allowed) {
       if (req.body[k] !== undefined) update[k] = req.body[k];
@@ -270,6 +272,7 @@ router.get('/employee/:empId', selfOrAdmin, async (req, res) => {
         checkIn:     r.checkIn,
         checkOut:    r.checkOut,
         lateMinutes: r.lateMinutes,
+        overtimeMinutes: r.overtimeMinutes ?? 0,
         leaveType:   r.leaveType,
         notes:       r.notes,
       })),
