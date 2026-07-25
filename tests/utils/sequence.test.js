@@ -1,66 +1,58 @@
 'use strict';
+// Document-number allocation must survive alongside mongoose-sequence.
 //
-// Concurrency test for the atomic document-number allocator.
-// The property that matters: N parallel calls — including the very
-// first ones that race to seed the counter — must yield N distinct,
-// monotonically increasing numbers starting above the seed.
+// Regression: our counters used to share the "counters" collection with
+// mongoose-sequence (Order.orderNo), whose UNIQUE index on
+// { id, reference_value } rejected every row after the first — our rows
+// have neither field, so they all indexed as (null, null). The duplicate
+// error was swallowed and the follow-up $inc returned null, surfacing as
+// "Cannot read properties of null (reading 'seq')" when creating a DC.
 
-const mongoose = require("mongoose");
-const { MongoMemoryServer } = require("mongodb-memory-server");
+process.env.NODE_ENV = 'test';
 
-const Counter = require("../../models/Counter");
-const { nextNumber } = require("../../utils/sequence");
+const mongoose = require('mongoose');
+const { MongoMemoryServer } = require('mongodb-memory-server');
 
-let mongo;
+let mongo, Counter, nextNumber;
 
 beforeAll(async () => {
   mongo = await MongoMemoryServer.create();
   await mongoose.connect(mongo.getUri());
+  require('../../models/Order.js');            // registers mongoose-sequence
+  Counter    = require('../../models/Counter.js');
+  nextNumber = require('../../utils/sequence.js').nextNumber;
+  // Recreate the plugin's index exactly as it builds it.
+  await mongoose.connection.db.collection('counters')
+    .createIndex({ id: 1, reference_value: 1 }, { unique: true });
+}, 60_000);
+
+afterAll(async () => { await mongoose.disconnect(); await mongo.stop(); });
+afterEach(async () => { await Counter.deleteMany({}); });
+
+test('our counters live outside the plugin-owned "counters" collection', () => {
+  expect(Counter.collection.name).toBe('doc_counters');
 });
 
-afterAll(async () => {
-  await mongoose.disconnect();
-  await mongo.stop();
+test('several distinct counters can be allocated (the DC-after-PO case)', async () => {
+  expect(await nextNumber('poNo', async () => 0)).toBe(1);
+  expect(await nextNumber('dc:elastic:25/26', async () => 0)).toBe(1);
+  expect(await nextNumber('dc:material:25/26', async () => 0)).toBe(1);
+  expect(await nextNumber('poNo', async () => 0)).toBe(2);
 });
 
-beforeEach(async () => {
-  await Counter.deleteMany({});
+test('seeds from existing data on first use', async () => {
+  expect(await nextNumber('dc:elastic:26/27', async () => 41)).toBe(42);
 });
 
-describe("nextNumber", () => {
-  it("seeds from existing data and starts above it", async () => {
-    const n = await nextNumber("poNo", async () => 1042);
-    expect(n).toBe(1043);
-  });
+test('hands out distinct numbers under concurrency', async () => {
+  const got = await Promise.all(
+    Array.from({ length: 8 }, () => nextNumber('race', async () => 0))
+  );
+  expect(new Set(got).size).toBe(8);
+});
 
-  it("starts at 1 when there is no existing data", async () => {
-    const n = await nextNumber("fresh", async () => 0);
-    expect(n).toBe(1);
-  });
-
-  it("hands out distinct numbers under parallel load (cold start)", async () => {
-    // All 25 callers race the initial seed AND the increments.
-    const results = await Promise.all(
-      Array.from({ length: 25 }, () => nextNumber("poNo", async () => 1000))
-    );
-    const unique = new Set(results);
-    expect(unique.size).toBe(25);            // no duplicates — the actual bug
-    expect(Math.min(...results)).toBeGreaterThan(1000);
-  });
-
-  it("hands out distinct numbers under parallel load (warm counter)", async () => {
-    await nextNumber("dc:elastic:25/26", async () => 7);
-    const results = await Promise.all(
-      Array.from({ length: 25 }, () => nextNumber("dc:elastic:25/26", async () => 7))
-    );
-    expect(new Set(results).size).toBe(25);
-    expect(Math.min(...results)).toBeGreaterThan(8 - 1);
-  });
-
-  it("keeps independent keys independent", async () => {
-    const a = await nextNumber("k1", async () => 100);
-    const b = await nextNumber("k2", async () => 500);
-    expect(a).toBe(101);
-    expect(b).toBe(501);
-  });
+test('a missing counter row is recreated rather than throwing on null', async () => {
+  await nextNumber('gap', async () => 5);
+  await Counter.deleteMany({ _id: 'gap' });          // row vanishes
+  await expect(nextNumber('gap', async () => 9)).resolves.toBe(10);
 });

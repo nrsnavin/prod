@@ -42,16 +42,28 @@ async function nextNumber(key, seedFrom) {
       { upsert: true }
     );
   } catch (err) {
-    // Two concurrent first-callers can both take the insert path; the
-    // loser's duplicate-key error is harmless — the doc now exists and
-    // the $inc below still hands out distinct numbers.
+    // Two concurrent first-callers can both take the insert path. A
+    // duplicate on OUR key is harmless (the doc now exists and the $inc
+    // below still hands out distinct numbers) — but a duplicate on any
+    // other index means the seed did NOT land, and continuing would read
+    // `seq` off null. Re-check before deciding it was benign.
     if (err?.code !== 11000) throw err;
+    const exists = await Counter.exists({ _id: key });
+    if (!exists) {
+      throw new Error(
+        `Could not seed counter "${key}" — a duplicate-key error left it uncreated. ` +
+        `This usually means another index on the counters collection rejected the row.`
+      );
+    }
   }
+  // upsert so the row is created even if the seeding write above was lost;
+  // without it a missing doc returns null and throws on `.seq`.
   doc = await Counter.findOneAndUpdate(
     { _id: key },
     { $inc: { seq: 1 } },
-    { new: true }
+    { new: true, upsert: true, setDefaultsOnInsert: true }
   );
+  if (!doc) throw new Error(`Counter "${key}" could not be allocated`);
   return doc.seq;
 }
 
