@@ -16,7 +16,8 @@
 //   warpYarn[].{id,weight}
 // Required kg = Σ (weight_grams × metres) / 1000.
 
-const Elastic = require("../models/Elastic.js");
+const Elastic     = require("../models/Elastic.js");
+const RawMaterial = require("../models/RawMaterial.js");
 
 // lines: [{ elastic: ObjectId|string, quantity: Number(metres) }]
 // Returns: [{ rawMaterial, name, category, requiredWeight, inStock,
@@ -32,25 +33,46 @@ async function computeMaterialRequirement(lines = []) {
   if (cleanLines.length === 0) return [];
 
   const elasticIds = cleanLines.map((l) => l.elastic);
-  const elastics = await Elastic.find({ _id: { $in: elasticIds } })
-    .populate("warpSpandex.id")
-    .populate("spandexCovering.id")
-    .populate("weftYarn.id")
-    .populate("warpYarn.id")
-    .lean();
+  // Deliberately NOT populated: populate replaces a dangling reference with
+  // null, which loses the id and made deleted materials disappear from the
+  // sheet entirely. Read the raw refs, then resolve them ourselves so a
+  // missing material can still be reported.
+  const elastics = await Elastic.find({ _id: { $in: elasticIds } }).lean();
+
+  const refIds = [];
+  const pushRef = (r) => { if (r) refIds.push(String(r)); };
+  for (const e of elastics) {
+    pushRef(e.warpSpandex?.id);
+    pushRef(e.spandexCovering?.id);
+    pushRef(e.weftYarn?.id);
+    for (const wy of e.warpYarn || []) pushRef(wy.id);
+  }
+  const materials = refIds.length
+    ? await RawMaterial.find({ _id: { $in: [...new Set(refIds)] } })
+        .select("name category stock price").lean()
+    : [];
+  const matById = new Map(materials.map((m) => [String(m._id), m]));
 
   const rawMap = new Map();
-  const addMaterial = (material, weightKg) => {
-    if (!material || !material._id) return;
-    const key = material._id.toString();
+  // Takes the REFERENCE id, not a populated doc, so a material that no
+  // longer exists still produces a row (flagged) instead of vanishing and
+  // silently under-reporting the requirement.
+  const addMaterial = (refId, weightKg) => {
+    if (!refId) return;
+    const key = String(refId);
     if (!rawMap.has(key)) {
+      const m = matById.get(key);
       rawMap.set(key, {
-        rawMaterial:    material._id,
-        name:           material.name || "Unknown",
-        category:       material.category || "",
+        rawMaterial:    refId,
+        name:           m?.name ?? "Unknown material (deleted?)",
+        category:       m?.category || "",
         requiredWeight: 0,
-        inStock:        Number(material.stock) || 0,
-        unitPrice:      Number(material.price) || 0,
+        // Always a number, so the UI never has to render a blank cell.
+        inStock:        Number(m?.stock) || 0,
+        unitPrice:      Number(m?.price) || 0,
+        // false when the material could not be resolved — the stock figure
+        // is a placeholder, not a real reading.
+        stockKnown:     !!m,
       });
     }
     rawMap.get(key).requiredWeight += weightKg;
