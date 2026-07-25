@@ -47,7 +47,8 @@ function attendanceTier(rate) {
 }
 
 function shiftHours(shiftType) {
-  return shiftType === "DAY" ? 12 : 8;
+  // Both DAY and NIGHT shifts are 12-hour shifts.
+  return 12;
 }
 
 async function getOrCreateConfig(year) {

@@ -592,7 +592,7 @@ router.get('/attendance', isAdmin('admin', 'accounts'), async (req, res) => {
     }).sort({ date: 1, shift: 1 }).lean();
 
     const s = await PayrollSettings.findOne({}).lean() ?? {};
-    const graceMinutes = s.overtimeGraceMinutes ?? 60;
+    const graceMinutes = s.overtimeGraceMinutes ?? 120;
 
     const days = records.map((r) => {
       const rawOt       = r.overtimeMinutes ?? 0;
@@ -894,8 +894,8 @@ router.get('/employee-overview/:empId', isAdmin('admin', 'accounts'), async (req
           id: emp._id, name: emp.name, department: emp.department,
           role: emp.role ?? '', hourlyRate: rate,
         },
-        // DAY runs 12h, NIGHT 8h (see services/payrollService.js).
-        shiftRates: { DAY: r2(rate * 12), NIGHT: r2(rate * 8) },
+        // DAY and NIGHT are both 12h shifts (see services/payrollService.js).
+        shiftRates: { DAY: r2(rate * 12), NIGHT: r2(rate * 12) },
         period: { year, month },
         payroll,
         production: {

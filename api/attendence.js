@@ -42,9 +42,29 @@ function parseDateParam(s, h, m, sec, ms) {
 function startOfDay(s)  { return parseDateParam(s,  0,  0,  0,   0); }
 function endOfDay(s)    { return parseDateParam(s, 23, 59, 59, 999); }
 
-function computeHours(shiftType, status, lateMinutes) {
-  const baseHours = shiftType === 'DAY' ? 12 : 8;
+// Minutes worked from manual "HH:mm" in/out times. Night shifts wrap past
+// midnight (out ≤ in ⇒ +24h). Returns null when either time is missing/bad.
+function minutesFromTimes(checkIn, checkOut) {
+  if (!checkIn || !checkOut) return null;
+  const toMin = (t) => {
+    const [h, m] = String(t).split(':').map(Number);
+    return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : NaN;
+  };
+  let inM = toMin(checkIn), outM = toMin(checkOut);
+  if (!Number.isFinite(inM) || !Number.isFinite(outM)) return null;
+  if (outM <= inM) outM += 24 * 60;
+  return outM - inM;
+}
+
+function computeHours(shiftType, status, lateMinutes, workedMinutes) {
+  const baseHours = 12; // DAY and NIGHT are both 12-hour shifts
   let hoursWorked;
+  // A recorded worked duration (manual in/out or live timer) wins for a
+  // worked shift — hours follow actual time, capped at the shift length.
+  if (workedMinutes > 0 && (status === 'present' || status === 'late')) {
+    hoursWorked = Math.min(workedMinutes, baseHours * 60) / 60;
+    return { shiftHours: baseHours, hoursWorked };
+  }
   switch (status) {
     case 'present':  hoursWorked = baseHours; break;
     case 'late':     hoursWorked = Math.max(0, baseHours - (lateMinutes || 0) / 60); break;
@@ -71,7 +91,11 @@ function fmtRecord(a) {
     status:       a.status,
     checkIn:      a.checkIn,
     checkOut:     a.checkOut,
+    clockInAt:    a.clockInAt ?? null,
+    clockOutAt:   a.clockOutAt ?? null,
+    workedMinutes: a.workedMinutes ?? 0,
     lateMinutes:  a.lateMinutes,
+    overtimeMinutes: a.overtimeMinutes ?? 0,
     leaveType:    a.leaveType,
     notes:        a.notes,
     markedBy:     a.markedBy,
@@ -100,7 +124,11 @@ router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
       const status     = r.status || 'present';
       const lateMinutes = r.lateMinutes || 0;
       const overtimeMinutes = Math.max(0, Number(r.overtimeMinutes) || 0);
-      const { shiftHours, hoursWorked } = computeHours(shiftUp, status, lateMinutes);
+      // Actual worked minutes from manual in/out times (or an explicit
+      // workedMinutes value) — feeds actual-hours pay.
+      const workedMinutes = Math.max(0,
+        Number(r.workedMinutes) || minutesFromTimes(r.checkIn, r.checkOut) || 0);
+      const { shiftHours, hoursWorked } = computeHours(shiftUp, status, lateMinutes, workedMinutes);
 
       return {
         updateOne: {
@@ -110,6 +138,7 @@ router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
               status,
               checkIn:     r.checkIn   || '',
               checkOut:    r.checkOut  || '',
+              workedMinutes,
               lateMinutes,
               overtimeMinutes,
               leaveType:   r.leaveType || '',
@@ -156,13 +185,117 @@ router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// Live shift timer — clock-in / clock-out (supervisor terminal).
+// The timer is the authoritative source for actual-hours pay: the
+// worked duration between clock-in and clock-out drives base pay
+// (capped at the 12h shift) with the remainder becoming overtime.
+// ─────────────────────────────────────────────────────────────
+function requireEmpAndShift(req, res) {
+  const { employeeId, shift } = req.body;
+  if (!employeeId || !shift) {
+    res.status(400).json({ success: false, message: 'employeeId and shift required.' });
+    return null;
+  }
+  const shiftUp = String(shift).toUpperCase();
+  if (!['DAY', 'NIGHT'].includes(shiftUp)) {
+    res.status(400).json({ success: false, message: 'shift must be DAY or NIGHT.' });
+    return null;
+  }
+  const dateObj = startOfDay(req.body.date || new Date());
+  return { employeeId, shiftUp, dateObj };
+}
+
+// POST /clock-in { employeeId, shift, date? } → stamps clockInAt = now.
+router.post('/clock-in', isAdmin('admin', 'accounts'), async (req, res) => {
+  try {
+    const ctx = requireEmpAndShift(req, res);
+    if (!ctx) return;
+    const { employeeId, shiftUp, dateObj } = ctx;
+
+    const existing = await Attendance.findOne({ employee: employeeId, date: dateObj, shift: shiftUp });
+    if (existing?.clockInAt && !existing?.clockOutAt) {
+      return res.status(409).json({ success: false, message: 'Already clocked in for this shift.' });
+    }
+
+    const doc = await Attendance.findOneAndUpdate(
+      { employee: employeeId, date: dateObj, shift: shiftUp },
+      { $set: {
+          status: 'present',
+          clockInAt: new Date(),
+          clockOutAt: null,
+          workedMinutes: 0,
+          markedBy: req.user?.name || 'admin',
+        } },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    ).populate('employee', 'name department skill role');
+
+    return res.json({ success: true, data: fmtRecord(doc) });
+  } catch (err) {
+    console.error('[POST /clock-in]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// POST /clock-out { employeeId, shift, date? } → stamps clockOutAt + workedMinutes.
+router.post('/clock-out', isAdmin('admin', 'accounts'), async (req, res) => {
+  try {
+    const ctx = requireEmpAndShift(req, res);
+    if (!ctx) return;
+    const { employeeId, shiftUp, dateObj } = ctx;
+
+    const doc = await Attendance.findOne({ employee: employeeId, date: dateObj, shift: shiftUp });
+    if (!doc || !doc.clockInAt) {
+      return res.status(400).json({ success: false, message: 'Not clocked in for this shift.' });
+    }
+    if (doc.clockOutAt) {
+      return res.status(409).json({ success: false, message: 'Already clocked out for this shift.' });
+    }
+
+    const now = new Date();
+    doc.clockOutAt = now;
+    doc.workedMinutes = Math.max(0, Math.round((now - doc.clockInAt) / 60000));
+    await doc.save(); // pre-save recomputes hoursWorked from the worked duration
+    await doc.populate('employee', 'name department skill role');
+
+    return res.json({ success: true, data: fmtRecord(doc) });
+  } catch (err) {
+    console.error('[POST /clock-out]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// GET /active?date=YYYY-MM-DD → shifts currently clocked in (running timers).
+router.get('/active', isAdmin('admin', 'accounts'), async (req, res) => {
+  try {
+    const dateObj = startOfDay(req.query.date || new Date());
+    const rows = await Attendance.find({
+      date: dateObj, clockInAt: { $ne: null }, clockOutAt: null,
+    }).populate('employee', 'name department skill role').lean();
+    return res.json({ success: true, data: rows.map(fmtRecord) });
+  } catch (err) {
+    console.error('[GET /active]', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 router.put('/:id', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { id } = req.params;
-    const allowed = ['status','checkIn','checkOut','lateMinutes','overtimeMinutes','leaveType','notes','markedBy'];
+    const allowed = ['status','checkIn','checkOut','workedMinutes','lateMinutes','overtimeMinutes','leaveType','notes','markedBy'];
     const update  = {};
     for (const k of allowed) {
       if (req.body[k] !== undefined) update[k] = req.body[k];
+    }
+
+    // If in/out times are edited without an explicit workedMinutes, recompute
+    // the worked duration so pay stays in step with the corrected times.
+    if (update.workedMinutes === undefined && (update.checkIn !== undefined || update.checkOut !== undefined)) {
+      const existing = await Attendance.findById(id).select('checkIn checkOut').lean();
+      const ci = update.checkIn ?? existing?.checkIn;
+      const co = update.checkOut ?? existing?.checkOut;
+      const mins = minutesFromTimes(ci, co);
+      if (mins != null) update.workedMinutes = mins;
     }
 
     const doc = await Attendance.findByIdAndUpdate(id,
@@ -271,6 +404,9 @@ router.get('/employee/:empId', selfOrAdmin, async (req, res) => {
         status:      r.status,
         checkIn:     r.checkIn,
         checkOut:    r.checkOut,
+        clockInAt:   r.clockInAt ?? null,
+        clockOutAt:  r.clockOutAt ?? null,
+        workedMinutes: r.workedMinutes ?? 0,
         lateMinutes: r.lateMinutes,
         overtimeMinutes: r.overtimeMinutes ?? 0,
         leaveType:   r.leaveType,
@@ -380,6 +516,8 @@ router.get('/monthly/:empId', selfOrAdmin, async (req, res) => {
       if (!dayMap[key]) continue;
       const slot = {
         id: r._id, status: r.status, checkIn: r.checkIn, checkOut: r.checkOut,
+        clockInAt: r.clockInAt ?? null, clockOutAt: r.clockOutAt ?? null,
+        workedMinutes: r.workedMinutes ?? 0,
         lateMinutes: r.lateMinutes, leaveType: r.leaveType, notes: r.notes,
       };
       if (r.shift === 'DAY')   dayMap[key].dayShift   = slot;

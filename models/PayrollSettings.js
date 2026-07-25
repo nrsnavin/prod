@@ -37,8 +37,8 @@ const PayrollSettingsSchema = new mongoose.Schema(
     // ── Overtime ──────────────────────────────────────────────
     // Minutes beyond the shift, past the grace window, are paid at
     // rate × overtimeMultiplier. Multiplier 1 = straight time.
-    overtimeMultiplier:   { type: Number, default: 1.5, min: 0 },
-    overtimeGraceMinutes: { type: Number, default: 0,   min: 0 },
+    overtimeMultiplier:   { type: Number, default: 1.25, min: 0 },
+    overtimeGraceMinutes: { type: Number, default: 120,  min: 0 },
 
     // ── Statutory deductions (default OFF — 0% deducts nothing) ─
     // PF: pfPercent of the wage, capped at pfWageCeiling (0 = no cap).
