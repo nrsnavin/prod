@@ -14,6 +14,7 @@ const Warping     = require('../models/Warping');
 const Covering    = require('../models/Covering');
 const Wastage     = require('../models/Wastage');
 const Machine     = require('../models/Machine');
+const { recomputePending } = require('../services/orderPending.js');
 const ShiftDetail = require('../models/ShiftDetail');
 
 const { buildFingerprint, stampFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
@@ -156,10 +157,10 @@ router.post(
     await job.save();
 
     order.jobs.push({ job: job._id, no: job.jobOrderNo });
-    for (const e of elastics) {
-      const pending = order.pendingElastic.find(p => p.elastic.toString() === e.elastic.toString());
-      if (pending) pending.quantity -= e.quantity;
-    }
+    // Pending = ordered − planned, recomputed from the order's live jobs
+    // (now including the one just created) rather than decremented in
+    // place, so every path agrees and a re-run can't double-count.
+    await recomputePending(order);
     order.status = 'InProgress';
 
     // 🪪 Mirror fingerprint on the parent Order so the order timeline
@@ -465,20 +466,6 @@ router.post(
       job.machine = undefined;
     }
 
-    const order = await Order.findById(job.order);
-    if (order) {
-      for (const e of job.elastics) {
-        const pending = order.pendingElastic.find(p => p.elastic.toString() === e.elastic.toString());
-        if (pending) pending.quantity += e.quantity;
-        else order.pendingElastic.push({ elastic: e.elastic, quantity: e.quantity });
-      }
-      const remainingJobs = await JobOrder.countDocuments({
-        order: job.order, _id: { $ne: job._id }, status: { $nin: ['cancelled', 'completed'] },
-      });
-      if (remainingJobs === 0) order.status = 'Approved';
-      await order.save();
-    }
-
     const previousStatus = job.status;
     stampStage(job, 'cancelled', req.user?._id);
     job.status = 'cancelled';
@@ -496,6 +483,19 @@ router.post(
     });
     job.fingerprints.push(fp);
     await job.save();
+
+    // Only now that the job is actually marked 'cancelled' does its planned
+    // quantity return to pending — recompute AFTER the save, or the job
+    // would still be counted as holding the quantity.
+    const order = await Order.findById(job.order);
+    if (order) {
+      await recomputePending(order);
+      const remainingJobs = await JobOrder.countDocuments({
+        order: job.order, _id: { $ne: job._id }, status: { $nin: ['cancelled', 'completed'] },
+      });
+      if (remainingJobs === 0) order.status = 'Approved';
+      await order.save();
+    }
 
     res.json({
       success: true,
