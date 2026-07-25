@@ -14,10 +14,37 @@ const AdvanceRequest  = require('../models/Advance');
 const Wastage         = require('../models/Wastage');
 const ShiftDetail     = require('../models/ShiftDetail');
 
-const SHIFT_HOURS = { DAY: 12, NIGHT: 8 };
+const SHIFT_HOURS = { DAY: 12, NIGHT: 12 };
 const r2 = (n) => Math.round(n * 100) / 100;
-const shiftHours = (s) => SHIFT_HOURS[s] ?? 8;
+const shiftHours = (s) => SHIFT_HOURS[s] ?? 12;
 const dayKey = (d, sh) => `${new Date(d).toISOString().slice(0, 10)}|${sh}`;
+
+// Resolve a shift's actual worked minutes for actual-hours pay. Priority:
+//   1. live timer (clockInAt → clockOutAt)  — server-stamped, authoritative
+//   2. a stored workedMinutes value          — persisted at clock-out
+//   3. manual times (checkIn/checkOut "HH:mm") — night shifts wrap past midnight
+// Returns null when no duration is known, so the caller falls back to the
+// scheduled-hours model (a plain "present" mark with no timer still pays a
+// full shift, keeping legacy data unchanged).
+function resolveWorkedMinutes(rec) {
+  if (rec.clockInAt && rec.clockOutAt) {
+    const mins = (new Date(rec.clockOutAt) - new Date(rec.clockInAt)) / 60000;
+    if (mins > 0) return mins;
+  }
+  if (Number.isFinite(rec.workedMinutes) && rec.workedMinutes > 0) return rec.workedMinutes;
+  if (rec.checkIn && rec.checkOut) {
+    const toMin = (t) => {
+      const [h, m] = String(t).split(':').map(Number);
+      return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : NaN;
+    };
+    let inM = toMin(rec.checkIn), outM = toMin(rec.checkOut);
+    if (Number.isFinite(inM) && Number.isFinite(outM)) {
+      if (outM <= inM) outM += 24 * 60; // crossed midnight (night shift)
+      return outM - inM;
+    }
+  }
+  return null;
+}
 
 async function computePayroll(empId, year, month) {
 
@@ -34,8 +61,8 @@ async function computePayroll(empId, year, month) {
     noLeaveBonus:           s.noLeaveBonus           ?? 300,
     perfectAttendanceBonus: s.perfectAttendanceBonus ?? 500,
     streakBonusPer7Shifts:  s.streakBonusPer7Shifts  ?? 100,
-    overtimeMultiplier:     s.overtimeMultiplier     ?? 1.5,
-    overtimeGraceMinutes:   s.overtimeGraceMinutes   ?? 0,
+    overtimeMultiplier:     s.overtimeMultiplier     ?? 1.25,
+    overtimeGraceMinutes:   s.overtimeGraceMinutes   ?? 120,
     pfPercent:      s.pfPercent      ?? 0,
     pfWageCeiling:  s.pfWageCeiling  ?? 0,
     esiPercent:     s.esiPercent     ?? 0,
@@ -104,33 +131,57 @@ async function computePayroll(empId, year, month) {
 
     presentShifts++;
     let pay = fullPay;
-    const lateMins     = rec.lateMinutes ?? 0;
-    const billableMins = Math.max(0, lateMins - settings.lateGracePeriodMinutes);
-    if (billableMins > 0) {
-      // Cap the cut at the shift's pay — a data-entry error (or being
-      // later than the shift is long) must never produce a NEGATIVE
-      // shift earning that silently eats other shifts' pay.
-      const ded        = Math.min(fullPay, (billableMins / 60) * hourlyRate);
-      pay             -= ded;
-      totalLateMinutes += lateMins;
-      lateDeductionTotal += ded;
+    const capMinutes = sh * 60;
+    const worked     = resolveWorkedMinutes(rec);
+    // Minutes that feed overtime: when a shift timer / manual in-out is
+    // recorded, overtime is whatever was worked beyond the 12h shift;
+    // otherwise fall back to the manually-entered overtimeMinutes field.
+    let otSourceMinutes;
+
+    if (worked != null) {
+      // Actual-hours pay: the timer is the source of truth. Base pay is the
+      // worked time capped at the shift length; a short shift simply pays
+      // less, and lateness is already reflected (no separate late cut).
+      const basePaidMin = Math.min(worked, capMinutes);
+      pay = r2((basePaidMin / 60) * hourlyRate);
+      otSourceMinutes = Math.max(0, worked - capMinutes);
       lineItems.push({
-        label:  `Late deduction ${billableMins}m (${rec.shift} ${dateStr})`,
-        amount: -ded,
-        type:   'deduction',
+        label:  `${rec.shift} Shift ${r2(basePaidMin / 60)}h worked (${dateStr})`,
+        amount: pay,
+        type:   'earning',
+      });
+    } else {
+      // Legacy path: no timer recorded → pay the full scheduled shift and
+      // apply the late-minutes deduction as before.
+      const lateMins     = rec.lateMinutes ?? 0;
+      const billableMins = Math.max(0, lateMins - settings.lateGracePeriodMinutes);
+      if (billableMins > 0) {
+        // Cap the cut at the shift's pay — a data-entry error (or being
+        // later than the shift is long) must never produce a NEGATIVE
+        // shift earning that silently eats other shifts' pay.
+        const ded        = Math.min(fullPay, (billableMins / 60) * hourlyRate);
+        pay             -= ded;
+        totalLateMinutes += lateMins;
+        lateDeductionTotal += ded;
+        lineItems.push({
+          label:  `Late deduction ${billableMins}m (${rec.shift} ${dateStr})`,
+          amount: -ded,
+          type:   'deduction',
+        });
+      }
+      otSourceMinutes = rec.overtimeMinutes ?? 0;
+      lineItems.push({
+        label:  `${rec.shift} Shift (${dateStr})`,
+        amount: pay,
+        type:   'earning',
       });
     }
     if (rec.shift === 'DAY')   { dayShiftsWorked++;   dayShiftEarnings   += pay; }
     if (rec.shift === 'NIGHT') { nightShiftsWorked++; nightShiftEarnings += pay; }
-    lineItems.push({
-      label:  `${rec.shift} Shift (${dateStr})`,
-      amount: pay,
-      type:   'earning',
-    });
 
     // Overtime — minutes beyond the shift, past the grace window, paid at
     // rate × multiplier. Tracked separately from base shift earnings.
-    const otMins = Math.max(0, (rec.overtimeMinutes ?? 0) - settings.overtimeGraceMinutes);
+    const otMins = Math.max(0, otSourceMinutes - settings.overtimeGraceMinutes);
     if (otMins > 0 && hourlyRate > 0) {
       const otPay = (otMins / 60) * hourlyRate * settings.overtimeMultiplier;
       totalOvertimeMinutes += otMins;

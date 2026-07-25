@@ -27,14 +27,22 @@ const AttendanceSchema = new mongoose.Schema({
   },
 
   // Time tracking
-  checkIn:     { type: String, default: '' },   // "HH:mm"
-  checkOut:    { type: String, default: '' },   // "HH:mm"
+  checkIn:     { type: String, default: '' },   // "HH:mm" — manual entry
+  checkOut:    { type: String, default: '' },   // "HH:mm" — manual entry
+  // Live shift timer — server-stamped when the operator clocks in / out.
+  // These are the authoritative source for actual-hours pay when present.
+  clockInAt:   { type: Date, default: null },
+  clockOutAt:  { type: Date, default: null },
+  // Actual minutes worked this shift, derived from the timer or manual
+  // in/out. Payroll pays these (capped at the 12h shift); minutes beyond
+  // the shift become overtime.
+  workedMinutes: { type: Number, default: 0, min: 0 },
   lateMinutes: { type: Number, default: 0 },
   // Minutes worked BEYOND the shift's scheduled hours. Payroll pays these
   // (past an optional grace window) at PayrollSettings.overtimeMultiplier.
   overtimeMinutes: { type: Number, default: 0, min: 0 },
 
-  // Shift hours (auto-computed on save: DAY=12, NIGHT=8, half=6/4, absent=0)
+  // Shift hours (auto-computed on save: DAY=12, NIGHT=12, half=6, absent=0)
   shiftHours:  { type: Number, default: 0 },
   hoursWorked: { type: Number, default: 0 },   // actual hours after late deduction
 
@@ -56,8 +64,20 @@ AttendanceSchema.index({ employee: 1, date: 1, shift: 1 }, { unique: true });
 
 // Auto-compute shiftHours and hoursWorked before save
 AttendanceSchema.pre('save', function(next) {
-  const baseHours = this.shift === 'DAY' ? 12 : 8;
+  const baseHours = 12; // DAY and NIGHT are both 12-hour shifts
   this.shiftHours = baseHours;
+
+  // A real worked duration (live timer or manual in/out) wins for a
+  // worked shift — pay follows actual hours, capped at the shift length.
+  let workedMin = this.workedMinutes;
+  if ((!workedMin || workedMin <= 0) && this.clockInAt && this.clockOutAt) {
+    workedMin = Math.max(0, (this.clockOutAt - this.clockInAt) / 60000);
+  }
+  if (workedMin > 0 && (this.status === 'present' || this.status === 'late')) {
+    this.hoursWorked = Math.min(workedMin, baseHours * 60) / 60;
+    return next();
+  }
+
   switch (this.status) {
     case 'present':   this.hoursWorked = baseHours; break;
     case 'late':      this.hoursWorked = Math.max(0, baseHours - this.lateMinutes / 60); break;

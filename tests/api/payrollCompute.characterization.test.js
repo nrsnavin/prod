@@ -16,7 +16,7 @@ const { MongoMemoryServer } = require('mongodb-memory-server');
 let mongo, computePayroll, Employee, Attendance, PayrollSettings, AdvanceRequest;
 
 const YEAR = 2026, MONTH = 6; // June 2026
-const RATE = 100;             // ₹/hour → DAY(12h)=₹1200, NIGHT(8h)=₹800
+const RATE = 100;             // ₹/hour → DAY(12h)=₹1200, NIGHT(12h)=₹1200
 
 beforeAll(async () => {
   mongo = await MongoMemoryServer.create();
@@ -63,11 +63,11 @@ describe('computePayroll — core pay math', () => {
     expect(p.grossEarnings).toBe(2400);
   });
 
-  test('NIGHT shift pays hourlyRate × 8', async () => {
+  test('NIGHT shift pays hourlyRate × 12 (same as DAY)', async () => {
     const emp = await makeEmp();
     await att(emp._id, 2, { shift: 'NIGHT' });
     const p = await computePayroll(emp._id, YEAR, MONTH);
-    expect(p.nightShiftEarnings).toBe(800);  // ₹100 × 8
+    expect(p.nightShiftEarnings).toBe(1200);  // ₹100 × 12
   });
 
   test('half_day pays half', async () => {

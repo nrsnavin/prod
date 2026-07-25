@@ -44,7 +44,7 @@ const makeEmp = (over = {}) => Employee.create({ name: 'W', hourlyRate: RATE, ..
 
 describe('#5 overtime', () => {
   test('pays overtime minutes at the configured multiplier', async () => {
-    await PayrollSettings.create({ overtimeMultiplier: 1.5 });
+    await PayrollSettings.create({ overtimeMultiplier: 1.5, overtimeGraceMinutes: 0 });
     const emp = await makeEmp();
     await att(emp._id, 2, { overtimeMinutes: 60 }); // 1h OT × ₹100 × 1.5 = ₹150
     const p = await computePayroll(emp._id, YEAR, MONTH);
@@ -53,7 +53,7 @@ describe('#5 overtime', () => {
   });
 
   test('overtime entered via POST /attendance/mark flows into pay', async () => {
-    await PayrollSettings.create({ overtimeMultiplier: 1.5 });
+    await PayrollSettings.create({ overtimeMultiplier: 1.5, overtimeGraceMinutes: 0 });
     const emp = await makeEmp();
     const res = await request(app).post('/api/v2/attendance/mark').set('Cookie', adminCookie()).send({
       date: `${YEAR}-${String(MONTH).padStart(2, '0')}-02`,
