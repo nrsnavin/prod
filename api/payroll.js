@@ -862,8 +862,8 @@ router.get('/employee-overview/:empId', isAdmin('admin', 'accounts'), async (req
         .lean(),
     ]);
 
-    // _advanceIds is an internal handle for /generate — not for clients.
-    delete payroll._advanceIds;
+    // internal handle for /generate — not for clients.
+    delete payroll._advanceRecoveries;
 
     res.json({
       success: true,
