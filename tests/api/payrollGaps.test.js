@@ -150,10 +150,6 @@ describe('#2/#3 finalize + pay workflow', () => {
     await gen();
     const slip = await Payroll.findOne({ employee: emp._id, year: YEAR, month: MONTH });
 
-    // can't pay a draft
-    const early = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({});
-    expect(early.status).toBe(400);
-
     // finalize commits the advance recovery
     const fin = await request(app).put(`/api/v2/payroll/${slip._id}/finalize`).set('Cookie', adminCookie()).send({});
     expect(fin.status).toBe(200);
@@ -165,13 +161,52 @@ describe('#2/#3 finalize + pay workflow', () => {
     const refin = await request(app).put(`/api/v2/payroll/${slip._id}/finalize`).set('Cookie', adminCookie()).send({});
     expect(refin.status).toBe(400);
 
-    // pay records the authed user, not a body-supplied name
+    // pay (full) records the authed user, not a body-supplied name
     const pay = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({ paidBy: 'HACKER' });
     expect(pay.status).toBe(200);
     expect(pay.body.data.paidBy).toBe('Owner');
+    expect(pay.body.data.status).toBe('paid');
+    expect(pay.body.data.amountPaid).toBe(pay.body.data.netPay);
 
-    // double-pay blocked
+    // double-pay blocked once fully paid
     const repay = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({});
+    expect(repay.status).toBe(400);
+  });
+
+  test('paying a draft auto-finalizes it and commits the advance', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await AdvanceRequest.create({ employee: emp._id, amount: 500, status: 'approved', deductMonth: MONTH, deductYear: YEAR });
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id, year: YEAR, month: MONTH });
+    expect(slip.status).toBe('draft');
+
+    const pay = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({});
+    expect(pay.status).toBe(200);
+    expect(pay.body.data.status).toBe('paid');
+    const adv = await AdvanceRequest.findOne({ employee: emp._id });
+    expect(adv.remainingBalance).toBe(0);            // advance committed on the way through
+    expect(adv.deductedInPayroll).toBe(true);
+  });
+
+  test('a custom (partial) amount marks it partially_paid, then clears to paid', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2); // net = 1200 + 800 bonus = 2000
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id, year: YEAR, month: MONTH });
+
+    const part = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({ amount: 500 });
+    expect(part.status).toBe(200);
+    expect(part.body.data.status).toBe('partially_paid');
+    expect(part.body.data.amountPaid).toBe(500);
+
+    // overpay is capped at the remaining balance
+    const rest = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({ amount: 99999 });
+    expect(rest.status).toBe(200);
+    expect(rest.body.data.status).toBe('paid');
+    expect(rest.body.data.amountPaid).toBe(rest.body.data.netPay);
+
+    const repay = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({ amount: 1 });
     expect(repay.status).toBe(400);
   });
 

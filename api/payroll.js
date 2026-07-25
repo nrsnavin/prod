@@ -192,10 +192,13 @@ router.get('/dashboard', isAdmin('admin', 'accounts'), async (req, res) => {
         totalBonuses:     r2(totalBonuses),
         perfectCount:     payrolls.filter(p => p.perfectAttendance).length,
         paidCount:        payrolls.filter(p => p.status === 'paid').length,
+        partiallyPaidCount: payrolls.filter(p => p.status === 'partially_paid').length,
         finalizedCount:   payrolls.filter(p => p.status === 'finalized').length,
         draftCount:       payrolls.filter(p => p.status === 'draft').length,
+        totalPaid:        r2(sum('amountPaid')),
       },
       employees: payrolls.map(p => ({
+        id:              p._id,
         employeeId:      p.employee?._id ?? p.employee,
         name:            p.employee?.name ?? '–',
         department:      p.employee?.department ?? '–',
@@ -209,6 +212,7 @@ router.get('/dashboard', isAdmin('admin', 'accounts'), async (req, res) => {
         totalBonuses:    p.totalBonuses,
         totalAdvanceDeduction: p.totalAdvanceDeduction ?? 0,
         netPay:          p.netPay,
+        amountPaid:      p.amountPaid ?? 0,
         perfectAttendance: p.perfectAttendance,
         status:          p.status,
       })).sort((a,b) => b.netPay - a.netPay),
@@ -244,61 +248,119 @@ router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
 
-    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    // ── Minimal, margin-respecting payslip ─────────────────────
+    const M = 56;                              // uniform page margin
+    const doc = new PDFDocument({ size: 'A4', margin: M });
     doc.pipe(res);
 
-    // Header band
-    doc.fillColor('#0D1B2A').rect(0, 0, doc.page.width, 96).fill();
-    doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(20).text('Payslip', 50, 30);
-    doc.font('Helvetica').fontSize(11).fillColor('#A8C0E0')
-       .text(`${MONTHS_PDF[month - 1]} ${year}`, 50, 58);
-    doc.fillColor(p.status === 'paid' ? '#22C55E' : p.status === 'finalized' ? '#38BDF8' : '#FBBF24')
-       .font('Helvetica-Bold').fontSize(11)
-       .text((p.status || 'draft').toUpperCase(), 0, 40, { align: 'right', width: doc.page.width - 50 });
+    const W        = doc.page.width;
+    const H        = doc.page.height;
+    const RIGHT    = W - M;                     // right content edge
+    const CW       = W - 2 * M;                 // content width
+    const AMT_W    = 130;                       // amount column width
+    const AMT_X    = RIGHT - AMT_W;             // amount column left edge
 
-    // Employee block
-    doc.fillColor('#0D1B2A').font('Helvetica').fontSize(11);
-    doc.text(`Employee : ${p.employee?.name || '—'}`, 50, 118)
-       .text(`Department : ${p.employee?.department || '—'}`)
-       .text(`Hourly rate : ${rupee(p.hourlyRate)}   |   Shifts: ${p.presentShifts} present, ${p.absentShifts} absent, ${p.approvedLeaveShifts} leave`);
+    // Restrained, mostly-monochrome palette.
+    const INK   = '#1F2430';
+    const MUTE  = '#8A909C';
+    const FAINT = '#B4B9C4';
+    const LINE  = '#E4E6EC';
+    const NEG   = '#B42318';                    // deduction amounts only
 
-    // Line items table
-    let y = 180;
-    doc.font('Helvetica-Bold').fontSize(12).fillColor('#1B2B45').text('DETAILS', 50, y);
-    y += 20;
-    doc.font('Helvetica').fontSize(10).fillColor('#0D1B2A');
+    // pdfkit's built-in Helvetica is WinAnsi-only: strip emoji / non-Latin1
+    // glyphs and spell ₹ as "Rs." so nothing renders as a blank box.
+    const clean = (s) => String(s ?? '')
+      .replace(/₹\s?/g, 'Rs. ')
+      .replace(/[^\x20-\xFF]/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+
+    const rule = (yy, color = LINE, lw = 0.75) => {
+      doc.moveTo(M, yy).lineTo(RIGHT, yy).lineWidth(lw).strokeColor(color).stroke();
+    };
+    const label = (text, x, y, w) =>
+      doc.font('Helvetica').fontSize(7.5).fillColor(MUTE)
+         .text(String(text).toUpperCase(), x, y, { width: w, characterSpacing: 0.8 });
+
+    // ── Header ─────────────────────────────────────────────────
+    let y = M;
+    doc.font('Helvetica-Bold').fontSize(19).fillColor(INK)
+       .text('Payslip', M, y, { characterSpacing: 0.3 });
+    doc.font('Helvetica').fontSize(10.5).fillColor(MUTE)
+       .text(`${MONTHS_PDF[month - 1]} ${year}`, M, y + 26);
+    // Status, top-right, quiet.
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(FAINT)
+       .text((p.status || 'draft').toUpperCase(), AMT_X, y + 6, { width: AMT_W, align: 'right', characterSpacing: 1 });
+    y += 52;
+    rule(y);
+    y += 22;
+
+    // ── Employee meta (two columns) ────────────────────────────
+    const shiftsLine = `${p.presentShifts ?? 0} present · ${p.absentShifts ?? 0} absent · ${p.approvedLeaveShifts ?? 0} leave`;
+    const colW = CW / 2 - 8;
+    const colX2 = M + CW / 2 + 8;
+    const metaCell = (x, w, lab, val) => {
+      label(lab, x, y, w);
+      doc.font('Helvetica-Bold').fontSize(11).fillColor(INK)
+         .text(String(val), x, y + 11, { width: w });
+    };
+    metaCell(M, colW, 'Employee', p.employee?.name || '—');
+    metaCell(colX2, colW, 'Department', p.employee?.department || '—');
+    y += 38;
+    metaCell(M, colW, 'Hourly rate', rupee(p.hourlyRate));
+    metaCell(colX2, colW, 'Shifts', shiftsLine);
+    y += 44;
+
+    // ── Earnings & deductions ──────────────────────────────────
+    label('Earnings & deductions', M, y);
+    y += 16;
+    rule(y);
+    y += 12;
+    doc.fontSize(10);
     for (const li of p.lineItems || []) {
-      if (y > doc.page.height - 120) { doc.addPage(); y = 50; }
-      doc.fillColor(li.amount < 0 ? '#B91C1C' : '#166534')
-         .text(li.label, 55, y, { width: 360 });
-      doc.text(`${li.amount < 0 ? '-' : '+'}${rupee(Math.abs(li.amount))}`, 415, y, { width: 130, align: 'right' });
-      y += 16;
+      if (y > H - 150) { doc.addPage(); y = M; }
+      const neg = li.amount < 0;
+      doc.font('Helvetica').fontSize(10).fillColor(INK)
+         .text(clean(li.label), M, y, { width: AMT_X - M - 12 });
+      doc.font('Helvetica').fontSize(10).fillColor(neg ? NEG : INK)
+         .text(`${neg ? '- ' : ''}${rupee(Math.abs(li.amount))}`, AMT_X, y, { width: AMT_W, align: 'right' });
+      y += 17;
     }
 
-    // Totals
-    y += 10;
-    doc.moveTo(50, y).lineTo(doc.page.width - 50, y).strokeColor('#CBD5E1').stroke();
-    y += 12;
-    const totalRow = (label, val, bold) => {
-      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 12 : 10).fillColor('#0D1B2A');
-      doc.text(label, 55, y, { width: 360 });
-      doc.text(rupee(val), 415, y, { width: 130, align: 'right' });
-      y += bold ? 20 : 15;
+    // ── Summary ────────────────────────────────────────────────
+    y += 6;
+    rule(y);
+    y += 14;
+    const sumRow = (lab, val) => {
+      doc.font('Helvetica').fontSize(10).fillColor(MUTE).text(lab, M, y, { width: AMT_X - M - 12 });
+      doc.font('Helvetica').fontSize(10).fillColor(INK).text(rupee(val), AMT_X, y, { width: AMT_W, align: 'right' });
+      y += 17;
     };
-    totalRow('Gross earnings', p.grossEarnings);
-    totalRow('Total deductions', p.totalDeductions);
-    totalRow('Total bonuses', p.totalBonuses);
-    if (p.totalAdvanceDeduction) totalRow('  incl. advance recovery', p.totalAdvanceDeduction);
+    sumRow('Gross earnings', p.grossEarnings);
+    sumRow('Total bonuses', p.totalBonuses);
+    sumRow('Total deductions', p.totalDeductions);
+    if (p.totalAdvanceDeduction)
+      sumRow('   incl. advance recovery', p.totalAdvanceDeduction);
 
-    // Net pay banner
-    y += 8;
-    doc.fillColor('#1D6FEB').rect(50, y, doc.page.width - 100, 56).fill();
-    doc.fillColor('#FFFFFF').font('Helvetica').fontSize(12).text('NET PAY', 70, y + 10);
-    doc.font('Helvetica-Bold').fontSize(24).text(rupee(p.netPay), 70, y + 24);
+    // ── Net pay box ────────────────────────────────────────────
+    y += 10;
+    const boxH = 58;
+    if (y > H - boxH - 70) { doc.addPage(); y = M; }
+    doc.lineWidth(0.75);
+    doc.roundedRect(M, y, CW, boxH, 6).fillAndStroke('#FAFBFC', LINE);
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(MUTE)
+       .text('NET PAY', M + 18, y + 22, { characterSpacing: 1.2 });
+    doc.font('Helvetica-Bold').fontSize(21).fillColor(INK)
+       .text(rupee(p.netPay), AMT_X - 18, y + 17, { width: AMT_W, align: 'right' });
 
-    doc.fillColor('#94A3B8').font('Helvetica').fontSize(9)
-       .text('System-generated payslip. For queries contact your supervisor.',
-             50, doc.page.height - 60, { width: doc.page.width - 100, align: 'center' });
+    // ── Footer ─────────────────────────────────────────────────
+    const footY = H - 54;
+    rule(footY, LINE, 0.5);
+    doc.font('Helvetica').fontSize(8).fillColor(FAINT)
+       .text('System-generated payslip · Contact your supervisor for any queries.', M, footY + 10, { width: CW });
+    doc.font('Helvetica').fontSize(8).fillColor(FAINT)
+       .text(`Generated ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}`,
+             AMT_X, footY + 10, { width: AMT_W, align: 'right' });
     doc.end();
   } catch (e) { next(e); }
 });
@@ -344,6 +406,42 @@ router.get('/history/:empId', selfOrAdmin, async (req, res) => {
 // draft → finalized. Commits the advance recovery to the advances'
 // remainingBalance (capped at what each advance still owes, so a stale
 // preview can never over-recover), then locks the slip.
+// Commit a draft's advance recoveries (capped at each advance's remaining
+// balance) and mark it finalized. Refunds any over-planned recovery so the
+// slip never short-pays. Mutates `p` in place; caller saves within `session`.
+async function finalizeDraft(p, session) {
+  let shortfall = 0;
+  for (const rec of p.advanceRecoveries || []) {
+    const adv = await AdvanceRequest.findById(rec.advance).session(session);
+    if (!adv) { shortfall = r2(shortfall + rec.amount); continue; }
+    const current = adv.remainingBalance != null ? adv.remainingBalance : adv.amount;
+    const take = Math.min(rec.amount, current);
+    shortfall = r2(shortfall + (rec.amount - take));
+    rec.amount = take;                                  // record what was actually taken
+    adv.remainingBalance = r2(current - take);
+    if (adv.remainingBalance <= 0) adv.deductedInPayroll = true;
+    await adv.save({ session });
+  }
+
+  // The draft over-deducted by `shortfall` — give it back so net pay
+  // reflects what was actually recovered.
+  if (shortfall > 0) {
+    p.totalAdvanceDeduction = r2((p.totalAdvanceDeduction || 0) - shortfall);
+    p.totalDeductions       = r2((p.totalDeductions || 0) - shortfall);
+    p.netPay                = r2(Math.max(0, (p.grossEarnings || 0) - p.totalDeductions + (p.totalBonuses || 0)));
+    p.lineItems.push({
+      label:  `Advance recovery capped — ₹${shortfall} carried to next month`,
+      amount: shortfall,
+      type:   'earning',
+    });
+    p.markModified('advanceRecoveries');
+    p.markModified('lineItems');
+  }
+
+  p.status = 'finalized';
+  p.finalizedAt = new Date();
+}
+
 router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
   const session = await mongoose.startSession();
   try {
@@ -355,41 +453,7 @@ router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
         out = { code: 400, body: { success: false, message: `Only a draft payroll can be finalized (this one is ${p.status})` } };
         return;
       }
-
-      // Commit each recovery, capped at what the advance still owes so a
-      // stale draft can't over-recover. Track any shortfall (planned minus
-      // actually taken) so we can refund it below — otherwise the slip
-      // would keep the over-planned deduction and short-pay the employee.
-      let shortfall = 0;
-      for (const rec of p.advanceRecoveries || []) {
-        const adv = await AdvanceRequest.findById(rec.advance).session(session);
-        if (!adv) { shortfall = r2(shortfall + rec.amount); continue; }
-        const current = adv.remainingBalance != null ? adv.remainingBalance : adv.amount;
-        const take = Math.min(rec.amount, current);
-        shortfall = r2(shortfall + (rec.amount - take));
-        rec.amount = take;                                  // record what was actually taken
-        adv.remainingBalance = r2(current - take);
-        if (adv.remainingBalance <= 0) adv.deductedInPayroll = true;
-        await adv.save({ session });
-      }
-
-      // The draft over-deducted by `shortfall` — give it back so net pay
-      // reflects what was actually recovered.
-      if (shortfall > 0) {
-        p.totalAdvanceDeduction = r2((p.totalAdvanceDeduction || 0) - shortfall);
-        p.totalDeductions       = r2((p.totalDeductions || 0) - shortfall);
-        p.netPay                = r2(Math.max(0, (p.grossEarnings || 0) - p.totalDeductions + (p.totalBonuses || 0)));
-        p.lineItems.push({
-          label:  `Advance recovery capped — ₹${shortfall} carried to next month`,
-          amount: shortfall,
-          type:   'earning',
-        });
-        p.markModified('advanceRecoveries');
-        p.markModified('lineItems');
-      }
-
-      p.status = 'finalized';
-      p.finalizedAt = new Date();
+      await finalizeDraft(p, session);
       await p.save({ session });
       await p.populate('employee', 'name');
       out = { code: 200, body: { success: true, data: p } };
@@ -402,25 +466,50 @@ router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
   }
 });
 
-// finalized → paid. Must be finalized first; can't be paid twice. The
-// payer is the authenticated user, not a client-supplied name.
+// Record a payment. Pays the full remaining net by default, or a custom
+// `amount` (partial pay → status 'partially_paid'). A draft is auto-finalized
+// first (committing its advance recoveries) so pay works in one step. The
+// payer is the authenticated user, never a client-supplied name.
 router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
+  const session = await mongoose.startSession();
   try {
-    const { paymentNote = '' } = req.body;
-    const p = await Payroll.findById(req.params.id);
-    if (!p) return res.status(404).json({ success: false, message: 'Not found' });
-    if (p.status === 'paid') return res.status(400).json({ success: false, message: 'Already paid' });
-    if (p.status !== 'finalized')
-      return res.status(400).json({ success: false, message: `Finalize before paying (this one is ${p.status})` });
+    let out;
+    await session.withTransaction(async () => {
+      const { paymentNote = '' } = req.body;
+      const p = await Payroll.findById(req.params.id).session(session);
+      if (!p) { out = { code: 404, body: { success: false, message: 'Not found' } }; return; }
+      if (p.status === 'paid') { out = { code: 400, body: { success: false, message: 'Already fully paid' } }; return; }
 
-    p.status = 'paid';
-    p.paidAt = new Date();
-    p.paidBy = req.user?.name || 'admin';
-    p.paymentNote = paymentNote;
-    await p.save();
-    await p.populate('employee', 'name');
-    res.json({ success: true, data: p });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+      // One-step pay: finalize the draft (commits advances) before disbursing.
+      if (p.status === 'draft') await finalizeDraft(p, session);
+
+      const alreadyPaid = r2(p.amountPaid || 0);
+      const remaining   = r2(Math.max(0, (p.netPay || 0) - alreadyPaid));
+      // Default to clearing the balance; otherwise pay the requested amount,
+      // capped at what's still owed (never overpay the slip).
+      const requested = req.body.amount != null ? Number(req.body.amount) : remaining;
+      if (!Number.isFinite(requested) || requested <= 0) {
+        out = { code: 400, body: { success: false, message: 'Payment amount must be greater than 0' } };
+        return;
+      }
+      const pay = r2(Math.min(requested, remaining));
+      if (pay <= 0) { out = { code: 400, body: { success: false, message: 'Nothing left to pay' } }; return; }
+
+      p.amountPaid  = r2(alreadyPaid + pay);
+      p.status      = p.amountPaid >= (p.netPay || 0) ? 'paid' : 'partially_paid';
+      p.paidAt      = new Date();
+      p.paidBy      = req.user?.name || 'admin';
+      if (paymentNote) p.paymentNote = paymentNote;
+      await p.save({ session });
+      await p.populate('employee', 'name');
+      out = { code: 200, body: { success: true, data: p } };
+    });
+    return res.status(out.code).json(out.body);
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  } finally {
+    await session.endSession();
+  }
 });
 
 router.get('/advance', isAdmin('admin', 'accounts'), async (req, res) => {

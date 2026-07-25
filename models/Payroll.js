@@ -91,15 +91,19 @@ const PayrollSchema = new mongoose.Schema(
     lineItems: { type: [LineItemSchema], default: [] },
 
     // ── Workflow status ────────────────────────────────────────
+    // draft → finalized → (partially_paid) → paid. Paying a draft
+    // auto-finalizes it. partially_paid means amountPaid < netPay.
     status: {
       type: String,
-      enum: ['draft', 'finalized', 'paid'],
+      enum: ['draft', 'finalized', 'partially_paid', 'paid'],
       default: 'draft',
     },
     finalizedAt:  { type: Date, default: null },
     paidAt:       { type: Date, default: null },
     paidBy:       { type: String, default: '' },
     paymentNote:  { type: String, default: '' },
+    // Cumulative amount actually disbursed (supports partial / custom pay).
+    amountPaid:   { type: Number, default: 0 },
   },
   { timestamps: true }
 );
