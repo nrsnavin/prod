@@ -2,17 +2,34 @@
 const mongoose = require('mongoose');
 
 // ── ADVANCE REQUEST ───────────────────────────────────────────
-// Employee asks for advance salary.
-// Admin approves → specifies which month/year to deduct from.
-// Payroll engine deducts it when generating that month's payroll.
+// Lifecycle:
+//   requested → approved → paid_out → recovered
+//                    ↘ rejected
+//
+//   requested  employee asked for an advance
+//   approved   admin agreed and set the month/year that recovers it —
+//              no cash has moved yet
+//   paid_out   cash actually handed over; the employee now owes it back,
+//              and this is when it hits their ledger
+//   recovered  fully recovered out of pay (remainingBalance = 0)
+//
+// 'pending' is the legacy name for 'requested' and is still accepted so
+// existing rows keep working (see the backfill migration).
+const ADVANCE_STATUSES = ['requested','approved','paid_out','recovered','rejected','pending'];
+// Money is with the employee → payroll may recover against it.
+const RECOVERABLE_STATUSES = ['paid_out','approved'];
+
 const AdvanceRequestSchema = new mongoose.Schema(
   {
     employee:   { type: mongoose.Types.ObjectId, ref: 'Employee', required: true, index: true },
     amount:     { type: Number, required: true, min: 1 },
     reason:     { type: String, default: '' },
 
-    // Admin sets these on approval
-    status:     { type: String, enum: ['pending','approved','rejected'], default: 'pending' },
+    status:     { type: String, enum: ADVANCE_STATUSES, default: 'requested' },
+    // Set when the cash is actually handed over.
+    paidOutAt:  { type: Date,   default: null },
+    paidOutBy:  { type: String, default: '' },
+    recoveredAt:{ type: Date,   default: null },
     deductMonth:{ type: Number, default: null, min: 1, max: 12 },
     deductYear: { type: Number, default: null },
     adminNotes: { type: String, default: '' },
@@ -39,3 +56,5 @@ AdvanceRequestSchema.pre('save', function (next) {
 });
 
 module.exports = mongoose.model('AdvanceRequest', AdvanceRequestSchema);
+module.exports.ADVANCE_STATUSES    = ADVANCE_STATUSES;
+module.exports.RECOVERABLE_STATUSES = RECOVERABLE_STATUSES;

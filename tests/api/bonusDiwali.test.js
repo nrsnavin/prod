@@ -9,7 +9,8 @@ process.env.NODE_ENV = 'test';
 const request  = require('supertest');
 const mongoose = require('mongoose');
 const jwt      = require('jsonwebtoken');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// Bonus trigger + pay run in transactions → need a replica set.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 let mongo, app, Employee, Payroll, ShiftDetail, BonusConfig, BonusRecord, User, admin;
 
@@ -21,7 +22,7 @@ const curYear = now.getFullYear();
 const curMonth = now.getMonth() + 1;       // 1–12
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   Employee = require('../../models/Employee'); Payroll = require('../../models/Payroll');

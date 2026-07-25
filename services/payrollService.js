@@ -323,7 +323,9 @@ async function computePayroll(empId, year, month) {
   // no more silent write-offs when an advance exceeds a month's net.
   const advances = await AdvanceRequest.find({
     employee: empId,
-    status:   'approved',
+    // Recover only what the employee actually holds: paid-out advances
+    // (and legacy 'approved' rows from before the paid_out state existed).
+    status:   { $in: AdvanceRequest.RECOVERABLE_STATUSES },
     $or: [
       { deductYear: { $lt: year } },
       { deductYear: year, deductMonth: { $lte: month } },

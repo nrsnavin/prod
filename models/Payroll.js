@@ -102,8 +102,34 @@ const PayrollSchema = new mongoose.Schema(
     paidAt:       { type: Date, default: null },
     paidBy:       { type: String, default: '' },
     paymentNote:  { type: String, default: '' },
-    // Cumulative amount actually disbursed (supports partial / custom pay).
+    // Cumulative amount settled against the slip = cash handed over PLUS
+    // any advance recovered at payment time.
     amountPaid:   { type: Number, default: 0 },
+    // Cumulative cash actually handed to the employee.
+    totalCashPaid:{ type: Number, default: 0 },
+    // Cumulative advance recovered as part of the payouts below (distinct
+    // from totalAdvanceDeduction, which also covers payroll-time recovery).
+    advanceRecoveredAtPayment: { type: Number, default: 0 },
+
+    // One row per payout: what was handed over, what was held back against
+    // an advance, when, and by whom. Gives a full payment history per slip.
+    payouts: {
+      type: [{
+        at:               { type: Date,   default: Date.now },
+        cash:             { type: Number, default: 0 },  // handed to the employee
+        advanceRecovered: { type: Number, default: 0 },  // held back vs an advance
+        total:            { type: Number, default: 0 },  // cash + recovered
+        paidBy:           { type: String, default: '' },
+        note:             { type: String, default: '' },
+        advances: [{
+          advance: { type: mongoose.Types.ObjectId, ref: 'AdvanceRequest' },
+          amount:  { type: Number, default: 0 },
+          _id: false,
+        }],
+        _id: false,
+      }],
+      default: [],
+    },
   },
   { timestamps: true }
 );
