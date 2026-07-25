@@ -202,10 +202,21 @@ router.put(
     const year = parseInt(req.body.year) || currentYear();
     const cfg  = await getOrCreateConfig(year);
 
-    if (cfg.status === "triggered") {
-      if (req.body.yearlyWorkingDays !== undefined) {
+    // The working-days denominator produced every generated amount, so it is
+    // locked while any record computed from it still exists — whether the
+    // year is 'triggered' or 'completed'. Resetting clears the UNPAID
+    // records and unlocks it; paid records can never be removed, so a fully
+    // paid year stays locked for good.
+    if (req.body.yearlyWorkingDays !== undefined &&
+        Number(req.body.yearlyWorkingDays) !== cfg.yearlyWorkingDays) {
+      const existing = await BonusRecord.countDocuments({ year });
+      if (existing > 0) {
+        const paid = await BonusRecord.countDocuments({ year, status: "paid" });
         return next(new ErrorHandler(
-          "Cannot change yearlyWorkingDays after bonus has been triggered. Reset first.", 400
+          paid > 0
+            ? `Cannot change working days — ${paid} bonus record(s) for ${year} are already paid. Reset removes only unpaid records, so this stays locked.`
+            : `Cannot change working days while ${year}'s bonus is generated. Use "Reset ${year} bonus" to clear the ${existing} unpaid record(s), then change it.`,
+          400
         ));
       }
     }
