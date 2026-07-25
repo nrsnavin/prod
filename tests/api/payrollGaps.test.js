@@ -259,3 +259,66 @@ describe('#9 flat yearly bonus removed', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('payment-state integrity', () => {
+  const gen = () => request(app).post('/api/v2/payroll/generate').set('Cookie', adminCookie()).send({ year: YEAR, month: MONTH });
+
+  // Regression: /generate only refused 'finalized'/'paid', so a PARTIALLY
+  // paid slip was regenerated — reset to draft with the recomputed amount,
+  // re-opening it for a second finalize/pay after cash had gone out.
+  test('a partially-paid slip is never regenerated', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id, year: YEAR, month: MONTH });
+    await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({ amount: 500 });
+    expect((await Payroll.findById(slip._id)).status).toBe('partially_paid');
+
+    const res = await gen();
+    expect(res.status).toBe(200);
+    expect(JSON.stringify(res.body.errors)).toMatch(/not regenerated/);
+
+    const after = await Payroll.findById(slip._id);
+    expect(after.status).toBe('partially_paid');   // not reverted to draft
+    expect(after.amountPaid).toBe(500);
+    expect(after.payouts).toHaveLength(1);
+  });
+
+  test('a slip with money paid against it is protected even if flagged draft', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id, year: YEAR, month: MONTH });
+    // simulate a corrupted status with cash already recorded
+    await Payroll.updateOne({ _id: slip._id }, { $set: { status: 'draft', amountPaid: 300 } });
+
+    const res = await gen();
+    expect(JSON.stringify(res.body.errors)).toMatch(/already .*300 paid/);
+    expect((await Payroll.findById(slip._id)).amountPaid).toBe(300);
+  });
+
+  // Regression: unpaidTotal summed raw netPay, ignoring what had already
+  // been handed over, so a partly-paid month overstated the liability.
+  test('unpaid total counts only what is still owed', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id, year: YEAR, month: MONTH });
+    expect(slip.netPay).toBe(2000);
+    await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({ amount: 1500 });
+
+    const res = await request(app).get(`/api/v2/payroll/history/${emp._id}`).set('Cookie', adminCookie());
+    expect(res.status).toBe(200);
+    expect(res.body.data.unpaidTotal).toBe(500);   // was 2000
+  });
+
+  test('a fully paid slip leaves nothing outstanding', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id, year: YEAR, month: MONTH });
+    await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({});
+    const res = await request(app).get(`/api/v2/payroll/history/${emp._id}`).set('Cookie', adminCookie());
+    expect(res.body.data.unpaidTotal).toBe(0);
+  });
+});
