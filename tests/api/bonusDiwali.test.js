@@ -49,7 +49,11 @@ async function seed({ diwaliMonth }) {
   await BonusConfig.create({
     year: curYear,
     bonusDate: new Date(curYear, (diwaliMonth ? curMonth : curMonth === 1 ? 6 : 1) - 1, 15),
+    // Synthetic 2-day "year": switch off the eligibility threshold (default
+    // 30 days) and the statutory floor so this suite isolates the tier math.
     yearlyWorkingDays: 2,
+    minDaysForEligibility: 0,
+    minBonusPercent: 0,
   });
   return emp;
 }

@@ -39,6 +39,24 @@ const BonusConfigSchema = new mongoose.Schema(
       min: 1,
     },
 
+    // Minimum days worked in the window to qualify for any bonus.
+    // Mirrors the Payment of Bonus Act's 30-working-days rule. 0 = off.
+    minDaysForEligibility: {
+      type: Number,
+      default: 30,
+      min: 0,
+    },
+
+    // Floor on the effective bonus rate: the attendance multiplier may not
+    // pull the payout below this percent of the bonus base. Defaults to the
+    // statutory 8.33%. 0 = no floor (attendance tier applies unchecked).
+    minBonusPercent: {
+      type: Number,
+      default: 8.33,
+      min: 0,
+      max: 100,
+    },
+
     // 'pending' → bonus not yet triggered
     // 'triggered' → BonusRecords created, some may still be unpaid
     // 'completed' → all records marked paid

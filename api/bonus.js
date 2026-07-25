@@ -28,9 +28,11 @@ const BonusConfig      = require("../models/BonusConfig");
 const BonusRecord      = require("../models/BonusRecord");
 const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
+const Attendance       = require("../models/Attendence.js");
 const Payroll          = require("../models/Payroll");
 const PDFDocument      = require("pdfkit");
 const ledger           = require("../services/ledgerService");
+const LedgerEntry      = require("../models/LedgerEntry");
 const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 
@@ -100,12 +102,34 @@ async function computeEmployeeBonus(emp, cfg, win) {
   const shifts = await ShiftDetail.find({
     employee: emp._id, date: { $gte: win.start, $lte: win.end },
   }).select("shift date").lean();
-  const uniqueDates = new Set(shifts.map(s => {
-    const d = new Date(s.date); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-  }));
-  const attendanceDays = uniqueDates.size;
   const hoursWorked = shifts.reduce((sum, s) => sum + shiftHours(s.shift), 0);
   const estimatedEarnings = (emp.hourlyRate || 0) * hoursWorked;
+
+  // ── Attendance ────────────────────────────────────────────────
+  // Count days the employee ACTUALLY turned up, from the attendance
+  // register — a scheduled shift is not proof of attendance. Using
+  // ShiftDetail alone let someone marked absent every single day still
+  // score 100% and take a full-tier bonus.
+  const marks = await Attendance.find({
+    employee: emp._id, date: { $gte: win.start, $lte: win.end },
+  }).select("date status isApprovedLeave").lean();
+
+  const dayKey = (d) => { const x = new Date(d); return `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`; };
+  let attendanceDays, attendanceSource;
+  if (marks.length > 0) {
+    const worked = new Set(
+      marks
+        .filter(m => ['present', 'late', 'half_day'].includes(m.status) || m.isApprovedLeave === true)
+        .map(m => dayKey(m.date))
+    );
+    attendanceDays = worked.size;
+    attendanceSource = 'attendance';
+  } else {
+    // No attendance register for the window (legacy data) — fall back to
+    // scheduled shifts so historical years still compute.
+    attendanceDays = new Set(shifts.map(s => dayKey(s.date))).size;
+    attendanceSource = 'scheduled_shifts';
+  }
 
   const basedOn = salaryReceived > 0 ? "salary_received" : "estimated";
   const base    = salaryReceived > 0 ? salaryReceived : estimatedEarnings;
@@ -116,7 +140,19 @@ async function computeEmployeeBonus(emp, cfg, win) {
   const totalWorkingDays = cfg.yearlyWorkingDays;
   const attendanceRate   = Math.min(100, totalWorkingDays > 0 ? (attendanceDays / totalWorkingDays) * 100 : 0);
   const { tier, multiplier } = attendanceTier(attendanceRate);
-  const bonusAmount = Math.round(rawBonusAmount * multiplier);
+
+  // Eligibility: below the minimum days worked no bonus is due (mirrors the
+  // Payment of Bonus Act's 30-working-days rule; 0 disables the check).
+  const minDays  = cfg.minDaysForEligibility ?? 30;
+  const eligible = attendanceDays >= minDays;
+
+  // Statutory floor: the attendance multiplier may not drag the effective
+  // rate below the configured minimum percent of the base (default 8.33%,
+  // the Act's floor). Set minBonusPercent to 0 to allow any amount.
+  const floorPct = cfg.minBonusPercent ?? 8.33;
+  const scaled   = rawBonusAmount * multiplier;
+  const floored  = floorPct > 0 ? Math.max(scaled, base * (floorPct / 100)) : scaled;
+  const bonusAmount = eligible ? Math.round(Math.min(floored, rawBonusAmount)) : 0;
 
   return {
     hourlyRate: emp.hourlyRate || 0, hoursWorked,
@@ -124,9 +160,11 @@ async function computeEmployeeBonus(emp, cfg, win) {
     annualEarnings: Math.round(base),   // the bonus base (window salary)
     basedOn,
     bonusPercent, rawBonusAmount,
-    attendanceDays, totalWorkingDays,
+    attendanceDays, totalWorkingDays, attendanceSource,
     attendanceRate: parseFloat(attendanceRate.toFixed(1)),
-    attendanceTier: tier, multiplier, bonusAmount,
+    attendanceTier: tier, multiplier,
+    eligible, minDaysForEligibility: minDays,
+    bonusAmount,
   };
 }
 
@@ -172,13 +210,23 @@ router.put(
       }
     }
 
-    const { bonusDate, bonusLabel, yearlyWorkingDays } = req.body;
+    const { bonusDate, bonusLabel, yearlyWorkingDays, minDaysForEligibility, minBonusPercent } = req.body;
     if (bonusDate    !== undefined) cfg.bonusDate         = bonusDate ? new Date(bonusDate) : null;
     if (bonusLabel   !== undefined) cfg.bonusLabel        = bonusLabel;
     if (yearlyWorkingDays !== undefined) {
       const wd = parseInt(yearlyWorkingDays);
       if (isNaN(wd) || wd < 1) return next(new ErrorHandler("yearlyWorkingDays must be ≥ 1", 400));
       cfg.yearlyWorkingDays = wd;
+    }
+    if (minDaysForEligibility !== undefined) {
+      const md = parseInt(minDaysForEligibility);
+      if (isNaN(md) || md < 0) return next(new ErrorHandler("minDaysForEligibility must be ≥ 0", 400));
+      cfg.minDaysForEligibility = md;
+    }
+    if (minBonusPercent !== undefined) {
+      const mp = parseFloat(minBonusPercent);
+      if (isNaN(mp) || mp < 0 || mp > 100) return next(new ErrorHandler("minBonusPercent must be 0–100", 400));
+      cfg.minBonusPercent = mp;
     }
 
     await cfg.save();
@@ -212,8 +260,6 @@ router.post(
       ));
     }
 
-    await BonusRecord.deleteMany({ year, status: "pending" });
-
     const win = diwaliWindow(cfg, year);
     const employees = await Employee.find().select("name department hourlyRate bonusPercent");
 
@@ -221,26 +267,44 @@ router.post(
       return next(new ErrorHandler("No employees found", 404));
     }
 
+    // Never recompute a record that has already been PAID — the money is
+    // out the door and its amount is history.
+    const paidIds = new Set(
+      (await BonusRecord.find({ year, status: "paid" }).select("employee").lean())
+        .map((r) => String(r.employee))
+    );
+
     const records = [];
     for (const emp of employees) {
+      if (paidIds.has(String(emp._id))) continue;
       const c = await computeEmployeeBonus(emp, cfg, win);
       records.push({ employee: emp._id, year, ...c, status: "pending" });
     }
 
+    // Upsert keyed on (employee, year) — matching the unique index. The old
+    // filter also matched on status:'pending', so a paid record never
+    // matched and the upsert tried to INSERT a duplicate (E11000), or
+    // silently reverted the paid row where the index was missing.
     const ops = records.map((r) => ({
       updateOne: {
-        filter: { employee: r.employee, year: r.year, status: "pending" },
+        filter: { employee: r.employee, year: r.year },
         update: { $set: r },
         upsert: true,
       },
     }));
 
-    // Records + their ledger rows land together, so a triggered bonus can
-    // never exist without the matching entry in each employee's ledger.
+    // Everything — clearing stale drafts, writing records, flipping the
+    // config and posting the ledger — lands in ONE transaction, so a
+    // failure can't leave the year half-generated.
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
-        await BonusRecord.bulkWrite(ops, { session });
+        // Drop pending rows for employees who no longer qualify/exist.
+        await BonusRecord.deleteMany(
+          { year, status: "pending", employee: { $nin: records.map((r) => r.employee) } },
+          { session }
+        );
+        if (ops.length) await BonusRecord.bulkWrite(ops, { session });
         cfg.status      = "triggered";
         cfg.triggeredAt = new Date();
         await cfg.save({ session });
@@ -249,7 +313,11 @@ router.post(
         const diwaliDate = cfg.bonusDate
           ? new Date(cfg.bonusDate)
           : new Date(win.diwaliYear, win.diwaliMonth - 1, 1);
-        const posted = await BonusRecord.find({ year }).session(session);
+        // Only (re)post the records this run touched — a paid record's
+        // ledger rows must not be rewritten.
+        const posted = await BonusRecord.find({
+          year, employee: { $in: records.map((r) => r.employee) },
+        }).session(session);
         for (const rec of posted) {
           await ledger.postDiwaliBonus(rec, diwaliDate, session, {
             postedBy: req.user?.name || 'admin',
@@ -302,8 +370,19 @@ router.get(
       canGenerate: onMonth && cfg.status !== "completed",
       diwaliDate:  cfg.bonusDate,
       bonusLabel:  cfg.bonusLabel,
+      configured:  !!cfg.bonusDate,
+      config: {
+        bonusDate: cfg.bonusDate,
+        bonusLabel: cfg.bonusLabel,
+        yearlyWorkingDays: cfg.yearlyWorkingDays,
+        minDaysForEligibility: cfg.minDaysForEligibility ?? 30,
+        minBonusPercent: cfg.minBonusPercent ?? 8.33,
+        status: cfg.status,
+      },
       window:      { start: win.start, end: win.end, months: win.months },
       totalPayout: rows.reduce((s, r) => s + r.bonusAmount, 0),
+      eligibleCount:   rows.filter((r) => r.eligible).length,
+      ineligibleCount: rows.filter((r) => !r.eligible).length,
       rows,
     });
   })
@@ -499,14 +578,32 @@ router.delete(
     const year = parseInt(req.params.year);
     if (isNaN(year)) return next(new ErrorHandler("Invalid year", 400));
 
-    const deleted = await BonusRecord.deleteMany({ year, status: "pending" });
+    // Deleting the records must also retract their ledger rows, or each
+    // employee's ledger keeps showing a Diwali bonus that no longer exists
+    // (and their balance stays inflated). Both happen in one transaction.
+    let deleted = { deletedCount: 0 };
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const doomed = await BonusRecord.find({ year, status: "pending" })
+          .select("_id").session(session).lean();
+        const ids = doomed.map((d) => d._id);
+        if (ids.length) {
+          await LedgerEntry.deleteMany({ source: "bonus", sourceId: { $in: ids } }, { session });
+        }
+        deleted = await BonusRecord.deleteMany({ year, status: "pending" }, { session });
 
-    const cfg = await BonusConfig.findOne({ year });
-    if (cfg) {
-      cfg.status      = "pending";
-      cfg.triggeredAt = null;
-      await cfg.save();
-    }
+        const cfg = await BonusConfig.findOne({ year }).session(session);
+        if (cfg) {
+          // Stay 'completed' if paid records remain — resetting drafts must
+          // not reopen a year that was already fully paid out.
+          const paidLeft = await BonusRecord.countDocuments({ year, status: "paid" }).session(session);
+          cfg.status      = paidLeft > 0 ? "completed" : "pending";
+          cfg.triggeredAt = paidLeft > 0 ? cfg.triggeredAt : null;
+          await cfg.save({ session });
+        }
+      });
+    } finally { await session.endSession(); }
 
     console.log(`[bonus/reset] ${year}: deleted ${deleted.deletedCount} pending records`);
 
