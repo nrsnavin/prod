@@ -64,8 +64,13 @@ describe("migration chain (real CLI)", () => {
     ]);
     run(["up"]);
 
-    const counter = await db.collection("counters").findOne({ _id: "poNo" });
+    // Counters live in "doc_counters": the shared "counters" collection is
+    // owned by mongoose-sequence, whose unique { id, reference_value }
+    // index rejected our rows (see 20260725000002-move-doc-counters).
+    const counter = await db.collection("doc_counters").findOne({ _id: "poNo" });
     expect(counter.seq).toBeGreaterThanOrEqual(1042); // next allocation > 1042
+    // …and nothing of ours is left behind in the plugin's collection.
+    expect(await db.collection("counters").findOne({ _id: "poNo" })).toBeNull();
   }, 60_000);
 
   it("installs DB validators that reject negative stock", async () => {
