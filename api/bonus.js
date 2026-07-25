@@ -445,6 +445,47 @@ router.get(
   })
 );
 
+// ─────────────────────────────────────────────────────────────
+// GET /employee/:id/prediction?year=
+//   One employee's LIVE Diwali-bonus projection from current data —
+//   window salary, attendance tier, eligibility and the resulting
+//   amount — without persisting anything. Powers the prediction card on
+//   the employee detail page. Returns the generated record too (when the
+//   year has been triggered) so the UI can show projected vs locked-in.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/employee/:id/prediction",
+  selfOrAdmin,
+  catchAsyncErrors(async (req, res, next) => {
+    const year = parseInt(req.query.year) || currentYear();
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid employee id", 400));
+    }
+
+    const emp = await Employee.findById(id).select("name department hourlyRate bonusPercent");
+    if (!emp) return next(new ErrorHandler("Employee not found", 404));
+
+    const cfg = await getOrCreateConfig(year);
+    const win = diwaliWindow(cfg, year);
+    const prediction = await computeEmployeeBonus(emp, cfg, win);
+    const record = await BonusRecord.findOne({ employee: id, year }).lean();
+
+    res.status(200).json({
+      success: true,
+      year,
+      employee: { id: emp._id, name: emp.name, department: emp.department },
+      approximate: !isDiwaliMonth(cfg),
+      configured: !!cfg.bonusDate,
+      diwaliDate: cfg.bonusDate,
+      bonusLabel: cfg.bonusLabel,
+      window: { start: win.start, end: win.end, months: win.months },
+      prediction,
+      record: record || null,     // the locked-in figure, once generated
+    });
+  })
+);
+
 router.get(
   "/employee/:id/pdf",
   selfOrAdmin,

@@ -125,10 +125,18 @@ router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
       // paid slip to draft and recompute the amount AFTER payment. Only
       // draft (or not-yet-existing) rows may be regenerated.
       const existing = await Payroll.findOne(
-        { employee: id, year: +year, month: +month }, 'status'
+        { employee: id, year: +year, month: +month }, 'status amountPaid'
       ).lean();
-      if (existing && ['finalized', 'paid'].includes(existing.status)) {
+      if (existing && ['finalized', 'paid', 'partially_paid'].includes(existing.status)) {
         errors.push({ employeeId: id, error: `Payroll already ${existing.status} — not regenerated` });
+        continue;
+      }
+      // Belt and braces: any slip money has been paid against is off limits
+      // even if its status somehow says draft. Regenerating would reset it
+      // to draft and recompute the amount AFTER cash was handed over,
+      // re-opening it for a second finalize/pay.
+      if (existing && (existing.amountPaid ?? 0) > 0) {
+        errors.push({ employeeId: id, error: `Payroll already has ₹${existing.amountPaid} paid — not regenerated` });
         continue;
       }
 
@@ -551,10 +559,15 @@ router.get('/history/:empId', selfOrAdmin, async (req, res) => {
       .select('year month netPay grossEarnings totalDeductions status finalizedAt paidAt createdAt')
       .lean();
 
-    // Unpaid salary left = net pay on every non-'paid' payslip.
+    // Salary still owed = net pay MINUS whatever has already been paid on
+    // each non-'paid' payslip. Summing raw netPay overstated the liability
+    // for a partially-paid slip (it ignored the cash already handed over).
     const agg = await Payroll.aggregate([
       { $match: { employee: new mongoose.Types.ObjectId(empId), status: { $ne: 'paid' } } },
-      { $group: { _id: null, total: { $sum: '$netPay' }, count: { $sum: 1 } } },
+      { $addFields: {
+          _owed: { $max: [0, { $subtract: ['$netPay', { $ifNull: ['$amountPaid', 0] }] }] },
+      } },
+      { $group: { _id: null, total: { $sum: '$_owed' }, count: { $sum: 1 } } },
     ]);
     const unpaid = agg[0] || { total: 0, count: 0 };
 

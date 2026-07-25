@@ -200,3 +200,51 @@ describe('preview exposes the configured Diwali settings', () => {
     expect(res.body.rows[0].bonusAmount).toBeGreaterThan(0);
   });
 });
+
+describe('per-employee live prediction', () => {
+  test('returns the live projection, tier and eligibility for one employee', async () => {
+    const emp = await makeEmp('Ravi');
+    await paidMonth(emp);                       // 10000 window salary
+    await marked(emp, [3, 4], 'present');       // 2/2 days → S tier
+    await makeCfg({ bonusLabel: 'Diwali 2026' });
+
+    const res = await request(app)
+      .get(`/api/v2/bonus/employee/${emp._id}/prediction?year=${curYear}`)
+      .set('Cookie', cookie());
+    expect(res.status).toBe(200);
+    expect(res.body.employee.name).toBe('Ravi');
+    expect(res.body.bonusLabel).toBe('Diwali 2026');
+    expect(res.body.prediction.attendanceTier).toBe('S');
+    expect(res.body.prediction.bonusAmount).toBe(1000);
+    expect(res.body.prediction.eligible).toBe(true);
+    expect(res.body.record).toBeNull();          // not generated yet
+  });
+
+  test('exposes the locked-in record once the year is generated', async () => {
+    const emp = await makeEmp();
+    await paidMonth(emp);
+    await marked(emp, [3, 4], 'present');
+    await makeCfg();
+    await request(app).post('/api/v2/bonus/trigger').set('Cookie', cookie()).send({ year: curYear });
+
+    const res = await request(app)
+      .get(`/api/v2/bonus/employee/${emp._id}/prediction?year=${curYear}`)
+      .set('Cookie', cookie());
+    expect(res.body.record).not.toBeNull();
+    expect(res.body.record.bonusAmount).toBe(1000);
+  });
+
+  test('an ineligible employee predicts zero with a reason', async () => {
+    const emp = await makeEmp();
+    await paidMonth(emp);
+    await marked(emp, [3], 'present');
+    await makeCfg({ minDaysForEligibility: 30 });
+
+    const res = await request(app)
+      .get(`/api/v2/bonus/employee/${emp._id}/prediction?year=${curYear}`)
+      .set('Cookie', cookie());
+    expect(res.body.prediction.eligible).toBe(false);
+    expect(res.body.prediction.bonusAmount).toBe(0);
+    expect(res.body.prediction.minDaysForEligibility).toBe(30);
+  });
+});
