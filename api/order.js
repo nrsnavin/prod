@@ -306,8 +306,21 @@ router.get(
 
     const order = await Order.findById(id)
       .populate("customer",  "name gstin")
-      .populate("elasticOrdered.elastic", "name")
-      .populate("jobs.job")
+      // elasticOrdered.elastic is deliberately NOT populated: mongoose turns
+      // an unresolvable ref into null, discarding the id the produced/packed/
+      // pending joins below key on. Names are resolved from a lookup map
+      // instead, so a deleted elastic master degrades one row's label rather
+      // than throwing and taking the whole order page down with it.
+      // The job's own elastic names come along so the order page can show a
+      // per-job breakdown without a round trip per job.
+      .populate({
+        path: "jobs.job",
+        populate: [
+          { path: "elastics.elastic",        select: "name" },
+          { path: "producedElastic.elastic", select: "name" },
+          { path: "packedElastic.elastic",   select: "name" },
+        ],
+      })
       .populate("createdBy",  "name role")
       .populate("updatedBy",  "name role")
       .populate("approvedBy", "name role")
@@ -319,18 +332,83 @@ router.get(
 
     if (!order) return next(new ErrorHandler("Order not found", 404));
 
+    // Name lookup for every elastic referenced anywhere on this order. A row
+    // whose master has since been deleted simply has no entry and is labelled
+    // rather than dropped — the ordered quantity is still real.
+    const elasticIds = [
+      ...(order.elasticOrdered || []),
+      ...(order.producedElastic || []),
+      ...(order.packedElastic || []),
+      ...(order.pendingElastic || []),
+    ]
+      .map((row) => row?.elastic)
+      .filter(Boolean);
+    const elasticNames = new Map(
+      (await Elastic.find({ _id: { $in: elasticIds } }).select("name").lean())
+        .map((el) => [String(el._id), el.name])
+    );
+
+    // Matching on strings rather than ObjectId.equals(): a null id on either
+    // side used to throw here and 500 the whole page.
+    const qtyFor = (rows, id) =>
+      (rows || []).find((p) => p?.elastic && String(p.elastic) === id)?.quantity;
+
     const elastics = order.elasticOrdered.map((e) => {
-      const produced = order.producedElastic.find((p) => p.elastic.equals(e.elastic._id))?.quantity || 0;
-      const packed   = order.packedElastic.find((p)   => p.elastic.equals(e.elastic._id))?.quantity || 0;
-      const pending  = order.pendingElastic.find((p)  => p.elastic.equals(e.elastic._id))?.quantity ?? e.quantity;
-      const reserved = (order.reservations || []).find((p) => p.elastic.equals(e.elastic._id))?.quantity ?? 0;
+      const id = String(e.elastic ?? "");
       return {
-        id:       e.elastic._id,
-        name:     e.elastic.name,
+        id:       e.elastic ?? null,
+        name:     elasticNames.get(id) ?? "Unknown elastic",
         ordered:  e.quantity,
-        produced, packed, pending,
-        reserved,
+        produced: qtyFor(order.producedElastic, id) || 0,
+        packed:   qtyFor(order.packedElastic, id)   || 0,
+        pending:  qtyFor(order.pendingElastic, id)  ?? e.quantity,
+        reserved: qtyFor(order.reservations, id)    ?? 0,
       };
+    });
+
+    // Per-job elastic breakdown, so the order page can show at a glance what
+    // each job covers and how much of it is still to weave.
+    //
+    // Note the two senses of "pending". At ORDER level it means "not yet
+    // committed to any job" (ordered − planned; see services/orderPending.js).
+    // Here it means "committed to this job but not yet woven" (planned −
+    // produced). They answer different questions and must not be conflated.
+    const jobs = (order.jobs || []).map((ref) => {
+      const job = ref.job && typeof ref.job === "object" ? ref.job : null;
+      if (!job) return ref;
+
+      const qtyBy = (arr) => {
+        const map = new Map();
+        for (const row of arr || []) {
+          const id = row.elastic?._id ?? row.elastic;
+          if (!id) continue;
+          map.set(String(id), (map.get(String(id)) || 0) + (row.quantity || 0));
+        }
+        return map;
+      };
+      const produced = qtyBy(job.producedElastic);
+      const packed   = qtyBy(job.packedElastic);
+
+      const elasticSummary = (job.elastics || []).map((e) => {
+        const id = String(e.elastic?._id ?? e.elastic ?? "");
+        const planned = e.quantity || 0;
+        const made    = produced.get(id) || 0;
+        return {
+          id,
+          // Falls back to the order's own naming when the job's elastic ref
+          // no longer resolves (deleted master), rather than dropping the row.
+          name: e.elastic?.name
+            ?? elastics.find((oe) => String(oe.id) === id)?.name
+            ?? "Unknown",
+          planned,
+          produced: made,
+          packed:   packed.get(id) || 0,
+          // Over-production is a data issue, not a negative outstanding qty.
+          pending:  Math.max(0, planned - made),
+        };
+      });
+
+      return { ...ref, elasticSummary };
     });
 
     const liveRawMaterials = await Promise.all(
@@ -370,7 +448,7 @@ router.get(
         description: order.description,
         customer:    order.customer,
         elastics,
-        jobs:        order.jobs,
+        jobs,
         rawMaterialRequired: liveRawMaterials,
         canApprove,
         createdBy:   order.createdBy  || null,
