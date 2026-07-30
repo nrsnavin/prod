@@ -487,7 +487,6 @@ router.post(
   "/approve",
   catchAsyncErrors(async (req, res, next) => {
     const session = await mongoose.startSession();
-    session.startTransaction();
     try {
       const { orderId, force = false, forceReason = "" } = req.body;
       const actor = actorFromRequest(req);
@@ -497,18 +496,32 @@ router.post(
       // fingerprint + status flip) lives in services/orderService.js.
       // The route keeps only session lifecycle, HTTP shaping, and the
       // post-commit fire-and-forget notifications.
+      //
+      // withTransaction, not a hand-rolled startTransaction/commit pair:
+      // approving two different orders that draw on the same raw material
+      // makes their transactions collide on that material document, and
+      // Mongo resolves the collision by aborting one with a WriteConflict.
+      // Without the retry withTransaction provides, that surfaced to the
+      // user as a 500 on a perfectly valid approval — the busier the floor,
+      // the more often it fired. approveOrderTxn re-reads the order and
+      // every material from the session on entry, so a replay starts from
+      // clean state rather than compounding the aborted attempt's edits.
+      let txn;
+      await session.withTransaction(async () => {
+        txn = await approveOrderTxn(session, {
+          orderId, force, forceReason, actor,
+          whatsappActor: req.body?.whatsappActor,
+          userId:        req.user?._id,
+        });
+      });
+
       const {
         order, approveFp, deductionFingerprints, reservationFingerprints,
         stockoutSnapshots,
-      } = await approveOrderTxn(session, {
-        orderId, force, forceReason, actor,
-        whatsappActor: req.body?.whatsappActor,
-        userId:        req.user?._id,
-      });
+      } = txn;
 
-      await session.commitTransaction();
-      session.endSession();
-
+      // Responding and notifying only once the transaction has committed —
+      // inside the callback a retry would try to send the response twice.
       res.status(200).json({
         success:                 true,
         message:                 "Order approved, raw stock deducted, elastic stock reserved",
@@ -587,9 +600,10 @@ router.post(
         }
       })();
     } catch (error) {
-      await session.abortTransaction();
-      session.endSession();
+      // withTransaction has already aborted; only the session is ours to close.
       return next(error);
+    } finally {
+      session.endSession();
     }
   })
 );
