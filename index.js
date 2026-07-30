@@ -3,9 +3,17 @@ const connectDatabase = require('./db/Database');
 const path = require('path');
 
 // Handling uncaught Exception
+//
+// This used to log "shutting down the server" and then carry on running.
+// After an uncaught exception the process is in an undefined state —
+// a request may have been abandoned mid-transaction, a listener may be
+// half-registered — and serving traffic from it is worse than being down,
+// because the failure is silent. Exit non-zero and let systemd restart a
+// clean process (deploy/jarvis.service, Restart=on-failure).
 process.on("uncaughtException", (err) => {
-  console.log(`Error: ${err.message}`);
-  console.log(`shutting down the server for handling uncaught exception`);
+  console.error(`Uncaught exception: ${err?.message}`);
+  console.error(err?.stack);
+  process.exit(1);
 });
 
 // dotenv (idempotent — app.js already loads this on require, but keeping
@@ -40,12 +48,22 @@ const server = HOST
   ? app.listen(process.env.PORT, HOST, onListen)
   : app.listen(process.env.PORT, onListen);
 
-// unhandled promise rejection
+// unhandled promise rejection — drain in-flight requests, then exit so the
+// supervisor brings up a clean process.
 process.on("unhandledRejection", (err) => {
-  console.log(`Shutting down the server for ${err.message}`);
-  console.log(`shutting down the server for unhandle promise rejection`);
+  console.error(`Unhandled rejection: ${err?.message}`);
+  console.error(err?.stack);
+  server.close(() => process.exit(1));
+  // Don't hang forever if a keep-alive connection refuses to drain.
+  setTimeout(() => process.exit(1), 10_000).unref();
+});
 
-  server.close(() => {
-    process.exit(1);
-  });
+// SIGTERM is what systemd sends on `restart` and `stop`. Closing the
+// listener first lets in-flight requests finish instead of being cut off
+// mid-write — which matters here because several routes are partway
+// through a Mongo transaction at any given moment.
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received — draining connections");
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 10_000).unref();
 });

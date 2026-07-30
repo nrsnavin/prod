@@ -17,6 +17,15 @@
 Description=Jarvis ERP API
 After=network.target
 
+# systemd's defaults are StartLimitBurst=5 within StartLimitIntervalSec=10s.
+# With RestartSec=3 that budget is spent in well under a minute, so a
+# database outage longer than that used to leave the unit in `failed` state
+# permanently — needing a manual `systemctl reset-failed` even after the
+# database came back. Widening the window lets it keep retrying through a
+# replica-set election or a short network partition and recover on its own.
+StartLimitIntervalSec=300
+StartLimitBurst=30
+
 [Service]
 Type=simple
 User=ubuntu
@@ -28,8 +37,13 @@ EnvironmentFile=/home/ubuntu/prod/config/.env
 Environment=NODE_ENV=PRODUCTION
 Environment=HOST=127.0.0.1
 ExecStart=/usr/bin/node index.js
-Restart=on-failure
+# `always`, not `on-failure`: a clean exit(0) from an unexpected path is
+# still the service not running, which is the thing we care about.
+Restart=always
 RestartSec=3
+# Give in-flight requests time to drain on SIGTERM (index.js closes the
+# listener and waits) before systemd escalates to SIGKILL.
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target

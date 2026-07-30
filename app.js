@@ -191,11 +191,13 @@ app.get("/api/v2/health", (req, res) =>
 // rotation) so requests aren't sent to a box that's up but can't reach
 // Mongo. mongoose.connection.readyState === 1 means connected.
 app.get("/api/v2/health/ready", (req, res) => {
-  const state = mongoose.connection.readyState; // 0=disconnected 1=connected 2=connecting 3=disconnecting
-  const ready = state === 1;
-  res.status(ready ? 200 : 503).json({
-    status: ready ? "ready" : "not-ready",
-    db: ["disconnected", "connected", "connecting", "disconnecting"][state] || "unknown",
+  // Single source of truth for the readyState → label mapping (db/Database.js),
+  // so the probe and any other caller can never disagree about what "ready"
+  // means.
+  const { ok, state } = require("./db/Database").databaseHealth();
+  res.status(ok ? 200 : 503).json({
+    status: ok ? "ready" : "not-ready",
+    db: state,
   });
 });
 
