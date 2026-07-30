@@ -31,6 +31,54 @@ function clockToMinutes(timeStr) {
   return hours * 60 + minutes;
 }
 
+/** Both DAY and NIGHT run 12h, so efficiency is measured against 720 min. */
+const SHIFT_MINUTES = 720;
+
+/** How many past shifts the machine detail page shows. */
+const RECENT_SHIFT_LIMIT = 6;
+
+/**
+ * A shift's numbers before an admin verifies it live in the `submitted*`
+ * fields; only on verification are they cascaded into the canonical ones.
+ * Showing the canonical 0 for a shift the worker has already reported on
+ * makes the machine look idle, so fall back to what was submitted and let
+ * the row's `status` tell the reader it is not yet verified.
+ */
+function shiftFigures(shift) {
+  const verified = shift.status === "closed";
+  const timer =
+    !verified && shift.submittedTimer ? shift.submittedTimer : shift.timer;
+  const meters =
+    !verified && Number.isFinite(shift.submittedProductionMeters)
+      ? shift.submittedProductionMeters
+      : shift.productionMeters;
+  return { timer, meters: Number.isFinite(meters) ? meters : 0 };
+}
+
+/** Maps ShiftDetail documents to the rows the machine detail page renders. */
+function toShiftRows(shifts) {
+  return shifts.map((shift) => {
+    const { timer, meters } = shiftFigures(shift);
+    const runtimeMinutes = clockToMinutes(timer);
+    const efficiency =
+      runtimeMinutes > 0 ? Math.min(100, (runtimeMinutes / SHIFT_MINUTES) * 100) : 0;
+
+    return {
+      id:           shift._id,
+      date:         shift.date,
+      shift:        shift.shift,
+      status:       shift.status,
+      description:  shift.description || "",
+      feedback:     shift.feedback    || "",
+      // employee may be null if the operator was deleted since the shift ran
+      employee:     shift.employee?.name ?? "Unknown",
+      runtimeMinutes,
+      outputMeters: meters,
+      efficiency:   parseFloat(efficiency.toFixed(2)),
+    };
+  });
+}
+
 // ─────────────────────────────────────────────────────────────
 //  1.  CREATE MACHINE
 //      POST /machine/create-machine
@@ -205,42 +253,26 @@ router.get(
     if (!id) return next(new ErrorHandler("Machine id is required", 400));
 
     const machine = await Machine.findById(id)
-      .populate({
-        path: "shifts",
-        populate: [
-          { path: "employee", model: "Employee", select: "name" },
-        ],
-      })
       .populate("orderRunning", "jobOrderNo")
       .populate({ path: "elastics.elastic", model: "Elastic", select: "name" })
       .exec();
 
     if (!machine) return next(new ErrorHandler("Machine not found", 404));
 
-    // FIX: sort + limit AFTER populate (not inside populate options)
-    const sortedShifts = [...machine.shifts]
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-      .slice(0, 10);
+    // Read the shifts from ShiftDetail rather than the denormalised
+    // Machine.shifts array. Nothing ever wrote to that array — the
+    // shift-plan create path pushes only onto Employee.shifts, while the
+    // delete path prunes Machine.shifts — so it is empty for every machine
+    // and this table always came back blank. Querying the shift records
+    // themselves is also correct for all historical data with no backfill.
+    const recentShifts = await ShiftDetail.find({ machine: machine._id })
+      .sort({ date: -1, createdAt: -1 })
+      .limit(RECENT_SHIFT_LIMIT)
+      .populate({ path: "employee", model: "Employee", select: "name" })
+      .lean()
+      .exec();
 
-    const result = sortedShifts.map((shift) => {
-      const runtimeMinutes = clockToMinutes(shift.timer);
-      const efficiency     = runtimeMinutes > 0
-        ? Math.min(100, (runtimeMinutes / 720) * 100)
-        : 0;
-
-      return {
-        id:             shift._id,
-        date:           shift.date,
-        shift:          shift.shift,
-        description:    shift.description || "",
-        feedback:       shift.feedback    || "",
-        // FIX: shift.employee may be null if employee was deleted
-        employee:       shift.employee?.name ?? "Unknown",
-        runtimeMinutes,
-        outputMeters:   shift.production || 0,
-        efficiency:     parseFloat(efficiency.toFixed(2)),
-      };
-    });
+    const result = toShiftRows(recentShifts);
 
     res.status(200).json({
       success: true,

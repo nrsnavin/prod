@@ -119,4 +119,8 @@ const ShiftDetailSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Serves the machine detail page's "recent shifts" lookup
+// (find by machine, newest first) without a collection scan.
+ShiftDetailSchema.index({ machine: 1, date: -1 });
+
 module.exports = mongoose.model("ShiftDetail", ShiftDetailSchema);
