@@ -57,9 +57,54 @@ const RawMaterialSchema = new mongoose.Schema(
     stockMovements: {
       type: [StockMovementSchema],
       default: [],
+      // Excluded from every query unless asked for with select("+stockMovements").
+      // Mongo cannot return part of a document, so without this a list of 40
+      // materials drags 40 full movement histories across the wire — and the
+      // MRP, forecast and category pickers all list every material.
+      select: false,
     },
   },
   { timestamps: true }
 );
 
-module.exports = mongoose.model("RawMaterial", RawMaterialSchema);
+// ── Indexes ─────────────────────────────────────────────────────────
+// Materials are looked up by name (search, import matching) and grouped by
+// category (warp/weft/covering pickers on the MRP and job forms).
+RawMaterialSchema.index({ name: 1 });
+RawMaterialSchema.index({ category: 1, name: 1 });
+
+/**
+ * Cap on the embedded stockMovements ledger.
+ *
+ * This array is append-only and was unbounded: every order approval, cancel
+ * refund, inward and outward pushed a row onto the material document, so a
+ * material used by every order grew forever. Two problems, and the second
+ * arrives long before the first:
+ *
+ *   1. It marches toward MongoDB's 16 MB per-document limit, after which
+ *      every write to that material fails — including ones that have
+ *      nothing to do with stock.
+ *   2. Mongo has no way to read "part of" a document, so every load of the
+ *      material drags the whole history with it, and the whole document is
+ *      rewritten on each append.
+ *
+ * The authoritative history lives in the MaterialInward / MaterialOutward
+ * collections — which is what the stock-movements report actually reads —
+ * so this array is a convenience tail, not a system of record. The detail
+ * endpoint already only ever displays the newest 50.
+ */
+const MAX_EMBEDDED_MOVEMENTS = 500;
+
+RawMaterialSchema.pre("save", function trimStockMovements(next) {
+  const moves = this.stockMovements;
+  if (Array.isArray(moves) && moves.length > MAX_EMBEDDED_MOVEMENTS) {
+    // Keep the newest; entries are appended in chronological order.
+    this.stockMovements = moves.slice(-MAX_EMBEDDED_MOVEMENTS);
+  }
+  next();
+});
+
+const RawMaterial = mongoose.model("RawMaterial", RawMaterialSchema);
+
+module.exports = RawMaterial;
+module.exports.MAX_EMBEDDED_MOVEMENTS = MAX_EMBEDDED_MOVEMENTS;

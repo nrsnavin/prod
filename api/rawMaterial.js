@@ -13,6 +13,7 @@ const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
+const { appendStockMovement } = require("../utils/stockLedger");
 const {
   maybeFireCriticalStockout,
   maybeFirePriceChangeAlert,
@@ -81,6 +82,9 @@ router.get(
     if (!id) return next(new ErrorHandler("Material ID required", 400));
 
     const material = await RawMaterial.findById(id)
+      // stockMovements is select:false on the schema — this detail view is
+      // the one place that wants it, and it trims to the newest 50 below.
+      .select("+stockMovements")
       .populate("supplier", "name phone email")
       .populate("stockMovements.order", "orderNo")
       .lean();
@@ -296,13 +300,12 @@ router.post(
 
     const _stockBefore = Number(material.stock) || 0;
     material.stock += qtyNum;
-    material.stockMovements.push({
-      date:     new Date(),
+    await material.save();
+    await appendStockMovement(material._id, {
       type:     "PO_INWARD",
       quantity: qtyNum,
       balance:  material.stock,
     });
-    await material.save();
 
     const inward = await MaterialInward.create({
       rawMaterial:   rawMaterialId,
@@ -421,14 +424,13 @@ router.post(
             const newStock = Math.max(0, oldStock + item.adjustment);
             material.stock = newStock;
 
+            await material.save({ session });
             // Running balance log
-            material.stockMovements.push({
-              date:     new Date(),
+            await appendStockMovement(material._id, {
               type:     "STOCK_ADJUST",
               quantity: item.adjustment,
               balance:  newStock,
-            });
-            await material.save({ session });
+            }, session);
 
             const reason = item.reason?.trim() || globalReason;
 
@@ -588,7 +590,7 @@ router.get(
     const since = new Date(now.getTime() - lookbackDays * 86_400_000);
 
     const [materials, consumptionAgg, openOrders] = await Promise.all([
-      RawMaterial.find({}).populate("supplier", "name").lean(),
+      RawMaterial.find({}).select("-stockMovements").populate("supplier", "name").lean(),
       MaterialOutward.aggregate([
         { $match: { type: "ORDER_APPROVAL", reversed: { $ne: true }, createdAt: { $gte: since } } },
         { $group: { _id: "$rawMaterial", used: { $sum: "$quantity" } } },

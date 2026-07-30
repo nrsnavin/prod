@@ -154,6 +154,9 @@ describe("GET /api/v2/materials/get-raw-material-detail", () => {
 
   it("returns 404 when material is not found", async () => {
     const chain = {
+      // stockMovements is select:false on the schema, so the route asks for
+      // it back explicitly — the double has to offer the same chain.
+      select:   jest.fn().mockReturnThis(),
       populate: jest.fn().mockReturnThis(),
       lean:     jest.fn().mockResolvedValue(null),
     };
@@ -166,6 +169,7 @@ describe("GET /api/v2/materials/get-raw-material-detail", () => {
   it("returns 200 with material and history", async () => {
     const mat = { ...fakeMaterial(), stockMovements: [], inwards: [], outwards: [] };
     const chain = {
+      select:   jest.fn().mockReturnThis(),
       populate: jest.fn().mockReturnThis(),
       lean:     jest.fn().mockResolvedValue(mat),
     };

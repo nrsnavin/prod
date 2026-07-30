@@ -20,6 +20,7 @@ const Elastic        = require('../models/Elastic');
 const MaterialOutward = require('../models/MaterialOut.cjs');
 const { buildFingerprint, ACTION_CODES } = require('../utils/fingerprint');
 const { applyMovement } = require('../utils/elasticStock');
+const { appendStockMovement } = require('../utils/stockLedger');
 
 // Approve an Open order inside a transaction: pre-flight stock check,
 // (optional) forced-override fingerprint, raw-material deduction +
@@ -117,11 +118,11 @@ async function approveOrderTxn(session, {
       newStock:   Number(material.stock),
     });
     material.totalConsumption = (material.totalConsumption || 0) + applied;
-    material.stockMovements?.push({
-      date: new Date(), type: 'ORDER_APPROVAL', order: order._id,
-      quantity: applied, balance: material.stock,
-    });
     await material.save({ session });
+    await appendStockMovement(material._id, {
+      type: 'ORDER_APPROVAL', order: order._id,
+      quantity: applied, balance: material.stock,
+    }, session);
     await MaterialOutward.create([{
       rawMaterial: rm.rawMaterial,
       quantity:    applied,

@@ -14,6 +14,7 @@ const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/f
 const { requireReason } = require("../utils/auditReason.js");
 const { assertVersion } = require("../utils/versioning.js");
 const { applyMovement } = require("../utils/elasticStock.js");
+const { appendStockMovement } = require("../utils/stockLedger.js");
 const { estimateOrderEta } = require("../utils/orderEta.js");
 const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
@@ -142,14 +143,13 @@ async function _refundRawMaterialsForOrder(session, order, actor, userObjectId) 
       0,
       (Number(material.totalConsumption) || 0) - qty
     );
-    material.stockMovements?.push({
-      date:     new Date(),
+    await material.save({ session });
+    await appendStockMovement(material._id, {
       type:     "ORDER_CANCEL_REFUND",
       order:    order._id,
       quantity: qty,
       balance:  material.stock,
-    });
-    await material.save({ session });
+    }, session);
 
     // Mark the outward row as reversed so audit + the dedupe filter
     // above stay self-consistent. The original outward stays in
@@ -204,12 +204,43 @@ router.get(
     // "All" (case-insensitive) lists every order regardless of status;
     // any other value filters to that exact status.
     const filter = String(status).toLowerCase() === "all" ? {} : { status };
-    const orders = await Order.find(filter)
-      .populate("customer",  "name")
-      .populate("createdBy", "name role")
-      .populate("updatedBy", "name role")
-      .sort({ createdAt: -1 });
-    res.status(200).json({ success: true, orders });
+
+    // Paginated. This route used to return every order ever placed, fully
+    // hydrated into mongoose documents and sorted in memory — the one list
+    // endpoint in the app that did (jobs, elastics and materials all page).
+    // The sort was the sharp edge: on an unindexed field Mongo caps an
+    // in-memory sort at 32 MB and then errors outright, so the order list
+    // would have stopped working rather than merely slowed down.
+    // The default is deliberately generous rather than small: the mobile app
+    // reads `orders` without paging, so a tight default would silently hide
+    // rows from it. 200 keeps every existing caller whole in practice while
+    // removing the unbounded case, and the new index makes the page cheap.
+    const page  = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(Math.max(1, Number(req.query.limit) || 200), 500);
+
+    const [orders, total] = await Promise.all([
+      Order.find(filter)
+        .populate("customer",  "name")
+        .populate("createdBy", "name role")
+        .populate("updatedBy", "name role")
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        // .lean(): these are read straight to JSON, so paying for full
+        // document hydration bought nothing.
+        .lean(),
+      Order.countDocuments(filter),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      orders,
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      hasMore: page * limit < total,
+    });
   })
 );
 
@@ -411,22 +442,34 @@ router.get(
       return { ...ref, elasticSummary };
     });
 
-    const liveRawMaterials = await Promise.all(
-      order.rawMaterialRequired.map(async (rm) => {
-        const mat = await RawMaterial.findById(rm.rawMaterial)
-          .select("name stock unit")
-          .lean();
-        const inStock = mat?.stock ?? 0;
-        return {
-          rawMaterial:     rm.rawMaterial,
-          name:            mat?.name ?? rm.name ?? "—",
-          unit:            mat?.unit ?? "kg",
-          requiredWeight:  rm.requiredWeight,
-          inStock,
-          stockSufficient: inStock >= rm.requiredWeight,
-        };
-      })
+    // One query for every material on the order, not one per material. This
+    // was a findById inside a map — an order with 20 materials opened 20
+    // connections and paid 20 round trips to render one page.
+    const requirementIds = (order.rawMaterialRequired || [])
+      .map((rm) => rm.rawMaterial)
+      .filter(Boolean);
+    const materialsById = new Map(
+      (await RawMaterial.find({ _id: { $in: requirementIds } })
+        .select("name stock unit")
+        .lean()
+      ).map((m) => [String(m._id), m])
     );
+
+    const liveRawMaterials = (order.rawMaterialRequired || []).map((rm) => {
+      const mat = materialsById.get(String(rm.rawMaterial));
+      // A deleted material is reported as absent rather than as zero stock:
+      // see utils/materialRequirement.js — "0 in stock" and "we no longer
+      // know" look identical on screen but mean very different things.
+      const inStock = mat?.stock ?? 0;
+      return {
+        rawMaterial:     rm.rawMaterial,
+        name:            mat?.name ?? rm.name ?? "—",
+        unit:            mat?.unit ?? "kg",
+        requiredWeight:  rm.requiredWeight,
+        inStock,
+        stockSufficient: inStock >= rm.requiredWeight,
+      };
+    });
 
     const canApprove = order.status === "Open"
       ? liveRawMaterials.every((m) => m.stockSufficient)

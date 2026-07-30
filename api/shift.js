@@ -812,6 +812,7 @@ router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, re
     });
 
     const detailIds = [];
+    const detailByOperator = [];
     for (const m of machines) {
       if (!m.machine || !m.operator) continue;
 
@@ -833,15 +834,22 @@ router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, re
       });
 
       detailIds.push(detail._id);
+      // Pair the shift with the operator who is actually working it.
+      detailByOperator.push({ operator: m.operator, detailId: detail._id });
     }
 
     await ShiftPlan.findByIdAndUpdate(shiftPlan._id, { $push: { plan: { $each: detailIds } } });
 
-    for (const m of machines) {
-      if (m.operator) {
-        await Employee.findByIdAndUpdate(m.operator, { $push: { shifts: { $each: detailIds } } });
-      }
-    }
+    // Each operator gets only their own shift. This used to push the whole
+    // plan's detailIds to every operator, so one worker's `shifts` array
+    // accumulated every machine's shift for that day — inflating
+    // totalShifts on the employee page and growing each employee document
+    // by the size of the entire plan, daily.
+    await Promise.all(
+      detailByOperator.map(({ operator, detailId }) =>
+        Employee.findByIdAndUpdate(operator, { $push: { shifts: detailId } })
+      )
+    );
 
     return res.status(201).json({
       success: true, shiftPlanId: shiftPlan._id, status: 'draft',

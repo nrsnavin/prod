@@ -117,4 +117,29 @@ const OrderSchema = new mongoose.Schema(
 
 OrderSchema.plugin(AutoIncrement, { inc_field: "orderNo" });
 
+// ── Indexes ─────────────────────────────────────────────────────────
+// This collection had none, so every screen that lists orders was a full
+// collection scan followed by an in-memory sort. The sort is the part that
+// bites first: without an index Mongo caps it at 32 MB and then *errors*
+// ("Sort exceeded memory limit") rather than degrading, so the order list
+// stops working outright once the collection outgrows that.
+
+// The order list: filter by status, newest first. Compound and in that
+// order so the same index serves both the filter and the sort.
+OrderSchema.index({ status: 1, createdAt: -1 });
+
+// "All orders", newest first — the unfiltered variant of the same screen.
+OrderSchema.index({ createdAt: -1 });
+
+// Customer detail page: this customer's orders, newest first.
+OrderSchema.index({ customer: 1, createdAt: -1 });
+
+// Lookup by human-facing number (WhatsApp commands, search). Unique because
+// mongoose-sequence is meant to guarantee it — this makes the database
+// enforce it too, so a duplicate fails loudly instead of quietly existing.
+OrderSchema.index({ orderNo: 1 }, { unique: true, sparse: true });
+
+// Delivery-schedule views: what is due, soonest first, within a status.
+OrderSchema.index({ status: 1, supplyDate: 1 });
+
 module.exports = mongoose.model("Order", OrderSchema);
