@@ -29,6 +29,7 @@ const multer = require("multer");
 const { buildShiftSheetPdf, shortCode } = require("../utils/shiftSheetPdf");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
+const { totalMeters } = require("../utils/shiftFigures");
 
 // Scanned 200-machine sheets run ~19 pages; allow up to 25 MB in memory.
 const sheetUpload = multer({
@@ -47,11 +48,18 @@ function normDate(raw) {
 // Imported at the top of this file; re-exported as router.applyProductionCascade
 // below for the characterization test and any external caller.
 
+// Summary of the day and night plan for a date. `?date=` makes this work
+// for any day (the shift-plans page browses past and future dates with it);
+// with no date it means today, which is what every existing caller does.
 router.get(
   "/today",
   isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
-    const today    = normDate(new Date());
+    const raw = req.query.date;
+    if (raw && Number.isNaN(new Date(raw).getTime())) {
+      return next(new ErrorHandler("date is not a valid date", 400));
+    }
+    const today    = normDate(raw ? new Date(raw) : new Date());
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
@@ -78,9 +86,11 @@ router.get(
         };
       }
 
-      const production = shift.plan.reduce(
-        (sum, d) => sum + (d.production || 0), 0
-      );
+      // `d.production` is not a field on ShiftDetail — it is
+      // `productionMeters` — so this used to sum a column of undefined and
+      // report 0 metres for every shift, however busy. See
+      // utils/shiftFigures.js, which the machine detail page shares.
+      const production = totalMeters(shift.plan);
       const uniqueOperators = new Set(
         shift.plan.filter((d) => d.employee).map((d) => d.employee._id.toString())
       );
@@ -96,6 +106,7 @@ router.get(
     res.json({
       success: true,
       data: {
+        date:       today,
         dayShift:   buildShiftData("DAY"),
         nightShift: buildShiftData("NIGHT"),
       },

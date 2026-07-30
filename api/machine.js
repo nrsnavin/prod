@@ -11,6 +11,9 @@ const ShiftDetail      = require("../models/ShiftDetail");
 const MachineIssue     = require("../models/MachineIssue");
 const Machine          = require("../models/Machine");
 const MachineServiceBill = require("../models/MachineServiceBill");
+// Reading metres/timer off a ShiftDetail — shared with the shift-plan
+// summary, which had its own (wrong) copy. See utils/shiftFigures.js.
+const { shiftFigures, clockToMinutes, SHIFT_MINUTES } = require("../utils/shiftFigures");
 const { notify }       = require("../utils/notify");
 const { actorFromRequest } = require("../utils/fingerprint");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
@@ -19,22 +22,9 @@ const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 //  HELPERS
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Convert "HH:MM" timer string → total minutes.
- * FIX: original parseClockTimeToMinutes() returned NaN for
- *      null/undefined input on some Node versions because
- *      "".split(":").map(Number) → [NaN]. Added null guard.
- */
-function clockToMinutes(timeStr) {
-  if (!timeStr || typeof timeStr !== "string") return 0;
-  const parts   = timeStr.split(":").map(Number);
-  const hours   = Number.isFinite(parts[0]) ? parts[0] : 0;
-  const minutes = Number.isFinite(parts[1]) ? parts[1] : 0;
-  return hours * 60 + minutes;
-}
-
-/** Both DAY and NIGHT run 12h, so efficiency is measured against 720 min. */
-const SHIFT_MINUTES = 720;
+// clockToMinutes / shiftFigures / SHIFT_MINUTES now live in
+// utils/shiftFigures.js — the shift-plan summary needs the same reading of
+// a ShiftDetail, and it had its own (wrong) copy. Imported at the top.
 
 // ── Service / spare bill uploads ────────────────────────────────────
 const { BILL_KINDS, ALLOWED_CONTENT_TYPES, MAX_FILE_BYTES } = MachineServiceBill;
@@ -70,24 +60,6 @@ const BILL_METADATA = "-data";
 
 /** How many past shifts the machine detail page shows. */
 const RECENT_SHIFT_LIMIT = 6;
-
-/**
- * A shift's numbers before an admin verifies it live in the `submitted*`
- * fields; only on verification are they cascaded into the canonical ones.
- * Showing the canonical 0 for a shift the worker has already reported on
- * makes the machine look idle, so fall back to what was submitted and let
- * the row's `status` tell the reader it is not yet verified.
- */
-function shiftFigures(shift) {
-  const verified = shift.status === "closed";
-  const timer =
-    !verified && shift.submittedTimer ? shift.submittedTimer : shift.timer;
-  const meters =
-    !verified && Number.isFinite(shift.submittedProductionMeters)
-      ? shift.submittedProductionMeters
-      : shift.productionMeters;
-  return { timer, meters: Number.isFinite(meters) ? meters : 0 };
-}
 
 /** Maps ShiftDetail documents to the rows the machine detail page renders. */
 function toShiftRows(shifts) {
