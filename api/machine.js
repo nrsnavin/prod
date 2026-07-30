@@ -4,11 +4,13 @@ const express = require("express");
 const router  = express.Router();
 
 const mongoose         = require("mongoose");
+const multer           = require("multer");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const ShiftDetail      = require("../models/ShiftDetail");
 const MachineIssue     = require("../models/MachineIssue");
 const Machine          = require("../models/Machine");
+const MachineServiceBill = require("../models/MachineServiceBill");
 const { notify }       = require("../utils/notify");
 const { actorFromRequest } = require("../utils/fingerprint");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
@@ -33,6 +35,38 @@ function clockToMinutes(timeStr) {
 
 /** Both DAY and NIGHT run 12h, so efficiency is measured against 720 min. */
 const SHIFT_MINUTES = 720;
+
+// ── Service / spare bill uploads ────────────────────────────────────
+const { BILL_KINDS, ALLOWED_CONTENT_TYPES, MAX_FILE_BYTES } = MachineServiceBill;
+
+// Held in memory then written to the bill document as a data URL; multer's
+// own limit is the first line of defence so an oversized file is rejected
+// before it is ever fully buffered.
+const billUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_BYTES, files: 1 },
+});
+
+/**
+ * multer surfaces its size/count limits as a MulterError, which the generic
+ * error handler would report as a 500. Turn them into the 400s they are.
+ */
+function handleBillUpload(req, res, next) {
+  billUpload.single("file")(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      const message =
+        err.code === "LIMIT_FILE_SIZE"
+          ? `File is too large — the limit is ${Math.round(MAX_FILE_BYTES / (1024 * 1024))} MB.`
+          : `Upload rejected: ${err.message}`;
+      return next(new ErrorHandler(message, 400));
+    }
+    return next(err);
+  });
+}
+
+/** Strips the file payload; every listing returns metadata only. */
+const BILL_METADATA = "-data";
 
 /** How many past shifts the machine detail page shows. */
 const RECENT_SHIFT_LIMIT = 6;
@@ -274,6 +308,23 @@ router.get(
 
     const result = toShiftRows(recentShifts);
 
+    // How many bills each service log carries, and what they add up to, so
+    // the history renders in one request instead of one per log. The files
+    // themselves are fetched only when a bill is actually opened.
+    const billRollup = await MachineServiceBill.aggregate([
+      { $match: { machine: machine._id } },
+      {
+        $group: {
+          _id:    "$serviceLog",
+          count:  { $sum: 1 },
+          amount: { $sum: { $ifNull: ["$amount", 0] } },
+        },
+      },
+    ]);
+    const billsByLog = new Map(
+      billRollup.map((b) => [String(b._id), { count: b.count, amount: b.amount }])
+    );
+
     res.status(200).json({
       success: true,
       machine: {
@@ -301,7 +352,11 @@ router.get(
           : null,
         result,
         serviceLogs:  [...machine.serviceLogs]
-          .sort((a, b) => new Date(b.date) - new Date(a.date)),
+          .sort((a, b) => new Date(b.date) - new Date(a.date))
+          .map((log) => {
+            const bills = billsByLog.get(String(log._id)) ?? { count: 0, amount: 0 };
+            return { ...log.toObject(), billCount: bills.count, billTotal: bills.amount };
+          }),
       },
     });
   })
@@ -497,7 +552,10 @@ router.patch(
 //    technician:      "Rajan Kumar",        (optional)
 //    cost:            1500,                  (optional, default 0)
 //    nextServiceDate: "2026-06-15",          (optional ISO string)
-//    resolved:        true                   (optional, default true)
+//    resolved:        true,                  (optional, default true)
+//    setMaintenance:  true                   (optional — take the machine
+//                                             off the floor in the same
+//                                             action; see below)
 //  }
 // ─────────────────────────────────────────────────────────────
 router.post(
@@ -511,6 +569,7 @@ router.post(
       cost         = 0,
       nextServiceDate,
       resolved     = true,
+      setMaintenance = false,
     } = req.body;
 
     if (!machineId)   return next(new ErrorHandler("machineId is required", 400));
@@ -539,17 +598,200 @@ router.post(
     };
 
     machine.serviceLogs.push(log);
+
+    // Taking the machine in for service is one action, not two: recording
+    // the job and pulling the machine off the floor happen together, in a
+    // single save, so the machine can never be left running against a log
+    // that says it is stripped down.
+    //
+    // A machine mid-job is deliberately NOT pulled — its job would be left
+    // pointing at a machine that is out of service. The caller has to stop
+    // the job first, and gets told so.
+    const wantsMaintenance =
+      setMaintenance === true || setMaintenance === "true";
+    let statusChanged = false;
+
+    if (wantsMaintenance && machine.status !== "maintenance") {
+      if (machine.status === "running") {
+        return next(
+          new ErrorHandler(
+            "This machine is running a job. Stop the job before sending it for service.",
+            409
+          )
+        );
+      }
+      machine.status = "maintenance";
+      statusChanged = true;
+    }
+
     await machine.save();
 
     const saved = machine.serviceLogs[machine.serviceLogs.length - 1];
 
-    console.log(`[machine/add-service-log] ${machine.ID}: ${type} log added`);
+    console.log(
+      `[machine/add-service-log] ${machine.ID}: ${type} log added` +
+        (statusChanged ? " → sent to maintenance" : "")
+    );
+
+    // No machineBreakdown notification here on purpose. That alert exists to
+    // flag an *unplanned* stoppage; work booked through this endpoint is
+    // planned by definition, which is exactly the case /status already
+    // suppresses by looking for a recent service log.
 
     res.status(201).json({
       success: true,
       log: saved,
       totalLogs: machine.serviceLogs.length,
+      status: machine.status,
+      statusChanged,
     });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  SERVICE & SPARE BILLS
+//
+//  POST   /machine/service-bill            (multipart, field "file")
+//  GET    /machine/service-bills?machineId=&serviceLogId=
+//  GET    /machine/service-bill/:id/file   download / inline view
+//  DELETE /machine/service-bill/:id
+// ─────────────────────────────────────────────────────────────
+
+/** Resolves the machine + service log a bill is being filed against. */
+async function findServiceLog(machineId, serviceLogId) {
+  if (!mongoose.isValidObjectId(machineId)) {
+    throw new ErrorHandler("A valid machineId is required", 400);
+  }
+  if (!mongoose.isValidObjectId(serviceLogId)) {
+    throw new ErrorHandler("A valid serviceLogId is required", 400);
+  }
+  const machine = await Machine.findById(machineId);
+  if (!machine) throw new ErrorHandler("Machine not found", 404);
+
+  const log = machine.serviceLogs.id(serviceLogId);
+  if (!log) throw new ErrorHandler("Service log not found on this machine", 404);
+
+  return { machine, log };
+}
+
+router.post(
+  "/service-bill",
+  handleBillUpload,
+  catchAsyncErrors(async (req, res, next) => {
+    const { machineId, serviceLogId, kind, amount, vendor, billNo, billDate, partName, notes } =
+      req.body;
+
+    if (!req.file) {
+      return next(new ErrorHandler('No file uploaded (field name must be "file").', 400));
+    }
+    if (!BILL_KINDS.includes(kind)) {
+      return next(
+        new ErrorHandler(`kind must be one of: ${BILL_KINDS.join(", ")}`, 400)
+      );
+    }
+    if (!ALLOWED_CONTENT_TYPES.includes(req.file.mimetype)) {
+      return next(
+        new ErrorHandler(
+          `Unsupported file type "${req.file.mimetype}". Upload a PDF or a photo.`,
+          400
+        )
+      );
+    }
+
+    const { machine } = await findServiceLog(machineId, serviceLogId);
+
+    const bill = await MachineServiceBill.create({
+      machine:     machine._id,
+      serviceLog:  serviceLogId,
+      kind,
+      filename:    req.file.originalname || "",
+      contentType: req.file.mimetype,
+      size:        req.file.size,
+      data:        `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`,
+      amount:      Number(amount) > 0 ? Number(amount) : 0,
+      vendor:      vendor   || "",
+      billNo:      billNo   || "",
+      billDate:    billDate ? new Date(billDate) : null,
+      partName:    partName || "",
+      notes:       notes    || "",
+      uploadedBy:  req.user?._id ?? null,
+    });
+
+    // Echo without the payload — the client already has the file.
+    const { data: _omit, ...meta } = bill.toObject();
+
+    res.status(201).json({ success: true, bill: meta });
+  })
+);
+
+router.get(
+  "/service-bills",
+  catchAsyncErrors(async (req, res, next) => {
+    const { machineId, serviceLogId } = req.query;
+    if (!mongoose.isValidObjectId(machineId)) {
+      return next(new ErrorHandler("A valid machineId is required", 400));
+    }
+
+    const filter = { machine: machineId };
+    // Optional: without it, every bill for the machine comes back.
+    if (serviceLogId) {
+      if (!mongoose.isValidObjectId(serviceLogId)) {
+        return next(new ErrorHandler("A valid serviceLogId is required", 400));
+      }
+      filter.serviceLog = serviceLogId;
+    }
+
+    const bills = await MachineServiceBill.find(filter)
+      .select(BILL_METADATA)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({
+      success: true,
+      count: bills.length,
+      totalAmount: bills.reduce((sum, b) => sum + (b.amount || 0), 0),
+      bills,
+    });
+  })
+);
+
+router.get(
+  "/service-bill/:id/file",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return next(new ErrorHandler("A valid bill id is required", 400));
+    }
+
+    const bill = await MachineServiceBill.findById(id).lean();
+    if (!bill) return next(new ErrorHandler("Bill not found", 404));
+
+    // Stored as data:<mime>;base64,<payload> — send back the bytes.
+    const base64 = String(bill.data).split(",")[1] ?? "";
+    const buffer = Buffer.from(base64, "base64");
+
+    // `inline` so a PDF or photo opens in the browser's viewer rather than
+    // dropping into Downloads; the filename is still used if it is saved.
+    const safeName = (bill.filename || `bill-${bill._id}`).replace(/["\\\r\n]/g, "");
+    res.setHeader("Content-Type", bill.contentType);
+    res.setHeader("Content-Length", buffer.length);
+    res.setHeader("Content-Disposition", `inline; filename="${safeName}"`);
+    res.send(buffer);
+  })
+);
+
+router.delete(
+  "/service-bill/:id",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return next(new ErrorHandler("A valid bill id is required", 400));
+    }
+
+    const bill = await MachineServiceBill.findByIdAndDelete(id);
+    if (!bill) return next(new ErrorHandler("Bill not found", 404));
+
+    res.json({ success: true, id });
   })
 );
 
