@@ -50,9 +50,57 @@ describe('dcToContext', () => {
     expect(ctx.fields.companyName).toBe('Balu Elastics');
     expect(ctx.fields.docNo).toBe('DC/2026/0042');
     expect(ctx.fields.partyName).toBe('Sunrise Garments');
-    expect(ctx.fields.totalAmount).toBe('₹45,750');
     expect(ctx.rows).toHaveLength(2);
-    expect(ctx.rows[0]).toMatchObject({ sno: 1, qty: 500, amount: 21000 });
+    expect(ctx.rows[0]).toMatchObject({ sno: 1, qty: 500 });
+  });
+
+  // A delivery challan accompanies goods; it is not a tax invoice. Putting a
+  // value on one invites it being treated as an invoice, so the context does
+  // not carry money at all — a template cannot bind it even by hand.
+  test('carries no price anywhere', () => {
+    const { dcToContext } = require('../../services/pdf/dcContext.js');
+    const ctx = dcToContext(dc.toObject(), { company: 'Balu Elastics' });
+
+    expect(ctx.fields.totalAmount).toBeUndefined();
+    for (const row of ctx.rows) {
+      expect(row.rate).toBeUndefined();
+      expect(row.amount).toBeUndefined();
+    }
+    // Nothing money-shaped slipped in under another name either.
+    const moneyish = Object.entries(ctx.fields)
+      .filter(([k, v]) => /rate|amount|price|value/i.test(k) || String(v).includes('\u20B9'));
+    expect(moneyish).toEqual([]);
+  });
+
+  test('reports quantity and line count, which is what a challan totals', () => {
+    const { dcToContext } = require('../../services/pdf/dcContext.js');
+    const ctx = dcToContext(dc.toObject(), {});
+    expect(ctx.fields.totalQty).toBe('950');
+    expect(ctx.fields.lineCount).toBe('2');
+  });
+});
+
+describe('delivery-challan template', () => {
+  const { getDocType, starterTemplate } = require('../../services/pdf/docTypes.js');
+
+  test('offers no money column or bindable money field', () => {
+    const dcType = getDocType('delivery-challan');
+    expect(dcType.columns.map((c) => c.field)).toEqual(['sno', 'description', 'unit', 'qty']);
+    expect(dcType.columns.some((c) => c.format === 'currency')).toBe(false);
+    expect(dcType.fields.map((f) => f.key)).not.toContain('totalAmount');
+  });
+
+  test('leaves the purchase order priced — it is a commercial document', () => {
+    const po = getDocType('purchase-order');
+    expect(po.columns.map((c) => c.field)).toContain('rate');
+    expect(po.columns.map((c) => c.field)).toContain('amount');
+  });
+
+  test('its starter binds nothing that no longer exists', () => {
+    const { elements } = starterTemplate('delivery-challan');
+    const bound = elements.filter((e) => e.type === 'field').map((e) => e.field);
+    const available = new Set(getDocType('delivery-challan').fields.map((f) => f.key));
+    expect(bound.filter((b) => !available.has(b))).toEqual([]);
   });
 });
 

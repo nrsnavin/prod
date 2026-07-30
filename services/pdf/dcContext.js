@@ -16,10 +16,6 @@ function fmtDate(d) {
   return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-function inr(n) {
-  return "₹" + Math.round(Number(n) || 0).toLocaleString("en-IN");
-}
-
 function dcToContext(dc, branding = {}) {
   const items = Array.isArray(dc.items) ? dc.items : [];
   return {
@@ -40,9 +36,14 @@ function dcToContext(dc, branding = {}) {
       partyAddress: dc.customerAddress || "",
       partyGstin: dc.customerGstin ? `GSTIN: ${dc.customerGstin}` : "",
       // ── totals ──
+      //
+      // Quantity only. A delivery challan accompanies goods; it is not a
+      // tax invoice, and putting a value on it invites it being treated as
+      // one. Rate and amount are deliberately absent from this context, so
+      // a template cannot bind them even by hand.
       totalQty: `${Number(dc.totalQuantity || 0).toLocaleString("en-IN")}`,
-      totalAmount: inr(dc.totalAmount),
-      // ── transport (available to bind if the template wants it) ──
+      lineCount: String(items.length),
+      // ── transport ──
       vehicleNo: dc.vehicleNo || "",
       transporter: dc.transporter || "",
       lrNumber: dc.lrNumber || "",
@@ -56,8 +57,9 @@ function dcToContext(dc, branding = {}) {
       description: it.elasticName || it.description || (it.elastic && it.elastic.name) || "—",
       unit: it.unit || "",
       qty: Number(it.quantity || 0),
-      rate: Number(it.rate || 0),
-      amount: Number(it.amount || 0),
+      // `rate` and `amount` are not carried. The DC document still stores
+      // them (the create form captures a value), but they are not part of
+      // what a challan presents.
     })),
   };
 }
