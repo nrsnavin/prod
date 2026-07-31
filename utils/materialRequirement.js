@@ -18,6 +18,10 @@
 
 const Elastic     = require("../models/Elastic.js");
 const RawMaterial = require("../models/RawMaterial.js");
+// Required for its side effect: populating `supplier` below needs the
+// model registered, and this module is loaded by callers (the MRP unit
+// tests among them) that have no other reason to pull Supplier in.
+require("../models/Supplier.js");
 
 // lines: [{ elastic: ObjectId|string, quantity: Number(metres) }]
 // Returns: [{ rawMaterial, name, category, requiredWeight, inStock,
@@ -49,7 +53,11 @@ async function computeMaterialRequirement(lines = []) {
   }
   const materials = refIds.length
     ? await RawMaterial.find({ _id: { $in: [...new Set(refIds)] } })
-        .select("name category stock price").lean()
+        // supplier comes along so a shortfall can be turned straight into
+        // a purchase order without a second round of lookups.
+        .select("name category stock price supplier")
+        .populate("supplier", "name")
+        .lean()
     : [];
   const matById = new Map(materials.map((m) => [String(m._id), m]));
 
@@ -73,6 +81,8 @@ async function computeMaterialRequirement(lines = []) {
         // false when the material could not be resolved — the stock figure
         // is a placeholder, not a real reading.
         stockKnown:     !!m,
+        supplierId:     m?.supplier?._id ? String(m.supplier._id) : null,
+        supplierName:   m?.supplier?.name || "",
       });
     }
     rawMap.get(key).requiredWeight += weightKg;
