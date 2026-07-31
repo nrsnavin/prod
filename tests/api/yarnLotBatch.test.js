@@ -1103,7 +1103,7 @@ describe('the lot register', () => {
   });
 
   it('opens a lot by hand for yarn already on the rack', async () => {
-    const material = await makeMaterial();
+    const material = await makeMaterial({ stock: 100 });
     const res = await request(app).post('/api/v2/yarn-lots/create')
       .set('Cookie', adminCookie())
       .send({ rawMaterial: String(material._id), lotNo: 'LEGACY-1', quantity: 75, shade: 'Black' });
@@ -1119,5 +1119,115 @@ describe('the lot register', () => {
       .set('Cookie', adminCookie())
       .send({ rawMaterial: String(material._id), lotNo: 'X-1', quantity: 0 });
     expect(res.status).toBe(400);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  A lot may only be opened against stock that exists
+// ══════════════════════════════════════════════════════════════════
+describe('opening a lot by hand', () => {
+  const open = (material, quantity, lotNo = 'H-1') =>
+    request(app).post('/api/v2/yarn-lots/create')
+      .set('Cookie', adminCookie())
+      .send({ rawMaterial: String(material._id), lotNo, quantity });
+
+  it('refuses more than the material actually holds', async () => {
+    // Free-text quantities let a material holding 10 carry a lot
+    // claiming 500, and every screen downstream read that as fact.
+    const material = await makeMaterial({ stock: 10 });
+    const res = await open(material, 500);
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/Only 10 of Nylon 70D is not yet assigned/i);
+    expect(await YarnLot.countDocuments({})).toBe(0);
+  });
+
+  it('takes exactly what is left unassigned', async () => {
+    const material = await makeMaterial({ stock: 100 });
+    const res = await open(material, 100);
+    expect(res.status).toBe(201);
+  });
+
+  it('counts stock already sitting in another lot as assigned', async () => {
+    const material = await makeMaterial({ stock: 100 });
+    await makeLot(material, { lotNo: 'D-1', receivedQty: 70 });
+
+    const tooMuch = await open(material, 50);
+    expect(tooMuch.status).toBe(400);
+    expect(tooMuch.body.message).toMatch(/Only 30 /);
+
+    const fits = await open(material, 30, 'H-2');
+    expect(fits.status).toBe(201);
+  });
+
+  it('frees up what a lot has already been drawn down by', async () => {
+    // 100 received, 60 issued — the lot only stands on the 40 still in it.
+    const material = await makeMaterial({ stock: 100 });
+    await makeLot(material, { lotNo: 'D-1', receivedQty: 100, consumedQty: 60 });
+
+    const res = await open(material, 60, 'H-2');
+    expect(res.status).toBe(201);
+  });
+
+  it('ignores an exhausted lot, which stands on nothing', async () => {
+    const material = await makeMaterial({ stock: 50 });
+    await makeLot(material, { lotNo: 'D-1', receivedQty: 40, consumedQty: 40, status: 'exhausted' });
+
+    const res = await open(material, 50, 'H-2');
+    expect(res.status).toBe(201);
+  });
+
+  it('still counts a quarantined lot — the yarn is on the rack', async () => {
+    const material = await makeMaterial({ stock: 100 });
+    await makeLot(material, { lotNo: 'D-1', receivedQty: 100, status: 'quarantined' });
+
+    const res = await open(material, 10, 'H-2');
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/already assigned to lots/i);
+  });
+
+  it('refuses outright when a material has no stock at all', async () => {
+    const material = await makeMaterial({ stock: 0 });
+    const res = await open(material, 10);
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/already assigned to lots/i);
+  });
+
+  it('tops up an existing lot only as far as the unassigned stock goes', async () => {
+    // Crediting an existing lot is still an assignment of stock.
+    const material = await makeMaterial({ stock: 100 });
+    await makeLot(material, { lotNo: 'D-1', receivedQty: 80 });
+
+    const tooMuch = await open(material, 50, 'D-1');
+    expect(tooMuch.status).toBe(400);
+
+    const fits = await open(material, 20, 'D-1');
+    expect(fits.status).toBe(201);
+    expect(fits.body.lot.receivedQty).toBe(100);
+  });
+
+  it('reports what is unassigned on the material detail', async () => {
+    const material = await makeMaterial({ stock: 100 });
+    await makeLot(material, { lotNo: 'D-1', receivedQty: 70 });
+
+    const res = await request(app)
+      .get(`/api/v2/materials/get-raw-material-detail?id=${material._id}`)
+      .set('Cookie', adminCookie());
+
+    expect(res.body.material.unplacedQty).toBe(30);
+  });
+
+  it('reports zero unassigned when lots already exceed stock', async () => {
+    // Normal in the window between order approval debiting stock and the
+    // batch drawing the lot down — the rack still holds the yarn.
+    const material = await makeMaterial({ stock: 40 });
+    await makeLot(material, { lotNo: 'D-1', receivedQty: 100 });
+
+    const res = await request(app)
+      .get(`/api/v2/materials/get-raw-material-detail?id=${material._id}`)
+      .set('Cookie', adminCookie());
+
+    expect(res.body.material.unplacedQty).toBe(0);
   });
 });

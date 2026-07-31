@@ -19,7 +19,7 @@ const WarpingBatch = require("../models/WarpingBatch");
 const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
-const { creditLot } = require("../services/yarnLotService");
+const { creditLot, unplacedQuantity } = require("../services/yarnLotService");
 const { isAdmin } = require("../middleware/auth");
 
 const oid = (v) => mongoose.Types.ObjectId.isValid(v);
@@ -91,8 +91,28 @@ router.post("/create", isAdmin("admin", "production", "accounts"), catchAsyncErr
     return next(new ErrorHandler("Invalid supplier id", 400));
   }
 
-  const material = await RawMaterial.findById(rawMaterial).select("name");
+  const material = await RawMaterial.findById(rawMaterial).select("name stock");
   if (!material) return next(new ErrorHandler("Raw material not found", 404));
+
+  // A lot opened by hand assigns stock that already exists; it does not
+  // conjure any. Without this the quantity was free text, so a material
+  // holding 10 kg could carry a lot claiming 500 — and every screen
+  // downstream would read that as fact.
+  const unplaced = await unplacedQuantity(material);
+  if (unplaced <= 0) {
+    return next(new ErrorHandler(
+      `All of ${material.name}'s stock (${material.stock}) is already assigned to lots. ` +
+      `Receive or adjust stock in before opening another.`,
+      400
+    ));
+  }
+  if (qty > unplaced) {
+    return next(new ErrorHandler(
+      `Only ${unplaced} of ${material.name} is not yet assigned to a lot — ` +
+      `cannot open a lot for ${qty}.`,
+      400
+    ));
+  }
 
   const lot = await creditLot({
     rawMaterial,

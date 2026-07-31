@@ -15,7 +15,7 @@ const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { appendStockMovement, normaliseMovements } = require("../utils/stockLedger");
 const YarnLot           = require("../models/YarnLot");
-const { creditLot, drawFromLot } = require("../services/yarnLotService");
+const { creditLot, drawFromLot, unplacedQuantity } = require("../services/yarnLotService");
 const {
   maybeFireCriticalStockout,
   maybeFirePriceChangeAlert,
@@ -131,9 +131,13 @@ router.get(
       .sort({ status: 1, receivedDate: -1 })
       .limit(100);
 
+    // Stock that exists but sits in no lot — what a hand-opened lot may
+    // draw on, and the number the Lots panel reports as unplaced.
+    const unplacedQty = await unplacedQuantity(material);
+
     res.status(200).json({
       success: true,
-      material: { ...material, inwards, outwards, lots },
+      material: { ...material, inwards, outwards, lots, unplacedQty },
     });
   })
 );

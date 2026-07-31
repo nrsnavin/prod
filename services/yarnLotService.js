@@ -1,5 +1,6 @@
 'use strict';
 
+const mongoose = require('mongoose');
 const YarnLot = require('../models/YarnLot');
 const ErrorHandler = require('../utils/ErrorHandler');
 
@@ -161,4 +162,57 @@ async function returnToLot(lotId, quantity, session) {
   return updated;
 }
 
-module.exports = { creditLot, drawFromLot, returnToLot };
+/**
+ * How much of a material's stock is already sitting in a named lot.
+ *
+ * Counts open and quarantined lots: both hold yarn that is physically
+ * on the rack. Exhausted lots hold nothing, and a closed lot has been
+ * written off or returned, so neither is standing on any stock.
+ */
+async function placedQuantity(rawMaterial, session) {
+  // A malformed id has no lots by definition, and casting it would throw
+  // — turning a detail page into a 500 over a bad query string.
+  if (!mongoose.Types.ObjectId.isValid(String(rawMaterial))) return 0;
+
+  const q = YarnLot.aggregate([
+    { $match: { rawMaterial: new mongoose.Types.ObjectId(String(rawMaterial)),
+                status: { $in: ['open', 'quarantined'] } } },
+    { $group: { _id: null,
+                placed: { $sum: { $subtract: ['$receivedQty', '$consumedQty'] } } } },
+  ]);
+  if (session) q.session(session);
+  const [row] = await q;
+  return Math.max(0, Number(row?.placed) || 0);
+}
+
+/**
+ * Stock that exists but has not been assigned to any lot — the pool a
+ * lot opened by hand is allowed to draw on.
+ *
+ * Opening a lot by hand used to take any number at all, so a material
+ * holding 10 kg could carry a lot claiming 500. That is not a lot, it is
+ * a guess with a number on it, and everything downstream (the picker,
+ * the batch, the trace) then reads as fact.
+ *
+ * ── The awkward part, stated plainly ───────────────────────────────
+ * `stock` is the commercial balance, debited at order approval; lot
+ * balances are physical yarn, drawn later when a batch is issued. In the
+ * window between the two, lots legitimately hold MORE than stock says,
+ * and this returns 0 — manual entry is refused while the books and the
+ * rack disagree. That is the honest answer: there is no unassigned stock
+ * to hand out, and inventing some would paper over the very gap the
+ * operator should be looking at.
+ */
+async function unplacedQuantity(material, session) {
+  const stock = Number(material?.stock) || 0;
+  const placed = await placedQuantity(material._id ?? material, session);
+  return Math.max(0, Math.round((stock - placed) * 1000) / 1000);
+}
+
+module.exports = {
+  creditLot,
+  drawFromLot,
+  returnToLot,
+  placedQuantity,
+  unplacedQuantity,
+};
