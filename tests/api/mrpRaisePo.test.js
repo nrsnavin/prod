@@ -339,3 +339,114 @@ describe('what has been ordered for a job', () => {
     expect(res.body.purchaseOrders).toHaveLength(0);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  ORDER-LEVEL — the whole order, before it is split into jobs
+// ══════════════════════════════════════════════════════════════════
+describe('raising a PO for a whole order', () => {
+  const orderMrp = (id) =>
+    request(app).get(`/api/v2/order/${id}/mrp`).set('Cookie', adminCookie());
+  const raiseForOrder = (id, body = {}) =>
+    request(app).post(`/api/v2/order/${id}/raise-po`).set('Cookie', adminCookie()).send(body);
+
+  it('computes the requirement for everything ordered', async () => {
+    const kumar = await makeSupplier('Kumar Yarns');
+    const material = await makeMaterial({ stock: 30, supplier: kumar._id });
+    const { order } = await makeJob([{ material, grams: 100 }]);
+
+    const res = await orderMrp(order._id);
+    expect(res.status).toBe(200);
+    expect(res.body.data.materials[0]).toMatchObject({ requiredWeight: 100, inStock: 30, shortfall: 70 });
+  });
+
+  it('covers quantity no job has been raised for', async () => {
+    // The job-level MRP only sees what was planned into a run. The order
+    // one sees the whole commitment, which is what has to be bought.
+    const kumar = await makeSupplier('Kumar Yarns');
+    const material = await makeMaterial({ stock: 0, supplier: kumar._id });
+    const { order } = await makeJob([{ material, grams: 100 }]);
+
+    const res = await raiseForOrder(order._id);
+    expect(res.status).toBe(201);
+    expect(res.body.purchaseOrders[0].lines[0].quantity).toBe(100);
+  });
+
+  it('links the PO to the order and to no job', async () => {
+    const kumar = await makeSupplier('Kumar Yarns');
+    const material = await makeMaterial({ stock: 0, supplier: kumar._id });
+    const { order } = await makeJob([{ material, grams: 50 }]);
+
+    const res = await raiseForOrder(order._id);
+    const po = await PurchaseOrder.findById(res.body.purchaseOrders[0].poId);
+    expect(String(po.forOrder)).toBe(String(order._id));
+    expect(po.forJob).toBeUndefined();
+  });
+
+  it('splits by supplier, exactly as the job-level one does', async () => {
+    const kumar = await makeSupplier('Kumar Yarns');
+    const raja = await makeSupplier('Raja Spandex');
+    const nylon = await makeMaterial({ name: 'Nylon 70D', stock: 0, supplier: kumar._id });
+    const spandex = await makeMaterial({ name: 'Spandex 40D', stock: 0, supplier: raja._id });
+    const { order } = await makeJob([
+      { material: nylon, grams: 40 },
+      { material: spandex, grams: 20 },
+    ]);
+
+    const res = await raiseForOrder(order._id);
+    expect(res.body.purchaseOrders).toHaveLength(2);
+  });
+
+  it('names a short material with no supplier rather than dropping it', async () => {
+    const kumar = await makeSupplier('Kumar Yarns');
+    const ordered = await makeMaterial({ name: 'Nylon 70D', stock: 0, supplier: kumar._id });
+    const orphan = await makeMaterial({ name: 'Rubber Tape', stock: 0, supplier: null });
+    const { order } = await makeJob([
+      { material: ordered, grams: 40 },
+      { material: orphan, grams: 20 },
+    ]);
+
+    const res = await raiseForOrder(order._id);
+    expect(res.body.skipped).toEqual([
+      expect.objectContaining({ name: 'Rubber Tape', reason: 'no supplier set' }),
+    ]);
+  });
+
+  it('refuses when nothing is short', async () => {
+    const kumar = await makeSupplier('Kumar Yarns');
+    const material = await makeMaterial({ stock: 9999, supplier: kumar._id });
+    const { order } = await makeJob([{ material, grams: 50 }]);
+
+    const res = await raiseForOrder(order._id);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/Nothing is short/i);
+  });
+
+  it('lists everything bought for the order, jobs included', async () => {
+    // From the order's point of view a PO raised off one of its jobs is
+    // the same spend, so both belong on the one list.
+    const kumar = await makeSupplier('Kumar Yarns');
+    const material = await makeMaterial({ stock: 0, supplier: kumar._id });
+    const { order, job } = await makeJob([{ material, grams: 50 }]);
+
+    await raiseForOrder(order._id);
+    await raise(job._id);
+
+    const res = await request(app)
+      .get(`/api/v2/order/${order._id}/purchase-orders`)
+      .set('Cookie', adminCookie());
+    expect(res.body.purchaseOrders).toHaveLength(2);
+  });
+
+  it('records the raise on the order audit trail', async () => {
+    const kumar = await makeSupplier('Kumar Yarns');
+    const material = await makeMaterial({ stock: 0, supplier: kumar._id });
+    const { order } = await makeJob([{ material, grams: 50 }]);
+
+    await raiseForOrder(order._id);
+
+    const after = await Order.findById(order._id);
+    const fp = after.fingerprints[after.fingerprints.length - 1];
+    expect(fp.code).toBe('PO_RAISED');
+    expect(fp.meta.source).toBe('order-mrp-shortfall');
+  });
+});

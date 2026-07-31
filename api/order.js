@@ -7,6 +7,11 @@ const Job = require("../models/JobOrder.js");
 const Elastic = require("../models/Elastic.js");
 const { computeMaterialRequirement } = require("../utils/materialRequirement.js");
 const ErrorHandler = require("../utils/ErrorHandler.js");
+const { buildOrderStatusReport } = require("../services/orderStatusReport.js");
+const PurchaseOrder = require("../models/PurchaseOrder.js");
+const { triageShortfall, createShortfallPos, skipReasons } = require("../services/shortfallPo.js");
+const { buildOrderStatusPdf } = require("../utils/orderStatusPdf.js");
+const { getPdfBranding } = require("../services/documentSettings.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
@@ -1432,6 +1437,168 @@ function _draftCustomerUpdate({ customerName, orderNo, expectedDate, promised, l
     `Thank you for your patience.`
   );
 }
+
+// ══════════════════════════════════════════════════════════════
+//  ORDER STATUS REPORT
+//
+//  GET /:id/status-report      — the computed report as JSON
+//  GET /:id/status-report.pdf  — the same report as a printed sheet
+//
+//  Both are fed by services/orderStatusReport.js, so the screen and the
+//  paper can never tell different stories.
+// ══════════════════════════════════════════════════════════════
+router.get(
+  '/:id/status-report',
+  catchAsyncErrors(async (req, res, next) => {
+    const data = await buildOrderStatusReport(req.params.id);
+    if (!data) return next(new ErrorHandler('Order not found', 404));
+    res.json({ success: true, data });
+  })
+);
+
+router.get(
+  '/:id/status-report.pdf',
+  catchAsyncErrors(async (req, res, next) => {
+    const data = await buildOrderStatusReport(req.params.id);
+    if (!data) return next(new ErrorHandler('Order not found', 404));
+
+    data.branding = await getPdfBranding();
+    const pdf = await buildOrderStatusPdf(data);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="order-status-${data.orderNo ?? req.params.id}.pdf"`
+    );
+    res.send(pdf);
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  ORDER-LEVEL MATERIAL REQUIREMENT
+//
+//  GET  /:id/mrp       — what the whole order needs, and what is short
+//  POST /:id/raise-po  — buy the gap, one PO per supplier
+//
+//  The job-level MRP answers "what does this run need". This answers
+//  "what does the whole order need", which is the question asked before
+//  the work is split into jobs at all — and the point at which yarn
+//  actually has to be bought.
+//
+//  Computed from elasticOrdered, so it covers the entire order including
+//  quantities no job has been raised for yet. The two views deliberately
+//  disagree while an order is part-planned; that difference is the
+//  unplanned quantity, and it is the thing worth seeing.
+// ══════════════════════════════════════════════════════════════
+router.get(
+  '/:id/mrp',
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler('Invalid order id', 400));
+    }
+    const order = await Order.findById(req.params.id)
+      .select('orderNo po date supplyDate status elasticOrdered customer')
+      .populate('customer', 'name')
+      .lean();
+    if (!order) return next(new ErrorHandler('Order not found', 404));
+
+    const materials = await computeMaterialRequirement(order.elasticOrdered || []);
+
+    res.json({
+      success: true,
+      data: {
+        orderId: String(order._id),
+        orderNo: order.orderNo ?? null,
+        customerPo: order.po || '',
+        customerName: order.customer?.name || '',
+        status: order.status,
+        materials,
+      },
+    });
+  })
+);
+
+router.post(
+  '/:id/raise-po',
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler('Invalid order id', 400));
+    }
+    const order = await Order.findById(req.params.id)
+      .select('orderNo elasticOrdered')
+      .lean();
+    if (!order) return next(new ErrorHandler('Order not found', 404));
+
+    const requirement = await computeMaterialRequirement(order.elasticOrdered || []);
+    const { orderable, noSupplier, unresolved, anyShort } =
+      triageShortfall(requirement, req.body?.materials);
+
+    if (!anyShort) {
+      return next(new ErrorHandler(
+        'Nothing is short on this order — no purchase order to raise.', 400
+      ));
+    }
+    if (orderable.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'None of the short materials has a supplier set — set one before raising a PO.',
+        skipped: skipReasons(unresolved, noSupplier),
+      });
+    }
+
+    const created = await createShortfallPos(
+      orderable,
+      { forOrder: order._id },
+      {
+        expectedDate: req.body?.expectedDate,
+        notes: req.body?.notes,
+        defaultNote: `Raised for order #${order.orderNo} material shortfall`,
+      }
+    );
+
+    try {
+      const doc = await Order.findById(order._id);
+      if (doc) {
+        // buildFingerprint + push: this router imports the builder, not
+        // the stamper, and the two produce the same row.
+        doc.fingerprints.push(buildFingerprint(ACTION_CODES.PO_RAISED, {
+          entityId: doc._id,
+          actor: actorFromRequest(req),
+          meta: {
+            source: 'order-mrp-shortfall',
+            purchaseOrders: created.map((c) => ({ poNo: c.poNo, supplier: c.supplierName })),
+          },
+        }));
+        await doc.save();
+      }
+    } catch (fpErr) {
+      console.warn('[order raise-po] fingerprint failed:', fpErr.message);
+    }
+
+    res.status(201).json({
+      success: true,
+      purchaseOrders: created,
+      skipped: skipReasons(unresolved, noSupplier),
+    });
+  })
+);
+
+router.get(
+  '/:id/purchase-orders',
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler('Invalid order id', 400));
+    }
+    // Everything bought for this order, including POs raised from one of
+    // its jobs — from the order's point of view they are the same spend.
+    const pos = await PurchaseOrder.find({ forOrder: req.params.id })
+      .populate('supplier', 'name')
+      .populate('items.rawMaterial', 'name')
+      .populate('forJob', 'jobOrderNo')
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, purchaseOrders: pos });
+  })
+);
 
 router.get(
   '/eta-risks',

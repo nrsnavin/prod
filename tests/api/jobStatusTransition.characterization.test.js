@@ -84,10 +84,26 @@ describe('POST /update-status — validation guards', () => {
   });
 
   test('400 when the job cannot advance further (no transition from status)', async () => {
-    const job = await makeJob({ status: 'preparatory' });
+    const job = await makeJob({ status: 'completed' });
     const res = await post({ jobId: job._id.toString(), nextStatus: 'weaving' });
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/cannot advance further/);
+  });
+
+  // preparatory → weaving became a real transition, but a gated one: a
+  // job with nothing prepared is refused with 409, not 400, and keeps
+  // its status. The gate itself is covered in weavingReadiness.test.js.
+  test('409 when a preparatory job has no warping or covering', async () => {
+    const job = await makeJob({ status: 'preparatory' });
+    const res = await post({ jobId: job._id.toString(), nextStatus: 'weaving' });
+    // This suite mounts a bare error handler, so only the status and the
+    // message are observable here; the WEAVING_NOT_READY code and the
+    // blocker payload are asserted in weavingReadiness.test.js, which
+    // mounts the real middleware.
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/cannot move to weaving yet/i);
+    const saved = await JobOrder.findById(job._id);
+    expect(saved.status).toBe('preparatory');
   });
 
   test('400 on an invalid transition target', async () => {

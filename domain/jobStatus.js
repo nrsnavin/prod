@@ -18,14 +18,27 @@ const JOB_STATUSES = [
 ];
 
 // Linear production flow. Keys are the "from" status; the value is the
-// only status /update-status may advance them to. Terminal / pre-flow
-// statuses (preparatory, completed, cancelled) are intentionally
-// absent — they cannot advance via /update-status.
+// only status /update-status may advance them to. Terminal statuses
+// (completed, cancelled) are intentionally absent — they cannot advance.
 const STATUS_TRANSITIONS = Object.freeze({
+  preparatory: 'weaving',
   weaving:   'finishing',
   finishing: 'checking',
   checking:  'packing',
   packing:   'completed',
+});
+
+// Transitions the pure state machine cannot decide on its own because
+// they depend on other documents. `validateTransition` says the move is
+// SHAPED right; the route named here must still prove the precondition
+// holds before writing the status.
+//
+// preparatory → weaving is gated on the job's warping AND covering both
+// being completed (services/weavingReadiness.js). Listing it here keeps
+// the gate visible from the state machine instead of hiding as an `if`
+// buried in a route — a later stage needing a precondition adds a line.
+const GATED_TRANSITIONS = Object.freeze({
+  preparatory: 'weaving-readiness',
 });
 
 // Per-stage audit fields on the JobOrder document.
@@ -54,7 +67,7 @@ function validateTransition(current, target) {
   if (expected !== target) {
     return { ok: false, message: `Invalid transition: "${current}" → "${target}". Expected: "${expected}"` };
   }
-  return { ok: true, expected };
+  return { ok: true, expected, gate: GATED_TRANSITIONS[current] || null };
 }
 
 // Stamp the per-stage (by/at) audit fields on a job document for the
@@ -77,6 +90,7 @@ function enteredAtField(status) {
 module.exports = {
   JOB_STATUSES,
   STATUS_TRANSITIONS,
+  GATED_TRANSITIONS,
   STAGE_TIMESTAMPS,
   nextStatus,
   validateTransition,

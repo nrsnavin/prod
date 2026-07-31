@@ -25,6 +25,10 @@ module.exports = (err, req, res, next) => {
   // dialog) before any of the recreating branches below swap `err`.
   const routeCode     = err.code;
   const routeShortfall = err.shortfall;
+  // Generic escape hatch for anything else a route wants the client to
+  // branch on (e.g. WEAVING_NOT_READY → which stage is still open).
+  // `shortfall` predates it and stays where callers already look.
+  const routeDetails  = err.details;
 
   // wrong mongodb id error
   if (err.name === "CastError") {
@@ -59,6 +63,7 @@ module.exports = (err, req, res, next) => {
   };
   if (typeof routeCode === "string") payload.code = routeCode;
   if (routeShortfall) payload.shortfall = routeShortfall;
+  if (typeof routeCode === "string" && routeDetails) payload.details = routeDetails;
 
   res.status(err.statusCode).json(payload);
 };

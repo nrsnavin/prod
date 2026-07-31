@@ -21,7 +21,8 @@ const PurchaseOrder = require('../models/PurchaseOrder');
 
 const { buildFingerprint, stampFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
 const { computeMaterialRequirement } = require('../utils/materialRequirement');
-const { nextNumber } = require('../utils/sequence');
+const { triageShortfall, createShortfallPos, skipReasons } = require('../services/shortfallPo');
+const { checkWeavingReadiness } = require('../services/weavingReadiness');
 const { buildMrpPdf } = require('../utils/mrpPdf');
 const { getPdfBranding } = require('../services/documentSettings.js');
 
@@ -376,6 +377,24 @@ router.post(
     const check = validateTransition(job.status, nextStatus);
     if (!check.ok) return next(new ErrorHandler(check.message, 400));
 
+    // preparatory → weaving is the one transition the state machine
+    // cannot decide alone: the job only counts as prepared once BOTH
+    // its warping and its covering are completed. If either is still
+    // open the job keeps its status and the caller is told which one —
+    // no partial move, no silent no-op.
+    if (check.gate === 'weaving-readiness') {
+      const readiness = await checkWeavingReadiness(job._id);
+      if (!readiness.ready) {
+        const err = new ErrorHandler(
+          `Job cannot move to weaving yet — ${readiness.blockers.join('; ')}`,
+          409
+        );
+        err.code = 'WEAVING_NOT_READY';
+        err.details = { status: job.status, stages: readiness.stages, blockers: readiness.blockers };
+        return next(err);
+      }
+    }
+
     if (nextStatus === 'finishing') {
       await releaseMachine(job.machine);
       job.machine = undefined;
@@ -448,6 +467,26 @@ router.post(
       fingerprint: stageFp,
       completionFingerprint: completionFp,
     });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  5b. WEAVING READINESS
+//      Read-only. Lets the UI show the "move to weaving" action and
+//      the reason it is unavailable BEFORE the user presses it,
+//      rather than only as an error afterwards.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  '/:jobId/weaving-readiness',
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.jobId)) {
+      return next(new ErrorHandler('Invalid job id', 400));
+    }
+    const readiness = await checkWeavingReadiness(req.params.jobId);
+    if (readiness.jobStatus === 'unknown') {
+      return next(new ErrorHandler('Job not found', 404));
+    }
+    res.json({ success: true, data: readiness });
   })
 );
 
@@ -893,7 +932,10 @@ router.get('/:jobId', async (req, res) => {
 async function _buildMrpData(jobId) {
   const job = await JobOrder.findById(jobId)
     .populate("customer", "name")
-    .populate("order",    "orderNo")
+    // po + supplyDate come along so the sheet can say which customer
+    // order it serves and when that order is due — the two questions
+    // asked of an MRP sheet that it could not previously answer.
+    .populate("order",    "orderNo po supplyDate")
     .populate("elastics.elastic", "name")
     .lean();
   if (!job) return null;
@@ -904,6 +946,11 @@ async function _buildMrpData(jobId) {
     jobId:           String(job._id),
     jobOrderNo:      job.jobOrderNo,
     orderNo:         job.order?.orderNo ?? null,
+    customerPo:      job.order?.po || "",
+    supplyDateLabel: job.order?.supplyDate
+      ? new Date(job.order.supplyDate).toLocaleDateString("en-IN",
+          { day: "2-digit", month: "short", year: "numeric" })
+      : "",
     customerName:    job.customer?.name || "",
     dateLabel:       job.date
       ? new Date(job.date).toLocaleDateString("en-IN",
@@ -1107,97 +1154,35 @@ router.post('/:jobId/raise-po', async (req, res) => {
     if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
 
     const requirement = await computeMaterialRequirement(job.elastics || []);
+    const { orderable, noSupplier, unresolved, anyShort } =
+      triageShortfall(requirement, req.body?.materials);
 
-    // Only what is actually short. Ordering against a material that is
-    // in stock is not a shortfall PO, it is a different decision.
-    let short = requirement.filter((m) => Number(m.shortfall) > 0);
-
-    const only = Array.isArray(req.body?.materials) ? req.body.materials.map(String) : null;
-    if (only && only.length) {
-      short = short.filter((m) => only.includes(String(m.rawMaterial)));
-    }
-
-    if (short.length === 0) {
+    if (!anyShort) {
       return res.status(400).json({
         success: false,
         message: 'Nothing is short on this job — no purchase order to raise.',
       });
     }
-
-    // A material whose reference could not be resolved has a placeholder
-    // stock figure, so its "shortfall" is not a reading. Never order on it.
-    const unresolved = short.filter((m) => m.stockKnown === false);
-    const noSupplier = short.filter((m) => m.stockKnown !== false && !m.supplierId);
-    const orderable = short.filter((m) => m.stockKnown !== false && m.supplierId);
-
     if (orderable.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'None of the short materials has a supplier set — set one before raising a PO.',
-        skipped: [...noSupplier, ...unresolved].map((m) => ({
-          rawMaterial: String(m.rawMaterial), name: m.name,
-          reason: m.stockKnown === false ? 'material not found' : 'no supplier set',
-        })),
+        skipped: skipReasons(unresolved, noSupplier),
       });
     }
 
-    const bySupplier = new Map();
-    for (const m of orderable) {
-      if (!bySupplier.has(m.supplierId)) {
-        bySupplier.set(m.supplierId, { supplierName: m.supplierName, lines: [] });
+    const created = await createShortfallPos(
+      orderable,
+      { forJob: job._id, forOrder: job.order || undefined },
+      {
+        expectedDate: req.body?.expectedDate,
+        notes: req.body?.notes,
+        defaultNote: `Raised for job J-${job.jobOrderNo} material shortfall`,
       }
-      bySupplier.get(m.supplierId).lines.push(m);
-    }
+    );
 
-    const expectedDate = req.body?.expectedDate ? new Date(req.body.expectedDate) : null;
-    const created = [];
-
-    for (const [supplierId, group] of bySupplier) {
-      const poNo = await nextNumber('poNo', async () => {
-        const last = await PurchaseOrder.findOne({ poNo: { $ne: null } })
-          .sort({ poNo: -1 }).select('poNo').lean();
-        return last?.poNo || 0;
-      });
-
-      const po = await PurchaseOrder.create({
-        supplier: supplierId,
-        items: group.lines.map((m) => ({
-          rawMaterial:      m.rawMaterial,
-          price:            Number(m.unitPrice) || 0,
-          // Order the gap, not the whole requirement — the stock already
-          // on hand is not bought twice.
-          quantity:         m.shortfall,
-          receivedQuantity: 0,
-        })),
-        expectedDate: expectedDate && !isNaN(expectedDate.getTime()) ? expectedDate : undefined,
-        notes: typeof req.body?.notes === 'string'
-          ? req.body.notes.trim()
-          : `Raised for job J-${job.jobOrderNo} material shortfall`,
-        poNo,
-        status: 'Open',
-        forJob: job._id,
-        forOrder: job.order || undefined,
-      });
-
-      created.push({
-        poId: po._id,
-        poNo: po.poNo,
-        supplierId,
-        supplierName: group.supplierName,
-        lines: group.lines.map((m) => ({
-          rawMaterial: String(m.rawMaterial),
-          name: m.name,
-          quantity: m.shortfall,
-          price: Number(m.unitPrice) || 0,
-        })),
-        value: group.lines.reduce(
-          (s, m) => s + m.shortfall * (Number(m.unitPrice) || 0), 0
-        ),
-      });
-    }
-
-    // Audit on the job: raising a PO is a commitment of money made from
-    // this screen, and the job is where someone looks for why.
+    // Audit on the job: raising a PO commits money from this screen, and
+    // the job is where someone looks for why.
     try {
       const jobDoc = await JobOrder.findById(jobId);
       if (jobDoc) {
@@ -1219,16 +1204,7 @@ router.post('/:jobId/raise-po', async (req, res) => {
     return res.status(201).json({
       success: true,
       purchaseOrders: created,
-      // Named, not swallowed — a material left out of the PO because it
-      // has no supplier is exactly what the user needs to hear about.
-      skipped: [
-        ...noSupplier.map((m) => ({
-          rawMaterial: String(m.rawMaterial), name: m.name, reason: 'no supplier set',
-        })),
-        ...unresolved.map((m) => ({
-          rawMaterial: String(m.rawMaterial), name: m.name, reason: 'material not found',
-        })),
-      ],
+      skipped: skipReasons(unresolved, noSupplier),
     });
   } catch (err) {
     console.error('[POST /jobs/:jobId/raise-po]', err);
