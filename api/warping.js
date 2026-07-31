@@ -592,12 +592,50 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
 
   const prefillTemplate = elasticTemplates.length > 0 ? elasticTemplates[0] : null;
 
+  // ── Lot-wise stock for each warp yarn ──────────────────────────────
+  // Programming a beam is where the lot decision is actually made: a beam
+  // wants to come off one lot, so the planner needs to see whether any
+  // single lot can carry it before committing the section. Aggregate
+  // stock cannot answer that — 300 kg spread over six lots of 50 is a
+  // very different thing from 300 kg on one.
+  const yarnIds = Array.from(warpMap.keys());
+  const openLots = yarnIds.length
+    ? await YarnLot.find({
+        rawMaterial: { $in: yarnIds },
+        status: "open",
+        $expr: { $gt: [{ $subtract: ["$receivedQty", "$consumedQty"] }, 0] },
+      }).sort({ receivedDate: -1 })
+    : [];
+
+  const lotsByYarn = new Map(yarnIds.map((id) => [id, []]));
+  for (const lot of openLots) {
+    lotsByYarn.get(String(lot.rawMaterial))?.push({
+      id: String(lot._id),
+      lotNo: lot.lotNo,
+      shade: lot.shade || "",
+      balance: lot.balance,
+    });
+  }
+
+  const lotStock = yarnIds.map((id) => {
+    const lots = lotsByYarn.get(id) || [];
+    return {
+      warpYarnId: id,
+      warpYarnName: warpMap.get(id)?.name || "",
+      lots,
+      // The two numbers a planner weighs against each other.
+      totalAvailable: lots.reduce((s, l) => s + l.balance, 0),
+      largestLot: lots.reduce((m, l) => Math.max(m, l.balance), 0),
+    };
+  });
+
   res.json({
     success:          true,
     jobId:            job._id,
     warpYarns:        Array.from(warpMap.values()),
     prefillTemplate,
     elasticTemplates,
+    lotStock,
   });
 }));
 
@@ -690,7 +728,7 @@ async function decorateAllocations(allocations, session) {
 
 // ── POST /warping/batch/create ────────────────────────────────
 router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(async (req, res, next) => {
-  const { warpingId, beamNos, allocations, remarks, machine } = req.body;
+  const { warpingId, beamNos, allocations, remarks, machine, elastics } = req.body;
 
   if (!mongoose.Types.ObjectId.isValid(warpingId)) {
     return next(new ErrorHandler("A valid warpingId is required", 400));
@@ -726,6 +764,29 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
     return next(err);
   }
 
+  // Which elastic is this batch warping for? Answering it is what turns
+  // "this lot went into job 812" into "this lot is in this roll".
+  const job = await JobOrder.findById(warping.job).select("elastics").lean();
+  const jobElastics = (job?.elastics || [])
+    .map((e) => String(e.elastic))
+    .filter(Boolean);
+
+  let forElastics = [];
+  if (Array.isArray(elastics) && elastics.length) {
+    const bad = elastics.filter((e) => !mongoose.Types.ObjectId.isValid(e));
+    if (bad.length) return next(new ErrorHandler("Invalid elastic id", 400));
+    const foreign = elastics.filter((e) => !jobElastics.includes(String(e)));
+    if (foreign.length) {
+      return next(new ErrorHandler(
+        "An elastic on this batch is not on the job", 400
+      ));
+    }
+    forElastics = elastics;
+  } else if (jobElastics.length === 1) {
+    // Unambiguous — no point making someone tick the only box there is.
+    forElastics = jobElastics;
+  }
+
   const seq = await nextNumber("warpingBatchNo", async () => {
     // Seed from the highest existing number so batches created before
     // the counter existed are not re-issued.
@@ -739,6 +800,7 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
     warping: warping._id,
     job: warping.job,
     beamNos: beams,
+    elastics: forElastics,
     allocations: parsed,
     machine: machine || undefined,
     remarks: remarks ? String(remarks).trim() : "",
@@ -886,6 +948,7 @@ router.get("/batch/list", catchAsyncErrors(async (req, res, next) => {
 
   const batches = await WarpingBatch.find(filter)
     .populate("job", "jobOrderNo status")
+    .populate("elastics", "name")
     .populate("machine", "ID")
     .sort({ createdAt: -1 })
     .limit(200);
@@ -900,6 +963,7 @@ router.get("/batch/:id", catchAsyncErrors(async (req, res, next) => {
   }
   const batch = await WarpingBatch.findById(req.params.id)
     .populate("job", "jobOrderNo status")
+    .populate("elastics", "name")
     .populate("machine", "ID")
     .populate("allocations.yarnLot", "lotNo shade status receivedQty consumedQty");
   if (!batch) return next(new ErrorHandler("Batch not found", 404));

@@ -62,6 +62,22 @@ const WarpingBatchSchema = new mongoose.Schema(
     /** Plan beam numbers this batch covers. */
     beamNos: { type: [Number], default: [] },
 
+    /**
+     * The elastic(s) this batch is warping for.
+     *
+     * Without it a lot can only be traced as far as the job, and a job
+     * with three elastics on it gives three possible answers to "which
+     * lot is in this roll". Filled automatically when the job has just
+     * one elastic — that case is unambiguous and not worth asking about.
+     *
+     * Left empty when the operator does not say and the job has several:
+     * the trail then reports the batch as job-wide rather than guessing,
+     * because a confident wrong attribution is worse here than an
+     * honest vague one. Someone chasing a shade complaint needs to know
+     * which it is.
+     */
+    elastics: [{ type: mongoose.Types.ObjectId, ref: 'Elastic' }],
+
     allocations: { type: [AllocationSchema], default: [] },
 
     /**
@@ -91,5 +107,7 @@ WarpingBatchSchema.index({ warping: 1, createdAt: -1 });
 WarpingBatchSchema.index({ job: 1 });
 // Tracing forward from a lot: "which batches did this lot go into?"
 WarpingBatchSchema.index({ 'allocations.yarnLot': 1 });
+// And backward, from a finished elastic to the lots behind it.
+WarpingBatchSchema.index({ elastics: 1 });
 
 module.exports = mongoose.model('WarpingBatch', WarpingBatchSchema);

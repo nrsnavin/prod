@@ -16,6 +16,7 @@ const Wastage     = require('../models/Wastage');
 const Machine     = require('../models/Machine');
 const { recomputePending } = require('../services/orderPending.js');
 const ShiftDetail = require('../models/ShiftDetail');
+const WarpingBatch = require('../models/WarpingBatch');
 
 const { buildFingerprint, stampFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
 const { computeMaterialRequirement } = require('../utils/materialRequirement');
@@ -928,6 +929,118 @@ router.patch('/:jobId/production-mode', async (req, res) => {
     }});
   } catch (err) {
     return res.status(500).json({ success: false, message: 'Failed to update production mode' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+//  GET /:jobId/yarn-lots
+//
+//  Which dye lots went into this job, grouped by the elastic they were
+//  warped for. This is the backward half of lot traceability: the
+//  forward half (/yarn-lots/:id/trace) answers "where did this lot go",
+//  and this one answers "what is in this roll" — the question that
+//  actually gets asked, months later, when a customer reports a shade
+//  band and quotes a job number off the packing list.
+//
+//  Batches that were never attributed to an elastic come back under a
+//  separate `unattributed` group rather than being spread across every
+//  elastic on the job. Attributing them everywhere would be a guess
+//  wearing the costume of a fact.
+// ════════════════════════════════════════════════════════════════
+router.get('/:jobId/yarn-lots', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(jobId))
+      return res.status(400).json({ success: false, message: 'Invalid job ID.' });
+
+    const job = await JobOrder.findById(jobId)
+      .select('jobOrderNo elastics')
+      .populate('elastics.elastic', 'name')
+      .lean();
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
+
+    const batches = await WarpingBatch.find({ job: jobId })
+      .populate('elastics', 'name')
+      .sort({ createdAt: 1 })
+      .lean();
+
+    // Cancelled batches drew nothing in the end — their yarn went back on
+    // the rack — so they are not part of what is in the goods.
+    const live = batches.filter((b) => b.status !== 'cancelled');
+
+    const groups = new Map();
+    const groupFor = (key, name) => {
+      if (!groups.has(key)) groups.set(key, { elasticId: key === 'unattributed' ? null : key, elasticName: name, lots: [] });
+      return groups.get(key);
+    };
+    // Seed a group per planned elastic, so an elastic with no lots
+    // recorded shows as "nothing recorded" rather than vanishing.
+    for (const e of job.elastics || []) {
+      if (e.elastic?._id) groupFor(String(e.elastic._id), e.elastic.name || 'Unknown');
+    }
+
+    for (const b of live) {
+      const targets = (b.elastics || []).length
+        ? b.elastics.map((e) => ({ key: String(e._id), name: e.name || 'Unknown' }))
+        : [{ key: 'unattributed', name: 'Not attributed to an elastic' }];
+
+      for (const t of targets) {
+        const g = groupFor(t.key, t.name);
+        for (const a of b.allocations || []) {
+          g.lots.push({
+            batchId: b._id,
+            batchNo: b.batchNo,
+            batchStatus: b.status,
+            beamNos: b.beamNos || [],
+            yarnLot: a.yarnLot,
+            lotNo: a.lotNo || '',
+            shade: a.shade || '',
+            materialName: a.materialName || '',
+            // A batch covering two elastics drew its yarn once, not twice.
+            // The quantity is left whole and `sharedAcross` says how many
+            // elastics it is answering for, rather than silently dividing
+            // a number nobody measured that way.
+            quantity: a.quantity,
+            sharedAcross: targets.length,
+            issuedDate: b.issuedDate || null,
+          });
+        }
+      }
+    }
+
+    const byElastic = Array.from(groups.values()).filter(
+      (g) => g.elasticId !== null || g.lots.length > 0
+    );
+
+    // The flat list of distinct lots in this job — what someone chasing a
+    // complaint wants first, before drilling into which beam.
+    const distinct = new Map();
+    for (const g of byElastic) {
+      for (const l of g.lots) {
+        const key = String(l.yarnLot || l.lotNo);
+        if (!distinct.has(key)) {
+          distinct.set(key, {
+            yarnLot: l.yarnLot, lotNo: l.lotNo, shade: l.shade, materialName: l.materialName,
+          });
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        jobId: job._id,
+        jobOrderNo: job.jobOrderNo,
+        byElastic,
+        lots: Array.from(distinct.values()),
+        // Batches exist but none say which elastic they were for — the
+        // UI uses this to explain why the trail is job-wide.
+        hasUnattributed: byElastic.some((g) => g.elasticId === null),
+      },
+    });
+  } catch (err) {
+    console.error('[GET /jobs/:jobId/yarn-lots]', err);
+    return res.status(500).json({ success: false, message: 'Failed to load yarn lots' });
   }
 });
 

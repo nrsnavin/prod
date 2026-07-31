@@ -566,6 +566,264 @@ describe('tracing a lot forward', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+//  Tying a batch to the elastic it warps
+// ══════════════════════════════════════════════════════════════════
+describe('attributing a batch to an elastic', () => {
+  it('fills in the elastic itself when the job only has one', async () => {
+    // No point making someone tick the only box there is.
+    const material = await makeMaterial();
+    const lot = await makeLot(material);
+    const { warping, job } = await makeWarping(material);
+
+    const res = await createBatch({
+      warpingId: String(warping._id),
+      beamNos: [1],
+      allocations: [{ rawMaterial: String(material._id), yarnLot: String(lot._id), quantity: 10 }],
+    });
+
+    const jobDoc = await JobOrder.findById(job._id);
+    expect(res.body.batch.elastics).toHaveLength(1);
+    expect(String(res.body.batch.elastics[0])).toBe(String(jobDoc.elastics[0].elastic));
+  });
+
+  it('leaves it blank rather than guessing when the job has several', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material);
+    const { warping, job } = await makeWarping(material);
+    const second = await Elastic.create({
+      name: '32mm Woven', weight: 6, noOfHook: 28, pick: 42, spandexEnds: 10,
+    });
+    await JobOrder.updateOne(
+      { _id: job._id },
+      { $push: { elastics: { elastic: second._id, quantity: 2000 } } }
+    );
+
+    const res = await createBatch({
+      warpingId: String(warping._id),
+      beamNos: [1],
+      allocations: [{ rawMaterial: String(material._id), yarnLot: String(lot._id), quantity: 10 }],
+    });
+    expect(res.body.batch.elastics).toEqual([]);
+  });
+
+  it('accepts an elastic the operator names', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material);
+    const { warping, job } = await makeWarping(material);
+    const jobDoc = await JobOrder.findById(job._id);
+    const elasticId = String(jobDoc.elastics[0].elastic);
+
+    const res = await createBatch({
+      warpingId: String(warping._id),
+      beamNos: [1],
+      elastics: [elasticId],
+      allocations: [{ rawMaterial: String(material._id), yarnLot: String(lot._id), quantity: 10 }],
+    });
+    expect(res.body.batch.elastics.map(String)).toEqual([elasticId]);
+  });
+
+  it('refuses an elastic that is not on the job', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material);
+    const { warping } = await makeWarping(material);
+    const stranger = await Elastic.create({
+      name: 'Someone else', weight: 4, noOfHook: 20, pick: 38, spandexEnds: 6,
+    });
+
+    const res = await createBatch({
+      warpingId: String(warping._id),
+      beamNos: [1],
+      elastics: [String(stranger._id)],
+      allocations: [{ rawMaterial: String(material._id), yarnLot: String(lot._id), quantity: 10 }],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/not on the job/i);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  Reading the trail back from a job
+// ══════════════════════════════════════════════════════════════════
+describe('yarn lots on a job', () => {
+  const jobLots = (jobId) =>
+    request(app).get(`/api/v2/job/${jobId}/yarn-lots`).set('Cookie', adminCookie());
+
+  it('reports the lot under the elastic it was warped for', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material, { lotNo: 'D-5150', shade: 'Ecru' });
+    const { job } = await issuedBatch(material, lot, 40);
+
+    const res = await jobLots(job._id);
+    expect(res.status).toBe(200);
+
+    const { byElastic, lots } = res.body.data;
+    expect(byElastic).toHaveLength(1);
+    expect(byElastic[0].elasticName).toBe('25mm Woven');
+    expect(byElastic[0].lots[0]).toMatchObject({
+      lotNo: 'D-5150', shade: 'Ecru', materialName: 'Nylon 70D', quantity: 40,
+    });
+    expect(lots).toHaveLength(1);
+    expect(res.body.data.hasUnattributed).toBe(false);
+  });
+
+  it('leaves an elastic with nothing recorded visible but empty', async () => {
+    // Vanishing would read as "no yarn needed", which is not the same
+    // thing as "nobody wrote it down".
+    const material = await makeMaterial();
+    await makeLot(material);
+    const { job } = await makeWarping(material);
+
+    const res = await jobLots(job._id);
+    expect(res.body.data.byElastic).toHaveLength(1);
+    expect(res.body.data.byElastic[0].lots).toEqual([]);
+  });
+
+  it('keeps an unattributed batch in its own group', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material);
+    const { warping, job } = await makeWarping(material);
+    const second = await Elastic.create({
+      name: '32mm Woven', weight: 6, noOfHook: 28, pick: 42, spandexEnds: 10,
+    });
+    await JobOrder.updateOne(
+      { _id: job._id },
+      { $push: { elastics: { elastic: second._id, quantity: 2000 } } }
+    );
+    // Two elastics and no attribution — the batch cannot be pinned down.
+    const created = await createBatch({
+      warpingId: String(warping._id),
+      beamNos: [1],
+      allocations: [{ rawMaterial: String(material._id), yarnLot: String(lot._id), quantity: 25 }],
+    });
+    await issueBatch(created.body.batch._id);
+
+    const res = await jobLots(job._id);
+    const unattributed = res.body.data.byElastic.find((g) => g.elasticId === null);
+    expect(res.body.data.hasUnattributed).toBe(true);
+    expect(unattributed.lots).toHaveLength(1);
+    expect(unattributed.lots[0].quantity).toBe(25);
+  });
+
+  it('leaves a shared quantity whole and says how many elastics it covers', async () => {
+    // The batch drew its yarn once, not once per elastic. Dividing it
+    // would invent a measurement nobody took.
+    const material = await makeMaterial();
+    const lot = await makeLot(material);
+    const { warping, job } = await makeWarping(material);
+    const jobDoc = await JobOrder.findById(job._id);
+    const second = await Elastic.create({
+      name: '32mm Woven', weight: 6, noOfHook: 28, pick: 42, spandexEnds: 10,
+    });
+    await JobOrder.updateOne(
+      { _id: job._id },
+      { $push: { elastics: { elastic: second._id, quantity: 2000 } } }
+    );
+
+    await createBatch({
+      warpingId: String(warping._id),
+      beamNos: [1],
+      elastics: [String(jobDoc.elastics[0].elastic), String(second._id)],
+      allocations: [{ rawMaterial: String(material._id), yarnLot: String(lot._id), quantity: 60 }],
+    });
+
+    const res = await jobLots(job._id);
+    const groups = res.body.data.byElastic.filter((g) => g.lots.length > 0);
+    expect(groups).toHaveLength(2);
+    for (const g of groups) {
+      expect(g.lots[0].quantity).toBe(60);
+      expect(g.lots[0].sharedAcross).toBe(2);
+    }
+  });
+
+  it('drops a cancelled batch — its yarn went back on the rack', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material);
+    const { batch, job } = await issuedBatch(material, lot, 40);
+    await request(app).patch(`/api/v2/warping/batch/${batch._id}/cancel`)
+      .set('Cookie', adminCookie()).send({});
+
+    const res = await jobLots(job._id);
+    expect(res.body.data.lots).toEqual([]);
+    expect(res.body.data.byElastic[0].lots).toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  Lot-wise stock while programming
+// ══════════════════════════════════════════════════════════════════
+describe('lot-wise stock in the plan context', () => {
+  /** An elastic whose warp yarn is `material`, so plan-context sees it. */
+  async function jobWithWarpYarn(material) {
+    const customer = await Customer.create({
+      name: 'Aravind Garments', contactName: 'Aravind', phoneNumber: '9111111111',
+      address: 'Tiruppur', email: 'a@t.co',
+    });
+    const elastic = await Elastic.create({
+      name: '25mm Woven', weight: 5, noOfHook: 24, pick: 40, spandexEnds: 8,
+      warpYarn: [{ id: material._id, ends: 240 }],
+    });
+    const order = await Order.create({
+      customer: customer._id, po: 'PO-9002', date: new Date(), supplyDate: new Date(),
+      elasticOrdered: [{ elastic: elastic._id, quantity: 5000 }],
+    });
+    return JobOrder.create({
+      order: order._id, customer: customer._id, date: new Date(),
+      elastics: [{ elastic: elastic._id, quantity: 5000 }],
+    });
+  }
+
+  it('reports each open lot and both numbers a planner weighs', async () => {
+    // 300 kg spread over three lots is a different thing from 300 on one:
+    // a beam wants to come off a single lot, so the largest lot is what
+    // decides whether the section can be programmed as planned.
+    const material = await makeMaterial();
+    await makeLot(material, { lotNo: 'D-1', receivedQty: 150 });
+    await makeLot(material, { lotNo: 'D-2', receivedQty: 100 });
+    await makeLot(material, { lotNo: 'D-3', receivedQty: 50 });
+    const job = await jobWithWarpYarn(material);
+
+    const res = await request(app)
+      .get(`/api/v2/warping/plan-context/${job._id}`)
+      .set('Cookie', adminCookie());
+
+    expect(res.status).toBe(200);
+    const [entry] = res.body.lotStock;
+    expect(entry.warpYarnName).toBe('Nylon 70D');
+    expect(entry.totalAvailable).toBe(300);
+    expect(entry.largestLot).toBe(150);
+    expect(entry.lots.map((l) => l.lotNo).sort()).toEqual(['D-1', 'D-2', 'D-3']);
+  });
+
+  it('leaves out lots that are empty or held back', async () => {
+    const material = await makeMaterial();
+    await makeLot(material, { lotNo: 'D-1', receivedQty: 100 });
+    await makeLot(material, { lotNo: 'D-2', receivedQty: 80, status: 'quarantined' });
+    await makeLot(material, { lotNo: 'D-3', receivedQty: 40, consumedQty: 40, status: 'exhausted' });
+    const job = await jobWithWarpYarn(material);
+
+    const res = await request(app)
+      .get(`/api/v2/warping/plan-context/${job._id}`)
+      .set('Cookie', adminCookie());
+
+    const [entry] = res.body.lotStock;
+    expect(entry.lots.map((l) => l.lotNo)).toEqual(['D-1']);
+    expect(entry.totalAvailable).toBe(100);
+  });
+
+  it('reports zero rather than omitting a yarn with no lots at all', async () => {
+    const material = await makeMaterial();
+    const job = await jobWithWarpYarn(material);
+
+    const res = await request(app)
+      .get(`/api/v2/warping/plan-context/${job._id}`)
+      .set('Cookie', adminCookie());
+
+    expect(res.body.lotStock).toHaveLength(1);
+    expect(res.body.lotStock[0]).toMatchObject({ totalAvailable: 0, largestLot: 0, lots: [] });
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 //  The lot register
 // ══════════════════════════════════════════════════════════════════
 describe('the lot register', () => {
