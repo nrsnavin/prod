@@ -120,8 +120,10 @@ async function approveOrderTxn(session, {
     material.totalConsumption = (material.totalConsumption || 0) + applied;
     await material.save({ session });
     await appendStockMovement(material._id, {
+      // Negative: this debits stock. Stored positive for years, which
+      // made every approval read as a receipt on the material's ledger.
       type: 'ORDER_APPROVAL', order: order._id,
-      quantity: applied, balance: material.stock,
+      quantity: -applied, balance: material.stock,
     }, session);
     await MaterialOutward.create([{
       rawMaterial: rm.rawMaterial,

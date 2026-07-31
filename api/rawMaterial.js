@@ -13,7 +13,7 @@ const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
-const { appendStockMovement } = require("../utils/stockLedger");
+const { appendStockMovement, normaliseMovements } = require("../utils/stockLedger");
 const YarnLot           = require("../models/YarnLot");
 const { creditLot, drawFromLot } = require("../services/yarnLotService");
 const {
@@ -93,10 +93,19 @@ router.get(
 
     if (!material) return next(new ErrorHandler("Raw material not found", 404));
 
-    // Sort stockMovements newest-first, keep last 50
-    material.stockMovements = (material.stockMovements || [])
-      .sort((a, b) => new Date(b.date) - new Date(a.date))
-      .slice(0, 50);
+    // Sort stockMovements newest-first, keep last 50, then normalise.
+    //
+    // Normalising is what makes the ledger readable for rows already in
+    // the database: order approvals were written with a positive quantity
+    // even though they debit stock, and PO receipts recorded no balance
+    // at all. Both are fixed at the writers now, but years of history
+    // would still read wrongly without this. See utils/stockLedger.js.
+    material.stockMovements = normaliseMovements(
+      (material.stockMovements || [])
+        .sort((a, b) => new Date(b.date) - new Date(a.date))
+        .slice(0, 50),
+      material.stock
+    );
 
     // Sort priceHistory newest-first, keep last 20
     material.priceHistory = (material.priceHistory || [])

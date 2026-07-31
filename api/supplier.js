@@ -29,6 +29,7 @@ const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { nextNumber } = require("../utils/sequence");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
 const { creditLot } = require("../services/yarnLotService");
+const { appendStockMovement } = require("../utils/stockLedger");
 const PdfTemplate = require("../models/PdfTemplate");
 const { renderTemplatePdf } = require("../services/pdf/templateRenderer");
 const { starterTemplate }   = require("../services/pdf/docTypes");
@@ -578,8 +579,8 @@ router.post(
       }
 
       // ── WRITE PASS ────────────────────────────────────────────────
-      const inwardDocs  = [];
-      const bulkOps     = [];  // RawMaterial bulkWrite operations
+      const inwardDocs   = [];
+      const stockCredits = [];  // applied inside the transaction below
 
       for (const inItem of activeItems) {
         const qty    = Number(inItem.quantity);
@@ -590,27 +591,15 @@ router.post(
         // 1. Update PO received quantity
         poItem.receivedQuantity = (poItem.receivedQuantity || 0) + qty;
 
-        // 2. Prepare stock increment for RawMaterial  ← THE FIX
-        bulkOps.push({
-          updateOne: {
-            filter: { _id: inItem.rawMaterial },
-            update: {
-              // Increment stock by the received quantity
-              $inc: { stock: qty },
-              // Append a movement record for full audit trail
-              $push: {
-                stockMovements: {
-                  date:     inItem.inwardDate
-                              ? new Date(inItem.inwardDate)
-                              : new Date(),
-                  type:     "PO_INWARD",
-                  quantity: qty,
-                  order:    po._id,
-                },
-              },
-            },
-          },
-        });
+        // 2. Credit the stock. Done per item with the post-increment
+        //    document returned, rather than in one bulkWrite, because the
+        //    movement row needs the resulting balance — pushed alongside
+        //    the $inc it had no way to know it and left the Balance
+        //    column empty on every PO receipt.
+        //
+        //    The $inc is still atomic, so the balance recorded here is
+        //    the real one even if another receipt lands at the same time.
+        stockCredits.push({ rawMaterial: inItem.rawMaterial, qty, inItem });
 
         // 3. Prepare MaterialInward document
         const over = excessByMaterial.get(String(inItem.rawMaterial));
@@ -665,7 +654,24 @@ router.post(
           });
           po.markModified("fingerprints");
           await po.save({ session });
-          await RawMaterial.bulkWrite(bulkOps, { session });
+          for (const credit of stockCredits) {
+            const updated = await RawMaterial.findOneAndUpdate(
+              { _id: credit.rawMaterial },
+              { $inc: { stock: credit.qty } },
+              { new: true, session }
+            );
+            await appendStockMovement(credit.rawMaterial, {
+              date: credit.inItem.inwardDate
+                ? new Date(credit.inItem.inwardDate)
+                : new Date(),
+              type:     "PO_INWARD",
+              quantity: credit.qty,
+              balance:  updated ? updated.stock : undefined,
+              // No `order` here. This field is ref:"Order" and was being
+              // handed a PurchaseOrder id, so populating it resolved to
+              // nothing and the ledger's reference column stayed blank.
+            }, session);
+          }
           created = await MaterialInward.insertMany(inwardDocs, { session });
 
           // Credit the dye lots, so this yarn can later be issued to a
