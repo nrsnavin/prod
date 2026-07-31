@@ -13,12 +13,14 @@
 //   • Signature block: Prepared by / Approved by / Received by
 
 const PDFDocument = require("pdfkit");
+const {
+  INK, MUTED, RULE, HEADER_BG, ALERT_BG, ALERT_INK,
+  boxLabel, boxValue, box, titleBox, signatureStrip,
+} = require("./sapForm");
 
-const DARK   = "#1f2937";
-const MUTED  = "#6b7280";
-const ACCENT = "#2563eb";
-const RED    = "#dc2626";
-const LINE   = "#d1d5db";
+// Aliases so the drawing code below reads the same as the other forms.
+const DARK = INK;
+const LINE = RULE;
 
 function _num(n) {
   const v = Number(n);
@@ -62,75 +64,88 @@ async function buildMrpPdf(data) {
   // ── Header ──────────────────────────────────────────────────────
   // Company name from Document Settings (data.branding), with a default.
   const brand = data.branding || {};
-  const accent = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(brand.accent || "") ? brand.accent : ACCENT;
-  doc.fillColor(accent).font("Helvetica-Bold").fontSize(11)
-    .text(brand.company || "Balu Elastics", left, doc.y);
-  doc.moveDown(0.15);
-  doc.fillColor(DARK).font("Helvetica-Bold").fontSize(20)
-    .text("Material Requirement Program", left, doc.y);
-  doc.moveDown(0.2);
-  doc.fillColor(MUTED).font("Helvetica").fontSize(10)
-    .text("MRP sheet — raw material planning for one job order");
-  doc.moveDown(0.5);
-  doc.strokeColor(accent).lineWidth(2)
-    .moveTo(left, doc.y).lineTo(right, doc.y).stroke();
-  doc.moveDown(0.8);
 
-  // ── Meta grid ───────────────────────────────────────────────────
-  const metaTop = doc.y;
-  const col = width / 2;
-  const metaRowH = 19;
-  const metaPairs = [
-    ["Job Order #", data.jobOrderNo != null ? String(data.jobOrderNo) : "—"],
-    ["Order #",     data.orderNo != null ? String(data.orderNo) : "—"],
-    ["Customer",    data.customerName || "—"],
-    ["Date",        data.dateLabel || "—"],
-    ["Status",      data.status || "—"],
-  ];
-  doc.fontSize(10);
-  metaPairs.forEach((pair, i) => {
-    const x = left + (i % 2) * col;
-    const y = metaTop + Math.floor(i / 2) * metaRowH;
-    doc.fillColor(MUTED).font("Helvetica").text(`${pair[0]}: `, x, y, { continued: true });
-    doc.fillColor(DARK).font("Helvetica-Bold").text(pair[1]);
-  });
-  doc.y = metaTop + Math.ceil(metaPairs.length / 2) * metaRowH + 10;
+  doc.fillColor(INK).font("Helvetica-Bold").fontSize(15)
+    .text(brand.company || "Balu Elastics", left, 40, { width: 300, lineBreak: false });
+  doc.fillColor(MUTED).font("Helvetica").fontSize(7.5)
+    .text("Material requirement planning for one job order", left, 58, { width: 300, lineBreak: false });
 
-  // ── Production mode banner ──────────────────────────────────────
+  titleBox(doc, "MRP SHEET", right - 165, 38, 165);
+
+  // Identity grid — ruled boxes with small-caps labels, not inline pairs.
+  const metaY = 70;
+  const metaH = 46;
+  box(doc, right - 165, metaY, 165, metaH);
+  boxLabel(doc, "Job order", right - 160, metaY + 5, 78);
+  boxValue(doc, data.jobOrderNo != null ? `J-${data.jobOrderNo}` : "—", right - 160, metaY + 15, 78, { bold: true });
+  boxLabel(doc, "Date", right - 78, metaY + 5, 72);
+  boxValue(doc, data.dateLabel || "—", right - 78, metaY + 15, 72, { fontSize: 8 });
+  boxLabel(doc, "Order / Status", right - 160, metaY + 29, 155);
+  boxValue(doc, `${data.orderNo != null ? `#${data.orderNo}` : "—"}  ·  ${data.status || "—"}`,
+    right - 160, metaY + 37, 155, { fontSize: 7.5 });
+
+  doc.strokeColor(INK).lineWidth(1.2)
+    .moveTo(left, 124).lineTo(right, 124).stroke();
+
+  // Customer pane.
+  box(doc, left, 134, width, 40);
+  boxLabel(doc, "Customer", left + 6, 140, 300);
+  boxValue(doc, data.customerName || "—", left + 6, 150, width - 12, { bold: true, fontSize: 10 });
+  doc.y = 184;
+
+  // ── Production mode ─────────────────────────────────────────────
+  // A ruled row rather than a colour banner: these sheets print in mono on
+  // the floor, so the distinction has to survive without colour.
   const outsource = data.productionMode === "outsource";
-  const bannerLabel = outsource ? "OUTSOURCED PRODUCTION" : "IN-HOUSE PRODUCTION";
-  const bannerColor = outsource ? "#b45309" : accent;
-  const bannerH = 24;
-  const bannerY = doc.y;
-  doc.rect(left, bannerY, width, bannerH).fill(bannerColor);
-  doc.fillColor("#ffffff").font("Helvetica-Bold").fontSize(11)
-    .text(bannerLabel, left + 10, bannerY + 7, { width: width - 20 });
-  doc.y = bannerY + bannerH + 10;
+  const modeY = doc.y;
+  const modeH = outsource ? 42 : 26;
+  box(doc, left, modeY, width, modeH);
+  boxLabel(doc, "Production mode", left + 6, modeY + 5, 150);
+  boxValue(doc, outsource ? "OUTSOURCED" : "IN-HOUSE", left + 6, modeY + 14, 150, { bold: true });
   if (outsource) {
-    doc.fillColor(DARK).font("Helvetica").fontSize(10)
-      .text(`Vendor / Subcontractor: ${data.outsourceVendor || "________________________"}`, left, doc.y);
-    doc.fillColor(MUTED).fontSize(9)
-      .text("Materials below are to be issued to the vendor against this sheet.");
-    doc.moveDown(0.6);
+    boxLabel(doc, "Vendor / subcontractor", left + 200, modeY + 5, 200);
+    boxValue(doc, data.outsourceVendor || "________________________", left + 200, modeY + 14, width - 206);
+    doc.font("Helvetica").fontSize(7).fillColor(MUTED)
+      .text("Materials below are to be issued to the vendor against this sheet.",
+        left + 6, modeY + 30, { width: width - 12, lineBreak: false });
   }
+  doc.y = modeY + modeH + 12;
 
   // ── Elastics being produced ─────────────────────────────────────
-  doc.fillColor(accent).font("Helvetica-Bold").fontSize(12).text("Elastics to produce", left, doc.y);
-  doc.moveDown(0.35);
-  doc.fillColor(DARK).font("Helvetica").fontSize(10);
-  if ((data.elastics || []).length) {
-    for (const e of data.elastics) {
-      doc.text(`•  ${e.name || "Unknown"} — ${_num(e.quantity)} m`, { indent: 2 });
-      doc.moveDown(0.15);
+  // A ruled mini-table: a bullet list reads as prose, and this is a form.
+  doc.fillColor(INK).font("Helvetica-Bold").fontSize(7)
+    .text("ELASTICS TO PRODUCE", left, doc.y);
+  let ey = doc.y + 11;
+  const elasticRows = data.elastics || [];
+  const eQtyX = right - 110;
+
+  doc.rect(left, ey, width, 16).fill(HEADER_BG);
+  doc.fillColor(INK).font("Helvetica-Bold").fontSize(8)
+    .text("Elastic", left + 6, ey + 4, { width: eQtyX - left - 12, lineBreak: false })
+    .text("Quantity (m)", eQtyX, ey + 4, { width: 104, align: "right", lineBreak: false });
+  box(doc, left, ey, width, 16);
+  ey += 16;
+
+  if (elasticRows.length) {
+    for (const e of elasticRows) {
+      doc.fillColor(INK).font("Helvetica").fontSize(8.5)
+        .text(e.name || "Unknown", left + 6, ey + 4, { width: eQtyX - left - 12, lineBreak: false })
+        .text(_num(e.quantity), eQtyX, ey + 4, { width: 104, align: "right", lineBreak: false });
+      box(doc, left, ey, width, 16);
+      ey += 16;
     }
   } else {
-    doc.fillColor(MUTED).text("No elastic lines on this job.");
+    doc.fillColor(MUTED).font("Helvetica").fontSize(8.5)
+      .text("No elastic lines on this job.", left + 6, ey + 4, { width: width - 12, lineBreak: false });
+    box(doc, left, ey, width, 16);
+    ey += 16;
   }
-  doc.moveDown(0.8);
+  doc.y = ey + 14;
 
   // ── Material requirement table ──────────────────────────────────
-  doc.fillColor(accent).font("Helvetica-Bold").fontSize(12).text("Raw material requirement", left, doc.y);
-  doc.moveDown(0.45);
+  doc.fillColor(INK).font("Helvetica-Bold").fontSize(7)
+    .text("RAW MATERIAL REQUIREMENT", left, doc.y);
+  doc.moveDown(0.9);
 
   const cols = [
     { key: "name",           label: "Material",   w: 0.40, align: "left"  },
@@ -150,8 +165,8 @@ async function buildMrpPdf(data) {
   // Draws the shaded header row at vertical position `hy`; returns the
   // next y. Re-used on every page so the table always has a header.
   const drawHeader = (hy) => {
-    doc.rect(left, hy, width, rowH).fill("#eef2ff");
-    doc.fillColor(DARK).font("Helvetica-Bold").fontSize(10);
+    doc.rect(left, hy, width, rowH).fill(HEADER_BG);
+    doc.fillColor(INK).font("Helvetica-Bold").fontSize(9);
     cols.forEach((c, i) => {
       const cw = c.w * width;
       doc.text(c.label, colX[i] + pad, hy + 6, { width: cw - pad * 2, align: c.align });
@@ -186,9 +201,10 @@ async function buildMrpPdf(data) {
         y = drawHeader(segTop);
       }
       const short = Number(m.shortfall) > 0;
-      // Zebra striping for scan-ability; shortfall rows get a red wash.
-      if (short) doc.rect(left, y, width, rowH).fill("#fef2f2");
-      else if (idx % 2 === 1) doc.rect(left, y, width, rowH).fill("#f9fafb");
+      // No zebra — a ruled grid does the scan-ability job without the
+      // banding. A shortfall row gets a wash AND bold text, because these
+      // sheets are printed in mono and colour alone would say nothing.
+      if (short) doc.rect(left, y, width, rowH).fill(ALERT_BG);
 
       const cells = {
         name:           m.name + (m.category ? `  (${m.category})` : ""),
@@ -198,9 +214,9 @@ async function buildMrpPdf(data) {
       };
       cols.forEach((c, i) => {
         const cw = c.w * width;
-        doc.fillColor(c.key === "shortfall" && short ? RED : DARK)
-          .font(c.key === "shortfall" && short ? "Helvetica-Bold" : "Helvetica")
-          .fontSize(10)
+        doc.fillColor(c.key === "shortfall" && short ? ALERT_INK : INK)
+          .font(short ? "Helvetica-Bold" : "Helvetica")
+          .fontSize(9)
           .text(String(cells[c.key]), colX[i] + pad, y + 6, { width: cw - pad * 2, align: c.align });
       });
       doc.strokeColor(LINE).lineWidth(0.5)
@@ -215,26 +231,16 @@ async function buildMrpPdf(data) {
 
   const anyShort = materials.some((m) => Number(m.shortfall) > 0);
   if (anyShort) {
-    doc.fillColor(RED).font("Helvetica-Bold").fontSize(9)
-      .text("Shortfall rows are highlighted — raise a purchase order before starting production.", left, doc.y);
+    doc.fillColor(ALERT_INK).font("Helvetica-Bold").fontSize(8)
+      .text("Rows in bold are short — raise a purchase order before starting production.", left, doc.y);
     doc.moveDown(0.5);
   }
 
-  // ── Signature block ─────────────────────────────────────────────
-  // Pin near the bottom of the current page, above the footer.
-  const sigY = Math.max(doc.y + 24, bottomLimit - 78);
-  const boxGap = 24;
-  const boxW = (width - boxGap * 2) / 3;
-  const labels = ["Prepared by", "Approved by", "Received by"];
-  labels.forEach((label, i) => {
-    const bx = left + i * (boxW + boxGap);
-    doc.strokeColor(DARK).lineWidth(0.8)
-      .moveTo(bx, sigY + 34).lineTo(bx + boxW, sigY + 34).stroke();
-    doc.fillColor(MUTED).font("Helvetica").fontSize(9)
-      .text(label, bx, sigY + 40, { width: boxW, align: "center" });
-    doc.fillColor("#9ca3af").fontSize(7)
-      .text("Name / Signature / Date", bx, sigY + 52, { width: boxW, align: "center" });
-  });
+  // ── Signature strip ─────────────────────────────────────────────
+  // Boxed, matching the challan and purchase order, and pinned above the
+  // footer so it lands in the same place on every sheet.
+  const sigY = Math.max(doc.y + 20, bottomLimit - 70);
+  signatureStrip(doc, left, sigY, width, ["Prepared by", "Approved by", "Received by"]);
 
   // ── Footer on every page: generated timestamp + page numbers ────
   const range = doc.bufferedPageRange();
