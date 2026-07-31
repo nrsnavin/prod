@@ -15,8 +15,10 @@ function fmtDate(d) {
   if (isNaN(dt.getTime())) return "";
   return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
+// "Rs." not ₹ — the built-in PDF font cannot encode U+20B9 and renders it
+// as a stray "¹". Matches templateRenderer and the payslip PDF.
 function inr(n) {
-  return "₹" + Math.round(Number(n) || 0).toLocaleString("en-IN");
+  return "Rs. " + Math.round(Number(n) || 0).toLocaleString("en-IN");
 }
 
 function poToContext(po, branding = {}) {
@@ -62,9 +64,16 @@ function poToContext(po, branding = {}) {
       // ── extras available to bind ──
       expectedDate: po.expectedDate ? `Expected: ${fmtDate(po.expectedDate)}` : "",
       poStatus: po.status || "",
+      // Bare equivalents for a layout that supplies its own labels — the
+      // prefixed versions above read as "EXPECTED DELIVERY / Expected: …"
+      // inside a labelled box. Both are kept so a saved template that binds
+      // the old keys is unaffected.
+      poNumber: po.poNo != null ? String(po.poNo) : "",
+      expectedDelivery: fmtDate(po.expectedDate),
       // ── totals ──
       totalQty: totalQty.toLocaleString("en-IN"),
       totalAmount: inr(totalAmount),
+      lineCount: String(rows.length),
       // ── footer / terms (from Document Settings) ──
       footerNote: branding.footerNote || "",
       termsText: branding.termsText || po.notes || "",

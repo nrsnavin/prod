@@ -16,83 +16,6 @@
 //  fresh template opens with a usable letterhead + table.
 // ══════════════════════════════════════════════════════════════
 
-const INVOICE_FIELDS = [
-  { key: "companyName", label: "Company name" },
-  { key: "tagline", label: "Tagline" },
-  { key: "companyAddress", label: "Company address" },
-  { key: "companyGstin", label: "Company GSTIN" },
-  { key: "companyContact", label: "Company phone/email" },
-  { key: "docTitle", label: "Document title" },
-  { key: "docNo", label: "Document no." },
-  { key: "docDate", label: "Document date" },
-  { key: "partyName", label: "Party name" },
-  { key: "partyAddress", label: "Party address" },
-  { key: "partyGstin", label: "Party GSTIN" },
-  { key: "totalQty", label: "Total quantity" },
-  { key: "totalAmount", label: "Total amount" },
-  { key: "footerNote", label: "Footer note" },
-  { key: "termsText", label: "Terms & conditions" },
-];
-
-const INVOICE_COLUMNS = [
-  { field: "sno", header: "#", width: 0.5, align: "left", format: "text" },
-  { field: "description", header: "Description", width: 3, align: "left", format: "text" },
-  { field: "qty", header: "Qty", width: 1, align: "right", format: "number" },
-  { field: "rate", header: "Rate", width: 1, align: "right", format: "currency" },
-  { field: "amount", header: "Amount", width: 1, align: "right", format: "currency" },
-];
-
-function invoiceSample(title) {
-  return {
-    fields: {
-      companyName: "Balu Elastics",
-      tagline: "Elastic Manufacturing",
-      companyAddress: "12 Mill Road, Erode, Tamil Nadu 638001",
-      companyGstin: "33ABCDE1234F1Z5",
-      companyContact: "+91 98765 43210  ·  hello@baluelastics.com",
-      docTitle: title,
-      docNo: "DC-2026-0042",
-      docDate: "22-Jul-2026",
-      partyName: "Sunrise Garments Pvt Ltd",
-      partyAddress: "48 Textile Park, Tiruppur 641604",
-      partyGstin: "33AAExx9999F1Z2",
-      totalQty: "1,250",
-      totalAmount: "₹86,500",
-      footerNote: "This is a computer-generated document.",
-      termsText: "Goods once dispatched will not be taken back. Subject to Erode jurisdiction.",
-    },
-    rows: [
-      { sno: 1, description: '3/4" Woven Elastic — White', qty: 500, rate: 42, amount: 21000 },
-      { sno: 2, description: '1" Knitted Elastic — Black', qty: 450, rate: 55, amount: 24750 },
-      { sno: 3, description: '2" Jacquard Elastic — Navy', qty: 300, rate: 68, amount: 20400 },
-    ],
-    logo: "", // pulled from DocumentSettings at render time
-  };
-}
-
-// A4 portrait = 595 x 842 pt. Starter letterhead + party block + table.
-function invoiceStarter() {
-  return [
-    { id: "logo", type: "image", x: 40, y: 36, w: 90, h: 42 },
-    { id: "company", type: "field", field: "companyName", x: 140, y: 38, w: 300, h: 22, fontSize: 18, bold: true, color: "#1D6FEB", align: "left" },
-    { id: "tagline", type: "field", field: "tagline", x: 140, y: 60, w: 300, h: 14, fontSize: 9, color: "#5A6A85" },
-    { id: "addr", type: "field", field: "companyAddress", x: 40, y: 88, w: 300, h: 12, fontSize: 8, color: "#5A6A85" },
-    { id: "gstin", type: "field", field: "companyGstin", x: 40, y: 100, w: 300, h: 12, fontSize: 8, color: "#5A6A85" },
-    { id: "title", type: "field", field: "docTitle", x: 380, y: 40, w: 175, h: 22, fontSize: 16, bold: true, align: "right", color: "#0D1B2A" },
-    { id: "docno", type: "field", field: "docNo", x: 380, y: 66, w: 175, h: 12, fontSize: 9, align: "right", color: "#5A6A85" },
-    { id: "docdate", type: "field", field: "docDate", x: 380, y: 80, w: 175, h: 12, fontSize: 9, align: "right", color: "#5A6A85" },
-    { id: "rule", type: "line", x: 40, y: 120, w: 515, h: 0, lineWidth: 1.5, color: "#1D6FEB" },
-    { id: "billto", type: "text", text: "Bill To:", x: 40, y: 134, w: 100, h: 12, fontSize: 9, bold: true, color: "#0D1B2A" },
-    { id: "party", type: "field", field: "partyName", x: 40, y: 148, w: 300, h: 14, fontSize: 11, bold: true },
-    { id: "partyaddr", type: "field", field: "partyAddress", x: 40, y: 164, w: 300, h: 12, fontSize: 8, color: "#5A6A85" },
-    { id: "table", type: "table", x: 40, y: 196, w: 515, h: 400, fontSize: 9, headerBg: "#1D6FEB", zebra: true, columns: INVOICE_COLUMNS },
-    { id: "totlbl", type: "text", text: "Total:", x: 380, y: 610, w: 80, h: 14, fontSize: 10, bold: true, align: "right" },
-    { id: "total", type: "field", field: "totalAmount", x: 465, y: 610, w: 90, h: 14, fontSize: 11, bold: true, align: "right", color: "#1D6FEB" },
-    { id: "terms", type: "field", field: "termsText", x: 40, y: 660, w: 515, h: 30, fontSize: 8, color: "#5A6A85" },
-    { id: "footer", type: "field", field: "footerNote", x: 40, y: 800, w: 515, h: 12, fontSize: 8, align: "center", color: "#8895A7" },
-  ];
-}
-
 // ══════════════════════════════════════════════════════════════
 //  DELIVERY CHALLAN
 //
@@ -264,6 +187,171 @@ function dcStarter() {
   ];
 }
 
+// ══════════════════════════════════════════════════════════════
+//  PURCHASE ORDER
+//
+//  Same ruled form as the challan, but a PO IS a commercial document:
+//  it commits the company to a price, so rate and amount stay. The
+//  parties are the other way round — we are the buyer, the supplier is
+//  the party — and the totals block carries a value, not just a count.
+// ══════════════════════════════════════════════════════════════
+
+const PO_FIELDS = [
+  { key: "companyName", label: "Company name" },
+  { key: "tagline", label: "Tagline" },
+  { key: "companyAddress", label: "Company address" },
+  { key: "companyGstin", label: "Company GSTIN" },
+  { key: "companyContact", label: "Company phone/email" },
+  { key: "docTitle", label: "Document title" },
+  { key: "docNo", label: "PO no. (prefixed)" },
+  { key: "poNumber", label: "PO no. (bare)" },
+  { key: "docDate", label: "PO date" },
+  { key: "expectedDate", label: "Expected delivery (prefixed)" },
+  { key: "expectedDelivery", label: "Expected delivery (bare)" },
+  { key: "poStatus", label: "PO status" },
+  { key: "partyName", label: "Supplier name" },
+  { key: "partyAddress", label: "Supplier address" },
+  { key: "partyGstin", label: "Supplier GSTIN" },
+  { key: "partyContact", label: "Supplier phone/email" },
+  { key: "totalQty", label: "Total quantity" },
+  { key: "totalAmount", label: "Total amount" },
+  { key: "lineCount", label: "Number of line items" },
+  { key: "footerNote", label: "Footer note" },
+  { key: "termsText", label: "Terms & conditions" },
+];
+
+const PO_COLUMNS = [
+  { field: "sno", header: "S.No", width: 0.55, align: "left", format: "text" },
+  { field: "description", header: "Material Description", width: 3.3, align: "left", format: "text" },
+  { field: "unit", header: "UOM", width: 0.7, align: "center", format: "text" },
+  { field: "qty", header: "Quantity", width: 1, align: "right", format: "number" },
+  { field: "rate", header: "Rate", width: 1, align: "right", format: "currency" },
+  { field: "amount", header: "Amount", width: 1.2, align: "right", format: "currency" },
+];
+
+function poSample() {
+  return {
+    fields: {
+      companyName: "Balu Elastics",
+      tagline: "Elastic Manufacturing",
+      companyAddress: "12 Mill Road, Erode, Tamil Nadu 638001",
+      companyGstin: "GSTIN: 33ABCDE1234F1Z5",
+      companyContact: "+91 98765 43210  ·  hello@baluelastics.com",
+      docTitle: "PURCHASE ORDER",
+      docNo: "PO #1042",
+      poNumber: "1042",
+      docDate: "22-Jul-2026",
+      expectedDelivery: "05-Aug-2026",
+      poStatus: "approved",
+      partyName: "Coimbatore Yarn Traders",
+      partyAddress: "7 Mettupalayam Road, Coimbatore 641002",
+      partyGstin: "GSTIN: 33AAFCY1234K1Z9",
+      partyContact: "+91 90000 11122  ·  sales@cbeyarn.in",
+      totalQty: "1,900",
+      totalAmount: "Rs. 1,86,500",
+      lineCount: "3",
+      footerNote: "This is a computer-generated document.",
+      termsText: "Please quote our PO number on the invoice and delivery note. Subject to Erode jurisdiction.",
+    },
+    rows: [
+      { sno: 1, description: "Nylon 40D — Semi-dull", unit: "kg", qty: 800, rate: 105, amount: 84000 },
+      { sno: 2, description: "Spandex 70D", unit: "kg", qty: 600, rate: 118, amount: 70800 },
+      { sno: 3, description: "Polyester 150D — Black", unit: "kg", qty: 500, rate: 63, amount: 31500 },
+    ],
+    logo: "",
+  };
+}
+
+function poStarter() {
+  const L = 34;
+  const R = 561;
+  const W = R - L;
+  const MID = L + W / 2;
+
+  const label = (id, text, x, y, w) => ({
+    id, type: "text", text, x, y, w, h: 10, fontSize: 6.5, bold: true, color: MUTED,
+  });
+  const value = (id, field, x, y, w, extra = {}) => ({
+    id, type: "field", field, x, y, w, h: 12, fontSize: 9, color: INK, ...extra,
+  });
+
+  return [
+    // ── Letterhead — the buyer ────────────────────────────────
+    { id: "logo", type: "image", x: L + 4, y: 40, w: 74, h: 36 },
+    { id: "company", type: "field", field: "companyName", x: L + 86, y: 40, w: 300, h: 20, fontSize: 15, bold: true, color: INK },
+    { id: "tagline", type: "field", field: "tagline", x: L + 86, y: 58, w: 300, h: 11, fontSize: 7.5, color: MUTED },
+    { id: "addr", type: "field", field: "companyAddress", x: L + 86, y: 70, w: 300, h: 11, fontSize: 7.5, color: MUTED },
+    { id: "contact", type: "field", field: "companyContact", x: L + 86, y: 82, w: 300, h: 11, fontSize: 7.5, color: MUTED },
+    { id: "cgstin", type: "field", field: "companyGstin", x: L + 86, y: 94, w: 300, h: 11, fontSize: 7.5, color: MUTED },
+
+    { id: "titlebox", type: "box", x: 396, y: 38, w: R - 396, h: 26, lineWidth: 0.8, color: INK },
+    { id: "title", type: "field", field: "docTitle", x: 400, y: 45, w: R - 404, h: 16, fontSize: 12, bold: true, align: "center", color: INK },
+
+    // ── Document identity grid ────────────────────────────────
+    { id: "idbox", type: "box", x: 396, y: 68, w: R - 396, h: 46, lineWidth: 0.6, color: RULE },
+    label("l_no", "P.O. NUMBER", 401, 73, 80),
+    value("v_no", "poNumber", 401, 83, 80, { bold: true }),
+    label("l_dt", "P.O. DATE", 486, 73, 70),
+    value("v_dt", "docDate", 486, 83, 70),
+    label("l_exp", "EXPECTED DELIVERY", 401, 97, 155),
+    value("v_exp", "expectedDelivery", 401, 105, 155, { fontSize: 8 }),
+
+    { id: "hrule", type: "line", x: L, y: 124, w: W, h: 0, lineWidth: 1.2, color: INK },
+
+    // ── Supplier | Deliver-to panes ───────────────────────────
+    { id: "pane", type: "box", x: L, y: 134, w: W, h: 92, lineWidth: 0.6, color: RULE },
+    { id: "panesplit", type: "line", x: MID, y: 134, w: 0, h: 92, lineWidth: 0.6, color: RULE },
+
+    label("l_sup", "SUPPLIER", L + 6, 140, 240),
+    value("v_sup", "partyName", L + 6, 152, 240, { bold: true, fontSize: 10 }),
+    value("v_supaddr", "partyAddress", L + 6, 167, 240, { fontSize: 8, color: MUTED }),
+    value("v_supcontact", "partyContact", L + 6, 195, 240, { fontSize: 8, color: MUTED }),
+    value("v_supgst", "partyGstin", L + 6, 207, 240, { fontSize: 8, color: MUTED }),
+
+    label("l_del", "DELIVER TO", MID + 6, 140, 240),
+    value("v_delname", "companyName", MID + 6, 152, 240, { bold: true, fontSize: 10 }),
+    value("v_deladdr", "companyAddress", MID + 6, 167, 240, { fontSize: 8, color: MUTED }),
+    value("v_delgst", "companyGstin", MID + 6, 195, 240, { fontSize: 8, color: MUTED }),
+
+    // ── Items ─────────────────────────────────────────────────
+    {
+      id: "table", type: "table", x: L, y: 238, w: W, h: 396, fontSize: 8.5,
+      headerBg: "#E4E4E4", headerColor: INK, bodyColor: INK,
+      gridColor: RULE, grid: true, zebra: false,
+      columns: PO_COLUMNS,
+    },
+
+    // ── Totals ────────────────────────────────────────────────
+    // Boxed and right-aligned: on a PO the value is the commitment, so it
+    // gets the emphasis the challan's quantity total does not need.
+    { id: "totbox", type: "box", x: 330, y: 640, w: R - 330, h: 40, lineWidth: 0.6, color: RULE },
+    { id: "tqty_l", type: "text", text: "Total quantity", x: 336, y: 647, w: 110, h: 12, fontSize: 8, color: MUTED },
+    { id: "tqty", type: "field", field: "totalQty", x: 446, y: 646, w: R - 452, h: 12, fontSize: 9, align: "right", color: INK },
+    { id: "tamt_rule", type: "line", x: 330, y: 661, w: R - 330, h: 0, lineWidth: 0.6, color: RULE },
+    { id: "tamt_l", type: "text", text: "TOTAL VALUE", x: 336, y: 667, w: 110, h: 12, fontSize: 8, bold: true, color: MUTED },
+    { id: "tamt", type: "field", field: "totalAmount", x: 430, y: 665, w: R - 436, h: 16, fontSize: 12, bold: true, align: "right", color: INK },
+
+    { id: "lines_l", type: "text", text: "Total line items:", x: L, y: 647, w: 90, h: 12, fontSize: 8, color: MUTED },
+    { id: "lines", type: "field", field: "lineCount", x: L + 92, y: 647, w: 40, h: 12, fontSize: 9, bold: true, color: INK },
+
+    // ── Terms ─────────────────────────────────────────────────
+    { id: "l_terms", type: "text", text: "TERMS & CONDITIONS", x: L, y: 692, w: 200, h: 10, fontSize: 6.5, bold: true, color: MUTED },
+    { id: "terms", type: "field", field: "termsText", x: L, y: 703, w: 290, h: 46, fontSize: 7.5, color: MUTED },
+
+    // ── Signature strip ───────────────────────────────────────
+    { id: "sigbox", type: "box", x: L, y: 758, w: W, h: 52, lineWidth: 0.6, color: RULE },
+    { id: "sigsplit1", type: "line", x: L + W / 3, y: 758, w: 0, h: 52, lineWidth: 0.6, color: RULE },
+    { id: "sigsplit2", type: "line", x: L + (2 * W) / 3, y: 758, w: 0, h: 52, lineWidth: 0.6, color: RULE },
+    { id: "sig1", type: "text", text: "Prepared by", x: L + 6, y: 796, w: 150, h: 10, fontSize: 7, color: MUTED },
+    { id: "sig2", type: "text", text: "Approved by", x: L + W / 3 + 6, y: 796, w: 150, h: 10, fontSize: 7, color: MUTED },
+    { id: "sig3", type: "text", text: "Supplier acknowledgement", x: L + (2 * W) / 3 + 6, y: 796, w: 165, h: 10, fontSize: 7, color: MUTED },
+
+    // ── Footer ────────────────────────────────────────────────
+    { id: "footer", type: "field", field: "footerNote", x: L, y: 818, w: 330, h: 10, fontSize: 7, color: MUTED },
+    { id: "pageno", type: "pageNumber", text: "Page {{n}} of {{total}}", x: 380, y: 818, w: R - 380, h: 10, fontSize: 7, align: "right", color: MUTED },
+  ];
+}
+
 const DOC_TYPES = {
   "delivery-challan": {
     label: "Delivery Challan",
@@ -274,10 +362,10 @@ const DOC_TYPES = {
   },
   "purchase-order": {
     label: "Purchase Order",
-    fields: INVOICE_FIELDS,
-    columns: INVOICE_COLUMNS,
-    sample: () => invoiceSample("PURCHASE ORDER"),
-    starter: invoiceStarter,
+    fields: PO_FIELDS,
+    columns: PO_COLUMNS,
+    sample: poSample,
+    starter: poStarter,
   },
 };
 

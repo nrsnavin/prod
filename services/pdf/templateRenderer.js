@@ -28,7 +28,10 @@ const PAGE = {
 function safeColor(c, fallback) {
   return c && HEX.test(c) ? c : fallback;
 }
-function inr(n) { return "₹" + Math.round(Number(n) || 0).toLocaleString("en-IN"); }
+// "Rs." rather than ₹ (U+20B9): pdfkit's built-in Helvetica is WinAnsi-only,
+// and the rupee sign is outside that set — it came out as a stray "¹" on
+// every currency cell. Same convention as the payslip PDF (api/payroll.js).
+function inr(n) { return "Rs. " + Math.round(Number(n) || 0).toLocaleString("en-IN"); }
 function num(n) {
   const v = Number(n) || 0;
   return (Math.round(v * 100) / 100).toLocaleString("en-IN");
