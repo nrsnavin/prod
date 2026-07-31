@@ -14,6 +14,8 @@ const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { appendStockMovement } = require("../utils/stockLedger");
+const YarnLot           = require("../models/YarnLot");
+const { creditLot } = require("../services/yarnLotService");
 const {
   maybeFireCriticalStockout,
   maybeFirePriceChangeAlert,
@@ -114,9 +116,15 @@ router.get(
       .limit(50)
       .lean();
 
+    // Dye lots, open ones first so the rack's usable stock reads at the
+    // top. Virtuals are needed for `balance`, so this is not .lean().
+    const lots = await YarnLot.find({ rawMaterial: id })
+      .sort({ status: 1, receivedDate: -1 })
+      .limit(100);
+
     res.status(200).json({
       success: true,
-      material: { ...material, inwards, outwards },
+      material: { ...material, inwards, outwards, lots },
     });
   })
 );
@@ -307,14 +315,45 @@ router.post(
       balance:  material.stock,
     });
 
+    const lotNo = req.body.lotNo ? String(req.body.lotNo).trim() : "";
+
     const inward = await MaterialInward.create({
       rawMaterial:   rawMaterialId,
       purchaseOrder: purchaseOrderId,
       quantity:      Number(quantity),
       inwardDate:    new Date(),
       remarks:       remarks || "",
-      lotNo:         req.body.lotNo ? String(req.body.lotNo).trim() : "",
+      lotNo,
     });
+
+    // Credit the dye lot, so the yarn can be issued to a warping batch
+    // by lot later. Only when a lot number was given — undyed or
+    // untracked material simply has no bucket.
+    //
+    // Deliberately not fatal. Stock has already been credited by the
+    // time we get here and this route is not transactional, so throwing
+    // would leave the operator retrying an inward that partly happened.
+    // The lot number is on the MaterialInward row either way, which is
+    // the durable record — the bucket can be rebuilt from it.
+    let lot = null;
+    let lotError = null;
+    if (lotNo) {
+      try {
+        lot = await creditLot({
+          rawMaterial:  rawMaterialId,
+          lotNo,
+          quantity:     qtyNum,
+          shade:        req.body.shade,
+          dyer:         req.body.dyer,
+          supplier:     material.supplier,
+          inward:       inward._id,
+          receivedDate: inward.inwardDate,
+        });
+      } catch (err) {
+        lotError = err.message;
+        console.warn(`Lot credit failed for inward ${inward._id}:`, err.message);
+      }
+    }
 
     const item = po.items.find(
       (i) => i.rawMaterial.toString() === rawMaterialId
@@ -328,7 +367,7 @@ router.post(
       await po.save();
     }
 
-    res.status(201).json({ success: true, inward });
+    res.status(201).json({ success: true, inward, lot, lotError });
 
     (async () => {
       let supplierName = null;

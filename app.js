@@ -82,6 +82,7 @@ const employee = require("./api/employee.js");
 const customer = require("./api/customer.js");
 const supplier = require("./api/supplier.js");
 const material = require("./api/rawMaterial.js");
+const yarnLot  = require("./api/yarnLot.js");
 const elastic  = require("./api/elastic.js");
 const elasticGroup = require("./api/elasticGroup.js");
 const order    = require("./api/order.js");
@@ -327,6 +328,9 @@ app.use("/api/v2/planner",     gate('production'), requireFeature('/planner'), p
 // (no role gate), matching the nav. Still requires login.
 app.use("/api/v2/assistant",   isAuthenticated, assistant);
 app.use("/api/v2/materials",   gate('production', 'accounts'), requireFeature('/materials'), material);
+// Dye lots are a materials concept — same gate, so anyone who can see
+// stock can see how it breaks down by lot.
+app.use("/api/v2/yarn-lots",   gate('production', 'accounts'), requireFeature('/materials'), yarnLot);
 app.use("/api/v2/warping",     gate('production'), warping);
 app.use("/api/v2/wastage",     gate('production'), wastage);
 app.use("/api/v2/attendance",  gate('accounts', 'production'), requireFeature('/attendance'), attendence);

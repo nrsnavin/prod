@@ -28,6 +28,7 @@ const { isAuthenticated } = require("../middleware/auth");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { nextNumber } = require("../utils/sequence");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
+const { creditLot } = require("../services/yarnLotService");
 const PdfTemplate = require("../models/PdfTemplate");
 const { renderTemplatePdf } = require("../services/pdf/templateRenderer");
 const { starterTemplate }   = require("../services/pdf/docTypes");
@@ -442,7 +443,11 @@ router.post(
 
 // ─────────────────────────────────────────────────────────────────────────
 // POST /inward-stock
-// Body: { poId, items: [{ rawMaterial, quantity, inwardDate?, remarks? }] }
+// Body: { poId, items: [{ rawMaterial, quantity, inwardDate?, remarks?,
+//                         lotNo?, shade? }] }
+//
+// A row carrying a lot number also credits a YarnLot bucket, so the yarn
+// can be issued to a warping batch by lot later on.
 //
 // ✅ FIX: increments RawMaterial.stock for every received item.
 //
@@ -610,6 +615,25 @@ router.post(
           await po.save({ session });
           await RawMaterial.bulkWrite(bulkOps, { session });
           created = await MaterialInward.insertMany(inwardDocs, { session });
+
+          // Credit the dye lots, so this yarn can later be issued to a
+          // warping batch by lot. Inside the transaction with everything
+          // else: unlike the standalone /materials/material-inward route,
+          // this path can roll the whole receipt back, so there is no
+          // reason to settle for best-effort here.
+          for (let i = 0; i < activeItems.length; i++) {
+            const item = activeItems[i];
+            if (!item.lotNo) continue;
+            await creditLot({
+              rawMaterial:  item.rawMaterial,
+              lotNo:        item.lotNo,
+              quantity:     Number(item.quantity),
+              shade:        item.shade,
+              supplier:     po.supplier,
+              inward:       created[i]?._id,
+              receivedDate: inwardDocs[i].inwardDate,
+            }, session);
+          }
         });
       } catch (err) {
         if (isDuplicateKeyError(err) && requestId) {

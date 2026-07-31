@@ -8,7 +8,11 @@ const Warping          = require("../models/Warping");
 const JobOrder         = require("../models/JobOrder");
 const Order            = require("../models/Order");
 const WarpingPlan      = require("../models/WarpingPlan");
+const WarpingBatch     = require("../models/WarpingBatch");
+const YarnLot          = require("../models/YarnLot");
 const Elastic          = require("../models/Elastic");
+const { nextNumber }   = require("../utils/sequence");
+const { drawFromLot, returnToLot } = require("../services/yarnLotService");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
@@ -595,6 +599,311 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
     prefillTemplate,
     elasticTemplates,
   });
+}));
+
+// ═══════════════════════════════════════════════════════════════════════
+//  WARPING BATCHES — running a plan from known yarn lots
+//
+//  A plan says what to build; a batch records which lots were actually
+//  drawn to build it, and when. One plan is routinely run over several
+//  sittings from different lots, which is exactly what makes the lot
+//  worth recording.
+//
+//  Issuing a batch moves lot balances and deliberately leaves
+//  RawMaterial.stock alone — that was already debited at order approval.
+//  See models/YarnLot.js.
+// ═══════════════════════════════════════════════════════════════════════
+
+/** Beam numbers the plan actually defines, for validating a batch. */
+function planBeamNumbers(plan) {
+  return new Set(
+    (plan?.beams || [])
+      .map((b) => Number(b.beamNo))
+      .filter((n) => Number.isFinite(n))
+  );
+}
+
+/**
+ * Normalise and check the allocations on a create/update.
+ * Returns [{ rawMaterial, yarnLot, quantity }] or throws.
+ */
+function parseAllocations(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new ErrorHandler("At least one lot allocation is required", 400);
+  }
+  const seen = new Set();
+  return raw.map((a, i) => {
+    const at = `Allocation ${i + 1}`;
+    if (!mongoose.Types.ObjectId.isValid(a?.rawMaterial)) {
+      throw new ErrorHandler(`${at}: a valid rawMaterial is required`, 400);
+    }
+    if (!mongoose.Types.ObjectId.isValid(a?.yarnLot)) {
+      throw new ErrorHandler(`${at}: a valid yarnLot is required`, 400);
+    }
+    const quantity = Number(a.quantity);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new ErrorHandler(`${at}: quantity must be greater than zero`, 400);
+    }
+    // The same lot twice in one batch would draw it down twice for a
+    // single physical issue. Merging silently would hide a keying slip,
+    // so say so and let the operator decide which line is right.
+    const key = String(a.yarnLot);
+    if (seen.has(key)) {
+      throw new ErrorHandler(
+        `${at}: this lot is already allocated to the batch — combine the two lines`,
+        400
+      );
+    }
+    seen.add(key);
+    return { rawMaterial: a.rawMaterial, yarnLot: a.yarnLot, quantity };
+  });
+}
+
+/** Snapshot lot + material names onto the allocations, for the record. */
+async function decorateAllocations(allocations, session) {
+  const lotIds = allocations.map((a) => a.yarnLot);
+  const q = YarnLot.find({ _id: { $in: lotIds } }).populate("rawMaterial", "name");
+  if (session) q.session(session);
+  const lots = await q;
+  const byId = new Map(lots.map((l) => [String(l._id), l]));
+
+  return allocations.map((a) => {
+    const lot = byId.get(String(a.yarnLot));
+    if (!lot) throw new ErrorHandler("Yarn lot not found", 404);
+    // A lot belonging to a different material means the picker was
+    // filtered on one material and submitted against another — the kind
+    // of mismatch that silently ruins a trace months later.
+    if (String(lot.rawMaterial?._id || lot.rawMaterial) !== String(a.rawMaterial)) {
+      throw new ErrorHandler(
+        `Lot ${lot.lotNo} does not belong to the selected material`,
+        400
+      );
+    }
+    return {
+      ...a,
+      lotNo: lot.lotNo,
+      shade: lot.shade || "",
+      materialName: lot.rawMaterial?.name || "",
+    };
+  });
+}
+
+// ── POST /warping/batch/create ────────────────────────────────
+router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(async (req, res, next) => {
+  const { warpingId, beamNos, allocations, remarks, machine } = req.body;
+
+  if (!mongoose.Types.ObjectId.isValid(warpingId)) {
+    return next(new ErrorHandler("A valid warpingId is required", 400));
+  }
+  if (machine && !mongoose.Types.ObjectId.isValid(machine)) {
+    return next(new ErrorHandler("Invalid machine id", 400));
+  }
+
+  const warping = await Warping.findById(warpingId);
+  if (!warping) return next(new ErrorHandler("Warping not found", 404));
+  if (warping.status === "cancelled") {
+    return next(new ErrorHandler("Warping is cancelled", 400));
+  }
+
+  const plan = await WarpingPlan.findOne({ warping: warping._id });
+  if (!plan) {
+    return next(new ErrorHandler("Create a warping plan before batching", 400));
+  }
+
+  const beams = Array.isArray(beamNos) ? beamNos.map(Number).filter(Number.isFinite) : [];
+  const known = planBeamNumbers(plan);
+  const unknown = beams.filter((n) => !known.has(n));
+  if (unknown.length) {
+    return next(new ErrorHandler(
+      `Beam ${unknown.join(", ")} is not in this warping plan`, 400
+    ));
+  }
+
+  let parsed;
+  try {
+    parsed = await decorateAllocations(parseAllocations(allocations));
+  } catch (err) {
+    return next(err);
+  }
+
+  const seq = await nextNumber("warpingBatchNo", async () => {
+    // Seed from the highest existing number so batches created before
+    // the counter existed are not re-issued.
+    const last = await WarpingBatch.findOne({ batchNo: /^WB-\d+$/ })
+      .sort({ batchNo: -1 }).select("batchNo").lean();
+    return last ? Number(String(last.batchNo).slice(3)) : 0;
+  });
+
+  const batch = await WarpingBatch.create({
+    batchNo: `WB-${String(seq).padStart(4, "0")}`,
+    warping: warping._id,
+    job: warping.job,
+    beamNos: beams,
+    allocations: parsed,
+    machine: machine || undefined,
+    remarks: remarks ? String(remarks).trim() : "",
+    createdBy: req.user?._id,
+  });
+
+  res.status(201).json({ success: true, batch });
+}));
+
+// ── POST /warping/batch/:id/issue ─────────────────────────────
+// Draw the allocated yarn off the rack. Every lot moves or none does.
+router.post("/batch/:id/issue", isAdmin("admin", "production"), catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next(new ErrorHandler("Invalid batch id", 400));
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    let batch;
+    await session.withTransaction(async () => {
+      // The status guard is part of the claim, not a separate read: two
+      // clicks on Issue would otherwise both see "planned" and both draw
+      // the lots down. The loser matches nothing and is told why.
+      const claimed = await WarpingBatch.findOneAndUpdate(
+        { _id: req.params.id, status: "planned" },
+        { $set: { status: "issued", issuedDate: new Date() } },
+        { new: true, session }
+      );
+      if (!claimed) {
+        const exists = await WarpingBatch.findById(req.params.id).session(session);
+        if (!exists) throw new ErrorHandler("Batch not found", 404);
+        throw new ErrorHandler(`Batch ${exists.batchNo} is already ${exists.status}`, 409);
+      }
+
+      for (const a of claimed.allocations) {
+        await drawFromLot(a.yarnLot, a.quantity, session);
+      }
+      batch = claimed;
+    });
+
+    const fp = buildFingerprint(ACTION_CODES.WARPING_STARTED, {
+      entityId: batch.job,
+      actor: actorFromRequest(req),
+      meta: {
+        batchNo: batch.batchNo,
+        beamNos: batch.beamNos,
+        lots: batch.allocations.map((a) => `${a.lotNo} (${a.quantity})`),
+      },
+    });
+    // Best-effort: the yarn has moved either way, and losing the audit
+    // line is not worth failing the issue and stranding the lot draws.
+    try {
+      await JobOrder.updateOne({ _id: batch.job }, { $push: { fingerprints: fp } });
+    } catch (fpErr) {
+      console.warn("Batch issue fingerprint failed:", fpErr.message);
+    }
+
+    res.json({ success: true, batch, fingerprint: fp });
+  } catch (err) {
+    return next(err);
+  } finally {
+    session.endSession();
+  }
+}));
+
+// ── POST /warping/batch/:id/complete ──────────────────────────
+router.post("/batch/:id/complete", isAdmin("admin", "production"), catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next(new ErrorHandler("Invalid batch id", 400));
+  }
+  const batch = await WarpingBatch.findOneAndUpdate(
+    { _id: req.params.id, status: "issued" },
+    { $set: { status: "completed", completedDate: new Date() } },
+    { new: true }
+  );
+  if (!batch) {
+    const exists = await WarpingBatch.findById(req.params.id);
+    if (!exists) return next(new ErrorHandler("Batch not found", 404));
+    return next(new ErrorHandler(
+      `Only an issued batch can be completed — ${exists.batchNo} is ${exists.status}`, 409
+    ));
+  }
+  res.json({ success: true, batch });
+}));
+
+// ── PATCH /warping/batch/:id/cancel ───────────────────────────
+// Cancelling a batch that was issued puts the yarn back on the rack.
+// A completed batch is history and cannot be cancelled — the beams exist.
+router.patch("/batch/:id/cancel", isAdmin("admin", "production"), catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next(new ErrorHandler("Invalid batch id", 400));
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    let batch;
+    await session.withTransaction(async () => {
+      const claimed = await WarpingBatch.findOneAndUpdate(
+        { _id: req.params.id, status: { $in: ["planned", "issued"] } },
+        { $set: { status: "cancelled" } },
+        { new: true, session }
+      );
+      if (!claimed) {
+        const exists = await WarpingBatch.findById(req.params.id).session(session);
+        if (!exists) throw new ErrorHandler("Batch not found", 404);
+        throw new ErrorHandler(
+          `Batch ${exists.batchNo} is ${exists.status} and cannot be cancelled`, 409
+        );
+      }
+      // `status` has already been overwritten with "cancelled", so it can
+      // no longer say whether the yarn ever left the rack. `issuedDate`
+      // survives the update untouched and answers that instead.
+      if (claimed.issuedDate) {
+        for (const a of claimed.allocations) {
+          await returnToLot(a.yarnLot, a.quantity, session);
+        }
+      }
+      batch = claimed;
+    });
+    res.json({ success: true, batch });
+  } catch (err) {
+    return next(err);
+  } finally {
+    session.endSession();
+  }
+}));
+
+// ── GET /warping/batch/list?warpingId= | ?jobId= ──────────────
+router.get("/batch/list", catchAsyncErrors(async (req, res, next) => {
+  const { warpingId, jobId, status } = req.query;
+  const filter = {};
+  if (warpingId) {
+    if (!mongoose.Types.ObjectId.isValid(warpingId)) {
+      return next(new ErrorHandler("Invalid warpingId", 400));
+    }
+    filter.warping = warpingId;
+  }
+  if (jobId) {
+    if (!mongoose.Types.ObjectId.isValid(jobId)) {
+      return next(new ErrorHandler("Invalid jobId", 400));
+    }
+    filter.job = jobId;
+  }
+  if (status && status !== "all") filter.status = status;
+
+  const batches = await WarpingBatch.find(filter)
+    .populate("job", "jobOrderNo status")
+    .populate("machine", "ID")
+    .sort({ createdAt: -1 })
+    .limit(200);
+
+  res.json({ success: true, batches });
+}));
+
+// ── GET /warping/batch/:id ────────────────────────────────────
+router.get("/batch/:id", catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next(new ErrorHandler("Invalid batch id", 400));
+  }
+  const batch = await WarpingBatch.findById(req.params.id)
+    .populate("job", "jobOrderNo status")
+    .populate("machine", "ID")
+    .populate("allocations.yarnLot", "lotNo shade status receivedQty consumedQty");
+  if (!batch) return next(new ErrorHandler("Batch not found", 404));
+  res.json({ success: true, batch });
 }));
 
 module.exports = router;

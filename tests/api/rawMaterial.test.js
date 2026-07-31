@@ -22,6 +22,8 @@ jest.mock("../../models/PurchaseOrder");
 jest.mock("../../models/MaterialInward");
 jest.mock("../../models/MaterialOut.cjs");
 jest.mock("../../models/Supplier");
+// The material detail now also returns the material's dye lots.
+jest.mock("../../models/YarnLot");
 // The stockout alert now goes through the transactional outbox; stub it
 // so this pure-mock suite never touches a real collection.
 jest.mock("../../utils/outbox.js", () => ({ enqueue: jest.fn().mockResolvedValue(undefined) }));
@@ -178,9 +180,15 @@ describe("GET /api/v2/materials/get-raw-material-detail", () => {
     const inwardChain = { populate: jest.fn().mockReturnThis(), sort: jest.fn().mockReturnThis(), limit: jest.fn().mockReturnThis(), lean: jest.fn().mockResolvedValue([]) };
     const outwardChain = { populate: jest.fn().mockReturnThis(), sort: jest.fn().mockReturnThis(), limit: jest.fn().mockReturnThis(), lean: jest.fn().mockResolvedValue([]) };
 
+    // Lots keep their virtuals (balance), so this chain ends at sort/limit
+    // rather than .lean() like the two ledgers above.
+    const lotChain = { sort: jest.fn().mockReturnThis(), limit: jest.fn().mockResolvedValue([]) };
+
     const MaterialOutward = require("../../models/MaterialOut.cjs");
+    const YarnLot = require("../../models/YarnLot");
     MaterialInward.find = jest.fn().mockReturnValue(inwardChain);
     MaterialOutward.find = jest.fn().mockReturnValue(outwardChain);
+    YarnLot.find = jest.fn().mockReturnValue(lotChain);
 
     const res = await request(app).get("/api/v2/materials/get-raw-material-detail?id=mat1");
 
