@@ -810,8 +810,13 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
 
   const warping = await Warping.findById(warpingId);
   if (!warping) return next(new ErrorHandler("Warping not found", 404));
-  if (warping.status === "cancelled") {
-    return next(new ErrorHandler("Warping is cancelled", 400));
+  // Only a warping that is still running can take a batch. Against a
+  // completed one the beams are already off the machine, so a draw
+  // recorded here never physically happened.
+  if (warping.status !== "open" && warping.status !== "in_progress") {
+    return next(new ErrorHandler(
+      `Warping is ${warping.status} — no further batches can be raised against it`, 400
+    ));
   }
 
   const plan = await WarpingPlan.findOne({ warping: warping._id });
@@ -833,6 +838,57 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
     parsed = await decorateAllocations(parseAllocations(allocations));
   } catch (err) {
     return next(err);
+  }
+
+  // A beam already covered by a live batch must not be claimed again.
+  // Two batches on one beam means the yarn is issued twice for it, and
+  // the trail then shows two lots inside a single beam — precisely the
+  // thing lot tracking exists to rule out. A cancelled batch drew
+  // nothing in the end, so it releases its beams.
+  if (beams.length) {
+    const live = await WarpingBatch.find({
+      warping: warping._id,
+      status: { $ne: "cancelled" },
+    }).select("batchNo beamNos").lean();
+    const taken = new Map();
+    for (const b of live) {
+      for (const n of b.beamNos || []) taken.set(Number(n), b.batchNo);
+    }
+    const clash = beams.filter((n) => taken.has(n));
+    if (clash.length) {
+      return next(new ErrorHandler(
+        `Beam ${clash.join(", ")} is already on batch ` +
+        `${[...new Set(clash.map((n) => taken.get(n)))].join(", ")}`,
+        409
+      ));
+    }
+  }
+
+  // The programme already named a lot for some sections. Drawing a
+  // different one leaves the sheet the warper actually followed and the
+  // trail telling different stories, and the sheet is the one that was
+  // acted on. Sections programmed without a lot constrain nothing.
+  const mismatch = [];
+  for (const beam of plan.beams || []) {
+    if (!beams.includes(Number(beam.beamNo))) continue;
+    for (const sec of beam.sections || []) {
+      if (!sec.yarnLot) continue;
+      const line = parsed.find(
+        (a) => String(a.rawMaterial) === String(sec.warpYarn)
+      );
+      if (line && String(line.yarnLot) !== String(sec.yarnLot)) {
+        mismatch.push(
+          `beam ${beam.beamNo} is programmed to run off lot ${sec.lotNo || sec.yarnLot}, ` +
+          `not ${line.lotNo}`
+        );
+      }
+    }
+  }
+  if (mismatch.length) {
+    return next(new ErrorHandler(
+      `${mismatch.join("; ")}. Change the programme, or draw the lot it names.`,
+      400
+    ));
   }
 
   // Which elastic is this batch warping for? Answering it is what turns
@@ -861,9 +917,16 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
   const seq = await nextNumber("warpingBatchNo", async () => {
     // Seed from the highest existing number so batches created before
     // the counter existed are not re-issued.
-    const last = await WarpingBatch.findOne({ batchNo: /^WB-\d+$/ })
-      .sort({ batchNo: -1 }).select("batchNo").lean();
-    return last ? Number(String(last.batchNo).slice(3)) : 0;
+    //
+    // Parsed, not sorted: `batchNo` is a string, so "WB-9999" sorts above
+    // "WB-10000" and a descending sort would seed the counter BACKWARDS
+    // once the numbers pass four digits — handing out a number already
+    // taken. This runs once, on first allocation, so the scan is cheap.
+    const rows = await WarpingBatch.find({ batchNo: /^WB-\d+$/ })
+      .select("batchNo").lean();
+    return rows.reduce(
+      (max, r) => Math.max(max, Number(String(r.batchNo).slice(3)) || 0), 0
+    );
   });
 
   const batch = await WarpingBatch.create({
@@ -904,6 +967,20 @@ router.post("/batch/:id/issue", isAdmin("admin", "production"), catchAsyncErrors
         const exists = await WarpingBatch.findById(req.params.id).session(session);
         if (!exists) throw new ErrorHandler("Batch not found", 404);
         throw new ErrorHandler(`Batch ${exists.batchNo} is already ${exists.status}`, 409);
+      }
+
+      // Re-checked here, not just at create: a warping can be cancelled or
+      // completed in the gap between planning a batch and issuing it, and
+      // drawing yarn against beams that are off the machine records a
+      // movement that never happened. Inside the transaction, so the lot
+      // draws below roll back with it.
+      const live = await Warping.findById(claimed.warping)
+        .select("status").session(session);
+      if (!live || (live.status !== "open" && live.status !== "in_progress")) {
+        throw new ErrorHandler(
+          `Warping is ${live ? live.status : "missing"} — batch ${claimed.batchNo} cannot be issued`,
+          409
+        );
       }
 
       for (const a of claimed.allocations) {
