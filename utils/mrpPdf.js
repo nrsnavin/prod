@@ -87,10 +87,16 @@ async function buildMrpPdf(data) {
   doc.strokeColor(INK).lineWidth(1.2)
     .moveTo(left, 124).lineTo(right, 124).stroke();
 
-  // Customer pane.
+  // Customer pane. The customer's own PO and the promised supply date sit
+  // beside the name: an MRP is read to decide what to buy and by when,
+  // and both answers were previously somewhere else entirely.
   box(doc, left, 134, width, 40);
-  boxLabel(doc, "Customer", left + 6, 140, 300);
-  boxValue(doc, data.customerName || "—", left + 6, 150, width - 12, { bold: true, fontSize: 10 });
+  boxLabel(doc, "Customer", left + 6, 140, 260);
+  boxValue(doc, data.customerName || "—", left + 6, 150, 260, { bold: true, fontSize: 10 });
+  boxLabel(doc, "Customer PO", left + 290, 140, 110);
+  boxValue(doc, data.customerPo || "—", left + 290, 150, 110, { fontSize: 9 });
+  boxLabel(doc, "Supply date", left + 410, 140, 110);
+  boxValue(doc, data.supplyDateLabel || "—", left + 410, 150, 110, { fontSize: 9 });
   doc.y = 184;
 
   // ── Production mode ─────────────────────────────────────────────
@@ -148,10 +154,14 @@ async function buildMrpPdf(data) {
   doc.moveDown(0.9);
 
   const cols = [
-    { key: "name",           label: "Material",   w: 0.40, align: "left"  },
-    { key: "requiredWeight", label: "Required",   w: 0.20, align: "right" },
-    { key: "inStock",        label: "In stock",   w: 0.20, align: "right" },
-    { key: "shortfall",      label: "Shortfall",  w: 0.20, align: "right" },
+    { key: "name",           label: "Material",   w: 0.30, align: "left"  },
+    // The supplier is already resolved when the requirement is computed.
+    // Without it on the sheet, deciding who to buy a shortfall from means
+    // leaving the sheet and looking each material up again.
+    { key: "supplierName",   label: "Supplier",   w: 0.22, align: "left"  },
+    { key: "requiredWeight", label: "Required",   w: 0.16, align: "right" },
+    { key: "inStock",        label: "In stock",   w: 0.16, align: "right" },
+    { key: "shortfall",      label: "Shortfall",  w: 0.16, align: "right" },
   ];
   const rowH = 20;
   const pad = 6;
@@ -208,6 +218,9 @@ async function buildMrpPdf(data) {
 
       const cells = {
         name:           m.name + (m.category ? `  (${m.category})` : ""),
+        // Named plainly when absent: a material with no supplier cannot
+        // be ordered at all, and that is the sheet's problem to raise.
+        supplierName:   m.supplierName || "— not set —",
         requiredWeight: _kg(m.requiredWeight),
         inStock:        _kg(m.inStock),
         shortfall:      short ? _kg(m.shortfall) : "—",

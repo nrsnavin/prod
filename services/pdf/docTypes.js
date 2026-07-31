@@ -43,10 +43,13 @@ const DC_FIELDS = [
   { key: "partyName", label: "Consignee name" },
   { key: "partyAddress", label: "Consignee address" },
   { key: "partyGstin", label: "Consignee GSTIN" },
+  { key: "partyContact", label: "Consignee phone" },
   { key: "orderNo", label: "Against order" },
   { key: "vehicleNo", label: "Vehicle no." },
+  { key: "driverName", label: "Driver name" },
   { key: "transporter", label: "Transporter" },
   { key: "lrNumber", label: "LR / GC no." },
+  { key: "remarks", label: "Remarks" },
   { key: "totalQty", label: "Total quantity" },
   { key: "lineCount", label: "Number of line items" },
   { key: "footerNote", label: "Footer note" },
@@ -82,8 +85,10 @@ function dcSample() {
       partyGstin: "33AAExx9999F1Z2",
       orderNo: "Order #1042",
       vehicleNo: "TN 33 BX 4417",
+      driverName: "R. Murugan",
       transporter: "Sri Balaji Transports",
       lrNumber: "LR-88213",
+      remarks: "Handle rolls flat — do not stack on edge.",
       totalQty: "1,250",
       lineCount: "3",
       footerNote: "This is a computer-generated document.",
@@ -144,15 +149,24 @@ function dcStarter() {
     label("l_cons", "CONSIGNEE (SHIP TO)", L + 6, 138, 240),
     value("v_cons", "partyName", L + 6, 150, 240, { bold: true, fontSize: 10 }),
     value("v_consaddr", "partyAddress", L + 6, 165, 240, { fontSize: 8, color: MUTED }),
-    value("v_consgst", "partyGstin", L + 6, 202, 240, { fontSize: 8, color: MUTED }),
+    value("v_consgst", "partyGstin", L + 6, 195, 240, { fontSize: 8, color: MUTED }),
+    // The consignee's phone. A challan is handed to a driver who may need
+    // to ring ahead; it was on the DC record but never on the paper.
+    value("v_consph", "partyContact", L + 6, 208, 240, { fontSize: 8, color: MUTED }),
 
     label("l_disp", "DISPATCH DETAILS", MID + 6, 138, 240),
     label("l_veh", "VEHICLE NO.", MID + 6, 152, 110),
     value("v_veh", "vehicleNo", MID + 6, 161, 110),
     label("l_lr", "LR / GC NO.", MID + 128, 152, 110),
     value("v_lr", "lrNumber", MID + 128, 161, 110),
-    label("l_tr", "TRANSPORTER", MID + 6, 182, 232),
-    value("v_tr", "transporter", MID + 6, 191, 232),
+    label("l_tr", "TRANSPORTER", MID + 6, 178, 110),
+    value("v_tr", "transporter", MID + 6, 187, 110),
+    // Who is actually driving. Captured on the DC and, until now, only
+    // ever visible on screen.
+    label("l_drv", "DRIVER", MID + 128, 178, 110),
+    value("v_drv", "driverName", MID + 128, 187, 110),
+    label("l_rem", "REMARKS", MID + 6, 204, 232),
+    value("v_rem", "remarks", MID + 6, 213, 232, { fontSize: 7.5, color: MUTED }),
 
     // ── Items ─────────────────────────────────────────────────
     {
@@ -209,6 +223,7 @@ const PO_FIELDS = [
   { key: "expectedDate", label: "Expected delivery (prefixed)" },
   { key: "expectedDelivery", label: "Expected delivery (bare)" },
   { key: "poStatus", label: "PO status" },
+  { key: "raisedFor", label: "Raised for (job / order)" },
   { key: "partyName", label: "Supplier name" },
   { key: "partyAddress", label: "Supplier address" },
   { key: "partyGstin", label: "Supplier GSTIN" },
@@ -243,6 +258,7 @@ function poSample() {
       docDate: "22-Jul-2026",
       expectedDelivery: "05-Aug-2026",
       poStatus: "approved",
+      raisedFor: "For Job J-812  ·  Order #1042",
       partyName: "Coimbatore Yarn Traders",
       partyAddress: "7 Mettupalayam Road, Coimbatore 641002",
       partyGstin: "GSTIN: 33AAFCY1234K1Z9",
@@ -293,8 +309,11 @@ function poStarter() {
     value("v_no", "poNumber", 401, 83, 80, { bold: true }),
     label("l_dt", "P.O. DATE", 486, 73, 70),
     value("v_dt", "docDate", 486, 83, 70),
-    label("l_exp", "EXPECTED DELIVERY", 401, 97, 155),
-    value("v_exp", "expectedDelivery", 401, 105, 155, { fontSize: 8 }),
+    label("l_exp", "EXPECTED DELIVERY", 401, 95, 155),
+    value("v_exp", "expectedDelivery", 401, 103, 155, { fontSize: 8 }),
+    // Blank on a routine replenishment PO; on one raised from a job's
+    // material shortfall it is the answer to "why did we buy this?".
+    value("v_for", "raisedFor", 401, 114, 155, { fontSize: 7 }),
 
     { id: "hrule", type: "line", x: L, y: 124, w: W, h: 0, lineWidth: 1.2, color: INK },
 

@@ -362,6 +362,11 @@ router.get(
     const po = await PurchaseOrder.findById(id)
       .populate("supplier", "name phoneNumber gstin email address contactPerson")
       .populate("items.rawMaterial", "name unit")
+      // What the PO was raised for, when it came out of a job's material
+      // shortfall. Printed on the supplier's copy so the purchase stays
+      // answerable long after the screen that created it is closed.
+      .populate("forJob", "jobOrderNo")
+      .populate("forOrder", "orderNo")
       .lean();
     if (!po) return next(new ErrorHandler("Purchase Order not found", 404));
 

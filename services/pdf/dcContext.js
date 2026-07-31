@@ -35,6 +35,10 @@ function dcToContext(dc, branding = {}) {
       partyName: dc.customerName || "",
       partyAddress: dc.customerAddress || "",
       partyGstin: dc.customerGstin ? `GSTIN: ${dc.customerGstin}` : "",
+      // Held on the DC record but never printed: the driver may need to
+      // ring ahead, and the consignee's number is the one thing on the
+      // paperwork that lets them.
+      partyContact: dc.customerPhone || "",
       // ── totals ──
       //
       // Quantity only. A delivery challan accompanies goods; it is not a
@@ -45,8 +49,15 @@ function dcToContext(dc, branding = {}) {
       lineCount: String(items.length),
       // ── transport ──
       vehicleNo: dc.vehicleNo || "",
+      // Captured alongside the vehicle, and until now only ever shown on
+      // screen — the gate clerk checking the lorry out has no other copy.
+      driverName: dc.driverName || "",
       transporter: dc.transporter || "",
       lrNumber: dc.lrNumber || "",
+      // Free text the dispatcher typed on this challan. It was being
+      // dropped entirely, so an instruction meant for whoever receives
+      // the goods never travelled with them.
+      remarks: dc.remarks || "",
       orderNo: dc.orderNo != null ? `Order #${dc.orderNo}` : "",
       // ── footer / terms (from Document Settings) ──
       footerNote: branding.footerNote || "",

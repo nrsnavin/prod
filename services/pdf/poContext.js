@@ -70,6 +70,17 @@ function poToContext(po, branding = {}) {
       // the old keys is unaffected.
       poNumber: po.poNo != null ? String(po.poNo) : "",
       expectedDelivery: fmtDate(po.expectedDate),
+      // What this PO was bought for. A purchase raised from a job's
+      // material shortfall carries the link, and the supplier's copy is
+      // where "why did we buy this?" gets answered months later.
+      raisedFor: (() => {
+        const job = po.forJob && typeof po.forJob === "object" ? po.forJob : null;
+        const order = po.forOrder && typeof po.forOrder === "object" ? po.forOrder : null;
+        const bits = [];
+        if (job?.jobOrderNo != null) bits.push(`Job J-${job.jobOrderNo}`);
+        if (order?.orderNo != null) bits.push(`Order #${order.orderNo}`);
+        return bits.length ? `For ${bits.join("  ·  ")}` : "";
+      })(),
       // ── totals ──
       totalQty: totalQty.toLocaleString("en-IN"),
       totalAmount: inr(totalAmount),

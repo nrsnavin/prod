@@ -132,3 +132,35 @@ describe('purchase-order template', () => {
     }
   });
 });
+
+describe('what the purchase order was raised for', () => {
+  const { poToContext } = require('../../services/pdf/poContext.js');
+  const { starterTemplate, DOC_TYPES } = require('../../services/pdf/docTypes.js');
+
+  it('names the job and order behind a shortfall PO', () => {
+    // Raised from a job's material shortfall, this is the supplier copy's
+    // answer to "why did we buy this?" long after the screen is closed.
+    const ctx = poToContext({
+      poNo: 1042, items: [],
+      forJob: { jobOrderNo: 812 },
+      forOrder: { orderNo: 55 },
+    }, {});
+    expect(ctx.fields.raisedFor).toBe('For Job J-812  ·  Order #55');
+  });
+
+  it('says nothing on a routine replenishment PO', () => {
+    // Most POs are for nobody in particular, and a blank line is right.
+    const ctx = poToContext({ poNo: 1043, items: [] }, {});
+    expect(ctx.fields.raisedFor).toBe('');
+  });
+
+  it('is placed on the starter layout and offered in the designer', () => {
+    const bound = new Set(
+      starterTemplate('purchase-order').elements
+        .filter((e) => e.type === 'field')
+        .map((e) => e.field)
+    );
+    expect(bound.has('raisedFor')).toBe(true);
+    expect(new Set(DOC_TYPES['purchase-order'].fields.map((f) => f.key)).has('raisedFor')).toBe(true);
+  });
+});

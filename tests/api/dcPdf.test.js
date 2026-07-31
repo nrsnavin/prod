@@ -35,6 +35,12 @@ beforeAll(async () => {
       { elasticName: '1" Knitted Elastic', unit: 'm', quantity: 450, rate: 55, amount: 24750 },
     ],
     totalQuantity: 950, totalAmount: 45750, status: 'dispatched',
+    customerPhone: '9876543210',
+    driverName: 'R. Murugan',
+    vehicleNo: 'TN 33 BX 4417',
+    transporter: 'Sri Balaji Transports',
+    lrNumber: 'LR-88213',
+    remarks: 'Handle rolls flat — do not stack on edge.',
   });
 }, 60_000);
 
@@ -131,5 +137,37 @@ describe('GET /dc/:id/pdf', () => {
   test('missing DC 404s', async () => {
     const res = await request(app).get(`/api/v2/dc/${new mongoose.Types.ObjectId()}/pdf`).set('Cookie', cookie(admin));
     expect(res.status).toBe(404);
+  });
+});
+
+
+describe('fields the challan records but never printed', () => {
+  const { dcToContext } = require('../../services/pdf/dcContext.js');
+  const { starterTemplate, DOC_TYPES } = require('../../services/pdf/docTypes.js');
+
+  it('carries the consignee phone, driver and remarks', () => {
+    const ctx = dcToContext(dc, {});
+    expect(ctx.fields.partyContact).toBe('9876543210');
+    expect(ctx.fields.driverName).toBe('R. Murugan');
+    expect(ctx.fields.remarks).toMatch(/Handle rolls flat/);
+  });
+
+  it('places every one of them on the starter layout', () => {
+    // A context field nothing binds is a field that still does not print.
+    const bound = new Set(
+      starterTemplate('delivery-challan').elements
+        .filter((e) => e.type === 'field')
+        .map((e) => e.field)
+    );
+    for (const f of ['partyContact', 'driverName', 'remarks']) {
+      expect(bound.has(f)).toBe(true);
+    }
+  });
+
+  it('offers them in the designer field list', () => {
+    const keys = new Set(DOC_TYPES['delivery-challan'].fields.map((f) => f.key));
+    for (const f of ['partyContact', 'driverName', 'remarks']) {
+      expect(keys.has(f)).toBe(true);
+    }
   });
 });
