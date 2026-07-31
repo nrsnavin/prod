@@ -46,6 +46,13 @@ const materialOutwardSchema = new mongoose.Schema(
       default: '',
     },
 
+    // Which dye lot the goods left. Set when a stock adjustment names
+    // one, so writing yarn off draws down the lot it actually came from
+    // rather than leaving the lot ledger to drift from the aggregate.
+    // Optional throughout — untracked material has no lot to name.
+    yarnLot: { type: mongoose.Schema.Types.ObjectId, ref: 'YarnLot' },
+    lotNo:   { type: String, trim: true, default: '' },
+
     // Price per unit captured at issue time
     unitPrice: {
       type: Number,

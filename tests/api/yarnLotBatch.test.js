@@ -27,7 +27,7 @@ const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 let mongo, app;
 let RawMaterial, YarnLot, WarpingBatch, Warping, WarpingPlan, JobOrder,
-  Order, Customer, Elastic, Supplier, PurchaseOrder, User, admin;
+  Order, Customer, Elastic, Supplier, PurchaseOrder, MaterialOutward, User, admin;
 
 const adminCookie = () => [
   `token=${jwt.sign({ id: admin._id, role: 'admin' }, process.env.JWT_SECRET_KEY)}`,
@@ -48,6 +48,7 @@ beforeAll(async () => {
   Elastic = require('../../models/Elastic');
   Supplier = require('../../models/Supplier');
   PurchaseOrder = require('../../models/PurchaseOrder');
+  MaterialOutward = require('../../models/MaterialOut.cjs');
   User = require('../../models/User');
   admin = await User.create({
     name: 'Owner', email: 'o@t.co', password: 'pass1234', role: 'admin', department: 'admin',
@@ -950,6 +951,112 @@ describe('the lot on a warping plan section', () => {
     expect(res.body.data.warping.beams[0].sections[0]).toMatchObject({
       lotNo: 'D-8800', shade: 'Ecru',
     });
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  Manual stock adjustments and the lot ledger
+// ══════════════════════════════════════════════════════════════════
+describe('naming a lot on a stock adjustment', () => {
+  const adjust = (body) =>
+    request(app).post('/api/v2/materials/bulk-adjust-stock')
+      .set('Cookie', adminCookie())
+      .send({ globalReason: 'Physical count', adjustments: [body] });
+
+  it('credits the named lot when stock is added', async () => {
+    const material = await makeMaterial({ stock: 100 });
+    const res = await adjust({
+      _id: String(material._id), adjustment: 40,
+      reason: 'Found in the far rack', lotNo: 'D-6100', shade: 'Ecru',
+    });
+
+    expect(res.status).toBe(200);
+    const lot = await YarnLot.findOne({ rawMaterial: material._id, lotNo: 'D-6100' });
+    expect(lot.receivedQty).toBe(40);
+    expect(lot.shade).toBe('Ecru');
+    expect((await RawMaterial.findById(material._id)).stock).toBe(140);
+  });
+
+  it('tops up an existing lot rather than opening a rival', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material, { lotNo: 'D-6100', receivedQty: 100 });
+    await adjust({ _id: String(material._id), adjustment: 25, lotNo: 'D-6100' });
+
+    expect(await YarnLot.countDocuments({ rawMaterial: material._id })).toBe(1);
+    expect((await YarnLot.findById(lot._id)).receivedQty).toBe(125);
+  });
+
+  it('draws the chosen lot down when stock is removed', async () => {
+    const material = await makeMaterial({ stock: 100 });
+    const lot = await makeLot(material, { receivedQty: 100 });
+
+    const res = await adjust({
+      _id: String(material._id), adjustment: -30,
+      reason: 'Damaged in the store', yarnLot: String(lot._id),
+    });
+
+    expect(res.status).toBe(200);
+    const after = await YarnLot.findById(lot._id);
+    expect(after.consumedQty).toBe(30);
+    expect(after.balance).toBe(70);
+    expect((await RawMaterial.findById(material._id)).stock).toBe(70);
+  });
+
+  it('records the lot on the outward row, for the ledger', async () => {
+    const material = await makeMaterial({ stock: 100 });
+    const lot = await makeLot(material, { lotNo: 'D-7000', receivedQty: 100 });
+    await adjust({ _id: String(material._id), adjustment: -30, yarnLot: String(lot._id) });
+
+    const out = await MaterialOutward.findOne({ rawMaterial: material._id });
+    expect(out.lotNo).toBe('D-7000');
+    expect(String(out.yarnLot)).toBe(String(lot._id));
+  });
+
+  it('refuses to write off more than the lot holds', async () => {
+    // Better to fail the item than to drive the lot negative and leave
+    // the ledger claiming yarn that was never there.
+    const material = await makeMaterial({ stock: 500 });
+    const lot = await makeLot(material, { receivedQty: 20 });
+
+    const res = await adjust({
+      _id: String(material._id), adjustment: -50, yarnLot: String(lot._id),
+    });
+
+    expect(res.body.errors).toHaveLength(1);
+    expect((await YarnLot.findById(lot._id)).consumedQty).toBe(0);
+    // The aggregate must not have moved either — the whole item rolls back.
+    expect((await RawMaterial.findById(material._id)).stock).toBe(500);
+  });
+
+  it('leaves the lot ledger alone when no lot is named', async () => {
+    // Untracked or undyed material has no lot, and an adjustment for
+    // stock nobody can place should not be blocked on inventing one.
+    const material = await makeMaterial({ stock: 100 });
+    const lot = await makeLot(material, { receivedQty: 100 });
+
+    const res = await adjust({ _id: String(material._id), adjustment: -30 });
+
+    expect(res.status).toBe(200);
+    expect((await RawMaterial.findById(material._id)).stock).toBe(70);
+    expect((await YarnLot.findById(lot._id)).consumedQty).toBe(0);
+  });
+
+  it('marks a lot exhausted when an adjustment empties it', async () => {
+    const material = await makeMaterial({ stock: 40 });
+    const lot = await makeLot(material, { receivedQty: 40 });
+    await adjust({ _id: String(material._id), adjustment: -40, yarnLot: String(lot._id) });
+
+    expect((await YarnLot.findById(lot._id)).status).toBe('exhausted');
+  });
+
+  it('reports which lot moved, so the UI can confirm it', async () => {
+    const material = await makeMaterial({ stock: 100 });
+    const lot = await makeLot(material, { lotNo: 'D-8200', receivedQty: 100 });
+    const res = await adjust({
+      _id: String(material._id), adjustment: -10, yarnLot: String(lot._id),
+    });
+
+    expect(res.body.updated[0].lotNo).toBe('D-8200');
   });
 });
 

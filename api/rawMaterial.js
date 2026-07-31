@@ -15,7 +15,7 @@ const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { appendStockMovement } = require("../utils/stockLedger");
 const YarnLot           = require("../models/YarnLot");
-const { creditLot } = require("../services/yarnLotService");
+const { creditLot, drawFromLot } = require("../services/yarnLotService");
 const {
   maybeFireCriticalStockout,
   maybeFirePriceChangeAlert,
@@ -393,12 +393,18 @@ router.post(
 //  Body:
 //  {
 //    adjustments: [
-//      { _id: "...", adjustment: 50,  reason: "Physical count" },
-//      { _id: "...", adjustment: -10, reason: "Damaged" },
+//      { _id: "...", adjustment: 50,  reason: "Physical count",
+//        lotNo: "D-4471", shade: "Ecru" },   ← credits that dye lot
+//      { _id: "...", adjustment: -10, reason: "Damaged",
+//        yarnLot: "<lot id>" },              ← draws that dye lot down
 //      { _id: "...", adjustment: 0  }   ← skipped automatically
 //    ],
 //    globalReason: "Monthly stock audit"   ← fallback reason
 //  }
+//
+//  The lot fields are optional. Given, the lot ledger moves with the
+//  aggregate inside the same transaction; omitted, only the aggregate
+//  moves and the lot balances are left as they were.
 //
 //  • Items with adjustment === 0 are silently skipped
 //  • stock is clamped to minimum 0 (never goes negative)
@@ -473,18 +479,53 @@ router.post(
 
             const reason = item.reason?.trim() || globalReason;
 
-            // Ledger record — atomic with the stock write. (Previously
-            // a failed inward row was tolerated, leaving stock credited
-            // with no audit trail; now the item rolls back instead.)
+            // ── The dye lot, when the adjustment names one ────────────
+            // A manual adjustment used to bypass lot tracking entirely,
+            // so every count correction pushed the lot ledger further
+            // out of step with the aggregate it is supposed to break
+            // down. Both directions are handled inside this transaction,
+            // so the lot move and the stock write cannot disagree.
+            //
+            // Still optional: untracked or undyed material has no lot to
+            // name, and an adjustment for stock nobody can place should
+            // not be blocked on inventing one.
+            const lotNo = item.lotNo ? String(item.lotNo).trim() : "";
+            let lotRef = null;
+            let lotLabel = lotNo;
+
             if (item.adjustment > 0) {
+              if (lotNo) {
+                const lot = await creditLot({
+                  rawMaterial: material._id,
+                  lotNo,
+                  quantity:    item.adjustment,
+                  shade:       item.shade,
+                  supplier:    material.supplier,
+                }, session);
+                lotRef = lot?._id || null;
+              }
               await MaterialInward.create([{
                 rawMaterial:   material._id,
                 purchaseOrder: item.purchaseOrderId || undefined,
                 quantity:      item.adjustment,
                 inwardDate:    new Date(),
                 remarks:       `Stock adjustment: ${reason}`,
+                lotNo,
               }], { session });
             } else {
+              // Removing stock draws the lot down. drawFromLot refuses
+              // to overdraw, so a write-off larger than the lot holds
+              // fails the item rather than driving the lot negative.
+              if (item.yarnLot) {
+                if (!mongoose.Types.ObjectId.isValid(item.yarnLot)) {
+                  throw new Error("Invalid yarn lot id");
+                }
+                const lot = await drawFromLot(
+                  item.yarnLot, Math.abs(item.adjustment), session
+                );
+                lotRef   = lot._id;
+                lotLabel = lot.lotNo;
+              }
               await MaterialOutward.create([{
                 rawMaterial: material._id,
                 quantity:    Math.abs(item.adjustment),
@@ -492,6 +533,8 @@ router.post(
                 outwardDate: new Date(),
                 unitPrice:   material.price || 0,
                 remarks:     `Stock adjustment: ${reason}`,
+                yarnLot:     lotRef || undefined,
+                lotNo:       lotLabel,
               }], { session });
             }
 
@@ -513,6 +556,7 @@ router.post(
               oldStock,
               newStock,
               adjustment: item.adjustment,
+              lotNo:      lotLabel || null,
             };
           });
           if (row) updated.push(row);
