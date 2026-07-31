@@ -168,7 +168,10 @@ router.get("/detail/:id", catchAsyncErrors(async (req, res, next) => {
     })
     .populate({
       path: "warpingPlan",
-      populate: { path: "beams.sections.warpYarn", select: "name category" },
+      populate: [
+        { path: "beams.sections.warpYarn", select: "name category" },
+        { path: "beams.sections.yarnLot", select: "lotNo shade status" },
+      ],
     });
 
   if (!warping) return next(new ErrorHandler("Warping not found", 404));
@@ -303,11 +306,63 @@ router.get("/warpingPlan", catchAsyncErrors(async (req, res, next) => {
 
   const plan = await WarpingPlan.findOne({ warping: req.query.id })
     .populate("job", "jobOrderNo status")
-    .populate("beams.sections.warpYarn", "name category");
+    .populate("beams.sections.warpYarn", "name category")
+    .populate("beams.sections.yarnLot", "lotNo shade status receivedQty consumedQty");
 
   if (!plan) return res.json({ exists: false });
   res.json({ exists: true, plan });
 }));
+
+/**
+ * Validate the dye lot named on each beam section and stamp the lot
+ * number onto it.
+ *
+ * The snapshot matters more than it looks: the programme sheet is the
+ * copy that goes to the machine and gets filed, and it has to still read
+ * correctly when someone digs it out two years later — by which time the
+ * lot may be archived, or renumbered, or long gone.
+ *
+ * A lot belonging to a different yarn is refused rather than quietly
+ * dropped. That mismatch means the picker was filtered on one yarn and
+ * submitted against another, and it would ruin the trace silently.
+ */
+async function resolveSectionLots(beams) {
+  const lotIds = [];
+  for (const beam of beams || []) {
+    for (const s of beam.sections || []) {
+      if (s.yarnLot) {
+        if (!mongoose.Types.ObjectId.isValid(s.yarnLot)) {
+          throw new ErrorHandler("Invalid yarn lot id on a beam section", 400);
+        }
+        lotIds.push(s.yarnLot);
+      }
+    }
+  }
+  if (lotIds.length === 0) return beams;
+
+  const lots = await YarnLot.find({ _id: { $in: lotIds } });
+  const byId = new Map(lots.map((l) => [String(l._id), l]));
+
+  return (beams || []).map((beam) => ({
+    ...beam,
+    sections: (beam.sections || []).map((s) => {
+      if (!s.yarnLot) return { ...s, yarnLot: null, lotNo: "", shade: "" };
+      const lot = byId.get(String(s.yarnLot));
+      if (!lot) throw new ErrorHandler("Yarn lot not found", 404);
+      if (String(lot.rawMaterial) !== String(s.warpYarn)) {
+        throw new ErrorHandler(
+          `Lot ${lot.lotNo} does not belong to the yarn on that section`, 400
+        );
+      }
+      // A quarantined lot must not reach the machine. Programming is
+      // exactly where to catch that — before the beam is built.
+      if (lot.status === "quarantined") {
+        throw new ErrorHandler(`Lot ${lot.lotNo} is quarantined and cannot be programmed`, 409);
+      }
+      return { ...s, yarnLot: lot._id, lotNo: lot.lotNo, shade: lot.shade || "" };
+    }),
+  }));
+}
 
 router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   const { warpingId, beams, remarks } = req.body;
@@ -318,11 +373,18 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
   if (!warping)            return next(new ErrorHandler("Warping not found", 404));
   if (warping.warpingPlan) return next(new ErrorHandler("Warping plan already exists", 400));
 
+  let resolvedBeams;
+  try {
+    resolvedBeams = await resolveSectionLots(beams);
+  } catch (err) {
+    return next(err);
+  }
+
   const plan = await WarpingPlan.create({
     warping:   warping._id,
     job:       warping.job,
     noOfBeams: beams.length,
-    beams,
+    beams:     resolvedBeams,
     remarks:   remarks || "",
   });
 
@@ -331,7 +393,8 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
 
   const populated = await WarpingPlan.findById(plan._id)
     .populate("job", "jobOrderNo status")
-    .populate("beams.sections.warpYarn", "name category");
+    .populate("beams.sections.warpYarn", "name category")
+    .populate("beams.sections.yarnLot", "lotNo shade status receivedQty consumedQty");
 
   res.status(201).json({ success: true, plan: populated });
 }));
@@ -362,7 +425,14 @@ router.put("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErrors(
 
   const before = { remarks: plan.remarks, noOfBeams: plan.noOfBeams };
   if (remarks !== undefined) plan.remarks = String(remarks);
-  if (Array.isArray(beams) && beams.length > 0) { plan.beams = beams; plan.noOfBeams = beams.length; }
+  if (Array.isArray(beams) && beams.length > 0) {
+    try {
+      plan.beams = await resolveSectionLots(beams);
+    } catch (err) {
+      return next(err);
+    }
+    plan.noOfBeams = beams.length;
+  }
   plan.increment(); // bump __v so concurrent editors get a 409
   await plan.save();
 
@@ -377,7 +447,8 @@ router.put("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErrors(
 
   const populated = await WarpingPlan.findById(plan._id)
     .populate("job", "jobOrderNo status")
-    .populate("beams.sections.warpYarn", "name category");
+    .populate("beams.sections.warpYarn", "name category")
+    .populate("beams.sections.yarnLot", "lotNo shade status receivedQty consumedQty");
   res.status(200).json({ success: true, plan: populated });
 }));
 

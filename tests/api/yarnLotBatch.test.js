@@ -824,6 +824,136 @@ describe('lot-wise stock in the plan context', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+//  Naming the lot on a beam section, at programming time
+// ══════════════════════════════════════════════════════════════════
+describe('the lot on a warping plan section', () => {
+  async function openWarping(material) {
+    const { job } = await makeJob();
+    const warping = await Warping.create({ job: job._id, status: 'open' });
+    // The link back on the job is what job detail reads through — without
+    // it the job reports no warping at all.
+    await JobOrder.updateOne({ _id: job._id }, { warping: warping._id });
+    return { warping, job, material };
+  }
+
+  const createPlan = (warping, sections) =>
+    request(app).post('/api/v2/warping/warpingPlan/create')
+      .set('Cookie', adminCookie())
+      .send({ warpingId: String(warping._id), beams: [{ beamNo: 1, totalEnds: 240, sections }] });
+
+  it('stamps the lot number onto the section', async () => {
+    // The programme sheet is the copy that goes to the machine and gets
+    // filed, so it has to read correctly without the lot record.
+    const material = await makeMaterial();
+    const lot = await makeLot(material, { lotNo: 'D-8800', shade: 'Ecru' });
+    const { warping } = await openWarping(material);
+
+    const res = await createPlan(warping, [
+      { warpYarn: String(material._id), ends: 240, yarnLot: String(lot._id) },
+    ]);
+
+    expect(res.status).toBe(201);
+    const section = res.body.plan.beams[0].sections[0];
+    expect(section.lotNo).toBe('D-8800');
+    expect(section.shade).toBe('Ecru');
+  });
+
+  it('is optional — an untracked yarn has no lot', async () => {
+    const material = await makeMaterial();
+    const { warping } = await openWarping(material);
+
+    const res = await createPlan(warping, [{ warpYarn: String(material._id), ends: 240 }]);
+    expect(res.status).toBe(201);
+    expect(res.body.plan.beams[0].sections[0].lotNo).toBe('');
+    expect(res.body.plan.beams[0].sections[0].yarnLot).toBeNull();
+  });
+
+  it('refuses a lot belonging to a different yarn', async () => {
+    // The picker was filtered on one yarn and submitted against another.
+    // Dropping it quietly would ruin the trace without saying so.
+    const nylon = await makeMaterial({ name: 'Nylon 70D' });
+    const poly = await makeMaterial({ name: 'Polyester 150D' });
+    const polyLot = await makeLot(poly, { lotNo: 'P-90' });
+    const { warping } = await openWarping(nylon);
+
+    const res = await createPlan(warping, [
+      { warpYarn: String(nylon._id), ends: 240, yarnLot: String(polyLot._id) },
+    ]);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/does not belong to the yarn on that section/i);
+  });
+
+  it('refuses a quarantined lot before the beam is built', async () => {
+    const material = await makeMaterial();
+    const held = await makeLot(material, { status: 'quarantined' });
+    const { warping } = await openWarping(material);
+
+    const res = await createPlan(warping, [
+      { warpYarn: String(material._id), ends: 240, yarnLot: String(held._id) },
+    ]);
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/quarantined/i);
+  });
+
+  it('comes back on the plan read, populated', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material, { lotNo: 'D-8800' });
+    const { warping } = await openWarping(material);
+    await createPlan(warping, [
+      { warpYarn: String(material._id), ends: 240, yarnLot: String(lot._id) },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/v2/warping/warpingPlan?id=${warping._id}`)
+      .set('Cookie', adminCookie());
+
+    expect(res.body.plan.beams[0].sections[0].yarnLot.lotNo).toBe('D-8800');
+  });
+
+  it('can be changed while the warping is still open', async () => {
+    const material = await makeMaterial();
+    const first = await makeLot(material, { lotNo: 'D-1' });
+    const second = await makeLot(material, { lotNo: 'D-2' });
+    const { warping } = await openWarping(material);
+    const created = await createPlan(warping, [
+      { warpYarn: String(material._id), ends: 240, yarnLot: String(first._id) },
+    ]);
+
+    const res = await request(app)
+      .put(`/api/v2/warping/warpingPlan/${created.body.plan._id}`)
+      .set('Cookie', adminCookie())
+      .send({
+        auditReason: 'Switched to the newer lot',
+        beams: [{
+          beamNo: 1, totalEnds: 240,
+          sections: [{ warpYarn: String(material._id), ends: 240, yarnLot: String(second._id) }],
+        }],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.plan.beams[0].sections[0].lotNo).toBe('D-2');
+  });
+
+  it('reaches the job detail beams', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material, { lotNo: 'D-8800', shade: 'Ecru' });
+    const { warping, job } = await openWarping(material);
+    await createPlan(warping, [
+      { warpYarn: String(material._id), ends: 240, yarnLot: String(lot._id) },
+    ]);
+
+    const res = await request(app)
+      .get(`/api/v2/job/${job._id}`)
+      .set('Cookie', adminCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.warping.beams[0].sections[0]).toMatchObject({
+      lotNo: 'D-8800', shade: 'Ecru',
+    });
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 //  The lot register
 // ══════════════════════════════════════════════════════════════════
 describe('the lot register', () => {

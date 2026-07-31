@@ -56,6 +56,23 @@ router.use(isAuthenticated);
 
 
 // ─────────────────────────────────────────────────────────────────────────
+// OVER-RECEIPT
+//
+// A supplier sending slightly more than ordered is normal — a full bag
+// instead of a part one, a roll that weighed heavy. Refusing it outright
+// only pushed the difference into a stock adjustment, which credits the
+// same yarn while losing the link to the PO that brought it in.
+//
+// So a delivery may exceed the line's ordered quantity. Up to this
+// fraction over, no explanation is asked for; past it, someone has to
+// say why, and that reason is kept on the inward row.
+// ─────────────────────────────────────────────────────────────────────────
+const OVER_RECEIPT_TOLERANCE = 0.10;
+const MIN_EXCESS_REASON = 5;
+
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// ─────────────────────────────────────────────────────────────────────────
 // HELPER: derive PO status from its items
 // ─────────────────────────────────────────────────────────────────────────
 function deriveStatus(items) {
@@ -465,7 +482,9 @@ router.post(
   "/inward-stock",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { poId, items, requestId } = req.body;
+      // excessReason at the top level covers the whole submit; a row may
+      // override it with its own.
+      const { poId, items, requestId, excessReason } = req.body;
 
       // Idempotency: a retried inward (flaky network, double-tap) must
       // not credit stock twice. Fast path here; the claim inside the
@@ -510,6 +529,10 @@ router.post(
       }
 
       // ── VALIDATION PASS (before any writes) ───────────────────────
+      // Excess per line, carried into the write pass so the arithmetic
+      // is done once and the inward row records what was actually over.
+      const excessByMaterial = new Map();
+
       for (const inItem of activeItems) {
         const poItem = po.items.find(
           (p) => p.rawMaterial.toString() === inItem.rawMaterial.toString()
@@ -523,16 +546,34 @@ router.post(
           );
         }
 
-        const pending =
-          (poItem.quantity || 0) - (poItem.receivedQuantity || 0);
+        const ordered  = Number(poItem.quantity) || 0;
+        const already  = Number(poItem.receivedQuantity) || 0;
+        const totalAfter = already + Number(inItem.quantity);
+        // Measured against what was ORDERED, not what is still pending.
+        // Against pending, a PO for 100 already 90 received would call a
+        // 12-unit delivery a 20% overshoot when it is 2% over the order —
+        // and the tolerance is about the delivery against the order.
+        const excess = Math.max(0, totalAfter - ordered);
+        const allowanceFree = ordered * OVER_RECEIPT_TOLERANCE;
 
-        if (Number(inItem.quantity) > pending) {
-          return next(
-            new ErrorHandler(
-              `Cannot receive ${inItem.quantity} — only ${pending} units ` +
-              `are still pending for material ${inItem.rawMaterial}`, 400
-            )
-          );
+        if (excess > 0) {
+          const reason = String(inItem.excessReason || excessReason || "").trim();
+          if (excess > allowanceFree && reason.length < MIN_EXCESS_REASON) {
+            return next(new ErrorHandler(
+              `Receiving ${totalAfter} against ${ordered} ordered is ` +
+              `${excess} over — past the ` +
+              `${Math.round(OVER_RECEIPT_TOLERANCE * 100)}% tolerance ` +
+              `(${round2(allowanceFree)}). Give a reason of at least ` +
+              `${MIN_EXCESS_REASON} characters to receive it.`,
+              400
+            ));
+          }
+          excessByMaterial.set(String(inItem.rawMaterial), {
+            excess: round2(excess),
+            // Inside the tolerance a reason is optional, but keep one if
+            // it was offered — it costs nothing and helps later.
+            reason: excess > allowanceFree ? reason : reason || "",
+          });
         }
       }
 
@@ -572,6 +613,7 @@ router.post(
         });
 
         // 3. Prepare MaterialInward document
+        const over = excessByMaterial.get(String(inItem.rawMaterial));
         inwardDocs.push({
           rawMaterial:   inItem.rawMaterial,
           purchaseOrder: poId,
@@ -581,6 +623,8 @@ router.post(
                            : new Date(),
           remarks:       inItem.remarks ? inItem.remarks.trim() : "",
           lotNo:         inItem.lotNo ? String(inItem.lotNo).trim() : "",
+          excessQuantity: over?.excess || 0,
+          excessReason:   over?.reason || "",
         });
       }
 
@@ -603,11 +647,19 @@ router.post(
             req,
             meta: {
               poNo: po.poNo,
-              items: activeItems.map((i) => ({
-                rawMaterial: String(i.rawMaterial),
-                quantity: Number(i.quantity),
-                lotNo: i.lotNo ? String(i.lotNo) : undefined,
-              })),
+              items: activeItems.map((i) => {
+                const over = excessByMaterial.get(String(i.rawMaterial));
+                return {
+                  rawMaterial: String(i.rawMaterial),
+                  quantity: Number(i.quantity),
+                  lotNo: i.lotNo ? String(i.lotNo) : undefined,
+                  // An over-receipt belongs in the audit trail, not just
+                  // on the inward row — it is the kind of thing someone
+                  // reviews the PO to find.
+                  excess: over?.excess || undefined,
+                  excessReason: over?.reason || undefined,
+                };
+              }),
               newStatus: deriveStatus(po.items),
             },
           });

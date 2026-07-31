@@ -759,7 +759,13 @@ router.get('/:jobId', async (req, res) => {
       .populate('wastageElastic.elastic',  'name')
       .populate({
         path: 'warping',
-        populate: { path: 'warpingPlan', populate: { path: 'beams.sections.warpYarn', model: 'RawMaterial', select: 'name unit' } },
+        populate: {
+          path: 'warpingPlan',
+          populate: [
+            { path: 'beams.sections.warpYarn', model: 'RawMaterial', select: 'name unit' },
+            { path: 'beams.sections.yarnLot', model: 'YarnLot', select: 'lotNo shade status' },
+          ],
+        },
       })
       .populate({ path: 'covering', populate: { path: 'elasticPlanned.elastic', select: 'name' } })
       .populate({
@@ -784,7 +790,20 @@ router.get('/:jobId', async (req, res) => {
     const warping = w ? {
       status: w.status || 'open', date: fmtDate(w.date), completedDate: fmtDate(w.completedDate),
       noOfBeams: wp?.noOfBeams || 0, remarks: wp?.remarks || '',
-      beams: (wp?.beams || []).map(b => ({ beamNo: b.beamNo, totalEnds: b.totalEnds, sections: (b.sections || []).map((s, i) => ({ sectionNo: i + 1, yarnName: s.warpYarn?.name || 'Unknown', yarnUnit: s.warpYarn?.unit || '', ends: s.ends || 0 })) })),
+      beams: (wp?.beams || []).map(b => ({
+        beamNo: b.beamNo,
+        totalEnds: b.totalEnds,
+        sections: (b.sections || []).map((s, i) => ({
+          sectionNo: i + 1,
+          yarnName: s.warpYarn?.name || 'Unknown',
+          yarnUnit: s.warpYarn?.unit || '',
+          ends: s.ends || 0,
+          // Prefer the snapshot over the populated lot: it is what the
+          // printed programme said, and it survives the lot record.
+          lotNo: s.lotNo || s.yarnLot?.lotNo || '',
+          shade: s.shade || s.yarnLot?.shade || '',
+        })),
+      })),
     } : null;
 
     const co = job.covering;
