@@ -168,6 +168,7 @@ router.get("/detail/:id", catchAsyncErrors(async (req, res, next) => {
       path: "warpingPlan",
       populate: [
         { path: "beams.sections.warpYarn", select: "name category" },
+        { path: "beams.elastic", select: "name" },
         { path: "beams.sections.yarnLot", select: "lotNo shade status" },
       ],
     });
@@ -305,6 +306,7 @@ router.get("/warpingPlan", catchAsyncErrors(async (req, res, next) => {
   const plan = await WarpingPlan.findOne({ warping: req.query.id })
     .populate("job", "jobOrderNo status")
     .populate("beams.sections.warpYarn", "name category")
+    .populate("beams.elastic", "name")
     .populate("beams.sections.yarnLot", "lotNo shade status receivedQty consumedQty");
 
   if (!plan) return res.json({ exists: false });
@@ -428,6 +430,7 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
   const populated = await WarpingPlan.findById(plan._id)
     .populate("job", "jobOrderNo status")
     .populate("beams.sections.warpYarn", "name category")
+    .populate("beams.elastic", "name")
     .populate("beams.sections.yarnLot", "lotNo shade status receivedQty consumedQty");
 
   res.status(201).json({ success: true, plan: populated });
@@ -482,6 +485,7 @@ router.put("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErrors(
   const populated = await WarpingPlan.findById(plan._id)
     .populate("job", "jobOrderNo status")
     .populate("beams.sections.warpYarn", "name category")
+    .populate("beams.elastic", "name")
     .populate("beams.sections.yarnLot", "lotNo shade status receivedQty consumedQty");
   res.status(200).json({ success: true, plan: populated });
 }));
