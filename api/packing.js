@@ -9,6 +9,28 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const Packing          = require("../models/Packing");
 const JobOrder         = require("../models/JobOrder");
 const Order            = require("../models/Order");
+const { recomputePacked } = require("../services/orderPending.js");
+
+/**
+ * Mirror a job's packed metres onto its order.
+ *
+ * Packing updated the JOB's figure and pushed a fingerprint onto the
+ * order without touching the order's own numbers, so the audit trail
+ * said metres had been packed while the order said none had. Every path
+ * that moves a job's packed quantity — recording, correcting, reversing
+ * — has to come through here, or the order drifts again from whichever
+ * one is forgotten.
+ *
+ * Call AFTER the job has been saved: the recompute reads the jobs back.
+ */
+async function syncOrderPacked(orderId, session) {
+  if (!orderId) return null;
+  const order = await Order.findById(orderId).session(session);
+  if (!order) return null;
+  await recomputePacked(order, session);
+  await order.save({ session });
+  return order;
+}
 const Employee         = require("../models/Employee");
 const Elastic          = require("../models/Elastic");
 const StockMovement    = require("../models/StockMovement");
@@ -204,6 +226,10 @@ router.post(
         if (jobDoc.order) {
           const order = await Order.findById(jobDoc.order).session(session);
           if (order) {
+            // The order's packed figure, derived from its jobs. Without
+            // this the fingerprint below recorded a packing the order's
+            // own numbers denied.
+            await recomputePacked(order, session);
             order.fingerprints.push(buildFingerprint(ACTION_CODES.PACKING_CREATED, {
               entityId: order._id, actor,
               meta: {
@@ -360,6 +386,9 @@ router.put(
               meta: { packingId: packing._id.toString(), auditReason, before: { meter: oldMeter }, after: { meter: newMeter } },
             });
             await job.save({ session });
+            // A correction has to reach the order too, or the order
+            // keeps the figure that was just corrected.
+            await syncOrderPacked(job.order, session);
           }
         }
         result = packing.toObject();
@@ -406,6 +435,8 @@ router.delete(
             meta: { packingId: packing._id.toString(), auditReason, elastic: packing.elastic?.toString(), meter: packing.meter },
           });
           await job.save({ session });
+          // A reversal is a change to the packed total like any other.
+          await syncOrderPacked(job.order, session);
         }
 
         // Look up the original PACKING_INWARD so we know how much

@@ -16,16 +16,53 @@
 //   warpYarn[].{id,weight}
 // Required kg = Σ (weight_grams × metres) / 1000.
 
-const Elastic     = require("../models/Elastic.js");
-const RawMaterial = require("../models/RawMaterial.js");
+const Elastic       = require("../models/Elastic.js");
+const RawMaterial   = require("../models/RawMaterial.js");
+const PurchaseOrder = require("../models/PurchaseOrder.js");
 // Required for its side effect: populating `supplier` below needs the
 // model registered, and this module is loaded by callers (the MRP unit
 // tests among them) that have no other reason to pull Supplier in.
 require("../models/Supplier.js");
 
+/**
+ * How much of each material is bought but not yet delivered.
+ *
+ * Without this a shortfall reads as unbought, and the natural response
+ * to it is to raise the purchase order again — so the yarn arrives
+ * twice and the money goes out twice.
+ *
+ * It is reported BESIDE the shortfall and never netted off it. Stock on
+ * order is not stock in the building: subtracting it would report a
+ * material as covered while the machine has nothing to run.
+ *
+ * @returns {Promise<Map<string, number>>} material id → quantity due
+ */
+async function onOrderByMaterial(materialIds = []) {
+  if (!materialIds.length) return new Map();
+
+  const pos = await PurchaseOrder.find({
+    // A cancelled PO owes nothing, and a completed one has arrived.
+    status: { $nin: ["Cancelled", "Completed"] },
+    "items.rawMaterial": { $in: materialIds },
+  }).select("items").lean();
+
+  const due = new Map();
+  for (const po of pos) {
+    for (const item of po.items || []) {
+      const key = String(item.rawMaterial ?? "");
+      if (!key) continue;
+      // What is left on the line, not the whole line — a part-received
+      // order still owes only the remainder.
+      const outstanding = (Number(item.quantity) || 0) - (Number(item.receivedQuantity) || 0);
+      if (outstanding > 0) due.set(key, (due.get(key) || 0) + outstanding);
+    }
+  }
+  return due;
+}
+
 // lines: [{ elastic: ObjectId|string, quantity: Number(metres) }]
 // Returns: [{ rawMaterial, name, category, requiredWeight, inStock,
-//             shortfall, unitPrice }]
+//             onOrder, shortfall, unitPrice }]
 async function computeMaterialRequirement(lines = []) {
   const cleanLines = (lines || [])
     .map((l) => ({
@@ -104,12 +141,19 @@ async function computeMaterialRequirement(lines = []) {
     }
   }
 
+  const due = await onOrderByMaterial(
+    Array.from(rawMap.values()).map((m) => m.rawMaterial)
+  );
+
   // Finalise derived fields (round weight to 3 dp; compute shortfall).
   return Array.from(rawMap.values()).map((m) => {
     const requiredWeight = Math.round(m.requiredWeight * 1000) / 1000;
+    // Against stock alone. See onOrderByMaterial for why what is on
+    // order is shown next to this rather than folded into it.
     const shortfall = Math.max(0, Math.round((requiredWeight - m.inStock) * 1000) / 1000);
-    return { ...m, requiredWeight, shortfall };
+    const onOrder = Math.round((due.get(String(m.rawMaterial)) || 0) * 1000) / 1000;
+    return { ...m, requiredWeight, shortfall, onOrder };
   });
 }
 
-module.exports = { computeMaterialRequirement };
+module.exports = { computeMaterialRequirement, onOrderByMaterial };

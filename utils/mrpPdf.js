@@ -45,7 +45,8 @@ function _bufferFromDoc(doc) {
 //   jobOrderNo, orderNo, customerName, dateLabel, status,
 //   productionMode: "in_house"|"outsource", outsourceVendor,
 //   elastics: [{ name, quantity }],
-//   materials: [{ name, category, requiredWeight, inStock, shortfall }],
+//   materials: [{ name, category, requiredWeight, inStock, onOrder,
+//                 shortfall }],
 // }
 async function buildMrpPdf(data) {
   // Generous, balanced margins keep text clear of the paper edge and the
@@ -154,14 +155,19 @@ async function buildMrpPdf(data) {
   doc.moveDown(0.9);
 
   const cols = [
-    { key: "name",           label: "Material",   w: 0.30, align: "left"  },
+    { key: "name",           label: "Material",   w: 0.26, align: "left"  },
     // The supplier is already resolved when the requirement is computed.
     // Without it on the sheet, deciding who to buy a shortfall from means
     // leaving the sheet and looking each material up again.
-    { key: "supplierName",   label: "Supplier",   w: 0.22, align: "left"  },
-    { key: "requiredWeight", label: "Required",   w: 0.16, align: "right" },
-    { key: "inStock",        label: "In stock",   w: 0.16, align: "right" },
-    { key: "shortfall",      label: "Shortfall",  w: 0.16, align: "right" },
+    { key: "supplierName",   label: "Supplier",   w: 0.20, align: "left"  },
+    { key: "requiredWeight", label: "Required",   w: 0.14, align: "right" },
+    { key: "inStock",        label: "In stock",   w: 0.14, align: "right" },
+    // Bought but not yet delivered. Its own column, never netted off the
+    // shortfall: reading a shortfall as covered because yarn is on order
+    // is how a machine ends up waiting for stock the sheet called
+    // sufficient — and how the same PO gets raised twice.
+    { key: "onOrder",        label: "On order",   w: 0.13, align: "right" },
+    { key: "shortfall",      label: "Shortfall",  w: 0.13, align: "right" },
   ];
   const rowH = 20;
   const pad = 6;
@@ -223,6 +229,7 @@ async function buildMrpPdf(data) {
         supplierName:   m.supplierName || "— not set —",
         requiredWeight: _kg(m.requiredWeight),
         inStock:        _kg(m.inStock),
+        onOrder:        Number(m.onOrder) > 0 ? _kg(m.onOrder) : "—",
         shortfall:      short ? _kg(m.shortfall) : "—",
       };
       cols.forEach((c, i) => {

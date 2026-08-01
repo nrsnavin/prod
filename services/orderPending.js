@@ -84,4 +84,46 @@ async function recomputeProduced(order, session) {
   return order.producedElastic;
 }
 
-module.exports = { recomputePending, recomputeProduced, RELEASING_STATUSES };
+/**
+ * Mirror total packed metres from the order's jobs onto
+ * Order.packedElastic.
+ *
+ * Packing used to update the JOB's figure and push a fingerprint onto
+ * the order without touching the order's own numbers — so the audit
+ * trail said metres had been packed while the order said none had. It
+ * matters twice over now that pending means ordered less packed: an
+ * order with every metre packed still read as entirely outstanding.
+ *
+ * Derived from the jobs, not incremented in place. A counter drifts the
+ * moment a packing is corrected or reversed, or the same request is
+ * replayed; a recompute can only ever say what the jobs say.
+ *
+ * Tracking only — packing never touches pending, which is ordered less
+ * PLANNED and answers a different question.
+ */
+async function recomputePacked(order, session) {
+  let q = JobOrder.find({ order: order._id }).select('packedElastic');
+  if (session) q = q.session(session);
+  const jobs = await q;
+
+  const packed = {};
+  for (const j of jobs) {
+    for (const p of j.packedElastic || []) {
+      if (!p?.elastic) continue;
+      const id = p.elastic.toString();
+      packed[id] = (packed[id] || 0) + (p.quantity || 0);
+    }
+  }
+
+  for (const row of order.packedElastic || []) {
+    row.quantity = packed[row.elastic.toString()] || 0;
+  }
+  return order.packedElastic;
+}
+
+module.exports = {
+  recomputePending,
+  recomputeProduced,
+  recomputePacked,
+  RELEASING_STATUSES,
+};
