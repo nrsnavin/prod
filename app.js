@@ -151,6 +151,12 @@ app.use(bodyParser.urlencoded({ extended: true, limit: "1mb" }));
 // Strip Mongo operator keys ($-prefixed / dotted) from all inputs.
 app.use(sanitizeMongo);
 
+// An unpicked <select> submits "", which is a cast error on any field
+// the schema declares as a reference — and Mongoose rejects the whole
+// document for it. Blank those to null once here rather than in every
+// route that happens to remember. See utils/blankRefs.js.
+app.use(require("./utils/blankRefs.js").normaliseBlankRefs);
+
 // One JSON line per completed request (method, path, status, ms,
 // user when authenticated). Zero-dep stand-in for morgan.
 app.use(require("./middleware/requestLogger"));

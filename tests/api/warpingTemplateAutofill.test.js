@@ -368,3 +368,40 @@ describe('tapes on a plan', () => {
     expect(plan.beams.map((b) => b.tapeNo)).toEqual([1, 2, null, null]);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  THE SAME BLANK, ARRIVING FROM A FORM
+//
+//  The route was fixed for the dye lot specifically. This proves the
+//  general guard in front of it: an unpicked <select> submits "", and
+//  that reaches the boundary, not the model. Driven through the real
+//  app so the middleware is in the path.
+// ══════════════════════════════════════════════════════════════════
+
+describe('a blank reference anywhere in the body', () => {
+  it('never reaches the model as an empty string', async () => {
+    const y = await yarn('Nylon 70D');
+    const e = await makeElastic('20mm', null);
+    const job = await makeJob([e]);
+    await createWarping(job);
+    const warping = await Warping.findOne({ job: job._id });
+
+    const res = await request(app)
+      .post('/api/v2/warping/warpingPlan/create')
+      .set('Cookie', adminCookie())
+      .send({
+        warpingId: String(warping._id),
+        beams: [
+          { beamNo: 1, elastic: "", sections: [{ warpYarn: String(y._id), ends: 120, yarnLot: "" }] },
+        ],
+        remarks: "",
+      });
+
+    expect(res.status).toBe(201);
+    const plan = await WarpingPlan.findOne({ warping: warping._id });
+    expect(plan.beams[0].sections[0].yarnLot).toBeNull();
+    expect(plan.beams[0].elastic).toBeNull();
+    // A blank remark is text, and stays text.
+    expect(plan.remarks).toBe('');
+  });
+});
