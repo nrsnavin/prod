@@ -94,14 +94,30 @@ async function buildOrderStatusReport(orderId) {
     const pendingRow = (order.pendingElastic || []).find(
       (p) => p?.elastic && String(p.elastic) === id
     );
-    const pending = pendingRow ? num(pendingRow.quantity) : ordered;
+    // Two different questions, long conflated under one word.
+    //
+    //   notAssigned = ordered - planned into jobs. A PLANNING figure:
+    //     how much of this order nobody has raised a job for yet.
+    //     `pendingElastic` is the authority, recomputed from live jobs;
+    //     falling back to the ordered quantity is right for an order
+    //     with no jobs, where none of it is planned.
+    //
+    //   pending     = ordered - packed. A DELIVERY figure: how much the
+    //     customer is still owed. Work can be fully planned and still
+    //     entirely pending, which is why one number cannot serve both.
+    const notAssigned = pendingRow ? num(pendingRow.quantity) : ordered;
+    const pendingDelivery = Math.max(0, ordered - packed);
     return {
       elasticId: id || null,
       name: names.get(id) || 'Unknown elastic',
       ordered,
       produced,
       packed,
-      pending,
+      notAssigned,
+      pendingDelivery,
+      // Legacy alias for `notAssigned`, kept because the mobile app
+      // reads it as the per-elastic cap when allocating to a job.
+      pending: notAssigned,
       // Against what was ordered, so the columns add up on the page.
       packedPct: ordered > 0 ? Math.round((packed / ordered) * 100) : 0,
     };
@@ -112,9 +128,11 @@ async function buildOrderStatusReport(orderId) {
       ordered: t.ordered + l.ordered,
       produced: t.produced + l.produced,
       packed: t.packed + l.packed,
-      pending: t.pending + l.pending,
+      notAssigned: t.notAssigned + l.notAssigned,
+      pendingDelivery: t.pendingDelivery + l.pendingDelivery,
+      pending: t.pending + l.notAssigned,
     }),
-    { ordered: 0, produced: 0, packed: 0, pending: 0 }
+    { ordered: 0, produced: 0, packed: 0, notAssigned: 0, pendingDelivery: 0, pending: 0 }
   );
   totals.packedPct = totals.ordered > 0 ? Math.round((totals.packed / totals.ordered) * 100) : 0;
 
@@ -158,9 +176,9 @@ async function buildOrderStatusReport(orderId) {
     { planned: 0, produced: 0, packed: 0, shiftMeters: 0 }
   );
 
-  // Ordered quantity with no job raised against it at all. Distinct from
-  // "pending": pending covers work planned but unfinished, this is work
-  // nobody has started to plan.
+  // Ordered quantity with no job raised against it at all — the same
+  // question `notAssigned` asks per line, answered from the job side so
+  // the two can be compared and a disagreement is visible.
   const unplanned = Math.max(0, totals.ordered - jobTotals.planned);
 
   const days = daysUntil(order.supplyDate);

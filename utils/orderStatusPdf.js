@@ -179,24 +179,33 @@ async function buildOrderStatusPdf(data) {
   drawTable({
     title: 'ORDER LINES',
     cols: [
-      { key: 'name',     label: 'Elastic',      w: 0.34 },
-      { key: 'ordered',  label: 'Ordered (m)',  w: 0.14, align: 'right' },
-      { key: 'produced', label: 'Produced (m)', w: 0.14, align: 'right' },
-      { key: 'packed',   label: 'Packed (m)',   w: 0.14, align: 'right' },
-      { key: 'pending',  label: 'Pending (m)',  w: 0.14, align: 'right' },
-      { key: 'pct',      label: 'Packed %',     w: 0.10, align: 'right' },
+      { key: 'name',        label: 'Elastic',          w: 0.26 },
+      { key: 'ordered',     label: 'Ordered (m)',      w: 0.13, align: 'right' },
+      { key: 'produced',    label: 'Produced (m)',     w: 0.13, align: 'right' },
+      { key: 'packed',      label: 'Packed (m)',       w: 0.13, align: 'right' },
+      // Two questions, kept apart. "Not assigned" is a planning figure:
+      // how much has no job raised against it. "Pending" is a delivery
+      // figure: how much the customer is still owed. A line can be fully
+      // assigned and entirely pending, which is why one number for both
+      // told nobody anything.
+      { key: 'notAssigned', label: 'Not assigned (m)', w: 0.16, align: 'right' },
+      { key: 'pending',     label: 'Pending (m)',      w: 0.13, align: 'right' },
+      { key: 'pct',         label: 'Packed %',         w: 0.06, align: 'right' },
     ],
     rows: (data.lines || []).map((l) => ({
-      // A line with nothing left is done; one still owed carries a wash
-      // and bold, so it reads as outstanding without relying on colour.
-      bold: l.pending > 0,
-      wash: l.pending > 0 ? ALERT_BG : undefined,
+      // A line with nothing left to deliver is done; one still owed
+      // carries a wash and bold, so it reads as outstanding without
+      // relying on colour. Owed — not unassigned — is what makes a line
+      // outstanding, so the wash follows the delivery figure.
+      bold: l.pendingDelivery > 0,
+      wash: l.pendingDelivery > 0 ? ALERT_BG : undefined,
       cells: {
         name: l.name,
         ordered: _num(l.ordered),
         produced: _num(l.produced),
         packed: _num(l.packed),
-        pending: l.pending > 0 ? _num(l.pending) : '—',
+        notAssigned: l.notAssigned > 0 ? _num(l.notAssigned) : '—',
+        pending: l.pendingDelivery > 0 ? _num(l.pendingDelivery) : '—',
         pct: `${l.packedPct}%`,
       },
     })),
@@ -205,7 +214,8 @@ async function buildOrderStatusPdf(data) {
       ordered: _num(data.totals?.ordered),
       produced: _num(data.totals?.produced),
       packed: _num(data.totals?.packed),
-      pending: _num(data.totals?.pending),
+      notAssigned: _num(data.totals?.notAssigned),
+      pending: _num(data.totals?.pendingDelivery),
       pct: `${data.totals?.packedPct ?? 0}%`,
     },
     emptyText: 'No elastic lines on this order.',
@@ -287,9 +297,10 @@ async function buildOrderStatusPdf(data) {
   });
 
   // ── 4. Pending position ─────────────────────────────────────────
-  // Two different things, kept apart on purpose: quantity planned into a
-  // job but not finished, and quantity nobody has planned at all. Adding
-  // them together would hide which one needs a decision.
+  // Two different things, kept apart on purpose. PENDING is what the
+  // customer is still owed — ordered less packed. NOT ASSIGNED is what
+  // no job has been raised for. Adding them together would hide which
+  // one needs a decision, and they answer to different people.
   const pendY = doc.y;
   const cellW = width / 3;
   box(doc, left, pendY, width, 44);
@@ -297,11 +308,11 @@ async function buildOrderStatusPdf(data) {
     .moveTo(left + cellW, pendY).lineTo(left + cellW, pendY + 44).stroke()
     .moveTo(left + cellW * 2, pendY).lineTo(left + cellW * 2, pendY + 44).stroke();
 
-  boxLabel(doc, 'Pending against order', left + 6, pendY + 6, cellW - 12);
-  boxValue(doc, `${_num(data.totals?.pending)} m`, left + 6, pendY + 17, cellW - 12,
+  boxLabel(doc, 'Pending (ordered less packed)', left + 6, pendY + 6, cellW - 12);
+  boxValue(doc, `${_num(data.totals?.pendingDelivery)} m`, left + 6, pendY + 17, cellW - 12,
     { bold: true, fontSize: 11 });
 
-  boxLabel(doc, 'Not yet planned into a job', left + cellW + 6, pendY + 6, cellW - 12);
+  boxLabel(doc, 'Not assigned to jobs', left + cellW + 6, pendY + 6, cellW - 12);
   boxValue(doc, `${_num(data.unplanned)} m`, left + cellW + 6, pendY + 17, cellW - 12,
     { bold: true, fontSize: 11, color: data.unplanned > 0 ? ALERT_INK : INK });
 
@@ -313,7 +324,7 @@ async function buildOrderStatusPdf(data) {
   if (data.unplanned > 0) {
     doc.fillColor(ALERT_INK).font('Helvetica-Bold').fontSize(8)
       .text(
-        `${_num(data.unplanned)} m of this order has no job raised against it yet.`,
+        `${_num(data.unplanned)} m of this order is not assigned to any job yet.`,
         left, doc.y, { width, lineBreak: false }
       );
     doc.y += 14;

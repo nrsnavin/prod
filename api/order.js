@@ -397,6 +397,19 @@ router.get(
         ordered:  e.quantity,
         produced: qtyFor(order.producedElastic, id) || 0,
         packed:   qtyFor(order.packedElastic, id)   || 0,
+        // Two questions that were long conflated under "pending":
+        //   notAssigned — ordered minus what jobs have been raised for.
+        //     A planning figure, and the cap when allocating to a job.
+        //   pendingDelivery — ordered minus packed. A delivery figure:
+        //     what the customer is still owed. Work can be fully
+        //     planned and still entirely pending.
+        notAssigned:     qtyFor(order.pendingElastic, id) ?? e.quantity,
+        pendingDelivery: Math.max(
+          0,
+          e.quantity - (qtyFor(order.packedElastic, id) || 0)
+        ),
+        // Legacy alias for notAssigned — the mobile app reads it as the
+        // allocation cap, so its meaning must not drift.
         pending:  qtyFor(order.pendingElastic, id)  ?? e.quantity,
         reserved: qtyFor(order.reservations, id)    ?? 0,
       };
