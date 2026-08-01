@@ -42,6 +42,12 @@ const {
   enteredAtField,
 } = require('../domain/jobStatus');
 
+// The order's own rule. This router changes an order's status three
+// times as a side effect of something happening to a job, and none of
+// those writes used to ask where the order actually was — which is how
+// cancelling a job on a CANCELLED order set it back to Approved.
+const { applyOrderStatus } = require('../domain/orderStatus');
+
 function fullJobPopulate(query) {
   return query
     .populate('order',    'orderNo po status')
@@ -119,8 +125,24 @@ router.post(
 
     const order = await Order.findById(orderId);
     if (!order) return next(new ErrorHandler('Order not found', 404));
-    if (!['Open', 'InProgress'].includes(order.status))
-      return next(new ErrorHandler(`Cannot create job for order with status "${order.status}"`, 400));
+    // Approved or InProgress, not Open.
+    //
+    // This read `['Open', 'InProgress']`, which was backwards in both
+    // directions. An APPROVED order — the one the UI offers "Create
+    // job" on — was refused outright, so the normal path answered
+    // "Cannot create job for order with status Approved". And an OPEN
+    // one was accepted and pushed to InProgress below, skipping the
+    // approval that debits raw material and runs the stock guard: an
+    // order could reach the floor having consumed material nobody
+    // deducted, simply by raising a job on it.
+    if (!['Approved', 'InProgress'].includes(order.status)) {
+      return next(new ErrorHandler(
+        order.status === 'Open'
+          ? 'Approve the order before raising a job — approval is where raw material is deducted.'
+          : `Cannot create job for order with status "${order.status}"`,
+        400
+      ));
+    }
 
     for (const e of elastics) {
       const pending = order.pendingElastic.find(p => p.elastic.toString() === e.elastic.toString());
@@ -165,7 +187,10 @@ router.post(
     // (now including the one just created) rather than decremented in
     // place, so every path agrees and a re-run can't double-count.
     await recomputePending(order);
-    order.status = 'InProgress';
+    // Approved → InProgress. A no-op when the order is already running,
+    // and refused outright for anything terminal — raising a job must
+    // not be a way to reopen a finished order.
+    applyOrderStatus(order, 'InProgress', req.user?._id);
 
     // 🪪 Mirror fingerprint on the parent Order so the order timeline
     //    also shows that a job was spun off.
@@ -463,10 +488,9 @@ router.post(
 
       if (allDone) {
         const order = await Order.findById(job.order);
-        if (order) {
-          order.status      = 'Completed';
-          order.completedBy = req.user?._id || null;
-          order.completedAt = new Date();
+        // A cancelled or deleted order is not completed by its jobs
+        // finishing — that used to resurrect it.
+        if (order && applyOrderStatus(order, 'Completed', req.user?._id)) {
           stampFingerprint(order, ACTION_CODES.ORDER_COMPLETED, {
             actor,
             meta: {
@@ -562,7 +586,10 @@ router.post(
       const remainingJobs = await JobOrder.countDocuments({
         order: job.order, _id: { $ne: job._id }, status: { $nin: ['cancelled', 'completed'] },
       });
-      if (remainingJobs === 0) order.status = 'Approved';
+      // Nothing is planned any more, so an order that was running goes
+      // back to waiting. Only from InProgress: a completed or cancelled
+      // order stays where it is.
+      if (remainingJobs === 0) applyOrderStatus(order, 'Approved', req.user?._id);
       await order.save();
     }
 
