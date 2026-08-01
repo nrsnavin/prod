@@ -46,6 +46,13 @@ const BeamSchema = new mongoose.Schema(
       ref: "Elastic",
       default: null,
     },
+
+    // Which tape this beam belongs to. A plan often runs the same
+    // build several times over — the template describes one tape, and
+    // the programme repeats it. Without this the operator sees a flat
+    // list of beams and cannot tell where one tape ends and the next
+    // begins. Optional: a plan built beam by beam has no tapes.
+    tapeNo: { type: Number, default: null },
   },
   { _id: false }
 );

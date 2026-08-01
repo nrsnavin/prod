@@ -336,7 +336,23 @@ async function resolveSectionLots(beams) {
       }
     }
   }
-  if (lotIds.length === 0) return beams;
+
+  // Running without a nominated lot is normal and allowed — an undyed or
+  // untracked yarn has none, and a plan may be programmed before the lot
+  // is decided. But a form sends an unfilled picker as "", which is not
+  // an ObjectId: returning the beams untouched here (as this did when NO
+  // section had a lot) let those empty strings reach the model and fail
+  // to cast, so a whole plan was rejected for the one thing that is
+  // meant to be optional. Normalise first, always.
+  const blankLots = (bs) =>
+    (bs || []).map((beam) => ({
+      ...beam,
+      sections: (beam.sections || []).map((s) => ({
+        ...s, yarnLot: null, lotNo: "", shade: "",
+      })),
+    }));
+
+  if (lotIds.length === 0) return blankLots(beams);
 
   const lots = await YarnLot.find({ _id: { $in: lotIds } });
   const byId = new Map(lots.map((l) => [String(l._id), l]));
@@ -387,9 +403,15 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
   const jobElastics = new Set(
     (jobDoc?.elastics || []).map((e) => String(e.elastic)).filter(Boolean)
   );
+  const tapeOf = (v) => {
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  };
+
   resolvedBeams = resolvedBeams.map((b) => ({
     ...b,
     elastic: b.elastic && jobElastics.has(String(b.elastic)) ? b.elastic : null,
+    tapeNo: tapeOf(b.tapeNo),
   }));
 
   const plan = await WarpingPlan.create({

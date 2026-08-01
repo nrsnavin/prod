@@ -261,3 +261,110 @@ describe('a plan saved from the form keeps the elastic on each beam', () => {
     expect(plan.beams[0].elastic).toBeNull();
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  A PLAN WITHOUT A NOMINATED LOT
+//
+//  Choosing the dye lot is optional — an undyed or untracked yarn has
+//  none, and a plan is often programmed before the lot is decided. But
+//  a form sends an unfilled picker as "", and the beams used to reach
+//  the model untouched when NO section had a lot, so an empty string
+//  hit an ObjectId path and the whole plan was rejected for the one
+//  field that is meant to be optional.
+// ══════════════════════════════════════════════════════════════════
+
+describe('saving a plan with no yarn lot chosen', () => {
+  const createPlan = (warping, beams) =>
+    request(app).post('/api/v2/warping/warpingPlan/create')
+      .set('Cookie', adminCookie())
+      .send({ warpingId: String(warping._id), beams });
+
+  async function bareWarping() {
+    const e = await makeElastic('20mm', null);
+    const job = await makeJob([e]);
+    await createWarping(job);
+    return Warping.findOne({ job: job._id });
+  }
+
+  it('accepts an empty lot on every section and stores none', async () => {
+    const y = await yarn('Nylon 70D');
+    const warping = await bareWarping();
+
+    const res = await createPlan(warping, [
+      { beamNo: 1, sections: [
+        { warpYarn: String(y._id), ends: 120, yarnLot: "" },
+        { warpYarn: String(y._id), ends: 80,  yarnLot: "" },
+      ] },
+      { beamNo: 2, sections: [{ warpYarn: String(y._id), ends: 60, yarnLot: "" }] },
+    ]);
+
+    expect(res.status).toBe(201);
+    const plan = await WarpingPlan.findOne({ warping: warping._id });
+    expect(plan.beams[0].sections[0].yarnLot).toBeNull();
+    expect(plan.beams[0].sections[0].lotNo).toBe('');
+    expect(plan.beams[1].sections[0].yarnLot).toBeNull();
+  });
+
+  it('accepts an omitted lot just the same', async () => {
+    const y = await yarn('Nylon 70D');
+    const warping = await bareWarping();
+
+    const res = await createPlan(warping, [
+      { beamNo: 1, sections: [{ warpYarn: String(y._id), ends: 120 }] },
+    ]);
+
+    expect(res.status).toBe(201);
+    const plan = await WarpingPlan.findOne({ warping: warping._id });
+    expect(plan.beams[0].sections[0].yarnLot).toBeNull();
+  });
+
+  it('still blanks the unfilled sections when a sibling DOES name a lot', async () => {
+    const y = await yarn('Nylon 70D');
+    const YarnLot = require('../../models/YarnLot');
+    const lot = await YarnLot.create({
+      rawMaterial: y._id, lotNo: 'L-1', receivedQty: 100, consumedQty: 0, status: 'open',
+    });
+    const warping = await bareWarping();
+
+    const res = await createPlan(warping, [
+      { beamNo: 1, sections: [
+        { warpYarn: String(y._id), ends: 120, yarnLot: String(lot._id) },
+        { warpYarn: String(y._id), ends: 80,  yarnLot: "" },
+      ] },
+    ]);
+
+    expect(res.status).toBe(201);
+    const plan = await WarpingPlan.findOne({ warping: warping._id });
+    expect(String(plan.beams[0].sections[0].yarnLot)).toBe(String(lot._id));
+    expect(plan.beams[0].sections[0].lotNo).toBe('L-1');
+    expect(plan.beams[0].sections[1].yarnLot).toBeNull();
+  });
+});
+
+describe('tapes on a plan', () => {
+  const createPlan = (warping, beams) =>
+    request(app).post('/api/v2/warping/warpingPlan/create')
+      .set('Cookie', adminCookie())
+      .send({ warpingId: String(warping._id), beams });
+
+  it('records which tape each beam belongs to', async () => {
+    const y = await yarn('Nylon 70D');
+    const e = await makeElastic('20mm', null);
+    const job = await makeJob([e]);
+    await createWarping(job);
+    const warping = await Warping.findOne({ job: job._id });
+
+    const res = await createPlan(warping, [
+      { beamNo: 1, tapeNo: 1, sections: [{ warpYarn: String(y._id), ends: 120 }] },
+      { beamNo: 2, tapeNo: 2, sections: [{ warpYarn: String(y._id), ends: 120 }] },
+      // A beam added by hand belongs to no tape, and says so.
+      { beamNo: 3, sections: [{ warpYarn: String(y._id), ends: 60 }] },
+      // Nonsense is dropped rather than stored.
+      { beamNo: 4, tapeNo: 0, sections: [{ warpYarn: String(y._id), ends: 60 }] },
+    ]);
+
+    expect(res.status).toBe(201);
+    const plan = await WarpingPlan.findOne({ warping: warping._id });
+    expect(plan.beams.map((b) => b.tapeNo)).toEqual([1, 2, null, null]);
+  });
+});
