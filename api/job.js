@@ -259,18 +259,27 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler('Job ID is required', 400));
-    const job = await JobOrder.findById(id)
-      .populate('warping',  'status completedDate')
-      .populate('covering', 'status completedDate')
-      .select('status machine warping covering jobOrderNo');
+    if (!mongoose.Types.ObjectId.isValid(String(id))) {
+      return next(new ErrorHandler('Invalid job id', 400));
+    }
+    const job = await JobOrder.findById(id).select('status machine jobOrderNo');
     if (!job) return next(new ErrorHandler('Job not found', 404));
-    const warpingDone  = job.warping?.status  === 'completed';
-    const coveringDone = job.covering?.status === 'completed';
+
+    // Same verdict as GET /:jobId/weaving-readiness — one rule, two
+    // response shapes, because this older query-param form is kept for
+    // callers that already speak it. Deriving both from the service is
+    // what stops them drifting into disagreeing about the same job.
+    const readiness = await checkWeavingReadiness(id);
+    const stage = (name) => readiness.stages.find((s) => s.stage === name);
+
     res.json({
       success: true, jobOrderNo: job.jobOrderNo, jobStatus: job.status,
-      warpingStatus: job.warping?.status ?? null, coveringStatus: job.covering?.status ?? null,
-      warpingDone, coveringDone,
-      readyForWeaving: warpingDone && coveringDone,
+      warpingStatus:  stage('warping')?.status ?? null,
+      coveringStatus: stage('covering')?.status ?? null,
+      warpingDone:    stage('warping')?.done ?? false,
+      coveringDone:   stage('covering')?.done ?? false,
+      readyForWeaving: readiness.ready,
+      blockers: readiness.blockers,
       machineAssigned: !!job.machine,
     });
   })
