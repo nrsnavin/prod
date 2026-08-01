@@ -97,6 +97,13 @@ router.get(
 
       return {
         ...shift,
+        // `.lean()` returns the raw document, so there is no `id`
+        // virtual — only `_id`. The shift-plans page reads `id` both to
+        // decide the shift exists and to open it, so without this the
+        // card said "not created" for a date that plainly had a plan.
+        // Stated explicitly rather than by dropping .lean(), so the
+        // contract does not depend on a mongoose default.
+        id: String(shift._id),
         production,
         machinesRunning: shift.plan.length,
         operatorCount:   uniqueOperators.size,
