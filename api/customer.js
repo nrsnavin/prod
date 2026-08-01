@@ -75,12 +75,76 @@ router.get(
       ],
     } : {};
 
+    // Archived customers stay out of lists and pickers unless asked for.
+    // `$ne: true` rather than `false`, so records predating the field
+    // still count as active.
+    if (req.query.includeArchived !== "true") query.archived = { $ne: true };
+
     const customers = await Customer.find(query)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
 
     res.status(200).json({ success: true, customers });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  ARCHIVE / UNARCHIVE (soft delete)
+//  PATCH /api/v2/customer/:id/archive   { archived: true|false }
+//
+//  The detail page has offered a "Deactivate" button for some time
+//  with nothing behind it — the route did not exist, so pressing it
+//  404'd. This is that button's other half.
+//
+//  Nothing is deleted. Orders, delivery challans and ledger rows keep
+//  their references; the customer simply stops appearing in lists and
+//  pickers (override with ?includeArchived=true).
+//
+//  Guard: a customer with live orders cannot be archived. Hiding them
+//  while work is running would leave those orders pointing at someone
+//  nobody can look up — the same reason an elastic with reservations
+//  is protected. Completed and cancelled orders are history and do not
+//  block it.
+// ─────────────────────────────────────────────────────────────
+router.patch(
+  "/:id/archive",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid customer id", 400));
+    }
+    const wantArchived = req.body?.archived !== false; // default: archive
+
+    const customer = await Customer.findById(id).select("_id name archived");
+    if (!customer) return next(new ErrorHandler("Customer not found", 404));
+
+    if (wantArchived) {
+      const live = await Order.countDocuments({
+        customer: customer._id,
+        status: { $nin: ["Completed", "Cancelled"] },
+      });
+      if (live > 0) {
+        return next(new ErrorHandler(
+          `Cannot archive "${customer.name}" — ${live} order${live === 1 ? " is" : "s are"} still open. Complete or cancel them first.`,
+          400
+        ));
+      }
+    }
+
+    customer.archived   = wantArchived;
+    customer.archivedAt = wantArchived ? new Date() : undefined;
+    await customer.save();
+
+    res.json({
+      success:    true,
+      customerId: customer._id,
+      name:       customer.name,
+      archived:   customer.archived,
+      message:    wantArchived
+        ? `"${customer.name}" archived — hidden from lists`
+        : `"${customer.name}" restored to active lists`,
+    });
   })
 );
 

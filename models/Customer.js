@@ -19,6 +19,19 @@ const CustomerSchema = new mongoose.Schema(
             type: String,
             default: "",
         },
+
+        // ── Soft delete ──────────────────────────────────────────────
+        // A customer is never removed: their orders, delivery challans
+        // and ledger rows keep pointing at them, and a deleted record
+        // would leave that history unreadable. Archiving hides them
+        // from lists and pickers instead — a display filter, not a
+        // deletion. Legacy documents have no key, so every filter reads
+        // `{ archived: { $ne: true } }` rather than `{ archived: false }`.
+        //
+        // Mirrors Elastic.archived, deliberately: two soft deletes with
+        // different shapes is how one of them ends up forgotten.
+        archived:   { type: Boolean, default: false, index: true },
+        archivedAt: { type: Date },
         status: {
             type: String,
             required: true,
