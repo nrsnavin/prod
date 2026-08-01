@@ -312,6 +312,8 @@ router.post(
     // loser with a half-applied job state.
     const session = await mongoose.startSession();
     let machine;
+    // Blockers that kept the job in preparatory, or null if it advanced.
+    let held = null;
     try {
       await session.withTransaction(async () => {
         // Atomic claim: only flip free → running, so the second
@@ -338,19 +340,28 @@ router.post(
           );
         }
 
+        // Planning a machine is not the same as being prepared. A job
+        // only becomes weaving once its warping and covering are both
+        // completed — the same rule /update-status enforces. Read inside
+        // the transaction so an in-flight completion is visible.
         if (job.status === 'preparatory') {
-          job.status = 'weaving';
-          stampStage(job, 'weaving', req.user?._id);
-          stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
-            req,
-            meta:     {
-              previousStage: 'preparatory',
-              newStage:      'weaving',
-              jobOrderNo:    job.jobOrderNo,
-              machineId:     machine._id.toString(),
-              machineName:   machine.ID,
-            },
-          });
+          const readiness = await checkWeavingReadiness(job._id, session);
+          held = readiness.ready ? null : readiness.blockers;
+
+          if (readiness.ready) {
+            job.status = 'weaving';
+            stampStage(job, 'weaving', req.user?._id);
+            stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
+              req,
+              meta:     {
+                previousStage: 'preparatory',
+                newStage:      'weaving',
+                jobOrderNo:    job.jobOrderNo,
+                machineId:     machine._id.toString(),
+                machineName:   machine.ID,
+              },
+            });
+          }
         }
         job.machine = machine._id;
         await job.save({ session });
@@ -361,7 +372,14 @@ router.post(
 
     res.json({
       success: true,
-      message: 'Weaving plan saved. Job is now in weaving.',
+      // The plan is saved and the machine is claimed either way — what
+      // is withheld is only the status. Saying so plainly beats a
+      // message that claims a move which did not happen; the job
+      // advances on its own the moment preparation finishes.
+      message: held
+        ? `Weaving plan saved. The job stays in preparatory — ${held.join('; ')}.`
+        : 'Weaving plan saved. Job is now in weaving.',
+      weavingHeld: held ? { blockers: held } : null,
       data: {
         job:     { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
         machine: { _id: machine._id, ID: machine.ID, status: machine.status },
@@ -738,20 +756,30 @@ router.post(
     machine.orderRunning = job._id;
     await machine.save();
 
+    // Assigning a machine reserves capacity; it does not make the job
+    // prepared. The status only moves once warping and covering are
+    // both completed — the same rule /update-status enforces — and the
+    // job advances on its own the moment they are.
+    let held = null;
     if (job.status === 'preparatory') {
-      job.status = 'weaving';
-      stampStage(job, 'weaving', req.user?._id);
-      // 🪪 Fingerprint: JOB_STAGE_UPDATED (preparatory → weaving)
-      stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
-        req,
-        meta: {
-          previousStage: 'preparatory',
-          newStage:      'weaving',
-          jobOrderNo:    job.jobOrderNo,
-          machineId:     machine._id.toString(),
-          machineName:   machine.ID,
-        },
-      });
+      const readiness = await checkWeavingReadiness(job._id);
+      held = readiness.ready ? null : readiness.blockers;
+
+      if (readiness.ready) {
+        job.status = 'weaving';
+        stampStage(job, 'weaving', req.user?._id);
+        // 🪪 Fingerprint: JOB_STAGE_UPDATED (preparatory → weaving)
+        stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
+          req,
+          meta: {
+            previousStage: 'preparatory',
+            newStage:      'weaving',
+            jobOrderNo:    job.jobOrderNo,
+            machineId:     machine._id.toString(),
+            machineName:   machine.ID,
+          },
+        });
+      }
     }
     job.machine = machine._id;
     await job.save();
@@ -759,7 +787,10 @@ router.post(
     const populatedMachine = await Machine.findById(machine._id).populate('elastics.elastic', 'name').lean();
     return res.status(200).json({
       success: true,
-      message: `Machine "${machine.ID}" assigned with ${machine.NoOfHead}-head plan.`,
+      message: held
+        ? `Machine "${machine.ID}" assigned. The job stays in preparatory — ${held.join('; ')}.`
+        : `Machine "${machine.ID}" assigned with ${machine.NoOfHead}-head plan.`,
+      weavingHeld: held ? { blockers: held } : null,
       data: {
         jobId: job._id, jobStatus: job.status, machineId: machine._id, machineID: machine.ID, NoOfHead: machine.NoOfHead,
         headPlan: (populatedMachine.elastics || []).map(e => ({ head: e.head, elasticId: e.elastic?._id, elasticName: e.elastic?.name ?? '-' })),

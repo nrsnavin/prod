@@ -17,8 +17,9 @@ process.env.NODE_ENV = 'test';
 const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-// No transactions in this path, so a standalone server is enough.
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// /plan-weaving runs in session.withTransaction, which needs a
+// replica set — a standalone server 500s on it.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 let mongo, app, JobOrder, Warping, Covering, User, admin;
 
@@ -27,7 +28,10 @@ const adminCookie = () => [
 ];
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryReplSet.create({
+    replSet: { count: 1 },
+    instanceOpts: [{ launchTimeout: 60_000 }],
+  });
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   JobOrder = require('../../models/JobOrder');
@@ -137,5 +141,100 @@ describe('the older query-param form agrees with the new one', () => {
     expect(legacy.body.coveringDone).toBe(false);
     expect(legacy.body.coveringStatus).toBe('open');
     expect(legacy.body.blockers).toEqual(current.body.data.blockers);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  THE ROUTES THAT ACTUALLY MOVE JOBS TO WEAVING
+//
+//  /update-status is not how a job reaches weaving in practice —
+//  assigning a machine is, and both machine routes used to flip
+//  preparatory -> weaving outright. The gate on /update-status was
+//  therefore a gate beside an open door: a job with its warping and
+//  covering still running went to weaving the moment someone put it
+//  on a machine.
+//
+//  The machine is still claimed, because reserving capacity before
+//  preparation finishes is legitimate and blocking it would break a
+//  workflow nobody asked to change. Only the status is withheld, and
+//  the existing auto-advance moves the job the moment prep completes.
+// ══════════════════════════════════════════════════════════════════
+
+const Machine = () => require('../../models/Machine');
+
+async function freeMachine(heads = 2) {
+  return Machine().create({
+    ID: `M-${Math.random().toString(36).slice(2, 7)}`,
+    manufacturer: 'Acme', NoOfHead: heads, NoOfHooks: heads * 2, status: 'free',
+  });
+}
+
+const assignMachine = (job, machine, elastics) =>
+  request(app).post('/api/v2/job/assign-machine')
+    .set('Cookie', adminCookie())
+    .send({ jobId: String(job._id), machineId: String(machine._id), elastics });
+
+const planWeaving = (job, machine, headElasticMap) =>
+  request(app).post('/api/v2/job/plan-weaving')
+    .set('Cookie', adminCookie())
+    .send({ jobId: String(job._id), machineId: String(machine._id), headElasticMap });
+
+describe('assigning a machine does not smuggle a job into weaving', () => {
+  it('claims the machine but holds the status when prep is unfinished', async () => {
+    const job = await makeJob({ warpingStatus: 'completed', coveringStatus: 'in_progress' });
+    const machine = await freeMachine(2);
+
+    const res = await assignMachine(job, machine, [
+      { head: 1, elastic: null }, { head: 2, elastic: null },
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(res.body.weavingHeld.blockers).toEqual([
+      'The covering is in progress, not completed',
+    ]);
+
+    const saved = await JobOrder.findById(job._id);
+    expect(saved.status).toBe('preparatory');
+    // The machine is still reserved for the job — only the stage waits.
+    expect(String(saved.machine)).toBe(String(machine._id));
+    expect((await Machine().findById(machine._id)).status).toBe('running');
+  });
+
+  it('advances the job when prep is finished', async () => {
+    const job = await makeJob({ warpingStatus: 'completed', coveringStatus: 'completed' });
+    const machine = await freeMachine(2);
+
+    const res = await assignMachine(job, machine, [
+      { head: 1, elastic: null }, { head: 2, elastic: null },
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(res.body.weavingHeld).toBeNull();
+    expect((await JobOrder.findById(job._id)).status).toBe('weaving');
+  });
+});
+
+describe('planning weaving does not smuggle a job into weaving either', () => {
+  it('saves the plan but holds the status when prep is unfinished', async () => {
+    const job = await makeJob({ warpingStatus: 'open', coveringStatus: 'open' });
+    const machine = await freeMachine(1);
+
+    const res = await planWeaving(job, machine, { 0: new mongoose.Types.ObjectId().toString() });
+
+    expect(res.status).toBe(200);
+    expect(res.body.weavingHeld.blockers).toHaveLength(2);
+    expect(res.body.message).toMatch(/stays in preparatory/i);
+    expect((await JobOrder.findById(job._id)).status).toBe('preparatory');
+  });
+
+  it('advances the job when prep is finished', async () => {
+    const job = await makeJob({ warpingStatus: 'completed', coveringStatus: 'completed' });
+    const machine = await freeMachine(1);
+
+    const res = await planWeaving(job, machine, { 0: new mongoose.Types.ObjectId().toString() });
+
+    expect(res.status).toBe(200);
+    expect(res.body.weavingHeld).toBeNull();
+    expect((await JobOrder.findById(job._id)).status).toBe('weaving');
   });
 });
