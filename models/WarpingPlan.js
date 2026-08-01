@@ -36,6 +36,16 @@ const BeamSchema = new mongoose.Schema(
     totalEnds:    Number,
     sections:     [BeamSectionSchema],
     pairedBeamNo: { type: Number, default: null }, // set when two beams are combined
+
+    // Which elastic this beam is warping. A job can carry several, each
+    // with its own template, and a mixed job's programme cannot be read
+    // without saying which beam belongs to which product. Optional —
+    // hand-built plans and everything made before templates have none.
+    elastic: {
+      type: mongoose.Types.ObjectId,
+      ref: "Elastic",
+      default: null,
+    },
   },
   { _id: false }
 );

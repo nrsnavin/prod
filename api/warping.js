@@ -13,6 +13,7 @@ const YarnLot          = require("../models/YarnLot");
 const Elastic          = require("../models/Elastic");
 const { nextNumber }   = require("../utils/sequence");
 const { drawFromLot, returnToLot } = require("../services/yarnLotService");
+const { buildBeamsFromTemplates } = require("../services/warpingTemplate");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
@@ -83,28 +84,25 @@ router.post("/create", isAdmin('admin', 'production'), catchAsyncErrors(async (r
   try {
     const jobFull = await JobOrder.findById(jobId).populate({
       path:   "elastics.elastic",
-      select: "warpingPlanTemplate",
+      select: "name warpingPlanTemplate",
     });
 
-    for (const entry of (jobFull?.elastics || [])) {
-      const tpl = entry?.elastic?.warpingPlanTemplate;
-      if (
-        tpl &&
-        Array.isArray(tpl.beams) &&
-        tpl.beams.length > 0 &&
-        tpl.beams.some((b) => b.sections?.length > 0)
-      ) {
-        autoPlan = await WarpingPlan.create({
-          warping:   warping._id,
-          job:       jobId,
-          noOfBeams: tpl.noOfBeams || tpl.beams.length,
-          beams:     tpl.beams,
-          remarks:   "Auto-created from elastic warping plan template",
-        });
-        warping.warpingPlan = autoPlan._id;
-        await warping.save();
-        break;
-      }
+    // Every elastic on the job contributes its beams, not just the first
+    // one — a mixed job was previously planned as if it carried a single
+    // product, and the rest of its beams were simply absent.
+    const { beams, sources } = buildBeamsFromTemplates(jobFull?.elastics || []);
+
+    if (beams.length > 0) {
+      const from = sources.map((s) => s.elasticName).join(", ");
+      autoPlan = await WarpingPlan.create({
+        warping:   warping._id,
+        job:       jobId,
+        noOfBeams: beams.length,
+        beams,
+        remarks:   `Auto-created from the warping template of ${from}`,
+      });
+      warping.warpingPlan = autoPlan._id;
+      await warping.save();
     }
   } catch (planErr) {
     console.warn("Auto warping plan creation failed:", planErr.message);
