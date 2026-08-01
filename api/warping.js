@@ -378,6 +378,20 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
     return next(err);
   }
 
+  // A beam may name the elastic it is warping — the form carries it
+  // through when the plan was filled from a template, so a hand-saved
+  // plan keeps the same attribution an auto-created one gets. Only the
+  // job's own elastics are accepted; anything else is dropped rather
+  // than stored, since it would be a claim nobody could act on.
+  const jobDoc = await JobOrder.findById(warping.job).select("elastics.elastic").lean();
+  const jobElastics = new Set(
+    (jobDoc?.elastics || []).map((e) => String(e.elastic)).filter(Boolean)
+  );
+  resolvedBeams = resolvedBeams.map((b) => ({
+    ...b,
+    elastic: b.elastic && jobElastics.has(String(b.elastic)) ? b.elastic : null,
+  }));
+
   const plan = await WarpingPlan.create({
     warping:   warping._id,
     job:       warping.job,
@@ -661,6 +675,41 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
 
   const prefillTemplate = elasticTemplates.length > 0 ? elasticTemplates[0] : null;
 
+  // The beams a plan would be built with, merged across every elastic on
+  // the job exactly as auto-creation does. `prefillTemplate` above is the
+  // first elastic only; a form filled from that would disagree with the
+  // plan the same job gets when the warping raises one by itself, which
+  // is the sort of difference nobody notices until the floor does.
+  const merged = buildBeamsFromTemplates(job.elastics || []);
+  const elasticNameById = new Map(
+    (job.elastics || [])
+      .filter((e) => e.elastic)
+      .map((e) => [String(e.elastic._id), e.elastic.name || "Elastic"])
+  );
+  const templateBeams = merged.beams.map((b) => ({
+    beamNo:      b.beamNo,
+    totalEnds:   b.totalEnds,
+    elasticId:   b.elastic ? String(b.elastic) : null,
+    elasticName: b.elastic ? (elasticNameById.get(String(b.elastic)) || "") : "",
+    sections:    b.sections.map((s) => {
+      const id = s.warpYarn && typeof s.warpYarn === "object"
+        ? String(s.warpYarn._id)
+        : String(s.warpYarn);
+      return {
+        warpYarnId: id,
+        // The template's section is populated here, so its own name is
+        // the reliable one; warpMap only covers yarns listed on the
+        // elastic, and a template may name one that is not.
+        warpYarnName:
+          (s.warpYarn && typeof s.warpYarn === "object" ? s.warpYarn.name : null)
+          ?? warpMap.get(id)?.name
+          ?? "",
+        ends:      s.ends,
+        maxMeters: s.maxMeters ?? 0,
+      };
+    }),
+  }));
+
   // ── Lot-wise stock for each warp yarn ──────────────────────────────
   // Programming a beam is where the lot decision is actually made: a beam
   // wants to come off one lot, so the planner needs to see whether any
@@ -704,6 +753,7 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
     warpYarns:        Array.from(warpMap.values()),
     prefillTemplate,
     elasticTemplates,
+    templateBeams,
     lotStock,
   });
 }));

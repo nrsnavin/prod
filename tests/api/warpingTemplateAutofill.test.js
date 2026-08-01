@@ -172,3 +172,92 @@ describe('raising a warping for a job whose elastic has a template', () => {
     expect(plan.beams[0].sections[0].ends).toBe(120);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  THE SAME BEAMS, FOR A PLAN MADE BY HAND
+//
+//  /plan-context feeds the plan form. It has to offer the same beams
+//  auto-creation would build, or the plan someone types for a job
+//  quietly differs from the plan the same job gets on its own — and
+//  the difference only shows up on the floor.
+// ══════════════════════════════════════════════════════════════════
+
+const planContext = (job) =>
+  request(app).get(`/api/v2/warping/plan-context/${job._id}`).set('Cookie', adminCookie());
+
+describe('the plan form is offered the template beams', () => {
+  it('offers the same beams auto-creation builds, across every elastic', async () => {
+    const y1 = await yarn('Nylon 70D');
+    const y2 = await yarn('Poly 150D');
+    const a = await makeElastic('20mm', [
+      { beamNo: 1, sections: [{ warpYarn: y1._id, ends: 120, maxMeters: 5000 }] },
+    ]);
+    const b = await makeElastic('32mm', [
+      { beamNo: 1, sections: [{ warpYarn: y2._id, ends: 60 }] },
+    ]);
+    const job = await makeJob([a, b]);
+
+    const { body } = await planContext(job);
+
+    expect(body.templateBeams).toHaveLength(2);
+    expect(body.templateBeams.map((x) => x.beamNo)).toEqual([1, 2]);
+    expect(body.templateBeams[0]).toMatchObject({
+      elasticId: String(a._id), elasticName: '20mm', totalEnds: 120,
+    });
+    expect(body.templateBeams[0].sections[0]).toMatchObject({
+      warpYarnId: String(y1._id), warpYarnName: 'Nylon 70D', ends: 120, maxMeters: 5000,
+    });
+    expect(body.templateBeams[1]).toMatchObject({
+      elasticId: String(b._id), elasticName: '32mm',
+    });
+  });
+
+  it('offers nothing when no elastic carries a template', async () => {
+    const e = await makeElastic('20mm', null);
+    const job = await makeJob([e]);
+
+    const { body } = await planContext(job);
+    expect(body.templateBeams).toEqual([]);
+  });
+});
+
+describe('a plan saved from the form keeps the elastic on each beam', () => {
+  const createPlan = (warping, beams) =>
+    request(app).post('/api/v2/warping/warpingPlan/create')
+      .set('Cookie', adminCookie())
+      .send({ warpingId: String(warping._id), beams });
+
+  it('stores the elastic when it is one of the job\'s own', async () => {
+    const y = await yarn('Nylon 70D');
+    // No template, so the warping creates no plan and the form makes one.
+    const e = await makeElastic('20mm', null);
+    const job = await makeJob([e]);
+    await createWarping(job);
+    const warping = await Warping.findOne({ job: job._id });
+
+    const res = await createPlan(warping, [
+      { beamNo: 1, elastic: String(e._id), sections: [{ warpYarn: String(y._id), ends: 120 }] },
+    ]);
+
+    expect(res.status).toBe(201);
+    const plan = await WarpingPlan.findOne({ warping: warping._id });
+    expect(String(plan.beams[0].elastic)).toBe(String(e._id));
+  });
+
+  it('drops an elastic that is not on the job rather than storing the claim', async () => {
+    const y = await yarn('Nylon 70D');
+    const e = await makeElastic('20mm', null);
+    const stranger = await makeElastic('not on this job', null);
+    const job = await makeJob([e]);
+    await createWarping(job);
+    const warping = await Warping.findOne({ job: job._id });
+
+    const res = await createPlan(warping, [
+      { beamNo: 1, elastic: String(stranger._id), sections: [{ warpYarn: String(y._id), ends: 120 }] },
+    ]);
+
+    expect(res.status).toBe(201);
+    const plan = await WarpingPlan.findOne({ warping: warping._id });
+    expect(plan.beams[0].elastic).toBeNull();
+  });
+});
