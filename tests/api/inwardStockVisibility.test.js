@@ -190,6 +190,38 @@ describe('quantity still to be received', () => {
     expect(row.onOrder).toBe(0);
   });
 
+  it('the job MRP moves with the receipt, like the order MRP does', async () => {
+    // The job sheet is what the floor works from, so a receipt that
+    // reaches the order screen and not this one is still the reported
+    // fault. Both read RawMaterial.stock live — this pins that.
+    const { yarn, order, elastic } = await seedRequirement({ stock: 0, ordered: 400, received: 0 });
+    const job = await JobOrder.create({
+      date: new Date(), order: order._id, customer: order.customer, status: 'preparatory',
+      elastics: [{ elastic: elastic._id, quantity: 500 }],
+    });
+
+    const before = await request(app)
+      .get(`/api/v2/job/${job._id}/mrp`).set('Cookie', adminCookie());
+    const rowBefore = before.body.data.materials.find(
+      (m) => String(m.rawMaterial) === String(yarn._id)
+    );
+    expect(rowBefore.inStock).toBe(0);
+    expect(rowBefore.onOrder).toBe(400);
+
+    // The yarn arrives against that PO.
+    const po = await PurchaseOrder.findOne({ 'items.rawMaterial': yarn._id });
+    await receive(po, yarn, 400);
+
+    const after = await request(app)
+      .get(`/api/v2/job/${job._id}/mrp`).set('Cookie', adminCookie());
+    const rowAfter = after.body.data.materials.find(
+      (m) => String(m.rawMaterial) === String(yarn._id)
+    );
+    expect(rowAfter.inStock).toBe(400);
+    // And nothing is owed twice: it is here now, not on its way.
+    expect(rowAfter.onOrder).toBe(0);
+  });
+
   it('the shortfall still measures against stock alone', async () => {
     // On-order quantity is not in the building. Netting it off the
     // shortfall would report a material as covered while the machine
