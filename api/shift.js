@@ -845,13 +845,28 @@ router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, re
 
       const detail = await ShiftDetail.create({
         date: planDate, shift: shiftType,
-        job: machineDoc?.orderRunning ?? m.machine,
+        // The machine's running job, or nothing. This used to fall back
+        // to `m.machine` when the machine was idle, which put a MACHINE
+        // id in a field declared as a JobOrder — a reference into the
+        // wrong collection that resolves to nothing and files the shift
+        // against a job that does not exist.
+        job: machineDoc?.orderRunning ?? null,
         machine: m.machine, employee: m.operator,
         shiftPlan: shiftPlan._id, elastics,
         status: 'open', timer: '00:00:00',
       });
 
       detailIds.push(detail._id);
+      // Keep the job's own list true. The job page no longer depends on
+      // it — it reads the shifts by their `job` ref, which is the only
+      // thing that could show the years of shifts written before this
+      // was noticed — but leaving an array that nothing maintains is
+      // how it came to be a fact-shaped empty in the first place.
+      if (machineDoc?.orderRunning) {
+        await JobOrder.findByIdAndUpdate(machineDoc.orderRunning, {
+          $addToSet: { shiftDetails: detail._id },
+        });
+      }
       // Pair the shift with the operator who is actually working it.
       detailByOperator.push({ operator: m.operator, detailId: detail._id });
     }

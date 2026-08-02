@@ -24,6 +24,7 @@ const { computeMaterialRequirement } = require('../utils/materialRequirement');
 const { triageShortfall, createShortfallPos, skipReasons } = require('../services/shortfallPo');
 const { checkWeavingReadiness } = require('../services/weavingReadiness');
 const { plannedLotsForJob, distinctLots } = require('../services/yarnLotTrail');
+const { shiftFigures, clockToMinutes } = require('../utils/shiftFigures');
 const { buildMrpPdf } = require('../utils/mrpPdf');
 const { getPdfBranding } = require('../services/documentSettings.js');
 
@@ -877,19 +878,28 @@ router.get('/:jobId', async (req, res) => {
         },
       })
       .populate({ path: 'covering', populate: { path: 'elasticPlanned.elastic', select: 'name' } })
-      .populate({
-        path: 'shiftDetails', model: 'ShiftDetail',
-        populate: [
-          { path: 'machine',  model: 'Machine',  select: 'ID NoOfHead status' },
-          { path: 'employee', model: 'Employee', select: 'name department' },
-          { path: 'elastics.elastic', model: 'Elastic', select: 'name weaveType' },
-        ],
-      })
+      // shiftDetails is NOT populated here — see below. The array on the
+      // job was never written to by anything, so populating it returned
+      // an empty list for every job that has ever existed.
       .populate({ path: 'wastages', model: 'Wastage', populate: [{ path: 'elastic', model: 'Elastic', select: 'name' }, { path: 'employee', model: 'Employee', select: 'name' }] })
       .populate({ path: 'packingDetails', model: 'Packing', populate: [{ path: 'elastic', model: 'Elastic', select: 'name' }, { path: 'checkedBy', model: 'Employee', select: 'name' }, { path: 'packedBy', model: 'Employee', select: 'name' }] })
       .lean();
 
     if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
+
+    // ── The shifts run on this job ───────────────────────────────────
+    // Read by their `job` ref, not off `JobOrder.shiftDetails`. That
+    // array is denormalised and no code has ever pushed to it, so
+    // populating it returned an empty list for every job that has ever
+    // existed — a fact-shaped empty, which reads as "no shifts yet"
+    // rather than as a bug. Querying the shifts themselves also picks up
+    // every shift recorded before this was noticed.
+    const shiftDocs = await ShiftDetail.find({ job: job._id })
+      .populate('machine',  'ID NoOfHead status')
+      .populate('employee', 'name department')
+      .populate('elastics.elastic', 'name weaveType')
+      .sort({ date: 1, _id: 1 })
+      .lean();
 
     const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : null;
     const mapElasticQty = arr => (arr || []).map(e => ({ elasticId: e.elastic?._id || null, elasticName: e.elastic?.name || 'Unknown', quantity: e.quantity || 0 }));
@@ -918,13 +928,58 @@ router.get('/:jobId', async (req, res) => {
     const co = job.covering;
     const covering = co ? { status: co.status || 'open', date: fmtDate(co.date), completedDate: fmtDate(co.completedDate), remarks: co.remarks || '', elasticPlanned: mapElasticQty(co.elasticPlanned) } : null;
 
-    const shiftDetails = (job.shiftDetails || []).sort((a, b) => new Date(a.date) - new Date(b.date)).map(d => ({
-      id: d._id, date: fmtDate(d.date), shift: d.shift, status: d.status, timer: d.timer || '00:00:00',
-      productionMeters: d.productionMeters || 0, machineName: d.machine?.ID || '-', machineNoOfHead: d.machine?.NoOfHead || 0,
-      operatorName: d.employee?.name || '-', operatorDept: d.employee?.department || '',
-      elastics: (d.elastics || []).map(he => ({ head: he.head, elasticName: he.elastic?.name || '-' })),
-      description: d.description || '', feedback: d.feedback || '',
-    }));
+    const shiftDetails = shiftDocs.map(d => {
+      // Until an admin verifies, the operator's numbers live in the
+      // submitted* fields; the canonical ones are still 0. Reporting
+      // those makes a shift that ran all night look idle, so
+      // shiftFigures owns the fallback and `verified` says which it is.
+      const { timer, meters } = shiftFigures(d);
+      return {
+        id: d._id, date: fmtDate(d.date), shift: d.shift, status: d.status,
+        timer: timer || '00:00:00',
+        productionMeters: meters,
+        verified: d.status === 'closed',
+        machineName: d.machine?.ID || '-', machineNoOfHead: d.machine?.NoOfHead || 0,
+        operatorName: d.employee?.name || '-', operatorDept: d.employee?.department || '',
+        elastics: (d.elastics || []).map(he => ({ head: he.head, elasticName: he.elastic?.name || '-' })),
+        description: d.description || '', feedback: d.feedback || '',
+      };
+    });
+
+    // ── What the shifts add up to ────────────────────────────────────
+    // The list answers "which shifts", this answers "how much did they
+    // make and how long did it take" without the reader adding up rows
+    // by eye. Verified and merely-submitted are counted separately,
+    // because a claim and a checked figure are not the same fact.
+    const shiftSummary = shiftDocs.reduce((acc, d) => {
+      const { timer, meters } = shiftFigures(d);
+      acc.shifts += 1;
+      acc.produced += meters;
+      acc.workedMinutes += clockToMinutes(timer);
+      if (d.shift === 'DAY' || d.shift === 'NIGHT') acc.byShift[d.shift] += meters;
+      if (d.status === 'closed') acc.closed += 1;
+      else if (d.status === 'pending_verification') acc.awaitingVerification += 1;
+      else acc.open += 1;
+      const at = d.date ? new Date(d.date) : null;
+      if (at) {
+        if (!acc.firstDate || at < acc.firstDate) acc.firstDate = at;
+        if (!acc.lastDate  || at > acc.lastDate)  acc.lastDate  = at;
+      }
+      return acc;
+    }, {
+      shifts: 0, produced: 0, workedMinutes: 0,
+      byShift: { DAY: 0, NIGHT: 0 },
+      closed: 0, awaitingVerification: 0, open: 0,
+      firstDate: null, lastDate: null,
+    });
+    // Both shifts run 12h, so this is output per hour actually worked —
+    // not per hour rostered, which would flatter a machine that stood
+    // idle for half of it.
+    shiftSummary.metresPerHour = shiftSummary.workedMinutes > 0
+      ? Math.round((shiftSummary.produced / (shiftSummary.workedMinutes / 60)) * 10) / 10
+      : 0;
+    shiftSummary.firstDateLabel = fmtDate(shiftSummary.firstDate);
+    shiftSummary.lastDateLabel  = fmtDate(shiftSummary.lastDate);
 
     const wastages = (job.wastages || []).map(wst => ({ id: wst._id, elasticName: wst.elastic?.name || '-', employeeName: wst.employee?.name || '-', quantity: wst.quantity || 0, penalty: wst.penalty || 0, reason: wst.reason || '', date: fmtDate(wst.createdAt) }));
     const packingDetails = (job.packingDetails || []).map(pk => ({ id: pk._id, elasticName: pk.elastic?.name || '-', quantity: pk.quantity || 0, rolls: pk.rolls || 0, metersPerRoll: pk.metersPerRoll || 0, total: pk.total || 0, batch: pk.batch || '-', status: pk.status || 'open', date: fmtDate(pk.createdAt) }));
@@ -955,7 +1010,7 @@ router.get('/:jobId', async (req, res) => {
         producedElastics: mapElasticQty(job.producedElastic),
         packedElastics: mapElasticQty(job.packedElastic),
         wastageElastics: mapElasticQty(job.wastageElastic),
-        warping, covering, shiftDetails, wastages, packingDetails,
+        warping, covering, shiftDetails, shiftSummary, wastages, packingDetails,
         // ── Per-stage audit pointers ──
         createdBy:   fpUser(job.createdBy),
         createdAt:   job.createdAt || null,
