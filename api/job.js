@@ -23,6 +23,7 @@ const { buildFingerprint, stampFingerprint, ACTION_CODES, actorFromRequest } = r
 const { computeMaterialRequirement } = require('../utils/materialRequirement');
 const { triageShortfall, createShortfallPos, skipReasons } = require('../services/shortfallPo');
 const { checkWeavingReadiness } = require('../services/weavingReadiness');
+const { plannedLotsForJob, distinctLots } = require('../services/yarnLotTrail');
 const { buildMrpPdf } = require('../utils/mrpPdf');
 const { getPdfBranding } = require('../services/documentSettings.js');
 
@@ -1114,6 +1115,38 @@ router.get('/:jobId/yarn-lots', async (req, res) => {
       if (e.elastic?._id) groupFor(String(e.elastic._id), e.elastic.name || 'Unknown');
     }
 
+    // ── What the warping programme committed to ──────────────────────
+    // A lot is chosen when the programme is written, which is days
+    // before any batch is issued. Reading only the batches meant that
+    // decision — already made, already printed on the sheet at the
+    // machine — showed up nowhere at all until the yarn moved.
+    const planned = await plannedLotsForJob(jobId);
+    for (const p of planned.entries) {
+      const g = groupFor(
+        p.elasticId || 'unattributed',
+        p.elasticName || 'Not attributed to an elastic'
+      );
+      g.lots.push({
+        source: 'planned',
+        planId: p.planId,
+        batchId: null,
+        batchNo: null,
+        batchStatus: null,
+        beamNos: p.beamNos,
+        yarnLot: p.yarnLot,
+        lotNo: p.lotNo,
+        shade: p.shade,
+        lotStatus: p.lotStatus,
+        materialName: p.materialName,
+        // Programming names the lot, it does not weigh it. A quantity
+        // here would be invented; the section count is what was decided.
+        quantity: null,
+        sections: p.sections,
+        sharedAcross: 1,
+        issuedDate: null,
+      });
+    }
+
     for (const b of live) {
       const targets = (b.elastics || []).length
         ? b.elastics.map((e) => ({ key: String(e._id), name: e.name || 'Unknown' }))
@@ -1123,6 +1156,9 @@ router.get('/:jobId/yarn-lots', async (req, res) => {
         const g = groupFor(t.key, t.name);
         for (const a of b.allocations || []) {
           g.lots.push({
+            // Issued: the cones are off the rack. Never merged with the
+            // planned row above — one can still change, the other cannot.
+            source: 'issued',
             batchId: b._id,
             batchNo: b.batchNo,
             batchStatus: b.status,
@@ -1149,17 +1185,7 @@ router.get('/:jobId/yarn-lots', async (req, res) => {
 
     // The flat list of distinct lots in this job — what someone chasing a
     // complaint wants first, before drilling into which beam.
-    const distinct = new Map();
-    for (const g of byElastic) {
-      for (const l of g.lots) {
-        const key = String(l.yarnLot || l.lotNo);
-        if (!distinct.has(key)) {
-          distinct.set(key, {
-            yarnLot: l.yarnLot, lotNo: l.lotNo, shade: l.shade, materialName: l.materialName,
-          });
-        }
-      }
-    }
+    const lots = distinctLots(byElastic.flatMap((g) => g.lots));
 
     return res.json({
       success: true,
@@ -1167,7 +1193,13 @@ router.get('/:jobId/yarn-lots', async (req, res) => {
         jobId: job._id,
         jobOrderNo: job.jobOrderNo,
         byElastic,
-        lots: Array.from(distinct.values()),
+        lots,
+        // Sections the programme has left open. Not a fault — an undyed
+        // yarn has no lot, and a plan can be written before the lot is
+        // decided — but it is the difference between "no lot chosen" and
+        // "no programme", which a blank list cannot express.
+        sections: planned.sections,
+        openBeamNos: planned.openBeamNos,
         // Batches exist but none say which elastic they were for — the
         // UI uses this to explain why the trail is job-wide.
         hasUnattributed: byElastic.some((g) => g.elasticId === null),

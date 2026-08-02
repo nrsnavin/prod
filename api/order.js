@@ -25,6 +25,8 @@ const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
 const Notification         = require("../models/Notification.js");
 const { approveOrderTxn }  = require("../services/orderService.js");
+const WarpingBatch         = require("../models/WarpingBatch.js");
+const { plannedLotsByJob, distinctLots, emptyTrail } = require("../services/yarnLotTrail.js");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient.js");
 // ETA forecast engine lives in its own service (Phase 4 god-file split).
 // The routes below and utils/digest.js both consume these; keeping them
@@ -1525,6 +1527,111 @@ router.get(
         customerName: order.customer?.name || '',
         status: order.status,
         materials,
+      },
+    });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  GET /:id/yarn-lots — the dye lots this order's goods will carry
+//
+//  Shade complaints arrive quoting an order or a delivery note, not a
+//  warping batch, so the trail has to be answerable from this end too.
+//  It rolls up every job on the order: the lots each job's warping
+//  programme committed to, and the lots its batches actually issued.
+//
+//  Sections whose lot has not been chosen are counted, not hidden. An
+//  order two beams short of a decision looks exactly like a settled one
+//  otherwise, and that is the state worth seeing before the machine
+//  starts.
+// ══════════════════════════════════════════════════════════════
+router.get(
+  '/:id/yarn-lots',
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler('Invalid order id', 400));
+    }
+    const order = await Order.findById(req.params.id).select('orderNo').lean();
+    if (!order) return next(new ErrorHandler('Order not found', 404));
+
+    // Read the jobs by their order ref rather than the order's `jobs`
+    // array: the ref is the one a job cannot be created without.
+    const jobs = await Job.find({ order: order._id })
+      .select('jobOrderNo status elastics')
+      .populate('elastics.elastic', 'name')
+      .sort({ jobOrderNo: 1 })
+      .lean();
+
+    const jobIds = jobs.map((j) => j._id);
+    const [planned, batches] = await Promise.all([
+      plannedLotsByJob(jobIds),
+      WarpingBatch.find({ job: { $in: jobIds } })
+        .select('job batchNo status beamNos issuedDate allocations elastics')
+        .populate('elastics', 'name')
+        .sort({ createdAt: 1 })
+        .lean(),
+    ]);
+
+    const issuedByJob = new Map(jobIds.map((id) => [String(id), []]));
+    for (const b of batches) {
+      // Cancelled batches went back on the rack; they are not in the goods.
+      if (b.status === 'cancelled') continue;
+      const bucket = issuedByJob.get(String(b.job));
+      if (!bucket) continue;
+      const names = (b.elastics || []).map((e) => e.name).filter(Boolean);
+      for (const a of b.allocations || []) {
+        bucket.push({
+          source: 'issued',
+          batchId: b._id,
+          batchNo: b.batchNo,
+          batchStatus: b.status,
+          beamNos: b.beamNos || [],
+          yarnLot: a.yarnLot,
+          lotNo: a.lotNo || '',
+          shade: a.shade || '',
+          materialName: a.materialName || '',
+          quantity: a.quantity,
+          elasticNames: names,
+          issuedDate: b.issuedDate || null,
+        });
+      }
+    }
+
+    const byJob = jobs.map((j) => {
+      const trail = planned.get(String(j._id)) || emptyTrail();
+      return {
+        jobId: String(j._id),
+        jobOrderNo: j.jobOrderNo,
+        jobNo: `J-${j.jobOrderNo}`,
+        status: j.status,
+        elastics: (j.elastics || [])
+          .map((e) => e.elastic?.name)
+          .filter(Boolean),
+        planned: trail.entries,
+        issued: issuedByJob.get(String(j._id)) || [],
+        sections: trail.sections,
+        openBeamNos: trail.openBeamNos,
+      };
+    });
+
+    const allRows = byJob.flatMap((j) => [...j.planned, ...j.issued]);
+    const sections = byJob.reduce(
+      (acc, j) => ({
+        total: acc.total + j.sections.total,
+        withLot: acc.withLot + j.sections.withLot,
+        open: acc.open + j.sections.open,
+      }),
+      { total: 0, withLot: 0, open: 0 }
+    );
+
+    res.json({
+      success: true,
+      data: {
+        orderId: String(order._id),
+        orderNo: order.orderNo ?? null,
+        byJob,
+        lots: distinctLots(allRows),
+        sections,
       },
     });
   })

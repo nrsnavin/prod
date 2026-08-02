@@ -14,6 +14,7 @@ const Elastic          = require("../models/Elastic");
 const { nextNumber }   = require("../utils/sequence");
 const { drawFromLot, returnToLot } = require("../services/yarnLotService");
 const { buildBeamsFromTemplates } = require("../services/warpingTemplate");
+const { plannedLotsForJob, distinctLots } = require("../services/yarnLotTrail");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
@@ -174,7 +175,23 @@ router.get("/detail/:id", catchAsyncErrors(async (req, res, next) => {
     });
 
   if (!warping) return next(new ErrorHandler("Warping not found", 404));
-  res.json({ success: true, warping });
+
+  // The lots this programme commits to, folded per (elastic, lot). The
+  // beams below already carry them section by section; this is the same
+  // fact at the size a person can read — and it names how many sections
+  // are still open, which the beam list can only be counted for.
+  const lotTrail = await plannedLotsForJob(warping.job?._id || warping.job);
+
+  res.json({
+    success: true,
+    warping,
+    yarnLots: {
+      planned: lotTrail.entries,
+      lots: distinctLots(lotTrail.entries),
+      sections: lotTrail.sections,
+      openBeamNos: lotTrail.openBeamNos,
+    },
+  });
 }));
 
 router.post("/start", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
