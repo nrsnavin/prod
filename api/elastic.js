@@ -7,6 +7,8 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const { escapeRegex }  = require("../utils/escapeRegex");
 
 const Elastic       = require("../models/Elastic");
+const Order         = require("../models/Order");
+const JobOrder      = require("../models/JobOrder");
 const Costing       = require("../models/Costing");
 const StockMovement = require("../models/StockMovement");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
@@ -274,6 +276,138 @@ router.get(
   })
 );
 
+
+// ═════════════════════════════════════════════════════════════
+//  WHERE THIS ELASTIC HAS BEEN
+//
+//  GET /:id/orders  — the orders that asked for it
+//  GET /:id/jobs    — the jobs that made it
+//
+//  The stock ledger says how much there is; neither of these does.
+//  They answer the questions asked when a customer rings up about a
+//  product: who else buys this, what did we quote them, when did we
+//  last run it, and how much came off the machine that time.
+//
+//  Both paginate, because a product that has been in the catalogue for
+//  years has hundreds of each and neither list has a natural end.
+// ═════════════════════════════════════════════════════════════
+
+/** Shared page/limit parsing, so the two lists cannot drift apart. */
+const pageParams = (query) => ({
+  page: Math.max(1, Number(query.page) || 1),
+  limit: Math.min(100, Math.max(1, Number(query.limit) || 20)),
+});
+
+/** Pull this elastic's line out of an array of { elastic, quantity }. */
+const qtyFor = (rows, elasticId) => {
+  const row = (rows || []).find((r) => String(r.elastic?._id || r.elastic) === String(elasticId));
+  return Number(row?.quantity) || 0;
+};
+
+router.get(
+  "/:id/orders",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid elastic id", 400));
+    }
+    const elastic = await Elastic.findById(id).select("name").lean();
+    if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
+
+    const { page, limit } = pageParams(req.query);
+    const filter = { "elasticOrdered.elastic": elastic._id };
+    // Deleted orders are not history, they are a mistake being undone.
+    if (req.query.includeDeleted !== "true") filter.status = { $ne: "Deleted" };
+
+    const [orders, total] = await Promise.all([
+      Order.find(filter)
+        .select("orderNo po date supplyDate status customer elasticOrdered producedElastic packedElastic")
+        .populate("customer", "name")
+        .sort({ date: -1, _id: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Order.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      elastic: { _id: elastic._id, name: elastic.name },
+      // Only this elastic's line off each order. An order carrying four
+      // products would otherwise report the other three as this one's.
+      orders: orders.map((o) => ({
+        id: String(o._id),
+        orderNo: o.orderNo ?? null,
+        po: o.po || "",
+        date: o.date || null,
+        supplyDate: o.supplyDate || null,
+        status: o.status,
+        customerId: o.customer?._id ? String(o.customer._id) : null,
+        customerName: o.customer?.name || "",
+        ordered: qtyFor(o.elasticOrdered, elastic._id),
+        produced: qtyFor(o.producedElastic, elastic._id),
+        packed: qtyFor(o.packedElastic, elastic._id),
+      })),
+      page,
+      limit,
+      total,
+      hasMore: (page - 1) * limit + orders.length < total,
+    });
+  })
+);
+
+router.get(
+  "/:id/jobs",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid elastic id", 400));
+    }
+    const elastic = await Elastic.findById(id).select("name").lean();
+    if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
+
+    const { page, limit } = pageParams(req.query);
+    // A cancelled job made nothing, but it is still part of the record
+    // of what was attempted — hidden by default, askable for.
+    const filter = { "elastics.elastic": elastic._id };
+    if (req.query.includeCancelled !== "true") filter.status = { $ne: "cancelled" };
+
+    const [jobs, total] = await Promise.all([
+      JobOrder.find(filter)
+        .select("jobOrderNo date status order customer elastics producedElastic packedElastic wastageElastic")
+        .populate("customer", "name")
+        .populate("order", "orderNo")
+        .sort({ date: -1, _id: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      JobOrder.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      elastic: { _id: elastic._id, name: elastic.name },
+      jobs: jobs.map((j) => ({
+        id: String(j._id),
+        jobOrderNo: j.jobOrderNo ?? null,
+        jobNo: j.jobOrderNo != null ? `J-${j.jobOrderNo}` : "",
+        date: j.date || null,
+        status: j.status,
+        orderId: j.order?._id ? String(j.order._id) : null,
+        orderNo: j.order?.orderNo ?? null,
+        customerName: j.customer?.name || "",
+        planned: qtyFor(j.elastics, elastic._id),
+        produced: qtyFor(j.producedElastic, elastic._id),
+        packed: qtyFor(j.packedElastic, elastic._id),
+        wastage: qtyFor(j.wastageElastic, elastic._id),
+      })),
+      page,
+      limit,
+      total,
+      hasMore: (page - 1) * limit + jobs.length < total,
+    });
+  })
+);
 
 // ─────────────────────────────────────────────────────────────
 //  MANUAL ADJUST
