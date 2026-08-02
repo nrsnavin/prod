@@ -142,4 +142,15 @@ OrderSchema.index({ orderNo: 1 }, { unique: true, sparse: true });
 // Delivery-schedule views: what is due, soonest first, within a status.
 OrderSchema.index({ status: 1, supplyDate: 1 });
 
+// The elastic detail page: every order carrying one product, newest
+// first. Multikey, because elasticOrdered is an array — an order is
+// indexed once per product on it.
+//
+// Without this the query is the exact failure the note above describes:
+// a full scan of every order ever placed, then an in-memory sort of
+// whatever matched. That list is built to serve a product with hundreds
+// of orders behind it, so it is the screen that would hit the 32 MB sort
+// ceiling first — and it errors rather than degrading.
+OrderSchema.index({ "elasticOrdered.elastic": 1, date: -1 });
+
 module.exports = mongoose.model("Order", OrderSchema);

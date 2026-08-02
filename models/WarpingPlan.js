@@ -77,4 +77,11 @@ const WarpingPlanSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// The lot trail reads plans by job — on the job detail, on every job of
+// an order, and on the warping screen. `warping` is unique and therefore
+// indexed; `job` was not indexed at all, so each of those reads scanned
+// every plan ever written. Hot enough a path to be worth an index of its
+// own. See services/yarnLotTrail.js.
+WarpingPlanSchema.index({ job: 1 });
+
 module.exports = mongoose.model("WarpingPlan", WarpingPlanSchema);

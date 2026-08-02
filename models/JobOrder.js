@@ -94,4 +94,11 @@ const JobOrderSchema = new mongoose.Schema(
 
 JobOrderSchema.plugin(AutoIncrement, { inc_field: "jobOrderNo" });
 
+// The elastic detail page: every job that made one product, newest
+// first. Multikey on the elastics array, so a job is indexed once per
+// product it carries. Without it the list is a full collection scan and
+// then an in-memory sort — see the note on OrderSchema's indexes for why
+// that fails outright rather than merely slowly.
+JobOrderSchema.index({ "elastics.elastic": 1, date: -1 });
+
 module.exports = mongoose.model("JobOrder", JobOrderSchema);
