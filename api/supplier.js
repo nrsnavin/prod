@@ -329,13 +329,40 @@ router.get(
     try {
       const po = await PurchaseOrder.findById(req.query.id)
         .populate("supplier",          "name phoneNumber gstin email address contactPerson")
-        .populate("items.rawMaterial", "name unit");
+        .populate("items.rawMaterial", "name unit")
+        .lean();
 
       if (!po) return next(new ErrorHandler("Purchase Order not found", 404));
 
       const inwardHistory = await MaterialInward.find({ purchaseOrder: po._id })
         .populate("rawMaterial", "name unit")
         .sort({ inwardDate: -1 });
+
+      // ── What is received, and what is still to come ────────────────
+      // Stated here rather than left to the client to subtract.
+      //
+      // This route used to hand back the raw document, whose lines carry
+      // `receivedQuantity`. The goods-received screen read `received` —
+      // the name the pending-PO ageing report maps — so it was always
+      // undefined, `?? 0` made it nothing received, and the pending
+      // column printed the full order quantity no matter how much had
+      // arrived. No error, no blank: a confident wrong number saying
+      // nothing had come in about goods sitting in the store.
+      //
+      // Both names are emitted so neither client breaks, and `pending`
+      // is computed once, here, so there is no third place for the same
+      // subtraction to be written differently again.
+      po.items = (po.items || []).map((it) => {
+        const ordered  = Number(it.quantity) || 0;
+        const received = Number(it.receivedQuantity) || 0;
+        return {
+          ...it,
+          received,
+          // Floored at zero: over-delivery within tolerance is allowed,
+          // and "-8 pending" is not a quantity anyone can act on.
+          pending: Math.max(0, ordered - received),
+        };
+      });
 
       res.status(200).json({ success: true, po, inwardHistory });
     } catch (error) {
