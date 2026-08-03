@@ -583,7 +583,10 @@ router.post(
                   throw new Error("Invalid yarn lot id");
                 }
                 const lot = await drawFromLot(
-                  item.yarnLot, Math.abs(item.adjustment), session
+                  item.yarnLot, Math.abs(item.adjustment), session,
+                  // Not a batch issue — say on the lot's ledger that a
+                  // person wrote this off, and why.
+                  { reason }
                 );
                 lotRef   = lot._id;
                 lotLabel = lot.lotNo;

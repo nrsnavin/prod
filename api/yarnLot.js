@@ -19,7 +19,9 @@ const WarpingBatch = require("../models/WarpingBatch");
 const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
-const { creditLot, unplacedQuantity } = require("../services/yarnLotService");
+const { creditLot, unplacedQuantity, appendLotMovement } = require("../services/yarnLotService");
+const { appendStockMovement } = require("../utils/stockLedger");
+const { describeLotMovements } = require("../utils/lotLedger");
 const { isAdmin } = require("../middleware/auth");
 
 const oid = (v) => mongoose.Types.ObjectId.isValid(v);
@@ -220,16 +222,127 @@ router.get("/:id/trace", catchAsyncErrors(async (req, res, next) => {
   });
 }));
 
+// ══════════════════════════════════════════════════════════════
+//  POST /yarn-lots/:id/adjust   { delta, reason }
+//
+//  Correct one lot's balance — a recount, damage, spillage.
+//
+//  The lot and the material's aggregate stock move TOGETHER, inside one
+//  transaction. Lot balances are a subdivision of stock, so moving one
+//  without the other puts the two permanently out of step, and nothing
+//  afterwards can say which of them is right.
+//
+//  This is deliberately NOT how a batch issue behaves: issuing draws a
+//  lot and leaves RawMaterial.stock alone, because that stock was
+//  already debited at order approval and debiting it again would count
+//  the same yarn twice. An adjustment is different — it is a statement
+//  that the physical quantity is not what the system thought, and that
+//  is true of both figures at once. See models/YarnLot.js.
+// ══════════════════════════════════════════════════════════════
+router.post(
+  "/:id/adjust",
+  isAdmin("admin", "production", "accounts"),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!oid(req.params.id)) return next(new ErrorHandler("Invalid lot id", 400));
+
+    const delta = Number(req.body?.delta);
+    if (!Number.isFinite(delta) || delta === 0) {
+      return next(new ErrorHandler("delta must be a non-zero number", 400));
+    }
+    const reason = String(req.body?.reason || "").trim();
+    if (reason.length < 3) {
+      // An adjustment has no document behind it. Without a reason the
+      // ledger row is a number nobody can explain, which is the thing
+      // this ledger exists to prevent.
+      return next(new ErrorHandler("A reason (min 3 chars) is required", 400));
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      let out = null;
+      await session.withTransaction(async () => {
+        const lot = await YarnLot.findById(req.params.id).session(session);
+        if (!lot) throw new ErrorHandler("Yarn lot not found", 404);
+
+        const balance = (lot.receivedQty || 0) - (lot.consumedQty || 0);
+        if (delta < 0 && balance + delta < 0) {
+          throw new ErrorHandler(
+            `Lot ${lot.lotNo} holds only ${balance} — cannot take ${Math.abs(delta)} off it`,
+            409
+          );
+        }
+
+        // A shortfall is recorded as MORE consumed, a gain as MORE
+        // received. Both keep receivedQty >= consumedQty and leave the
+        // lot's own arithmetic intact, which zeroing one side would not.
+        if (delta < 0) lot.consumedQty = (lot.consumedQty || 0) + Math.abs(delta);
+        else lot.receivedQty = (lot.receivedQty || 0) + delta;
+
+        const after = (lot.receivedQty || 0) - (lot.consumedQty || 0);
+        // Follow the balance where it lands, both ways.
+        if (after <= 0 && lot.status === "open") lot.status = "exhausted";
+        if (after > 0 && lot.status === "exhausted") lot.status = "open";
+        await lot.save({ session });
+
+        await appendLotMovement(lot._id, {
+          type: "ADJUST",
+          quantity: delta,
+          balance: after,
+          reason,
+          by: req.user?._id,
+        }, session);
+
+        // The aggregate moves with it.
+        const material = await RawMaterial.findById(lot.rawMaterial).session(session);
+        if (material) {
+          material.stock = Math.max(0, (Number(material.stock) || 0) + delta);
+          await material.save({ session });
+          await appendStockMovement(material._id, {
+            type: "STOCK_ADJUST",
+            quantity: delta,
+            balance: material.stock,
+            reason: `Lot ${lot.lotNo}: ${reason}`,
+          }, session);
+        }
+
+        out = {
+          lotId: String(lot._id),
+          lotNo: lot.lotNo,
+          balance: after,
+          status: lot.status,
+          materialStock: material ? material.stock : null,
+        };
+      });
+      res.json({ success: true, ...out });
+    } finally {
+      await session.endSession();
+    }
+  })
+);
+
 // ── GET /yarn-lots/:id ────────────────────────────────────────
 // Declared after /:id/trace and /:id/status so those literal segments
 // are not swallowed by this parameterised route.
 router.get("/:id", catchAsyncErrors(async (req, res, next) => {
   if (!oid(req.params.id)) return next(new ErrorHandler("Invalid lot id", 400));
   const lot = await YarnLot.findById(req.params.id)
+    // The lot's own ledger — select:false on the schema, and this detail
+    // view is the one place that wants it.
+    .select("+movements")
     .populate("rawMaterial", "name category unit")
-    .populate("supplier", "name");
+    .populate("supplier", "name")
+    .populate("movements.warpingBatch", "batchNo status")
+    .populate("movements.by", "name");
   if (!lot) return next(new ErrorHandler("Yarn lot not found", 404));
-  res.json({ success: true, lot });
+
+  // Newest first, and said in words. A running total cannot be audited;
+  // this is what explains the balance beside it.
+  const movements = describeLotMovements(lot.movements, lot.balance);
+
+  res.json({
+    success: true,
+    lot: { ...lot.toJSON(), movements },
+  });
 }));
 
 module.exports = router;

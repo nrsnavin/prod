@@ -1075,7 +1075,11 @@ router.post("/batch/:id/issue", isAdmin("admin", "production"), catchAsyncErrors
       }
 
       for (const a of claimed.allocations) {
-        await drawFromLot(a.yarnLot, a.quantity, session);
+        // Name the batch on the lot's own ledger, so a lot can say where
+        // its yarn went rather than only how much of it is left.
+        await drawFromLot(a.yarnLot, a.quantity, session, {
+          warpingBatch: claimed._id, refNo: claimed.batchNo,
+        });
       }
       batch = claimed;
     });
@@ -1154,7 +1158,10 @@ router.patch("/batch/:id/cancel", isAdmin("admin", "production"), catchAsyncErro
       // survives the update untouched and answers that instead.
       if (claimed.issuedDate) {
         for (const a of claimed.allocations) {
-          await returnToLot(a.yarnLot, a.quantity, session);
+          await returnToLot(a.yarnLot, a.quantity, session, {
+            warpingBatch: claimed._id, refNo: claimed.batchNo,
+            reason: 'batch cancelled',
+          });
         }
       }
       batch = claimed;

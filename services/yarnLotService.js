@@ -22,6 +22,35 @@ const ErrorHandler = require('../utils/ErrorHandler');
  * existing bucket rather than opening a rival one — enforced by the
  * unique (rawMaterial, lotNo) index.
  */
+/**
+ * Append one row to a lot's own ledger, trimming to the cap in the same
+ * atomic update.
+ *
+ * Every lot move goes through this file, so putting the write here means
+ * the ledger cannot drift from the balance it explains — there is no
+ * second path that moves a lot without recording why.
+ *
+ * `balance` is passed in by the caller because the caller has just done
+ * the update and holds the authoritative post-move figure; recomputing
+ * it here would be a second read that could disagree.
+ */
+async function appendLotMovement(lotId, movement, session) {
+  const q = YarnLot.updateOne(
+    { _id: lotId },
+    {
+      $push: {
+        movements: {
+          $each: [{ date: new Date(), ...movement }],
+          // Negative slice keeps the newest, since rows append in order.
+          $slice: -YarnLot.MAX_EMBEDDED_MOVEMENTS,
+        },
+      },
+    }
+  );
+  if (session) q.session(session);
+  return q;
+}
+
 async function creditLot(
   { rawMaterial, lotNo, quantity, shade, supplier, dyer, inward, receivedDate },
   session
@@ -67,6 +96,16 @@ async function creditLot(
     await q;
     doc.status = 'open';
   }
+
+  if (doc) {
+    await appendLotMovement(doc._id, {
+      type: 'INWARD',
+      quantity: qty,
+      balance: (doc.receivedQty || 0) - (doc.consumedQty || 0),
+      inward: inward || undefined,
+      date: receivedDate || new Date(),
+    }, session);
+  }
   return doc;
 }
 
@@ -77,7 +116,7 @@ async function creditLot(
  * the lot genuinely holds enough. A concurrent issue that got there first
  * leaves this one unmatched, and it fails rather than overdrawing.
  */
-async function drawFromLot(lotId, quantity, session) {
+async function drawFromLot(lotId, quantity, session, meta = {}) {
   const qty = Number(quantity) || 0;
   if (qty <= 0) throw new ErrorHandler('Issue quantity must be greater than zero', 400);
 
@@ -121,6 +160,16 @@ async function drawFromLot(lotId, quantity, session) {
     await q;
     updated.status = 'exhausted';
   }
+
+  // Negative: a draw reduces the lot. Same sign convention as the raw
+  // material ledger, so the two cannot be read with opposite rules.
+  await appendLotMovement(updated._id, {
+    type: 'BATCH_ISSUE',
+    quantity: -qty,
+    balance: updated.receivedQty - updated.consumedQty,
+    warpingBatch: meta.warpingBatch,
+    refNo: meta.refNo || '',
+  }, session);
   return updated;
 }
 
@@ -130,7 +179,7 @@ async function drawFromLot(lotId, quantity, session) {
  * `consumedQty` has a min of 0 on the schema, but $inc bypasses schema
  * validation entirely, so the floor is enforced in the filter here.
  */
-async function returnToLot(lotId, quantity, session) {
+async function returnToLot(lotId, quantity, session, meta = {}) {
   const qty = Number(quantity) || 0;
   if (qty <= 0) return null;
 
@@ -159,6 +208,15 @@ async function returnToLot(lotId, quantity, session) {
     await q;
     updated.status = 'open';
   }
+
+  await appendLotMovement(updated._id, {
+    type: 'BATCH_RETURN',
+    quantity: qty,
+    balance: updated.receivedQty - updated.consumedQty,
+    warpingBatch: meta.warpingBatch,
+    refNo: meta.refNo || '',
+    reason: meta.reason || '',
+  }, session);
   return updated;
 }
 
@@ -210,6 +268,7 @@ async function unplacedQuantity(material, session) {
 }
 
 module.exports = {
+  appendLotMovement,
   creditLot,
   drawFromLot,
   returnToLot,

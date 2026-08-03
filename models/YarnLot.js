@@ -31,6 +31,34 @@ const mongoose = require('mongoose');
  * of lot balances is a floor on the yarn present, never the whole of it.
  */
 
+/**
+ * One movement on a lot.
+ *
+ * `quantity` is the DELTA to the lot's balance, so a draw is negative —
+ * the same convention as RawMaterial.stockMovements, deliberately, so
+ * the two ledgers cannot be read with opposite sign rules.
+ */
+const YarnLotMovementSchema = new mongoose.Schema(
+  {
+    date: { type: Date, required: true, default: Date.now },
+    /** INWARD | BATCH_ISSUE | BATCH_RETURN | ADJUST */
+    type: { type: String, required: true },
+    quantity: { type: Number, required: true },
+    /** The lot's balance immediately after this row. */
+    balance: { type: Number },
+
+    // What caused it. A batch for an issue or a return, an inward for a
+    // credit; a reason for an adjustment, which has no document.
+    warpingBatch: { type: mongoose.Types.ObjectId, ref: 'WarpingBatch' },
+    inward: { type: mongoose.Types.ObjectId, ref: 'MaterialInward' },
+    /** Human-facing number, snapshotted so the row survives a deletion. */
+    refNo: { type: String, trim: true, default: '' },
+    reason: { type: String, trim: true, default: '' },
+    by: { type: mongoose.Types.ObjectId, ref: 'User' },
+  },
+  { _id: false }
+);
+
 const YarnLotSchema = new mongoose.Schema(
   {
     rawMaterial: {
@@ -78,6 +106,25 @@ const YarnLotSchema = new mongoose.Schema(
 
     /** The inward rows that credited this lot, for drill-down. */
     inwards: [{ type: mongoose.Types.ObjectId, ref: 'MaterialInward' }],
+
+    /**
+     * This lot's own ledger.
+     *
+     * `receivedQty` and `consumedQty` are running totals, and a running
+     * total cannot be audited: it says a lot has 40 kg left without
+     * saying when the rest went or who took it. Every move through
+     * services/yarnLotService.js appends a row here, so the balance can
+     * always be explained rather than merely trusted.
+     *
+     * Capped like RawMaterial.stockMovements, and for the same reasons —
+     * an unbounded array on a hot document marches toward the 16 MB
+     * ceiling and is dragged along by every read of the lot.
+     */
+    movements: {
+      type: [YarnLotMovementSchema],
+      default: [],
+      select: false,
+    },
   },
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
@@ -91,6 +138,39 @@ YarnLotSchema.virtual('balance').get(function balance() {
 YarnLotSchema.virtual('issuable').get(function issuable() {
   return this.status === 'open' && this.balance > 0;
 });
+
+/**
+ * How long this lot has been on the rack, in whole days.
+ *
+ * Dyed yarn is not indefinitely interchangeable with itself: a lot that
+ * has sat for months is the one to use up first, and the one to look at
+ * when a shade complaint arrives. The rack has no way to show this, so
+ * the system has to.
+ */
+YarnLotSchema.virtual('ageDays').get(function ageDays() {
+  const from = this.receivedDate ? new Date(this.receivedDate).getTime() : null;
+  if (!from) return null;
+  return Math.max(0, Math.floor((Date.now() - from) / 86_400_000));
+});
+
+/**
+ * The age bucket, using the same vocabulary as the pending-PO ageing
+ * report so one word means one thing across the system.
+ *
+ * Only meaningful while the lot still holds something — an exhausted
+ * lot's age is history, not a thing to act on.
+ */
+YarnLotSchema.virtual('ageBucket').get(function ageBucket() {
+  const days = this.ageDays;
+  if (days == null || this.balance <= 0) return null;
+  if (days <= 30) return 'fresh';
+  if (days <= 90) return 'watch';
+  if (days <= 180) return 'late';
+  return 'critical';
+});
+
+/** Cap on the embedded ledger — see the note on RawMaterial. */
+YarnLotSchema.statics.MAX_EMBEDDED_MOVEMENTS = 200;
 
 // One bucket per (material, lot number) — a second delivery of the same
 // lot tops up the existing bucket rather than opening a rival one. The
