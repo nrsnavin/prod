@@ -297,3 +297,91 @@ describe('picking a machine through /plan-weaving', () => {
     expect(String(still.orderRunning)).toBe(String(job._id));
   });
 });
+
+// ── Giving the machine back ───────────────────────────────────────────
+
+describe('a job letting its machine go', () => {
+  /** Move a job to weaving by satisfying the readiness gate. */
+  async function toWeaving(job, elastic) {
+    const warping = await Warping.create({
+      date: new Date(), job: job._id, status: 'completed',
+      elasticOrdered: [{ elastic: elastic._id, quantity: 500 }],
+    });
+    const covering = await Covering.create({
+      date: new Date(), job: job._id, status: 'completed',
+    });
+    await JobOrder.findByIdAndUpdate(job._id, {
+      warping: warping._id, covering: covering._id,
+    });
+    return request(app).post('/api/v2/job/update-status')
+      .set('Cookie', adminCookie())
+      .send({ jobId: String(job._id), nextStatus: 'weaving' });
+  }
+
+  it('frees it when weaving finishes', async () => {
+    const { job, elastic } = await seed();
+    const machine = await makeMachine();
+    await planWeaving(job, machine, elastic);
+    await toWeaving(job, elastic);
+
+    const res = await request(app).post('/api/v2/job/update-status')
+      .set('Cookie', adminCookie())
+      .send({ jobId: String(job._id), nextStatus: 'finishing' });
+    expect(res.status).toBeLessThan(400);
+
+    const freed = await reload(machine);
+    expect(freed.status).toBe('free');
+    expect(freed.orderRunning).toBeNull();
+    // The head plan goes too: leaving it makes the next job's picker
+    // show heads already mapped to another job's products.
+    expect(freed.elastics).toEqual([]);
+  });
+
+  it('frees it when the job is cancelled while still preparatory', async () => {
+    // A machine can be claimed while the job is preparatory — the
+    // system offers that deliberately, to reserve capacity. The release
+    // on cancel only ran for jobs in weaving, so cancelling one of
+    // these left its machine running forever on a job that no longer
+    // existed to release it.
+    const { job, elastic } = await seed();
+    const machine = await makeMachine();
+    await planWeaving(job, machine, elastic);
+    expect((await JobOrder.findById(job._id)).status).toBe('preparatory');
+
+    const res = await request(app).post('/api/v2/job/cancel')
+      .set('Cookie', adminCookie())
+      .send({ jobId: String(job._id), reason: 'customer pulled the order' });
+    expect(res.status).toBeLessThan(400);
+
+    const freed = await reload(machine);
+    expect(freed.status).toBe('free');
+    expect(freed.orderRunning).toBeNull();
+  });
+
+  it('frees a stranded machine on cancel too', async () => {
+    const { job, elastic } = await seed();
+    const stranded = await makeMachine();
+    await Machine.findByIdAndUpdate(stranded._id, {
+      status: 'running', orderRunning: job._id,
+    });
+
+    await request(app).post('/api/v2/job/cancel')
+      .set('Cookie', adminCookie())
+      .send({ jobId: String(job._id), reason: 'no longer needed' });
+
+    expect((await reload(stranded)).status).toBe('free');
+  });
+
+  it('leaves a machine under maintenance alone on cancel', async () => {
+    const { job, elastic } = await seed();
+    const machine = await makeMachine();
+    await planWeaving(job, machine, elastic);
+    await Machine.findByIdAndUpdate(machine._id, { status: 'maintenance' });
+
+    await request(app).post('/api/v2/job/cancel')
+      .set('Cookie', adminCookie())
+      .send({ jobId: String(job._id), reason: 'stopped' });
+
+    expect((await reload(machine)).status).toBe('maintenance');
+  });
+});

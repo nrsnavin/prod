@@ -98,13 +98,39 @@ function fullJobPopulate(query) {
     });
 }
 
-async function releaseMachine(machineId) {
-  if (!machineId) return;
-  const machine = await Machine.findById(machineId);
-  if (!machine) return;
-  machine.status       = 'free';
-  machine.orderRunning = null;
-  await machine.save();
+/**
+ * Let go of every machine standing on a job.
+ *
+ * Takes the JOB, not a machine id. The link lives on both documents —
+ * `job.machine` and `machine.orderRunning` — and releasing by the job's
+ * side alone misses a machine that holds the job while the job does not
+ * point back, which is a state the non-transactional assign path can
+ * produce. Such a machine was then held forever: nothing would ever
+ * release it, because the job it claimed to run had no idea.
+ *
+ * `elastics` is cleared too. Leaving the head plan on a free machine
+ * makes the next job's picker show heads already mapped to another
+ * job's products.
+ *
+ * Never touches a machine in maintenance — that is not a job holding it,
+ * and "free" would put a machine back in the picker that is in pieces.
+ */
+async function releaseMachinesForJob(job) {
+  if (!job?._id) return;
+
+  await Machine.updateMany(
+    { orderRunning: job._id, status: 'running' },
+    { $set: { status: 'free', orderRunning: null, elastics: [] } }
+  );
+
+  // The mirror-image stray: the job points at a machine that no longer
+  // claims it.
+  if (job.machine) {
+    await Machine.updateOne(
+      { _id: job.machine, status: { $ne: 'maintenance' } },
+      { $set: { status: 'free', orderRunning: null, elastics: [] } }
+    );
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -483,8 +509,9 @@ router.post(
       }
     }
 
+    // Weaving is over, so the machine goes back in the pool.
     if (nextStatus === 'finishing') {
-      await releaseMachine(job.machine);
+      await releaseMachinesForJob(job);
       job.machine = undefined;
     }
 
@@ -590,10 +617,15 @@ router.post(
     if (job.status === 'cancelled') return next(new ErrorHandler('Job is already cancelled', 400));
     if (job.status === 'completed') return next(new ErrorHandler('A completed job cannot be cancelled', 400));
 
-    if (job.status === 'weaving' && job.machine) {
-      await releaseMachine(job.machine);
-      job.machine = undefined;
-    }
+    // Whatever the job was standing on, it is not standing on it now.
+    //
+    // This used to run only for a job in WEAVING that pointed at a
+    // machine. A machine can be claimed while the job is still
+    // preparatory — the system offers that deliberately, to reserve
+    // capacity — so cancelling such a job left its machine running
+    // forever on a job that no longer exists to release it.
+    await releaseMachinesForJob(job);
+    job.machine = undefined;
 
     const previousStatus = job.status;
     stampStage(job, 'cancelled', req.user?._id);
