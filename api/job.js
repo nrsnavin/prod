@@ -367,6 +367,40 @@ router.post(
           );
         }
 
+        // ── Let go of whatever this job was already on ───────────────
+        // This route claimed the new machine and released nothing, so
+        // moving a job to another machine left the first one stuck on
+        // "running" for a job it was no longer part of — unavailable to
+        // everything else, for good. It is the route the machine picker
+        // actually calls, which is why the release on /assign-machine
+        // never covered this.
+        //
+        // Released by `orderRunning` — the machine's own claim — so a
+        // machine holding the job is let go whichever side of the link
+        // survived. Scoped to this job, so someone else's running
+        // machine is untouched, and to `running`, so a machine in
+        // maintenance is not put back in the picker.
+        //
+        // Deliberately after the claim and inside the same transaction:
+        // if the machine being asked for turns out not to be free, the
+        // whole thing rolls back and the job stays on the machine it was
+        // already running. Releasing first would strand the job on
+        // nothing.
+        await Machine.updateMany(
+          { _id: { $ne: machine._id }, orderRunning: job._id, status: 'running' },
+          { $set: { status: 'free', orderRunning: null, elastics: [] } },
+          { session }
+        );
+        if (job.machine && job.machine.toString() !== machine._id.toString()) {
+          // The mirror-image stray: the job points at a machine that no
+          // longer claims it.
+          await Machine.updateOne(
+            { _id: { $eq: job.machine, $ne: machine._id }, status: { $ne: 'maintenance' } },
+            { $set: { status: 'free', orderRunning: null, elastics: [] } },
+            { session }
+          );
+        }
+
         // Planning a machine is not the same as being prepared. A job
         // only becomes weaving once its warping and covering are both
         // completed — the same rule /update-status enforces. Read inside
@@ -775,9 +809,43 @@ router.post(
         return next(new ErrorHandler(`Elastic "${entry.elastic}" (head ${entry.head}) is not part of this job.`, 400));
     }
 
+    // ── Let go of whatever this job was on ───────────────────────────
+    //
+    // The link lives on BOTH documents: `job.machine` and
+    // `machine.orderRunning`. This used to release by `job.machine`
+    // alone, which misses a machine that holds the job while the job
+    // does not point back — and that state is reachable, because the
+    // machine and the job below are two separate writes with no
+    // transaction around them. A failure between them leaves a machine
+    // running a job that has never heard of it, and no later assignment
+    // would ever free it.
+    //
+    // Released by `orderRunning` instead, which is the machine's own
+    // claim, so any machine standing on this job is let go regardless of
+    // which side of the link survived. Scoped to THIS job, so a machine
+    // running someone else's is untouched — and to `running`, so a
+    // machine in maintenance is not put back in the picker while it is
+    // in pieces on the floor.
+    await Machine.updateMany(
+      {
+        _id: { $ne: machine._id },
+        orderRunning: job._id,
+        status: 'running',
+      },
+      { $set: { status: 'free', orderRunning: null, elastics: [] } }
+    );
+
+    // The mirror-image stray: the job points at a machine that no longer
+    // claims it. Clearing by id is safe here precisely because the
+    // machine is not running anything.
     if (job.machine && job.machine.toString() !== machineId.toString()) {
-      const oldMachine = await Machine.findById(job.machine);
-      if (oldMachine) { oldMachine.status = 'free'; oldMachine.orderRunning = null; oldMachine.elastics = []; await oldMachine.save(); }
+      await Machine.updateOne(
+        // $eq and $ne on the one field: two `_id` keys in an object
+        // literal is not a conjunction, the second silently replaces the
+        // first.
+        { _id: { $eq: job.machine, $ne: machine._id }, status: { $ne: 'maintenance' } },
+        { $set: { status: 'free', orderRunning: null, elastics: [] } }
+      );
     }
 
     machine.elastics     = elastics.map(e => ({ head: e.head, elastic: e.elastic ? new mongoose.Types.ObjectId(e.elastic) : null }));
