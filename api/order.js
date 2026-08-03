@@ -58,8 +58,9 @@ async function computeRawMaterialRequired(elasticOrdered) {
 //  SHARED — RELEASE ALL REMAINING RESERVATIONS
 //
 //  Called from /cancel and /complete. For each entry in
-//  order.reservations: $inc reservedStock down on the elastic and
-//  emit a RESERVATION_RELEASE info-row. Clears the array on the
+//  order.reservations, post a RESERVATION_RELEASE: the promise is
+//  given up, and the goods it was holding become available again.
+//  No goods move — they were never taken. Clears the array on the
 //  order. Fingerprints (STOCK_RELEASED) appended to the order so
 //  the timeline shows the release event.
 // ════════════════════════════════════════════════════════════════
@@ -71,16 +72,8 @@ async function _releaseAllReservations(session, order, actor, context) {
     const qty = Number(r.quantity || 0);
     if (qty <= 0) continue;
 
-    // Decrement reservedStock on the elastic (clamped to 0).
-    const elasticDoc = await Elastic.findById(r.elastic).session(session);
-    if (elasticDoc) {
-      const current = Number(elasticDoc.reservedStock) || 0;
-      const next    = Math.max(0, current - qty);
-      elasticDoc.reservedStock = next;
-      await elasticDoc.save({ session });
-    }
-
-    // Info-only ledger row.
+    // applyMovement lowers reservedStock and records the resulting
+    // balance on the row. Doing it here as well would release twice.
     await applyMovement(session, {
       elasticId: r.elastic,
       type:      "RESERVATION_RELEASE",

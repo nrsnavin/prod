@@ -9,7 +9,6 @@ const { escapeRegex } = require("../utils/escapeRegex");
 
 const DeliveryChallan = require("../models/DeliveryChallan");
 const Order           = require("../models/Order");
-const Elastic         = require("../models/Elastic");
 const StockMovement   = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { applyMovement } = require("../utils/elasticStock");
@@ -56,13 +55,25 @@ function buildDcNumber(type, financialYear, sequence) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Reverse the source DC_OUT movements for one DC item.
+//  Undo one despatched DC item: goods back on the shelf, and the
+//  promise the despatch discharged put back on the order.
 //
-//  P0-1: refund equals SUM(source DC_OUT.applied), not item.quantity.
-//  Skipped silently when no DC_OUT exists (DC predates the ledger).
+//  Both halves are computed from the SAME source — the DC_OUT rows
+//  this challan wrote — because they are two sides of one movement.
+//  Reading the movements rather than the item is what makes the goods
+//  refund correct when the original despatch was clamped by the zero
+//  floor: it puts back what actually left, not what was asked for.
+//
+//  The promise only goes back if an order can hold it. An elastic
+//  whose reservedStock is raised with no order entry behind it is
+//  stock nobody can sell and no order is waiting for, so when the
+//  order has gone or closed the goods return and the reservation does
+//  not — reported, not silently dropped.
+//
+//  Skipped when no DC_OUT exists (a DC that predates the ledger).
 // ─────────────────────────────────────────────────────────────
-async function _refundDcItem(session, dc, item, reasonContext, userId) {
-  if (!item.elastic) return "no elastic on item";
+async function _reverseDcItem(session, dc, item, reasonContext, userId) {
+  if (!item.elastic) return { skipped: "no elastic on item" };
 
   const originals = await StockMovement.find({
     refType: "DeliveryChallan",
@@ -71,77 +82,67 @@ async function _refundDcItem(session, dc, item, reasonContext, userId) {
     type:    "DC_OUT",
   }).session(session);
 
-  if (originals.length === 0) {
-    return "no source DC_OUT";
-  }
+  if (originals.length === 0) return { skipped: "no source DC_OUT" };
 
-  const refund = -originals.reduce(
-    (s, m) => s + Number(m.applied || 0),
-    0
+  const refund = -originals.reduce((s, m) => s + Number(m.applied || 0), 0);
+
+  // A despatch made before DC_OUT carried a reserved figure recorded
+  // the split on the item instead. Fall back to it rather than reading
+  // an absent field as "no reservation was consumed" — that would
+  // strand the promise on every DC cut before this change.
+  const ledgerReserved = originals.reduce(
+    (s, m) => s + Number(m.reservedApplied || 0), 0
   );
-  if (refund <= 0) return "zero refund";
+  const reReserve = ledgerReserved !== 0
+    ? -ledgerReserved
+    : Number(item.consumedFromReservation || 0);
+
+  // Whether the order can take the promise back.
+  let order = null;
+  if (reReserve > 0 && dc.order) {
+    order = await Order.findById(dc.order).session(session);
+    if (order && !["Approved", "InProgress"].includes(order.status)) order = null;
+  }
+  const restoring = order ? reReserve : 0;
+  const strandedReservation = reReserve > 0 && !order ? reReserve : 0;
+
+  if (refund <= 0 && restoring <= 0) return { skipped: "zero refund" };
 
   await applyMovement(session, {
-    elasticId: item.elastic,
-    type:      "DC_CANCEL_RETURN",
-    quantity:  +refund,
-    refType:   "DeliveryChallan",
-    refId:     dc._id,
-    reason:    `${reasonContext}; reversal of ${originals.map((m) => m._id).join(",")}`,
-    by:        userId,
+    elasticId:        item.elastic,
+    type:             "DC_CANCEL_RETURN",
+    quantity:         +refund,
+    reservedQuantity: +restoring,
+    refType:          "DeliveryChallan",
+    refId:            dc._id,
+    reason: strandedReservation > 0
+      ? `${reasonContext}; goods returned, ${strandedReservation} reservation not restored (order closed or gone)`
+      : `${reasonContext}; reversal of ${originals.map((m) => m._id).join(",")}`,
+    by:               userId,
   });
-  return null;
-}
 
-// ─────────────────────────────────────────────────────────────
-//  Restore a reservation that was consumed by this DC item.
-//  PR E: paired with _refundDcItem on cancel / delete.
-// ─────────────────────────────────────────────────────────────
-async function _restoreReservation(session, dc, item, reasonContext, userId) {
-  if (!item.elastic) return null;
-  const qty = Number(item.consumedFromReservation || 0);
-  if (qty <= 0) return null;
-  if (!dc.order) return null;
-
-  const order = await Order.findById(dc.order).session(session);
-  if (!order) {
-    console.warn(
-      `[dc] cannot restore reservation — order ${dc.order} not found for DC ${dc._id}`
+  // The order's own entry, kept in step with the elastic's balance.
+  if (order && restoring > 0) {
+    const entry = (order.reservations || []).find(
+      (r) => r.elastic.toString() === item.elastic.toString()
     );
-    return null;
+    if (entry) {
+      entry.quantity = (Number(entry.quantity) || 0) + restoring;
+    } else {
+      // Pruned when it hit zero on despatch; it is owed again now.
+      order.reservations.push({ elastic: item.elastic, quantity: restoring });
+    }
+    await order.save({ session });
   }
 
-  // Bump the elastic's reservedStock back up.
-  const elasticDoc = await Elastic.findById(item.elastic).session(session);
-  if (elasticDoc) {
-    elasticDoc.reservedStock = (Number(elasticDoc.reservedStock) || 0) + qty;
-    await elasticDoc.save({ session });
+  if (strandedReservation > 0) {
+    console.warn(
+      `[dc] DC ${dc.dcNumber}: returned ${refund} to stock but did not restore ` +
+      `${strandedReservation} of reservation — order ${dc.order} is closed or missing.`
+    );
   }
 
-  // Top up the matching reservation entry on the order, or push a
-  // new one if it had been pruned.
-  const entry = (order.reservations || []).find(
-    (r) => r.elastic.toString() === item.elastic.toString()
-  );
-  if (entry) {
-    entry.quantity = (Number(entry.quantity) || 0) + qty;
-  } else {
-    order.reservations.push({ elastic: item.elastic, quantity: qty });
-  }
-  await order.save({ session });
-
-  // Info-row on the ledger so the timeline shows the restore.
-  await applyMovement(session, {
-    elasticId: item.elastic,
-    type:      "RESERVATION_HOLD",
-    quantity:  +qty,
-    refType:   "Order",
-    refId:     order._id,
-    reason:    `${reasonContext}; reservation restored`,
-    by:        userId,
-  });
-
-  return { elastic: item.elastic, quantity: qty };
+  return { refund, restored: restoring, strandedReservation };
 }
 
 router.get(
@@ -178,22 +179,23 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 //  CREATE DC
 //
-//  PR E: when the DC is linked to an Approved/InProgress order
-//  AND that order has matching reservations, split each item:
+//  Everything on the challan leaves the building, so the whole
+//  quantity comes off stock — always, in one DC_OUT.
+//
+//  When the DC is linked to an Approved/InProgress order holding a
+//  reservation for the elastic, that despatch also DISCHARGES the
+//  promise, up to what was reserved:
 //    consumeFromReservation = min(item.quantity, reservedQty)
-//    consumeFromStock        = item.quantity − consumeFromReservation
+//    consumeFromStock       = item.quantity − consumeFromReservation
+//  Both figures are stored on the item: they say how much of this
+//  shipment was against a promise and how much came out of free
+//  stock, which is what the order and the sales team each want to
+//  know. They are NOT two piles to ship from — that reading is what
+//  made a fully reserved order despatch without stock moving at all.
 //
-//  Stock-side DC_OUT is posted for the stock portion only. The
-//  reservation portion decrements Elastic.reservedStock + the
-//  Order.reservations entry and posts a RESERVATION_RELEASE info-row.
-//  Both numbers are stored on each item for traceability and so the
-//  cancel/delete paths can correctly restore reservations.
-//
-//  Falls back to the pre-PR-E behaviour (entire quantity deducted
-//  from free stock) when:
-//    • DC has no order ref, or
-//    • the order is not in Approved/InProgress, or
-//    • the order has no reservation entry for this elastic.
+//  With no reservation to discharge (no order ref, a closed order, or
+//  no entry for this elastic) the goods still leave; there is simply
+//  no promise to settle.
 // ─────────────────────────────────────────────────────────────
 router.post(
   "/create",
@@ -320,47 +322,47 @@ router.post(
                 reservedQty
               );
             }
-            const consumeFromStock =
-              Math.max(0, Number(item.quantity || 0) - consumeFromReservation);
+            const shipped = Number(item.quantity) || 0;
+            const consumeFromStock = Math.max(0, shipped - consumeFromReservation);
 
-            // Stock portion via the helper (with clamp).
-            if (consumeFromStock > 0) {
+            // ONE movement for the whole despatch.
+            //
+            // The quantity that left the building is `shipped`, all of
+            // it, however much of it had been promised to the order. A
+            // reservation is a claim on the goods, not a second pile to
+            // ship from — but this used to post DC_OUT for the stock
+            // portion only and merely release the promise for the rest,
+            // so a fully reserved order shipped its entire quantity
+            // without the stock figure moving at all. The warehouse
+            // went on listing goods that were on a lorry.
+            //
+            // `reservedQuantity` settles the promise on the same row:
+            // goods out, claim discharged, both balances stated.
+            if (shipped > 0) {
               await applyMovement(session, {
-                elasticId: item.elastic,
-                type:      "DC_OUT",
-                quantity:  -consumeFromStock,
-                refType:   "DeliveryChallan",
-                refId:     dc._id,
-                by:        req.user?._id,
+                elasticId:        item.elastic,
+                type:             "DC_OUT",
+                quantity:         -shipped,
+                reservedQuantity: -consumeFromReservation,
+                refType:          "DeliveryChallan",
+                refId:            dc._id,
+                reason: consumeFromReservation > 0
+                  ? `DC ${dc.dcNumber}; ${consumeFromReservation} against order reservation`
+                  : `DC ${dc.dcNumber}`,
+                by:               req.user?._id,
               });
             }
 
-            // Reservation portion: decrement reservedStock + the
-            // matching order entry; emit RESERVATION_RELEASE.
+            // The order's own reservation entry shrinks by what this
+            // despatch fulfilled, so a part-delivered order still holds
+            // the balance it is owed.
             if (consumeFromReservation > 0 && orderDoc) {
-              const elasticDoc = await Elastic.findById(item.elastic).session(session);
-              if (elasticDoc) {
-                const current = Number(elasticDoc.reservedStock) || 0;
-                elasticDoc.reservedStock = Math.max(0, current - consumeFromReservation);
-                await elasticDoc.save({ session });
-              }
-
               const entry = (orderDoc.reservations || []).find(
                 (r) => r.elastic.toString() === item.elastic.toString()
               );
               if (entry) {
                 entry.quantity = Math.max(0, (Number(entry.quantity) || 0) - consumeFromReservation);
               }
-
-              await applyMovement(session, {
-                elasticId: item.elastic,
-                type:      "RESERVATION_RELEASE",
-                quantity:  +consumeFromReservation,
-                refType:   "Order",
-                refId:     orderDoc._id,
-                reason:    `DC ${dc.dcNumber} consumed reservation`,
-                by:        req.user?._id,
-              });
             }
 
             // Persist the split on the item.
@@ -550,16 +552,9 @@ router.patch(
           dc.type === "elastic"
         ) {
           for (const item of (dc.items || [])) {
-            // Stock-side refund (P0-1: applied, not requested).
-            await _refundDcItem(
-              session,
-              dc,
-              item,
-              `DC ${dc.dcNumber} cancelled`,
-              req.user?._id
-            );
-            // Restore the reservation portion if any.
-            await _restoreReservation(
+            // Goods back on the shelf and the order's promise with
+            // them, off the DC_OUT rows this challan wrote.
+            await _reverseDcItem(
               session,
               dc,
               item,
@@ -601,14 +596,7 @@ router.delete(
 
         if (dc.type === "elastic") {
           for (const item of (dc.items || [])) {
-            await _refundDcItem(
-              session,
-              dc,
-              item,
-              `Draft DC ${dc.dcNumber} deleted`,
-              req.user?._id
-            );
-            await _restoreReservation(
+            await _reverseDcItem(
               session,
               dc,
               item,

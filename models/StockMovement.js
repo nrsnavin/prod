@@ -8,9 +8,22 @@
 //  caller's intent so the UI can show the clamp delta when the
 //  request would have driven stock below zero.
 //
-//  RESERVATION_HOLD / RESERVATION_RELEASE are info-only rows. They
-//  do not modify Elastic.stock — they sit on the ledger so the
-//  reservation lifecycle is visible in the audit trail.
+//  Two balances, because a stock ledger answers two questions:
+//
+//    applied / balance                 — goods. What is in the building.
+//    reservedApplied / reservedBalance — promises. How much of it is
+//                                        already sold to an approved
+//                                        order.
+//
+//  Available to promise is balance − reservedBalance, derived, never
+//  stored.
+//
+//  A reservation is a claim, not inventory: RESERVATION_HOLD and
+//  RESERVATION_RELEASE move the reserved balance and leave the goods
+//  alone. A dispatch moves both — the goods go out AND the promise is
+//  kept — which is why DC_OUT carries a reserved figure too. Treating
+//  the reservation as a second pile of goods to ship from is how a
+//  warehouse ends up listing stock that is on a lorry.
 //
 //  WASTAGE_RETURN is the symmetric reversal of WASTAGE_OUT (admin
 //  un-doing a wastage entry); kept distinct from WASTAGE_OUT so
@@ -48,6 +61,12 @@ const StockMovementSchema = new mongoose.Schema(
     requested: { type: Number, required: true },
     applied:   { type: Number, required: true },
     balance:   { type: Number, required: true },
+    // The promise side of the same movement. Defaulted rather than
+    // required: rows written before the reserved balance was tracked
+    // carry no figure, and a zero there would be a claim about history
+    // this code cannot make.
+    reservedApplied: { type: Number, default: 0 },
+    reservedBalance: { type: Number, default: null },
     refType:   { type: String },
     refId:     { type: mongoose.Types.ObjectId, index: true },
     reason:    { type: String },

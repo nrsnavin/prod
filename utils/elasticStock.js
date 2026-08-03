@@ -5,21 +5,36 @@
 //  Every change to Elastic.stock must go through applyMovement so
 //  the ledger and the running balance stay in lock-step.
 //
+//  TWO BALANCES, ONE WRITER
+//
+//  `stock` is goods in the building. `reservedStock` is how much of
+//  those goods is already promised to an approved order. They move
+//  independently and sometimes together, and both belong here: while
+//  reservations were maintained by hand at each call site, no ledger
+//  row could state the reserved balance, and a dispatch against a
+//  reservation released the promise without shipping the goods.
+//
+//  A movement carries a delta for each:
+//    quantity         — goods delta   (+in, −out)
+//    reservedQuantity — promise delta (+held, −released)
+//
+//  Reserving goods creates none, so RESERVATION_HOLD moves only the
+//  promise. Shipping keeps a promise AND empties a shelf, so DC_OUT
+//  moves both. Available to promise is stock − reservedStock, derived
+//  on read and never stored.
+//
 //  Atomicity model:
-//   1. Read current stock from Elastic.
-//   2. Compute the clamped delta (stock floor = 0).
-//   3. findOneAndUpdate with { _id, stock: <observed> } so the
-//      write only lands if no concurrent writer changed stock in
-//      between. On miss we retry up to MAX_RETRIES times.
-//   4. Insert the matching StockMovement row.
+//   1. Read current stock and reservedStock from Elastic.
+//   2. Compute the clamped deltas (both floor at 0).
+//   3. findOneAndUpdate with { _id, stock, reservedStock } all at the
+//      observed values, so the write only lands if no concurrent
+//      writer moved either in between. On miss we retry up to
+//      MAX_RETRIES times.
+//   4. Insert the matching StockMovement row carrying both balances.
 //
 //  Both the Elastic update and the StockMovement insert run inside
 //  the caller-supplied session, so they commit or roll back as a
 //  single unit.
-//
-//  RESERVATION_HOLD / RESERVATION_RELEASE rows skip the stock
-//  mutation entirely — they're info-only audit entries used by
-//  the order-reservation flow.
 //
 //  Magnitude guard: |quantity| > MAX_ABS_QUANTITY is rejected so a
 //  rogue caller (UI typo, malformed payload) can't blow up the
@@ -42,7 +57,14 @@ const VALID_TYPES = [
   "RESERVATION_RELEASE",
 ];
 
-const INFO_ONLY_TYPES = new Set(["RESERVATION_HOLD", "RESERVATION_RELEASE"]);
+/**
+ * Movements that move the promise rather than the goods.
+ *
+ * The type carries the direction, so callers pass a magnitude as
+ * `quantity` and it is read across to the reserved side here — rather
+ * than every call site having to remember which way its own sign goes.
+ */
+const RESERVATION_TYPES = { RESERVATION_HOLD: +1, RESERVATION_RELEASE: -1 };
 
 const MAX_RETRIES      = 5;
 const MAX_ABS_QUANTITY = 1e7;
@@ -52,6 +74,7 @@ async function applyMovement(session, opts) {
     elasticId,
     type,
     quantity,
+    reservedQuantity,
     refType,
     refId,
     reason,
@@ -66,39 +89,22 @@ async function applyMovement(session, opts) {
     throw new Error(`applyMovement: invalid type '${type}'`);
   }
 
-  const requested = Number(quantity);
-  if (!Number.isFinite(requested)) {
+  const sign = RESERVATION_TYPES[type];
+  // A HOLD of 400 raises the promise by 400 and ships nothing; a
+  // RELEASE of 400 lowers it. Callers pass the magnitude either way.
+  const requested = sign ? 0 : Number(quantity);
+  const reservedRequested = sign
+    ? sign * Math.abs(Number(quantity) || 0)
+    : Number(reservedQuantity) || 0;
+
+  if (!Number.isFinite(requested) || !Number.isFinite(reservedRequested)) {
     throw new Error("applyMovement: quantity must be a finite number");
   }
-  if (Math.abs(requested) > MAX_ABS_QUANTITY) {
+  const biggest = Math.max(Math.abs(requested), Math.abs(reservedRequested));
+  if (biggest > MAX_ABS_QUANTITY) {
     throw new Error(
-      `applyMovement: |quantity| ${Math.abs(requested)} exceeds safety cap ${MAX_ABS_QUANTITY}`
+      `applyMovement: |quantity| ${biggest} exceeds safety cap ${MAX_ABS_QUANTITY}`
     );
-  }
-
-  if (INFO_ONLY_TYPES.has(type)) {
-    const elastic = await Elastic.findById(elasticId).session(session);
-    if (!elastic) {
-      throw new Error(`applyMovement: Elastic ${elasticId} not found`);
-    }
-    const [persisted] = await StockMovement.create(
-      [
-        {
-          elastic:   elastic._id,
-          date:      new Date(),
-          type,
-          requested,
-          applied:   0,
-          balance:   Number(elastic.stock) || 0,
-          refType:   refType || undefined,
-          refId:     refId || undefined,
-          reason:    reason || undefined,
-          by:        by || undefined,
-        },
-      ],
-      { session }
-    );
-    return { elastic, movement: persisted };
   }
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
@@ -120,20 +126,43 @@ async function applyMovement(session, opts) {
       );
       current.stock = 0;
     }
+    // Same guard for the promise side: an exact-match CAS cannot match
+    // a field that is not there, and the loop would spin to exhaustion.
+    if (current.reservedStock === undefined || current.reservedStock === null) {
+      await Elastic.updateOne(
+        { _id: elasticId, reservedStock: { $exists: false } },
+        { $set: { reservedStock: 0 } },
+        { session }
+      );
+      current.reservedStock = 0;
+    }
 
     const currentStock = Number(current.stock) || 0;
-    const desired      = currentStock + requested;
-    const newStock     = Math.max(0, desired);
+    const newStock     = Math.max(0, currentStock + requested);
     const applied      = newStock - currentStock;
 
-    const inc = { stock: applied };
-    if (alsoIncProduced) inc.quantityProduced = applied;
+    // Reserved has no ceiling of its own: an order approved before the
+    // goods exist promises more than is on the shelf, and that gap is a
+    // production requirement, not a data error. Available reads as zero
+    // and the shortfall is visible where it belongs.
+    const currentReserved = Number(current.reservedStock) || 0;
+    const newReserved     = Math.max(0, currentReserved + reservedRequested);
+    const reservedApplied = newReserved - currentReserved;
 
-    const updated = await Elastic.findOneAndUpdate(
-      { _id: elasticId, stock: currentStock },
-      { $inc: inc },
-      { new: true, session }
-    );
+    const inc = {};
+    if (applied) inc.stock = applied;
+    if (reservedApplied) inc.reservedStock = reservedApplied;
+    if (alsoIncProduced && applied) inc.quantityProduced = applied;
+
+    const updated = Object.keys(inc).length
+      ? await Elastic.findOneAndUpdate(
+          // Both observed values in the filter: a concurrent writer that
+          // moved either one invalidates the arithmetic above.
+          { _id: elasticId, stock: currentStock, reservedStock: currentReserved },
+          { $inc: inc },
+          { new: true, session }
+        )
+      : current;
 
     if (!updated) continue;
 
@@ -146,6 +175,8 @@ async function applyMovement(session, opts) {
           requested,
           applied,
           balance:   Number(updated.stock) || 0,
+          reservedApplied,
+          reservedBalance: Number(updated.reservedStock) || 0,
           refType:   refType || undefined,
           refId:     refId || undefined,
           reason:    reason || undefined,

@@ -58,7 +58,30 @@ router.post(
       const planTemplate = elasticData.warpingPlanTemplate ?? null;
       delete elasticData.warpingPlanTemplate;
 
+      // An opening balance is a movement, not a property of the item.
+      // The whole body used to be handed to create(), so stock posted
+      // here appeared on the card with nothing on the ledger to explain
+      // it — a permanent, unexplainable discrepancy on reconciliation,
+      // and the one figure a stock ledger exists to account for.
+      const openingStock = Math.max(0, Number(elasticData.stock) || 0);
+      delete elasticData.stock;
+      // Neither of these is ever an opening figure: production is
+      // counted by packing, and a reservation belongs to an order that
+      // cannot exist before the elastic does.
+      delete elasticData.reservedStock;
+      delete elasticData.quantityProduced;
+
       const elastic = await Elastic.create(elasticData);
+
+      if (openingStock > 0) {
+        await applyMovement(null, {
+          elasticId: elastic._id,
+          type:      "MANUAL_ADJUST",
+          quantity:  +openingStock,
+          reason:    "Opening stock at creation",
+          by:        req.user?._id,
+        });
+      }
 
       if (
         planTemplate &&
@@ -177,7 +200,7 @@ router.get(
   "/reconcile",
   isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
-    const elastics = await Elastic.find().select("name stock").lean();
+    const elastics = await Elastic.find().select("name stock reservedStock").lean();
     if (elastics.length === 0) {
       return res.json({ success: true, elasticCount: 0, driftCount: 0, drifts: [] });
     }
@@ -186,28 +209,39 @@ router.get(
     const ledgers = await StockMovement.aggregate([
       { $match: { elastic: { $in: ids } } },
       { $group: {
-          _id:   "$elastic",
-          sum:   { $sum: "$applied" },
-          count: { $sum: 1 },
+          _id:         "$elastic",
+          sum:         { $sum: "$applied" },
+          // The promise side has to reconcile too, or a reserved figure
+          // can drift without anything noticing — which it did, while
+          // reservedStock was written by hand at four call sites and no
+          // ledger row recorded what it had become.
+          reservedSum: { $sum: "$reservedApplied" },
+          count:       { $sum: 1 },
       }},
     ]);
     const ledgerMap = new Map(ledgers.map((l) => [String(l._id), l]));
 
     const drifts = [];
     for (const e of elastics) {
-      const l         = ledgerMap.get(String(e._id));
-      const stock     = Number(e.stock) || 0;
-      const ledgerSum = l ? Number(l.sum) || 0 : 0;
-      const moveCount = l ? l.count : 0;
-      const drift     = stock - ledgerSum;
+      const l            = ledgerMap.get(String(e._id));
+      const stock        = Number(e.stock) || 0;
+      const reserved     = Number(e.reservedStock) || 0;
+      const ledgerSum    = l ? Number(l.sum) || 0 : 0;
+      const reservedLedgerSum = l ? Number(l.reservedSum) || 0 : 0;
+      const moveCount    = l ? l.count : 0;
+      const drift        = stock - ledgerSum;
+      const reservedDrift = reserved - reservedLedgerSum;
 
-      if (drift !== 0) {
+      if (drift !== 0 || reservedDrift !== 0) {
         drifts.push({
           elasticId: e._id,
           name:      e.name,
           stock,
           ledgerSum,
           drift,
+          reservedStock: reserved,
+          reservedLedgerSum,
+          reservedDrift,
           moveCount,
         });
       }
@@ -241,11 +275,31 @@ router.get(
 
     const filter = { elastic: elastic._id };
     const total     = await StockMovement.countDocuments(filter);
-    const movements = await StockMovement.find(filter)
+    const rows = await StockMovement.find(filter)
       .sort({ date: -1, _id: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .lean();
+
+    // Available is derived here rather than in each client, so the two
+    // apps cannot arrive at different answers to the same question.
+    // Rows written before the reserved balance was tracked carry null;
+    // that is "not known", which is not the same as zero, and it stays
+    // null so the screen can say so rather than invent a figure.
+    const movements = rows.map((m) => {
+      const reservedBalance =
+        m.reservedBalance === null || m.reservedBalance === undefined
+          ? null
+          : Number(m.reservedBalance);
+      return {
+        ...m,
+        reservedApplied: Number(m.reservedApplied) || 0,
+        reservedBalance,
+        available: reservedBalance === null
+          ? null
+          : Math.max(0, (Number(m.balance) || 0) - reservedBalance),
+      };
+    });
 
     const stock    = Number(elastic.stock) || 0;
     const reserved = Number(elastic.reservedStock) || 0;

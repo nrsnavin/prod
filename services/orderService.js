@@ -164,11 +164,12 @@ async function approveOrderTxn(session, {
 
     const elasticDoc = await Elastic.findById(line.elastic).session(session);
     if (!elasticDoc) throw new ErrorHandler(`Elastic ${line.elastic} not found`, 404);
-    elasticDoc.reservedStock = (Number(elasticDoc.reservedStock) || 0) + qty;
-    await elasticDoc.save({ session });
 
     order.reservations.push({ elastic: line.elastic, quantity: qty });
 
+    // applyMovement owns reservedStock, as it owns stock. Raising it
+    // here as well would double the hold, and writing it by hand at all
+    // is why no ledger row could state the reserved balance.
     await applyMovement(session, {
       elasticId: line.elastic,
       type:      'RESERVATION_HOLD',
