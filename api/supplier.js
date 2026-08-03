@@ -537,7 +537,10 @@ router.post(
         return next(new ErrorHandler("items exceeds the 500-item limit per request", 400));
 
       // ── Load PO ────────────────────────────────────────────────────
-      const po = await PurchaseOrder.findById(poId);
+      // `let`: the transaction below re-reads this inside its session, so
+      // a retried attempt works from committed state rather than from a
+      // copy something else may already have changed.
+      let po = await PurchaseOrder.findById(poId);
       if (!po)
         return next(new ErrorHandler("Purchase Order not found", 404));
 
@@ -616,12 +619,17 @@ router.post(
 
       for (const inItem of activeItems) {
         const qty    = Number(inItem.quantity);
-        const poItem = po.items.find(
-          (p) => p.rawMaterial.toString() === inItem.rawMaterial.toString()
-        );
 
-        // 1. Update PO received quantity
-        poItem.receivedQuantity = (poItem.receivedQuantity || 0) + qty;
+        // 1. The PO's received quantity is applied inside the
+        //    transaction, on a document re-read there. It used to be
+        //    incremented here, on the copy loaded before the session
+        //    opened — and withTransaction RETRIES its callback on a
+        //    transient error or an unknown commit result. Mongoose had
+        //    already cleared the dirty flags on the first attempt, so
+        //    the retry saved nothing: the stock and the audit rows
+        //    landed but the receipt never reached the PO, which then
+        //    stayed Open, kept reporting the delivered quantity as
+        //    still on order, and let it be bought again.
 
         // 2. Credit the stock. Done per item with the post-increment
         //    document returned, rather than in one bulkWrite, because the
@@ -661,6 +669,26 @@ router.post(
           // claim throws E11000 and aborts its transaction before any
           // stock moves.
           if (requestId) await claimKey(session, requestId, "inward-stock");
+
+          // Re-read inside the session so every attempt starts from the
+          // committed state and applies the increments itself. Nothing
+          // about this callback may depend on a mutation made before
+          // it — a retry replays it from the top.
+          po = await PurchaseOrder.findById(poId).session(session);
+          if (!po) throw new ErrorHandler("Purchase Order not found", 404);
+
+          for (const inItem of activeItems) {
+            const poItem = po.items.find(
+              (p) => p.rawMaterial.toString() === inItem.rawMaterial.toString()
+            );
+            if (!poItem) {
+              throw new ErrorHandler(
+                `Material ${inItem.rawMaterial} is not part of PO #${po.poNo}`, 400
+              );
+            }
+            poItem.receivedQuantity =
+              (Number(poItem.receivedQuantity) || 0) + Number(inItem.quantity);
+          }
 
           po.status = deriveStatus(po.items);
           // Audit: who received what against this PO, when.

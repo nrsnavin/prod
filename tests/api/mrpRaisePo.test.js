@@ -63,7 +63,14 @@ const makeMaterial = (over = {}) =>
  * A job for 1000 m of an elastic whose BOM draws `grams` per metre from
  * each given material — so the requirement is grams × 1000 / 1000 = kg.
  */
-async function makeJob(bom, metres = 1000) {
+/**
+ * An order and a job on it.
+ *
+ * `jobMetres` defaults to the whole order — the job IS the order. Pass
+ * less to model a part-planned order, where the order needs material
+ * the job does not.
+ */
+async function makeJob(bom, metres = 1000, jobMetres = metres) {
   const customer = await Customer.create({
     name: 'Aravind Garments', contactName: 'Aravind', phoneNumber: '9111111111',
     address: 'Tiruppur', email: 'a@t.co',
@@ -78,7 +85,7 @@ async function makeJob(bom, metres = 1000) {
   });
   const job = await JobOrder.create({
     order: order._id, customer: customer._id, date: new Date(),
-    elastics: [{ elastic: elastic._id, quantity: metres }],
+    elastics: [{ elastic: elastic._id, quantity: jobMetres }],
   });
   return { job, order, customer, elastic };
 }
@@ -424,17 +431,41 @@ describe('raising a PO for a whole order', () => {
   it('lists everything bought for the order, jobs included', async () => {
     // From the order's point of view a PO raised off one of its jobs is
     // the same spend, so both belong on the one list.
+    //
+    // The order runs 1000 m; only 400 m of it is planned into this job.
+    // Buying for the job covers its 20 kg, and the order-level raise
+    // then buys the 30 kg no job has been raised for — the unplanned
+    // remainder is exactly what the order-level sheet is for.
     const kumar = await makeSupplier('Kumar Yarns');
     const material = await makeMaterial({ stock: 0, supplier: kumar._id });
-    const { order, job } = await makeJob([{ material, grams: 50 }]);
+    const { order, job } = await makeJob([{ material, grams: 50 }], 1000, 400);
 
-    await raiseForOrder(order._id);
-    await raise(job._id);
+    const forJob = await raise(job._id);
+    expect(forJob.body.purchaseOrders[0].lines[0].quantity).toBe(20);
+
+    const forOrder = await raiseForOrder(order._id);
+    expect(forOrder.body.purchaseOrders[0].lines[0].quantity).toBe(30);
 
     const res = await request(app)
       .get(`/api/v2/order/${order._id}/purchase-orders`)
       .set('Cookie', adminCookie());
     expect(res.body.purchaseOrders).toHaveLength(2);
+  });
+
+  it('will not buy a second time for a job whose order already bought it', async () => {
+    // The job IS the whole order here, so the order-level PO covers it.
+    // Raising again from the job used to double the purchase, because
+    // the gap does not close until the goods arrive.
+    const kumar = await makeSupplier('Kumar Yarns');
+    const material = await makeMaterial({ stock: 0, supplier: kumar._id });
+    const { order, job } = await makeJob([{ material, grams: 50 }]);
+
+    await raiseForOrder(order._id);
+    const again = await raise(job._id);
+
+    expect(again.status).toBe(400);
+    expect(again.body.message).toMatch(/already on order/i);
+    expect(await PurchaseOrder.countDocuments({})).toBe(1);
   });
 
   it('records the raise on the order audit trail', async () => {

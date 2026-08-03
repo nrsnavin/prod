@@ -22,6 +22,7 @@ const PurchaseOrder = require('../models/PurchaseOrder');
 const { buildFingerprint, stampFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
 const { computeMaterialRequirement } = require('../utils/materialRequirement');
 const { triageShortfall, createShortfallPos, skipReasons } = require('../services/shortfallPo');
+const { issuedForOrder, shareForJob } = require('../services/orderIssuance');
 const { checkWeavingReadiness } = require('../services/weavingReadiness');
 const { plannedLotsForJob, distinctLots } = require('../services/yarnLotTrail');
 const { shiftFigures, clockToMinutes } = require('../utils/shiftFigures');
@@ -1186,6 +1187,30 @@ router.get('/:jobId', async (req, res) => {
 //  GET   /:jobId/mrp.pdf          — the MRP sheet as a PDF download
 // ════════════════════════════════════════════════════════════════
 
+/**
+ * This job's material requirement, net of what its order already drew.
+ *
+ * A job only exists under an approved order, and approving that order
+ * took its material out of stock. Comparing the job's full requirement
+ * against the balance left behind reported every job as short of the
+ * yarn standing on the floor for it, and the shortfall panel then
+ * offered to buy it a second time.
+ *
+ * @param job  lean job with `order` populated (orderNo + rawMaterialRequired)
+ */
+async function jobRequirement(job) {
+  const materials = await computeMaterialRequirement(job.elastics || []);
+  const orderId = job.order?._id || job.order;
+  if (!orderId) return materials;
+
+  const drawn = await issuedForOrder(orderId);
+  if (drawn.size === 0) return materials;
+
+  return computeMaterialRequirement(job.elastics || [], {
+    issued: shareForJob(drawn, job.order?.rawMaterialRequired || [], materials),
+  });
+}
+
 // Assemble the plain MRP data object the JSON route and the PDF
 // renderer both consume. Returns null if the job doesn't exist.
 async function _buildMrpData(jobId) {
@@ -1194,12 +1219,13 @@ async function _buildMrpData(jobId) {
     // po + supplyDate come along so the sheet can say which customer
     // order it serves and when that order is due — the two questions
     // asked of an MRP sheet that it could not previously answer.
-    .populate("order",    "orderNo po supplyDate")
+    // rawMaterialRequired divides the order's draw across its jobs.
+    .populate("order",    "orderNo po supplyDate rawMaterialRequired")
     .populate("elastics.elastic", "name")
     .lean();
   if (!job) return null;
 
-  const materials = await computeMaterialRequirement(job.elastics || []);
+  const materials = await jobRequirement(job);
 
   return {
     jobId:           String(job._id),
@@ -1440,17 +1466,24 @@ router.post('/:jobId/raise-po', async (req, res) => {
     if (!/^[a-f\d]{24}$/i.test(jobId))
       return res.status(400).json({ success: false, message: 'Invalid job ID.' });
 
-    const job = await JobOrder.findById(jobId).select('jobOrderNo order elastics').lean();
+    const job = await JobOrder.findById(jobId)
+      .select('jobOrderNo order elastics')
+      .populate('order', 'rawMaterialRequired')
+      .lean();
     if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
 
-    const requirement = await computeMaterialRequirement(job.elastics || []);
-    const { orderable, noSupplier, unresolved, anyShort } =
+    const requirement = await jobRequirement(job);
+    const { orderable, noSupplier, unresolved, anyShort, awaitingDelivery } =
       triageShortfall(requirement, req.body?.materials);
 
     if (!anyShort) {
       return res.status(400).json({
         success: false,
-        message: 'Nothing is short on this job — no purchase order to raise.',
+        message: awaitingDelivery.length
+          ? `Already on order — ${awaitingDelivery
+              .map((m) => m.name)
+              .join(', ')} ${awaitingDelivery.length === 1 ? 'is' : 'are'} short but bought and awaiting delivery.`
+          : 'Nothing is short on this job — no purchase order to raise.',
       });
     }
     if (orderable.length === 0) {
@@ -1463,7 +1496,9 @@ router.post('/:jobId/raise-po', async (req, res) => {
 
     const created = await createShortfallPos(
       orderable,
-      { forJob: job._id, forOrder: job.order || undefined },
+      // `order` is populated for the requirement split above, so take the
+      // id off it — the PO's ref is an id, not the document.
+      { forJob: job._id, forOrder: job.order?._id || job.order || undefined },
       {
         expectedDate: req.body?.expectedDate,
         notes: req.body?.notes,

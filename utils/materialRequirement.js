@@ -61,9 +61,20 @@ async function onOrderByMaterial(materialIds = []) {
 }
 
 // lines: [{ elastic: ObjectId|string, quantity: Number(metres) }]
-// Returns: [{ rawMaterial, name, category, requiredWeight, inStock,
-//             onOrder, shortfall, unitPrice }]
-async function computeMaterialRequirement(lines = []) {
+//
+// opts.issued — Map|object of material id → kg ALREADY drawn from stock
+//   for whatever this sheet is about. Approving an order takes its
+//   material out of stock immediately, so from that moment the
+//   requirement is part-met and `inStock` no longer contains it;
+//   comparing the full requirement against that reduced balance
+//   reported the order as short of yarn it was already standing on.
+//   Omitted means nothing has been drawn, which is the truth before
+//   approval and keeps every other caller reading as it did.
+//
+// Returns: [{ rawMaterial, name, category, requiredWeight, issued,
+//             outstanding, inStock, onOrder, shortfall, toBuy,
+//             unitPrice }]
+async function computeMaterialRequirement(lines = [], opts = {}) {
   const cleanLines = (lines || [])
     .map((l) => ({
       elastic:  l.elastic?._id || l.elastic,
@@ -145,15 +156,40 @@ async function computeMaterialRequirement(lines = []) {
     Array.from(rawMap.values()).map((m) => m.rawMaterial)
   );
 
+  const issuedMap = toMap(opts.issued);
+
   // Finalise derived fields (round weight to 3 dp; compute shortfall).
   return Array.from(rawMap.values()).map((m) => {
-    const requiredWeight = Math.round(m.requiredWeight * 1000) / 1000;
+    const key = String(m.rawMaterial);
+    const requiredWeight = round3(m.requiredWeight);
+    // Never more than the requirement: a draw larger than what this
+    // sheet asks for belongs to something else on the same order.
+    const issued = round3(Math.min(requiredWeight, Math.max(0, issuedMap.get(key) || 0)));
+    // What still has to come out of stock. This — not the gross
+    // requirement — is the quantity `inStock` has yet to cover.
+    const outstanding = round3(Math.max(0, requiredWeight - issued));
+
     // Against stock alone. See onOrderByMaterial for why what is on
     // order is shown next to this rather than folded into it.
-    const shortfall = Math.max(0, Math.round((requiredWeight - m.inStock) * 1000) / 1000);
-    const onOrder = Math.round((due.get(String(m.rawMaterial)) || 0) * 1000) / 1000;
-    return { ...m, requiredWeight, shortfall, onOrder };
+    const shortfall = Math.max(0, round3(outstanding - m.inStock));
+    const onOrder = round3(due.get(key) || 0);
+    // What buying should actually cover. A shortfall that has already
+    // been purchased is waiting on delivery, not on a second purchase
+    // order — the yarn is bought, and buying it again is money out
+    // twice for goods nobody ordered.
+    const toBuy = Math.max(0, round3(shortfall - onOrder));
+
+    return { ...m, requiredWeight, issued, outstanding, shortfall, onOrder, toBuy };
   });
+}
+
+const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
+
+/** Accept a Map or a plain object for the issued quantities. */
+function toMap(issued) {
+  if (issued instanceof Map) return issued;
+  if (issued && typeof issued === 'object') return new Map(Object.entries(issued));
+  return new Map();
 }
 
 module.exports = { computeMaterialRequirement, onOrderByMaterial };

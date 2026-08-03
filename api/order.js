@@ -10,6 +10,7 @@ const ErrorHandler = require("../utils/ErrorHandler.js");
 const { buildOrderStatusReport } = require("../services/orderStatusReport.js");
 const PurchaseOrder = require("../models/PurchaseOrder.js");
 const { triageShortfall, createShortfallPos, skipReasons } = require("../services/shortfallPo.js");
+const { issuedForOrder } = require("../services/orderIssuance.js");
 const { buildOrderStatusPdf } = require("../utils/orderStatusPdf.js");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const RawMaterial     = require("../models/RawMaterial.js");
@@ -476,19 +477,32 @@ router.get(
       ).map((m) => [String(m._id), m])
     );
 
+    // What approval already drew for this order. Without it every
+    // approved order's material panel turned red the moment it was
+    // approved: the requirement had come OUT of the stock figure it was
+    // then being compared against.
+    const drawn = await issuedForOrder(order._id);
+
     const liveRawMaterials = (order.rawMaterialRequired || []).map((rm) => {
       const mat = materialsById.get(String(rm.rawMaterial));
       // A deleted material is reported as absent rather than as zero stock:
       // see utils/materialRequirement.js — "0 in stock" and "we no longer
       // know" look identical on screen but mean very different things.
       const inStock = mat?.stock ?? 0;
+      const required = Number(rm.requiredWeight) || 0;
+      const issued = Math.min(required, drawn.get(String(rm.rawMaterial)) || 0);
+      const outstanding = Math.max(0, Math.round((required - issued) * 1000) / 1000);
       return {
         rawMaterial:     rm.rawMaterial,
         name:            mat?.name ?? rm.name ?? "—",
         unit:            mat?.unit ?? "kg",
-        requiredWeight:  rm.requiredWeight,
+        requiredWeight:  required,
+        // Drawn at approval; nil before it, and nil again after a
+        // cancel hands the material back.
+        issued:          Math.round(issued * 1000) / 1000,
+        outstanding,
         inStock,
-        stockSufficient: inStock >= rm.requiredWeight,
+        stockSufficient: inStock >= outstanding,
       };
     });
 
@@ -1517,7 +1531,12 @@ router.get(
       .lean();
     if (!order) return next(new ErrorHandler('Order not found', 404));
 
-    const materials = await computeMaterialRequirement(order.elasticOrdered || []);
+    // Approval already took this order's material out of stock, so the
+    // sheet has to know what it drew — otherwise it reads the reduced
+    // balance as a shortage and offers to buy the same yarn again.
+    const materials = await computeMaterialRequirement(order.elasticOrdered || [], {
+      issued: await issuedForOrder(order._id),
+    });
 
     res.json({
       success: true,
@@ -1649,13 +1668,20 @@ router.post(
       .lean();
     if (!order) return next(new ErrorHandler('Order not found', 404));
 
-    const requirement = await computeMaterialRequirement(order.elasticOrdered || []);
-    const { orderable, noSupplier, unresolved, anyShort } =
+    const requirement = await computeMaterialRequirement(order.elasticOrdered || [], {
+      issued: await issuedForOrder(order._id),
+    });
+    const { orderable, noSupplier, unresolved, anyShort, awaitingDelivery } =
       triageShortfall(requirement, req.body?.materials);
 
     if (!anyShort) {
       return next(new ErrorHandler(
-        'Nothing is short on this order — no purchase order to raise.', 400
+        awaitingDelivery.length
+          ? `Already on order — ${awaitingDelivery
+              .map((m) => m.name)
+              .join(', ')} ${awaitingDelivery.length === 1 ? 'is' : 'are'} short but bought and awaiting delivery.`
+          : 'Nothing is short on this order — no purchase order to raise.',
+        400
       ));
     }
     if (orderable.length === 0) {

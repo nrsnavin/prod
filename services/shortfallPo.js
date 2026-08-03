@@ -11,9 +11,24 @@
 const PurchaseOrder = require('../models/PurchaseOrder');
 const { nextNumber } = require('../utils/sequence');
 
+/**
+ * How much of a row still needs buying.
+ *
+ * The gap less what is already on order. Pressing the shortfall panel's
+ * button twice used to raise a second purchase order for the same
+ * quantity — the first one had not arrived, so the shortfall had not
+ * moved, and nothing on this path looked at the outstanding POs the
+ * sheet was already reporting beside it.
+ *
+ * Falls back to the raw shortfall for callers whose rows predate the
+ * field, so a stale row is never silently treated as fully covered.
+ */
+const buyable = (m) =>
+  Number(m?.toBuy ?? m?.shortfall) || 0;
+
 /** Split a computed requirement into what can be ordered and what cannot. */
 function triageShortfall(requirement, only) {
-  let short = (requirement || []).filter((m) => Number(m.shortfall) > 0);
+  let short = (requirement || []).filter((m) => buyable(m) > 0);
 
   if (Array.isArray(only) && only.length) {
     const wanted = only.map(String);
@@ -28,6 +43,12 @@ function triageShortfall(requirement, only) {
     noSupplier: short.filter((m) => m.stockKnown !== false && !m.supplierId),
     orderable: short.filter((m) => m.stockKnown !== false && m.supplierId),
     anyShort: short.length > 0,
+    // Short, but the purchase order for it already exists. Worth saying
+    // apart from "nothing is short", because the two ask for opposite
+    // things: one is finished, the other is waiting on a delivery.
+    awaitingDelivery: (requirement || []).filter(
+      (m) => Number(m.shortfall) > 0 && buyable(m) <= 0
+    ),
   };
 }
 
@@ -75,8 +96,8 @@ async function createShortfallPos(orderable, link = {}, opts = {}) {
         rawMaterial: m.rawMaterial,
         price: Number(m.unitPrice) || 0,
         // The gap, not the whole requirement — stock on hand is not
-        // bought a second time.
-        quantity: m.shortfall,
+        // bought a second time, and neither is stock already on order.
+        quantity: buyable(m),
         receivedQuantity: 0,
       })),
       expectedDate: expected && !isNaN(expected.getTime()) ? expected : undefined,
@@ -97,10 +118,10 @@ async function createShortfallPos(orderable, link = {}, opts = {}) {
       lines: group.lines.map((m) => ({
         rawMaterial: String(m.rawMaterial),
         name: m.name,
-        quantity: m.shortfall,
+        quantity: buyable(m),
         price: Number(m.unitPrice) || 0,
       })),
-      value: group.lines.reduce((s, m) => s + m.shortfall * (Number(m.unitPrice) || 0), 0),
+      value: group.lines.reduce((s, m) => s + buyable(m) * (Number(m.unitPrice) || 0), 0),
     });
   }
 
