@@ -186,48 +186,36 @@ describe('shortfall → PO → inward → MRP, on an approved order', () => {
     return res;
   }
 
-  it('reports what happens end to end', async () => {
+  it('clears the shortfall once yarn bought elsewhere arrives', async () => {
+    // A forced approval allocated nothing, so the order is genuinely
+    // short. It cannot be bought from the order any more — that route
+    // is closed once the stock is allocated — so this is the PO screen
+    // doing it, which is the path the refusal points at.
     const s = await seed({ stock: 0, metres: 100_000 });
 
-    // Approval with nothing in stock: refused unless forced.
     const plain = await approve(s.order);
     const forced = plain.status >= 400 ? await approve(s.order, { force: true }) : plain;
     expect(forced.status).toBeLessThan(400);
 
     const afterApproval = await mrpRow(s.order, s.yarn);
-    const raised = await raisePo(s.order);
-    const po = await PurchaseOrder.findById(raised.purchaseOrders[0].poId);
-    await receiveAll(po, s.yarn, po.items[0].quantity);
+    expect(afterApproval).toMatchObject({
+      requiredWeight: 100, allocated: 0, outstanding: 100, inStock: 0, shortfall: 100,
+    });
+
+    const po = await PurchaseOrder.create({
+      poNo: 7001, supplier: s.supplier._id, status: 'Open',
+      items: [{ rawMaterial: s.yarn._id, quantity: 100, price: 300, receivedQuantity: 0 }],
+    });
+    await receiveAll(po, s.yarn, 100);
+    expect(await stockOf(s.yarn)).toBe(100);
 
     const afterInward = await mrpRow(s.order, s.yarn);
-    const finalStock = await stockOf(s.yarn);
-
-    // Printed rather than asserted blind: this is the shape the report
-    // describes, and the numbers say which of the four steps is wrong.
-    // eslint-disable-next-line no-console
-    console.log('APPROVED-ORDER LOOP', JSON.stringify({
-      afterApproval: {
-        required: afterApproval.requiredWeight,
-        inStock: afterApproval.inStock,
-        shortfall: afterApproval.shortfall,
-      },
-      poRaisedFor: po.items[0].quantity,
-      afterInward: {
-        required: afterInward.requiredWeight,
-        inStock: afterInward.inStock,
-        shortfall: afterInward.shortfall,
-        onOrder: afterInward.onOrder,
-      },
-      stock: finalStock,
-    }, null, 2));
-
-    // The claim under test: once the yarn bought for this order is in,
-    // the order is not short of it.
     expect(afterInward.shortfall).toBe(0);
-    // Forced through on empty stock, so nothing was drawn: the whole
-    // requirement is still owed out of stock, and saying so is the
-    // difference between "covered" and "here, but not yet yours".
-    expect(afterInward.issued).toBe(0);
+    expect(afterInward.onOrder).toBe(0);
+    // Nothing was drawn at approval, so the whole requirement is still
+    // owed out of stock. Saying so is the difference between "covered"
+    // and "here, but not yet yours".
+    expect(afterInward.allocated).toBe(0);
     expect(afterInward.outstanding).toBe(100);
   });
 
@@ -242,12 +230,95 @@ describe('shortfall → PO → inward → MRP, on an approved order', () => {
     const after = await mrpRow(s.order, s.yarn);
     expect(after).toMatchObject({
       requiredWeight: 100,
-      issued: 100,       // taken out of stock at approval
+      allocated: 100,       // taken out of stock at approval
       outstanding: 0,    // nothing left to draw
       inStock: 0,        // which is why the balance is zero
       shortfall: 0,
       toBuy: 0,
     });
+  });
+
+  it('will not raise a PO once the stock is allocated', async () => {
+    // Buying for an order happens before approval. Approval allocated
+    // the stock to it — took it out of the balance and held it — so a
+    // purchase raised here would be buying a requirement already met.
+    const s = await seed({ stock: 100, metres: 100_000 });
+    expect((await approve(s.order)).status).toBeLessThan(400);
+
+    const res = await request(app)
+      .post(`/api/v2/order/${s.order._id}/raise-po`)
+      .set('Cookie', adminCookie())
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ORDER_ALREADY_APPROVED');
+    expect(res.body.message).toMatch(/allocated when it was approved/i);
+    expect(await PurchaseOrder.countDocuments({})).toBe(0);
+  });
+
+  it('refuses even when a forced approval left a real gap', async () => {
+    // The gap is real and nothing is holding it, but this is not the
+    // route that buys it — the job that needs it is, and the
+    // purchase-order screen is. This one sits next to the requirement,
+    // which is why it was the one that doubled up.
+    const s = await seed({ stock: 0, metres: 100_000 });
+    expect((await approve(s.order, { force: true })).status).toBeLessThan(400);
+
+    const row = await mrpRow(s.order, s.yarn);
+    expect(row).toMatchObject({ allocated: 0, outstanding: 100, shortfall: 100 });
+
+    const res = await request(app)
+      .post(`/api/v2/order/${s.order._id}/raise-po`)
+      .set('Cookie', adminCookie())
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('ORDER_ALREADY_APPROVED');
+  });
+
+  it('still raises one while the order is Open', async () => {
+    // The rule must not close the door it exists to keep open.
+    const s = await seed({ stock: 0, metres: 100_000 });
+    const raised = await raisePo(s.order);
+    expect(raised.purchaseOrders).toHaveLength(1);
+  });
+
+  it('says the stock is allocated on the order detail', async () => {
+    const s = await seed({ stock: 100, metres: 100_000 });
+    await approve(s.order);
+
+    const res = await request(app)
+      .get('/api/v2/order/get-orderDetail')
+      .query({ id: String(s.order._id) })
+      .set('Cookie', adminCookie());
+    expect(res.status).toBeLessThan(400);
+
+    const row = res.body.data.rawMaterialRequired.find(
+      (r) => String(r.rawMaterial) === String(s.yarn._id)
+    );
+    expect(row).toMatchObject({
+      requiredWeight: 100,
+      allocated: 100,
+      outstanding: 0,
+      allocationState: 'full',
+      stockSufficient: true,
+    });
+  });
+
+  it('calls a forced approval part-allocated, not allocated', async () => {
+    // "Allocated" on a row holding nothing would be the worst kind of
+    // wrong: reassuring, and false.
+    const s = await seed({ stock: 40, metres: 100_000 });
+    await approve(s.order, { force: true });
+
+    const res = await request(app)
+      .get('/api/v2/order/get-orderDetail')
+      .query({ id: String(s.order._id) })
+      .set('Cookie', adminCookie());
+
+    const row = res.body.data.rawMaterialRequired.find(
+      (r) => String(r.rawMaterial) === String(s.yarn._id)
+    );
+    expect(row).toMatchObject({ allocated: 40, outstanding: 60, allocationState: 'partial' });
   });
 
   it('gives the material back when the order is cancelled', async () => {
@@ -256,7 +327,7 @@ describe('shortfall → PO → inward → MRP, on an approved order', () => {
     // again, correctly.
     const s = await seed({ stock: 100, metres: 100_000 });
     await approve(s.order);
-    expect((await mrpRow(s.order, s.yarn)).issued).toBe(100);
+    expect((await mrpRow(s.order, s.yarn)).allocated).toBe(100);
 
     const res = await request(app).post('/api/v2/order/cancel')
       .set('Cookie', adminCookie())
@@ -264,7 +335,7 @@ describe('shortfall → PO → inward → MRP, on an approved order', () => {
     expect(res.status).toBeLessThan(400);
 
     const after = await mrpRow(s.order, s.yarn);
-    expect(after).toMatchObject({ issued: 0, outstanding: 100, inStock: 100, shortfall: 0 });
+    expect(after).toMatchObject({ allocated: 0, outstanding: 100, inStock: 100, shortfall: 0 });
   });
 });
 
@@ -297,7 +368,7 @@ describe('the job MRP under an approved order', () => {
     const row = res.body.data.materials.find(
       (m) => String(m.rawMaterial) === String(s.yarn._id)
     );
-    expect(row).toMatchObject({ requiredWeight: 100, issued: 100, outstanding: 0, shortfall: 0 });
+    expect(row).toMatchObject({ requiredWeight: 100, allocated: 100, outstanding: 0, shortfall: 0 });
   });
 
   it('splits the order draw across the jobs that share it', async () => {
@@ -321,6 +392,6 @@ describe('the job MRP under an approved order', () => {
     const row = res.body.data.materials.find(
       (m) => String(m.rawMaterial) === String(s.yarn._id)
     );
-    expect(row).toMatchObject({ requiredWeight: 50, issued: 50, outstanding: 0, shortfall: 0 });
+    expect(row).toMatchObject({ requiredWeight: 50, allocated: 50, outstanding: 0, shortfall: 0 });
   });
 });

@@ -490,17 +490,24 @@ router.get(
       // know" look identical on screen but mean very different things.
       const inStock = mat?.stock ?? 0;
       const required = Number(rm.requiredWeight) || 0;
-      const issued = Math.min(required, drawn.get(String(rm.rawMaterial)) || 0);
-      const outstanding = Math.max(0, Math.round((required - issued) * 1000) / 1000);
+      const allocated = Math.min(required, drawn.get(String(rm.rawMaterial)) || 0);
+      const outstanding = Math.max(0, Math.round((required - allocated) * 1000) / 1000);
       return {
         rawMaterial:     rm.rawMaterial,
         name:            mat?.name ?? rm.name ?? "—",
         unit:            mat?.unit ?? "kg",
         requiredWeight:  required,
-        // Drawn at approval; nil before it, and nil again after a
-        // cancel hands the material back.
-        issued:          Math.round(issued * 1000) / 1000,
+        // Taken out of stock and held for this order at approval; nil
+        // before it, and nil again after a cancel hands it back.
+        allocated:       Math.round(allocated * 1000) / 1000,
         outstanding,
+        // full  — the whole requirement is held for this order
+        // partial — a forced approval drew what there was; the rest is
+        //           still owed and nothing is holding it
+        // none  — not approved yet, or the allocation was handed back
+        allocationState: allocated <= 0
+          ? "none"
+          : outstanding > 0 ? "partial" : "full",
         inStock,
         stockSufficient: inStock >= outstanding,
       };
@@ -1535,7 +1542,7 @@ router.get(
     // sheet has to know what it drew — otherwise it reads the reduced
     // balance as a shortage and offers to buy the same yarn again.
     const materials = await computeMaterialRequirement(order.elasticOrdered || [], {
-      issued: await issuedForOrder(order._id),
+      allocated: await issuedForOrder(order._id),
     });
 
     res.json({
@@ -1664,12 +1671,34 @@ router.post(
       return next(new ErrorHandler('Invalid order id', 400));
     }
     const order = await Order.findById(req.params.id)
-      .select('orderNo elasticOrdered')
+      .select('orderNo elasticOrdered status')
       .lean();
     if (!order) return next(new ErrorHandler('Order not found', 404));
 
+    // Buying for an order happens BEFORE it is approved. Approval
+    // allocates the stock to the order — takes it out of the balance
+    // and holds it — so from that point the order's material question
+    // is settled and a purchase raised against it would be buying for
+    // a requirement already met.
+    //
+    // A forced approval is the exception the rule has to survive: it
+    // allocated only what was there, and the rest is genuinely owed.
+    // That gap is bought from the job that needs it or from the
+    // purchase-order screen directly, both of which stay open — this
+    // route is the one that used to double up, because it is the one
+    // sitting next to the requirement.
+    if (order.status !== 'Open') {
+      const err = new ErrorHandler(
+        `Stock for order #${order.orderNo} was allocated when it was approved — ` +
+        `raise purchase orders before approval, or from the job that needs the material.`,
+        400
+      );
+      err.code = 'ORDER_ALREADY_APPROVED';
+      return next(err);
+    }
+
     const requirement = await computeMaterialRequirement(order.elasticOrdered || [], {
-      issued: await issuedForOrder(order._id),
+      allocated: await issuedForOrder(order._id),
     });
     const { orderable, noSupplier, unresolved, anyShort, awaitingDelivery } =
       triageShortfall(requirement, req.body?.materials);

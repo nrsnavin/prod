@@ -1207,7 +1207,7 @@ async function jobRequirement(job) {
   if (drawn.size === 0) return materials;
 
   return computeMaterialRequirement(job.elastics || [], {
-    issued: shareForJob(drawn, job.order?.rawMaterialRequired || [], materials),
+    allocated: shareForJob(drawn, job.order?.rawMaterialRequired || [], materials),
   });
 }
 
