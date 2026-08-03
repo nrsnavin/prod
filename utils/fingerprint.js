@@ -40,6 +40,10 @@ const ACTION_CODES = Object.freeze({
   JOB_STAGE_UPDATED:        'JOB_STAGE_UPDATED',
   JOB_COMPLETED:            'JOB_COMPLETED',
   JOB_CANCELLED:            'JOB_CANCELLED',
+  // Moving a running job to another machine — a mid-run change with
+  // production consequences, so it belongs in the trail on its own
+  // rather than only as a side effect of a stage update.
+  JOB_MACHINE_CHANGED:      'JOB_MACHINE_CHANGED',
   // Sub-stage / per-action events recorded on the parent JobOrder
   WARPING_STARTED:          'WARPING_STARTED',
   WARPING_COMPLETED:        'WARPING_COMPLETED',
@@ -89,6 +93,7 @@ const ACTION_LABELS = Object.freeze({
   JOB_STAGE_UPDATED:        'Job Stage Updated',
   JOB_COMPLETED:            'Job Completed',
   JOB_CANCELLED:            'Job Cancelled',
+  JOB_MACHINE_CHANGED:      'Machine Changed',
   WARPING_STARTED:          'Warping Started',
   WARPING_COMPLETED:        'Warping Completed',
   COVERING_STARTED:         'Covering Started',

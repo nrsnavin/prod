@@ -385,3 +385,112 @@ describe('a job letting its machine go', () => {
     expect((await reload(machine)).status).toBe('maintenance');
   });
 });
+
+// ── Moving a job that is already running ──────────────────────────────
+
+describe('a machine breaking down mid-run', () => {
+  async function runningOnMachine(elastic) {
+    const { job } = await seed();
+    const machine = await makeMachine();
+    await planWeaving(job, machine, elastic);
+
+    const warping = await Warping.create({
+      date: new Date(), job: job._id, status: 'completed',
+      elasticOrdered: [{ elastic: elastic._id, quantity: 500 }],
+    });
+    const covering = await Covering.create({
+      date: new Date(), job: job._id, status: 'completed',
+    });
+    await JobOrder.findByIdAndUpdate(job._id, {
+      warping: warping._id, covering: covering._id,
+    });
+    const res = await request(app).post('/api/v2/job/update-status')
+      .set('Cookie', adminCookie())
+      .send({ jobId: String(job._id), nextStatus: 'weaving' });
+    expect(res.status).toBeLessThan(400);
+    return { job, machine };
+  }
+
+  it('can be swapped for another machine', async () => {
+    // Refused outright before, so a breakdown had no answer inside the
+    // system: the job had to be walked back a stage first.
+    const { elastic } = await seed();
+    const { job, machine } = await runningOnMachine(elastic);
+    expect((await JobOrder.findById(job._id)).status).toBe('weaving');
+    const replacement = await makeMachine();
+
+    const res = await planWeaving(job, replacement, elastic);
+    expect(res.status).toBe(200);
+
+    expect(String((await JobOrder.findById(job._id)).machine)).toBe(String(replacement._id));
+    expect((await reload(replacement)).status).toBe('running');
+  });
+
+  it('frees the machine that broke down', async () => {
+    const { elastic } = await seed();
+    const { job, machine } = await runningOnMachine(elastic);
+    const replacement = await makeMachine();
+
+    await planWeaving(job, replacement, elastic);
+
+    const broken = await reload(machine);
+    expect(broken.status).toBe('free');
+    expect(broken.orderRunning).toBeNull();
+    expect(broken.elastics).toEqual([]);
+  });
+
+  it('leaves the job in weaving — it never stopped running', async () => {
+    const { elastic } = await seed();
+    const { job } = await runningOnMachine(elastic);
+    const replacement = await makeMachine();
+
+    await planWeaving(job, replacement, elastic);
+    expect((await JobOrder.findById(job._id)).status).toBe('weaving');
+  });
+
+  it('records the move, naming both machines', async () => {
+    // No stage moved, so nothing else would have recorded it — and
+    // "which machine was it on before" is the question asked afterwards.
+    const { elastic } = await seed();
+    const { job, machine } = await runningOnMachine(elastic);
+    const replacement = await makeMachine();
+
+    await planWeaving(job, replacement, elastic);
+
+    const fresh = await JobOrder.findById(job._id);
+    const fp = (fresh.fingerprints || []).find((f) => f.code === 'JOB_MACHINE_CHANGED');
+    expect(fp).toBeTruthy();
+    expect(fp.meta.fromMachineId).toBe(String(machine._id));
+    expect(fp.meta.toMachineId).toBe(String(replacement._id));
+  });
+
+  it('accepts the same machine again, as a head-plan edit', async () => {
+    // Re-picking the machine the job is already on must not fail with
+    // "machine is not free" — that is the system objecting to its own
+    // state.
+    const { elastic } = await seed();
+    const { job, machine } = await runningOnMachine(elastic);
+
+    const res = await planWeaving(job, machine, elastic);
+    expect(res.status).toBe(200);
+
+    const still = await reload(machine);
+    expect(still.status).toBe('running');
+    expect(String(still.orderRunning)).toBe(String(job._id));
+  });
+
+  it('still refuses a machine running somebody else', async () => {
+    const { elastic } = await seed();
+    const { job } = await runningOnMachine(elastic);
+    const other = await seed();
+    const theirs = await makeMachine();
+    await Machine.findByIdAndUpdate(theirs._id, {
+      status: 'running', orderRunning: other.job._id,
+    });
+
+    const res = await planWeaving(job, theirs, elastic);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    // And nothing moved on either side.
+    expect(String((await reload(theirs)).orderRunning)).toBe(String(other.job._id));
+  });
+});

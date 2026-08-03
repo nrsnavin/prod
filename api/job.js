@@ -356,8 +356,19 @@ router.post(
     if (!job) return next(new ErrorHandler('Job not found', 404));
     if (!['preparatory', 'weaving'].includes(job.status))
       return next(new ErrorHandler(`Job must be preparatory or weaving (current: "${job.status}")`, 400));
-    if (job.status === 'weaving' && job.machine)
-      return next(new ErrorHandler('Job already has a machine assigned.', 400));
+    // A running job CAN be moved to another machine. It used to be
+    // refused outright, which meant a breakdown mid-run had no answer
+    // inside the system: the job had to be walked back a stage before
+    // it could be put on a working machine.
+    //
+    // Safe to allow because the old machine is released inside the same
+    // transaction as the new claim (below) — the refusal was standing in
+    // for a release that did not exist.
+    const movingWhileRunning =
+      job.status === 'weaving' &&
+      job.machine &&
+      job.machine.toString() !== String(machineId);
+    const previousMachineId = job.machine ? job.machine.toString() : null;
 
     // Machine claim + job status flip must be atomic. Without a
     // transaction two concurrent /plan-weaving requests could both
@@ -371,8 +382,17 @@ router.post(
       await session.withTransaction(async () => {
         // Atomic claim: only flip free → running, so the second
         // racing request gets null and bails cleanly.
+        // Claim only a free machine, OR the one this job is already on —
+        // re-picking the same machine is a head-plan edit, and failing it
+        // with "not free" would be the system objecting to its own state.
         machine = await Machine.findOneAndUpdate(
-          { _id: machineId, status: 'free' },
+          {
+            _id: machineId,
+            $or: [
+              { status: 'free' },
+              { status: 'running', orderRunning: job._id },
+            ],
+          },
           {
             $set: {
               status:       'running',
@@ -450,6 +470,22 @@ router.post(
             });
           }
         }
+        // A machine changed under a running job is a production event
+        // in its own right — no stage moved, so nothing else would have
+        // recorded it. Names both machines, because "which one was it on
+        // before" is the question asked afterwards.
+        if (movingWhileRunning) {
+          stampFingerprint(job, ACTION_CODES.JOB_MACHINE_CHANGED, {
+            req,
+            meta: {
+              jobOrderNo:      job.jobOrderNo,
+              fromMachineId:   previousMachineId,
+              toMachineId:     machine._id.toString(),
+              toMachineName:   machine.ID,
+            },
+          });
+        }
+
         job.machine = machine._id;
         await job.save({ session });
       });
