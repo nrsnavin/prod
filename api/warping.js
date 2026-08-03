@@ -15,6 +15,7 @@ const { nextNumber }   = require("../utils/sequence");
 const { drawFromLot, returnToLot } = require("../services/yarnLotService");
 const { buildBeamsFromTemplates } = require("../services/warpingTemplate");
 const { plannedLotsForJob, distinctLots } = require("../services/yarnLotTrail");
+const { checkWarpingIssued } = require("../services/warpingIssueReadiness");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
@@ -238,6 +239,20 @@ router.post("/complete", isAdmin('admin', 'production'), catchAsyncErrors(async 
   const id = req.body.id ?? req.query.id;
   if (!id) return next(new ErrorHandler("id is required", 400));
 
+  // An override, not a loophole. Warpings already in flight when this
+  // rule arrived have beams on the floor and no issued batch behind
+  // them, and refusing those forever would strand real work. It needs a
+  // reason and it is recorded on the fingerprint, so a completion that
+  // skipped the check is visible afterwards rather than indistinguishable
+  // from one that passed it.
+  const force = req.body?.force === true;
+  const forceReason = String(req.body?.forceReason || "").trim();
+  if (force && forceReason.length < 5) {
+    return next(new ErrorHandler(
+      "Completing without an issued batch needs a reason (min 5 chars).", 400
+    ));
+  }
+
   const session = await mongoose.startSession();
   try {
     let resp;
@@ -246,6 +261,31 @@ router.post("/complete", isAdmin('admin', 'production'), catchAsyncErrors(async 
       if (!warping) throw new ErrorHandler("Warping not found", 404);
       if (warping.status !== "in_progress")
         throw new ErrorHandler("Warping is not in progress", 400);
+
+      // ── The yarn has to have left the rack ────────────────────────
+      // Completing says the beams are built, and beams are built from
+      // yarn that was issued against a warping batch. That issue is what
+      // moves the lot balances and what ties the beam to the dye lot
+      // inside it. Completing without it leaves the lot ledger claiming
+      // yarn that is physically gone and the beam with no lot behind it
+      // — a hole in the shade trail exactly where it exists to cover.
+      //
+      // Only bites where the programme actually named lots; see
+      // services/warpingIssueReadiness.js for why.
+      const issued = await checkWarpingIssued(warping._id, session);
+      if (!issued.ready && !force) {
+        const err = new ErrorHandler(
+          `Warping cannot be completed yet — ${issued.reason}.`,
+          409
+        );
+        err.code = "WARPING_YARN_NOT_ISSUED";
+        err.details = {
+          lotsPlanned: issued.lotsPlanned,
+          batches: issued.batches,
+          reason: issued.reason,
+        };
+        throw err;
+      }
 
       warping.status        = "completed";
       warping.completedDate = new Date();
@@ -268,6 +308,12 @@ router.post("/complete", isAdmin('admin', 'production'), catchAsyncErrors(async 
           completedDate: warping.completedDate,
           jobAdvanced:   advanced,
           jobStatus,
+          // Both recorded, so a forced completion can be told from one
+          // that met the rule.
+          yarnIssued:    issued.batches.issued,
+          ...(force && !issued.ready
+            ? { forcedWithoutIssue: true, forceReason }
+            : {}),
         },
       });
 
