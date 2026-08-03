@@ -154,6 +154,7 @@ async function _refundRawMaterialsForOrder(session, order, actor, userObjectId) 
     await appendStockMovement(material._id, {
       type:     "ORDER_CANCEL_REFUND",
       order:    order._id,
+      refNo:    order.orderNo != null ? String(order.orderNo) : "",
       quantity: qty,
       balance:  material.stock,
     }, session);

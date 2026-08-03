@@ -123,6 +123,9 @@ async function approveOrderTxn(session, {
       // Negative: this debits stock. Stored positive for years, which
       // made every approval read as a receipt on the material's ledger.
       type: 'ORDER_APPROVAL', order: order._id,
+      // The order number as well as the id: the ledger has to still name
+      // the order years later, when it may have been deleted.
+      refNo: order.orderNo != null ? String(order.orderNo) : '',
       quantity: -applied, balance: material.stock,
     }, session);
     await MaterialOutward.create([{

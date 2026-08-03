@@ -89,6 +89,10 @@ router.get(
       .select("+stockMovements")
       .populate("supplier", "name phone email")
       .populate("stockMovements.order", "orderNo")
+      // The receipt's cause. `order` is ref:"Order" and could never hold
+      // it — which is why every goods receipt on this ledger used to be
+      // unexplained.
+      .populate("stockMovements.purchaseOrder", "poNo status")
       .lean();
 
     if (!material) return next(new ErrorHandler("Raw material not found", 404));
@@ -134,6 +138,43 @@ router.get(
     // Stock that exists but sits in no lot — what a hand-opened lot may
     // draw on, and the number the Lots panel reports as unplaced.
     const unplacedQty = await unplacedQuantity(material);
+
+    // ── Receipts recorded before the ledger had a PO field ──────────
+    // Those rows carry no reference at all, so a customer's entire
+    // existing history reads as unexplained goods receipts. Fixing only
+    // new writes would leave the ledger exactly as reported.
+    //
+    // MaterialInward is the authoritative record of the same events and
+    // does carry the PO, so the row can be matched back to it. The match
+    // is on the same DAY and the same quantity — not the same instant.
+    // The two are written milliseconds apart by different code (the
+    // movement takes `new Date()` in the route, the inward takes the
+    // model's Date.now default), so an exact timestamp match finds
+    // nothing. That was worth checking rather than assuming.
+    //
+    // Only when exactly one inward matches. Two receipts of the same
+    // quantity on the same day are genuinely indistinguishable, and
+    // naming one of them would be inventing a fact to fill a column.
+    const dayOf = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
+    for (const mv of material.stockMovements) {
+      if (mv.type !== "PO_INWARD" || mv.reference) continue;
+      const sameEvent = inwards.filter(
+        (iw) =>
+          Number(iw.quantity) === Math.abs(Number(mv.quantity)) &&
+          iw.inwardDate &&
+          dayOf(iw.inwardDate) === dayOf(mv.date)
+      );
+      if (sameEvent.length !== 1) continue;
+      const po = sameEvent[0].purchaseOrder;
+      if (!po?.poNo) continue;
+      mv.reference = `PO #${po.poNo}`;
+      mv.referenceKind = "purchaseOrder";
+      mv.referenceId = String(po._id);
+      // Said plainly: matched from the inward history, not recorded on
+      // the row at the time. A reconstruction and a record are not the
+      // same claim, and the UI marks it as such.
+      mv.referenceDerived = true;
+    }
 
     res.status(200).json({
       success: true,
@@ -324,6 +365,10 @@ router.post(
     await material.save();
     await appendStockMovement(material._id, {
       type:     "PO_INWARD",
+      // Which purchase order these goods came in against. Without it the
+      // ledger row says only that stock went up.
+      purchaseOrder: po._id,
+      refNo:         po.poNo != null ? String(po.poNo) : "",
       quantity: qtyNum,
       balance:  material.stock,
     });
@@ -484,13 +529,17 @@ router.post(
 
             await material.save({ session });
             // Running balance log
+            const reason = item.reason?.trim() || globalReason;
+
             await appendStockMovement(material._id, {
               type:     "STOCK_ADJUST",
+              // An adjustment has no document behind it — the reason the
+              // person typed IS the explanation, and it was being
+              // computed on the next line and then thrown away.
+              reason,
               quantity: item.adjustment,
               balance:  newStock,
             }, session);
-
-            const reason = item.reason?.trim() || globalReason;
 
             // ── The dye lot, when the adjustment names one ────────────
             // A manual adjustment used to bypass lot tracking entirely,

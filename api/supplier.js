@@ -699,9 +699,14 @@ router.post(
               type:     "PO_INWARD",
               quantity: credit.qty,
               balance:  updated ? updated.stock : undefined,
-              // No `order` here. This field is ref:"Order" and was being
-              // handed a PurchaseOrder id, so populating it resolved to
-              // nothing and the ledger's reference column stayed blank.
+              // Not `order` — that field is ref:"Order", and handing it a
+              // PurchaseOrder id resolved to nothing, which is why this
+              // used to record no reference at all and every goods
+              // receipt on the ledger was unexplained. `purchaseOrder`
+              // is the field that fits, with the number snapshotted
+              // beside it so the row survives the PO being deleted.
+              purchaseOrder: po._id,
+              refNo:         po.poNo != null ? String(po.poNo) : "",
             }, session);
           }
           created = await MaterialInward.insertMany(inwardDocs, { session });

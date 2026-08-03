@@ -20,6 +20,29 @@ const StockMovementSchema = new mongoose.Schema(
     date:     { type: Date,   required: true },
     type:     { type: String, required: true }, // ORDER_APPROVAL | PO_INWARD | STOCK_ADJUST | ORDER_CANCEL_REFUND
     order:    { type: mongoose.Types.ObjectId, ref: "Order" },
+
+    // ── Why this row exists ──────────────────────────────────────────
+    // A ledger that says "-40" and nothing else cannot be audited. The
+    // type says what kind of movement it was; these say which document
+    // caused it and, where a person typed one, the reason they gave.
+    //
+    // `order` above is ref:"Order" and a receipt is caused by a PURCHASE
+    // order, so PO receipts had nowhere to record their cause and were
+    // deliberately written with no reference at all — the ledger's
+    // reference column was blank for every goods receipt ever made.
+    purchaseOrder: { type: mongoose.Types.ObjectId, ref: "PurchaseOrder" },
+
+    // Snapshot of the human-facing number ("1042", "55"). Kept beside
+    // the reference for the same reason the warping programme snapshots
+    // its lot numbers: the ledger has to still read correctly years
+    // later, when the order or PO may have been deleted. Without it,
+    // deleting a document silently blanks its history.
+    refNo:  { type: String, trim: true, default: "" },
+
+    // What the person doing it said. Only manual adjustments have one —
+    // the rest are explained by the document they point at.
+    reason: { type: String, trim: true, default: "" },
+
     quantity: { type: Number, required: true },
     balance:  { type: Number },
   },
