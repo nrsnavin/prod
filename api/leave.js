@@ -17,17 +17,24 @@ const LeaveRequest = require('../models/LeaveRequest');
 const Attendance   = require('../models/Attendence.js');
 const ShiftDetail  = require('../models/ShiftDetail');
 const Employee     = require('../models/Employee');
-const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
 
-// Per-user feature gate (writes only). Worker self-service is exempt:
+// Per-user feature gate. Worker self-service is exempt from writes:
 // submitting your own request (POST /request) and cancelling your own
 // pending request (DELETE /:id) don't need the /leave management feature.
+// GET /employee/:empId is selfOrAdmin and exempt from the read gate for
+// the same reason — a worker's own leave history is answerable to their
+// identity, not to whether the admin ticked their Leave checkbox.
 // (req.user is set by the mount-level isAuthenticated in app.js.)
 router.use((req, res, next) => {
   if (req.method === 'POST' && req.path === '/request') return next();
   if (req.method === 'DELETE') return next();
-  return requireFeature('/leave')(req, res, next);
+  if ((req.method === 'GET' || req.method === 'HEAD') && req.path.startsWith('/employee/')) return next();
+  requireFeature('/leave')(req, res, (err) => {
+    if (err) return next(err);
+    requireFeatureRead('/leave')(req, res, next);
+  });
 });
 
 function toISODate(d)   { return new Date(d).toISOString().split('T')[0]; }

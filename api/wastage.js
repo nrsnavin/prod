@@ -17,16 +17,17 @@ const Elastic       = require("../models/Elastic");
 const Machine       = require("../models/Machine");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const { enqueue }   = require("../utils/outbox");
-const { isAuthenticated, isAdmin, requireFeature } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 const { resolveEmployeeId } = require("../utils/resolveEmployee");
 const { applyMovement } = require("../utils/elasticStock");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { requireReason } = require("../utils/auditReason");
 
 router.use(isAuthenticated);
-// Per-user feature gate (Phase 4): Wastage is a leaf screen. No-op for
-// legacy users without an explicit feature list — see requireFeature.
+// Per-user feature gate: Wastage is a leaf screen. No-op for legacy users
+// without an explicit feature list — see requireFeature.
 router.use(requireFeature('/wastage'));
+router.use(requireFeatureRead('/wastage'));
 
 // ═══════════════════════════════════════════════════════════
 //  ADD WASTAGE — P0-4: wastage no longer deducts elastic stock.

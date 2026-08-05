@@ -163,7 +163,10 @@ describe('feature config drives API enforcement (writes only)', () => {
     expect(res.status).not.toBe(403);
   });
 
-  test('READS are never feature-gated (GET passes without the feature)', async () => {
+  // Closing the read gap: a GET is now blocked exactly like a write when
+  // the user's explicit feature list omits the module. See
+  // tests/api/featureReadGate.test.js for full coverage of this behavior.
+  test('READS are feature-gated the same as writes (GET blocked without the feature)', async () => {
     const c = await createUser({
       name: 'Reader', email: 'reader@t.co', password: 'pass1234',
       department: 'production', features: ['/jobs'],   // no /wastage
@@ -171,7 +174,7 @@ describe('feature config drives API enforcement (writes only)', () => {
     const res = await request(app)
       .get('/api/v2/wastage/jobs-for-wastage')
       .set('Cookie', cookie(c.body.user.id, 'production'));
-    expect(res.status).not.toBe(403); // read allowed despite missing feature
+    expect(res.status).toBe(403);
   });
 
   test('an empty feature list defers to the role gate (write not blocked)', async () => {

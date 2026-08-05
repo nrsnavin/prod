@@ -21,7 +21,7 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const sanitizeMongo = require("./middleware/sanitizeMongo.js");
 const { setUserContext } = require("./middleware/userContext.js");
-const { isAuthenticated, isAdmin, requireFeature } = require("./middleware/auth.js");
+const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("./middleware/auth.js");
 
 // Trust the reverse proxy (nginx/ALB) so req.protocol, req.ip, and the
 // `secure` cookie flag reflect the real client connection rather than
@@ -274,17 +274,34 @@ const ADMIN_GATE = [isAuthenticated, isAdmin('admin')];
 // Assign via User.role: admin | sales | stores | production | accounts
 const gate = (...roles) => [isAuthenticated, isAdmin('admin', ...roles)];
 
-// Phase 4 — per-user FEATURE enforcement (requireFeature, below).
-// Layered ON TOP of the role gate for LEAF routers only: planner,
-// production, reports, qc, audit here, plus warping/covering/wastage/
-// packing which gate themselves inside the router. Leaf = the router's
-// data isn't read by other features' screens. Shared master-data routers
-// (machine, employee, customer, supplier, order, materials, job, dc,
-// elastic) are deliberately NOT feature-gated: their data is fetched
-// cross-feature (e.g. Jobs & Planning read /machine; HR & Shifts read
-// /employee), so a mount-level feature gate would 403 legitimate reads.
-// Those stay on the coarse role gate. requireFeature is also a no-op for
-// users with no explicit feature list, so legacy accounts are unaffected.
+// Phase 4 — per-user FEATURE enforcement: requireFeature gates writes,
+// requireFeatureRead gates reads, both below. Layered ON TOP of the role
+// gate for every router here, plus warping/covering/wastage/packing/
+// payroll/leave/bonus/attendance which gate themselves inside the router
+// (payroll/leave/bonus/attendance also carve out their selfOrAdmin routes
+// there — a worker's own payslip/leave/bonus/attendance answers to their
+// identity, not to whether the admin ticked that module's box for them).
+// requireFeature/requireFeatureRead are no-ops for a user with no explicit
+// feature list, so legacy accounts and admins without a customised list
+// are unaffected either way.
+//
+// Shared master-data routers (machine, employee, customer, supplier,
+// order, materials, job, dc, elastic-group) ARE read-gated, but each
+// mount's key list is deliberately broader than its write-side list
+// wherever another feature's screen only ever READS through it (e.g.
+// Analytics never writes a Customer, Order or Delivery Challan, but
+// reads all three for its dashboards) — audited against every cross-
+// feature call site in prod_web and the employee mobile app before this
+// was enabled, so a legitimate read never trips it.
+//
+// `elastic` is the one deliberate exception: several of its reads
+// (product list, detail, stock, and the per-elastic order/job rollups)
+// have no per-route role gate at all today, by design — the stock
+// screen is a shop-floor lookup for anyone in Production or Accounts,
+// not an Elastics-feature action, and /elastics isn't even in
+// Production's default feature set. Feature-gating those reads would
+// 403 that floor lookup for the department it exists for, so this
+// router's reads stay ungated, exactly as before.
 
 // Throttle credential-guessing before the login handler runs.
 app.use("/api/v2", apiLimiter);
@@ -313,46 +330,98 @@ app.use("/api/v2/user/verify-otp", loginLimiter);
 app.use("/api/v2/user", user);
 app.use("/api/v2/settings",    gate('production', 'accounts'), settings);
 app.use("/api/v2/pdf-templates", gate('production', 'accounts'), pdfTemplates);
-// Per-user feature enforcement (writes only — requireFeature passes all
-// reads). Machine head assignment is also written from the Jobs screen,
-// so /jobs may write here too.
-app.use("/api/v2/machine",     gate('production'), requireFeature('/machines', '/jobs'), machine);
-app.use("/api/v2/shift",       gate('production'), requireFeature('/shift-plans', '/shift-verification', '/production'), shift);
-app.use("/api/v2/customer",    gate('accounts'), requireFeature('/customers'), customer);
-app.use("/api/v2/employee",    gate('accounts', 'production'), requireFeature('/employees'), employee);
+// Per-user feature enforcement — requireFeature (writes) and
+// requireFeatureRead (reads). Machine head assignment is also written
+// AND read from the Jobs screen, Machine Issues, and Analytics.
+app.use("/api/v2/machine",     gate('production'),
+  requireFeature('/machines', '/jobs'),
+  requireFeatureRead('/machines', '/jobs', '/machine-issues', '/analytics'),
+  machine);
+app.use("/api/v2/shift",       gate('production'),
+  requireFeature('/shift-plans', '/shift-verification', '/production'),
+  requireFeatureRead('/shift-plans', '/shift-verification', '/production'),
+  shift);
+// Analytics and the Order/Elastic-group forms all read the customer list
+// without ever writing one.
+app.use("/api/v2/customer",    gate('accounts'),
+  requireFeature('/customers'),
+  requireFeatureRead('/customers', '/orders', '/elastic-groups', '/analytics'),
+  customer);
+// HR's Leave page reads an employee's record; only Employees itself writes.
+app.use("/api/v2/employee",    gate('accounts', 'production'),
+  requireFeature('/employees'),
+  requireFeatureRead('/employees', '/leave'),
+  employee);
+// Elastic's own reads (product list/detail, the worker-facing stock
+// lookup, and its per-elastic order/job rollups) stay UNGATED on
+// purpose — see the note above this block. Only writes are feature-gated.
 app.use("/api/v2/elastic",     gate('accounts', 'production'), requireFeature('/elastics'), elastic);
 // Elastic groups can be created from the Order form and Customer detail
-// (finance flows), so those features may write here too.
-app.use("/api/v2/elastic-group", gate('accounts'), requireFeature('/elastic-groups', '/orders', '/customers'), elasticGroup);
-app.use("/api/v2/dc",          gate('accounts'), requireFeature('/delivery-challans'), deliveryChallanRouter);
-// Purchase orders live on the supplier router, so /purchase-orders writes here.
-app.use("/api/v2/supplier",    gate('accounts'), requireFeature('/suppliers', '/purchase-orders'), supplier);
-app.use("/api/v2/bonus",       gate('accounts', 'production'), requireFeature('/bonus'), bonus);
-app.use("/api/v2/order",       gate('accounts'), requireFeature('/orders'), order);
-app.use("/api/v2/planner",     gate('production'), requireFeature('/planner'), planner);
+// (finance flows), so those features may write — and read — here too.
+app.use("/api/v2/elastic-group", gate('accounts'),
+  requireFeature('/elastic-groups', '/orders', '/customers'),
+  requireFeatureRead('/elastic-groups', '/orders', '/customers'),
+  elasticGroup);
+// Analytics' on-time-delivery stat pulls DC data without ever writing one.
+app.use("/api/v2/dc",          gate('accounts'),
+  requireFeature('/delivery-challans'),
+  requireFeatureRead('/delivery-challans', '/analytics'),
+  deliveryChallanRouter);
+// Purchase orders live on the supplier router, so /purchase-orders writes
+// (and Materials' stock-ops reads) land here too.
+app.use("/api/v2/supplier",    gate('accounts'),
+  requireFeature('/suppliers', '/purchase-orders'),
+  requireFeatureRead('/suppliers', '/purchase-orders', '/materials'),
+  supplier);
+app.use("/api/v2/order",       gate('accounts'),
+  requireFeature('/orders'),
+  requireFeatureRead('/orders', '/delivery-challans', '/analytics'),
+  order);
+app.use("/api/v2/planner",     gate('production'), requireFeature('/planner'), requireFeatureRead('/planner'), planner);
 // Ask Jarvis is an always-on feature — open to any authenticated user
 // (no role gate), matching the nav. Still requires login.
 app.use("/api/v2/assistant",   isAuthenticated, assistant);
-app.use("/api/v2/materials",   gate('production', 'accounts'), requireFeature('/materials'), material);
+// Warping batch creation and Purchase Orders both read stock/lot data
+// without writing it through this router.
+app.use("/api/v2/materials",   gate('production', 'accounts'),
+  requireFeature('/materials'),
+  requireFeatureRead('/materials', '/warping', '/covering', '/suppliers', '/purchase-orders'),
+  material);
 // Dye lots are a materials concept — same gate, so anyone who can see
 // stock can see how it breaks down by lot.
-app.use("/api/v2/yarn-lots",   gate('production', 'accounts'), requireFeature('/materials'), yarnLot);
+app.use("/api/v2/yarn-lots",   gate('production', 'accounts'),
+  requireFeature('/materials'),
+  requireFeatureRead('/materials', '/warping', '/covering'),
+  yarnLot);
+// warping/covering/wastage/packing/attendance/payroll/leave/bonus gate
+// themselves inside their own router — several mix admin-only data with
+// a worker's selfOrAdmin-scoped reads (own payslip, own attendance, own
+// leave, own bonus), which a mount-level gate here can't tell apart from
+// the admin-only routes sitting next to them.
 app.use("/api/v2/warping",     gate('production'), warping);
 app.use("/api/v2/wastage",     gate('production'), wastage);
-app.use("/api/v2/attendance",  gate('accounts', 'production'), requireFeature('/attendance'), attendence);
+app.use("/api/v2/attendance",  gate('accounts', 'production'), attendence);
 app.use("/api/v2/covering",    gate('production'), covering);
-app.use("/api/v2/job",         gate('production'), requireFeature('/jobs'), job);
+// The Machines screen's head-map editor reads a job's assignment.
+app.use("/api/v2/job",         gate('production'),
+  requireFeature('/jobs'),
+  requireFeatureRead('/jobs', '/machines'),
+  job);
 app.use("/api/v2/packing",     gate('production'), packing);
 // Production View feeds the Analytics dashboards too, so a user with
 // either feature may read it.
-app.use("/api/v2/production",  gate('production'), requireFeature('/production', '/analytics'), production);
+app.use("/api/v2/production",  gate('production'),
+  requireFeature('/production', '/analytics'),
+  requireFeatureRead('/production', '/analytics'),
+  production);
 // Management reports span operations and finance — either (or an admin)
 // may pull them; each report is read-only.
-app.use("/api/v2/reports",     gate('production', 'accounts'), requireFeature('/reports'), require("./api/reports.js"));
+app.use("/api/v2/reports",     gate('production', 'accounts'), requireFeature('/reports'), requireFeatureRead('/reports'), require("./api/reports.js"));
 // QC is a leaf, but the Jobs screen reads QC results, so /jobs passes too.
-app.use("/api/v2/qc",          gate('production'), requireFeature('/qc', '/jobs'), require("./api/qc.js"));
+app.use("/api/v2/qc",          gate('production'), requireFeature('/qc', '/jobs'), requireFeatureRead('/qc', '/jobs'), require("./api/qc.js"));
 app.use("/api/v2/payroll",     gate('accounts', 'production'), payroll);
 app.use("/api/v2/leave",       gate('accounts', 'production'), leave);
+app.use("/api/v2/bonus",       gate('accounts', 'production'), bonus);
 app.use("/api/v2/machine-issue", gate('production', 'accounts'), machineIssue);
 app.use("/api/v2/announcement", gate('production', 'accounts'), announcement);
 app.use("/api/v2/feedback",    gate('production', 'accounts'), feedback);
@@ -361,7 +430,7 @@ app.use("/api/v2/dashboard",   gate('production', 'accounts'), dashboard);
 // reach, so it stays admin-only (see note re: feature catalog).
 app.use("/api/v2/advisor",     gate(), advisor);
 app.use("/api/v2/io",          gate(), io);
-app.use("/api/v2/audit",       ADMIN_GATE, requireFeature('/audit'), audit);
+app.use("/api/v2/audit",       ADMIN_GATE, requireFeature('/audit'), requireFeatureRead('/audit'), audit);
 
 // Cron-triggerable morning digest — authenticated by a shared secret
 // header instead of an admin session, so an external scheduler (system

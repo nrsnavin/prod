@@ -35,14 +35,15 @@ const Employee         = require("../models/Employee");
 const Elastic          = require("../models/Elastic");
 const StockMovement    = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
-const { isAuthenticated, isAdmin, requireFeature } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
 const { requireReason } = require("../utils/auditReason");
 
 router.use(isAuthenticated);
-// Per-user feature gate (Phase 4): Packing is a leaf screen. No-op for
-// legacy users without an explicit feature list — see requireFeature.
+// Per-user feature gate: Packing is a leaf screen. No-op for legacy users
+// without an explicit feature list — see requireFeature.
 router.use(requireFeature('/packing'));
+router.use(requireFeatureRead('/packing'));
 
 function packingDetailQuery(query) {
   return query

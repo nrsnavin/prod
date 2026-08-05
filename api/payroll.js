@@ -19,7 +19,7 @@ const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
 const ShiftDetail      = require('../models/ShiftDetail');
 const Wastage          = require('../models/Wastage');
-const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
 const { EMPLOYEE_CARD_FIELDS } = require('../utils/populateFields');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
 // The ~200-line pure pay computation lives in services/payrollService.js.
@@ -30,12 +30,22 @@ const ledger = require('../services/ledgerService');
 const LedgerEntry = require('../models/LedgerEntry');
 
 router.use(isAuthenticated);
-// Per-user feature gate (writes only). The worker self-service advance
-// request (POST /advance) is exempt — an employee requests their own
-// advance without holding the /payroll management feature.
+// Per-user feature gate. The worker self-service advance request
+// (POST /advance) is exempt from writes — an employee requests their own
+// advance without holding the /payroll management feature. The selfOrAdmin
+// reads (own payslip/ledger/history/range) are exempt from the read gate
+// for the same reason: a worker's own pay record is answerable to their
+// identity, not to whether the admin ticked their Payroll checkbox.
 router.use((req, res, next) => {
   if (req.method === 'POST' && req.path === '/advance') return next();
-  return requireFeature('/payroll')(req, res, next);
+  const isSelfRead = (req.method === 'GET' || req.method === 'HEAD') &&
+    (req.path.startsWith('/slip/') || req.path.startsWith('/ledger/') ||
+     req.path.startsWith('/history/') || req.path.startsWith('/range/'));
+  if (isSelfRead) return next();
+  requireFeature('/payroll')(req, res, (err) => {
+    if (err) return next(err);
+    requireFeatureRead('/payroll')(req, res, next);
+  });
 });
 
 const r2 = (n) => Math.round(n * 100) / 100;

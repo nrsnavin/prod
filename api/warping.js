@@ -22,16 +22,17 @@ const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
 const { requireReason } = require("../utils/auditReason");
 const { assertVersion } = require("../utils/versioning");
-const { isAuthenticated, isAdmin, requireFeature } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 
 // All warping routes require login. Workers in the `warping` department
 // need to read /list, /detail, /warpingPlan and /plan-context to monitor
 // their assigned jobs in the employee app. Mutations stay admin-only.
 router.use(isAuthenticated);
-// Per-user feature gate (Phase 4): warping serves both the Warping and
-// Covering screens, so either feature grants access. No-op for users
-// without an explicit feature list (legacy) — see requireFeature.
+// Per-user feature gate: warping serves both the Warping and Covering
+// screens, so either feature grants access — reads included. No-op for
+// users without an explicit feature list (legacy) — see requireFeature.
 router.use(requireFeature('/warping', '/covering'));
+router.use(requireFeatureRead('/warping', '/covering'));
 
 router.post("/create", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   const { jobId, elasticOrdered } = req.body;

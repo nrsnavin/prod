@@ -33,10 +33,25 @@ const Payroll          = require("../models/Payroll");
 const PDFDocument      = require("pdfkit");
 const ledger           = require("../services/ledgerService");
 const LedgerEntry      = require("../models/LedgerEntry");
-const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 
 router.use(isAuthenticated);
+
+// GET /employee/:id, /employee/:id/prediction and /employee/:id/pdf are
+// selfOrAdmin — a worker's own bonus record is answerable to their
+// identity, not to whether the admin ticked their Bonus checkbox, so
+// those reads are exempt from the feature gate below. PUT
+// /employee/:id/percent is a write (admin-only) and is NOT exempt.
+router.use((req, res, next) => {
+  const isSelfRead = (req.method === 'GET' || req.method === 'HEAD') &&
+    req.path.startsWith('/employee/');
+  if (isSelfRead) return next();
+  requireFeature('/bonus')(req, res, (err) => {
+    if (err) return next(err);
+    requireFeatureRead('/bonus')(req, res, next);
+  });
+});
 
 function currentYear() {
   return new Date().getFullYear();

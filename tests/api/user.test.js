@@ -7,6 +7,7 @@ jest.mock("../../middleware/auth.js", () => ({
   isAdmin:         () => (_req, _res, next) => next(),
   selfOrAdmin:     (_req, _res, next) => next(),
   requireFeature:  () => (_req, _res, next) => next(),
+  requireFeatureRead: () => (_req, _res, next) => next(),
 }));
 
 jest.mock("../../models/User");

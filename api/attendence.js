@@ -18,10 +18,25 @@ const router     = express.Router();
 const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
 const ShiftDetail= require('../models/ShiftDetail');
-const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
 const { maybeFireAttendanceCrashed } = require('../utils/attendanceAlerts');
 
 router.use(isAuthenticated);
+
+// GET /employee/:empId and GET /monthly/:empId are selfOrAdmin — a worker's
+// own attendance history is answerable to their identity, not to whether
+// the admin ticked their Attendance checkbox, so those two reads are
+// exempt from the feature gate below. Everything else on this router
+// (marking, editing, date/summary/latecomer views) needs '/attendance'.
+router.use((req, res, next) => {
+  const isSelfRead = (req.method === 'GET' || req.method === 'HEAD') &&
+    (req.path.startsWith('/employee/') || req.path.startsWith('/monthly/'));
+  if (isSelfRead) return next();
+  requireFeature('/attendance')(req, res, (err) => {
+    if (err) return next(err);
+    requireFeatureRead('/attendance')(req, res, next);
+  });
+});
 
 function toISODate(d) {
   return new Date(d).toISOString().split('T')[0];

@@ -80,6 +80,47 @@ exports.requireFeature = (...keys) => {
     };
 };
 
+// Per-user FEATURE guard for READS — the counterpart requireFeature always
+// let through. Without it, an admin narrowing a user's feature list below
+// their department default (unticking a box on the Users page) only ever
+// stopped that user WRITING through the module; they could still browse
+// every record in it by calling the read routes directly, feature list or
+// not. This closes that gap, using the identical allow rule requireFeature
+// already applies to writes:
+//   • no explicit feature list → defer to the role gate (unaffected);
+//   • explicit list includes ANY of `keys` → allowed;
+//   • otherwise → 403.
+//
+// Mount this ONLY where every route on the router is either genuinely
+// module-owned data or is independently scoped by identity (selfOrAdmin) —
+// gate self-service routes THEMSELVES for that reason if the router
+// mixes the two (see payroll.js, leave.js, bonus.js, attendence.js for the
+// pattern: exempt the selfOrAdmin path before calling this). A worker
+// reading their own payslip is answerable to their identity, not to
+// whether the admin ticked the Payroll checkbox for them.
+//
+// `keys` takes every feature that legitimately reads through this router —
+// broader than the write-side list wherever a sibling screen only ever
+// reads here (e.g. Analytics pulling delivery-challan on-time stats never
+// writes a DC, so /analytics has to be read-only accepted on that mount).
+exports.requireFeatureRead = (...keys) => {
+    return (req, res, next) => {
+        const m = req.method;
+        if (m !== "GET" && m !== "HEAD") return next(); // writes: requireFeature's job
+
+        if (!req.user) {
+            return next(new ErrorHandler("Please login to continue", 401));
+        }
+
+        const explicit = Array.isArray(req.user.features) ? req.user.features : [];
+        if (explicit.length === 0) return next();
+
+        if (keys.some((k) => explicit.includes(k))) return next();
+
+        return next(new ErrorHandler("You don't have access to this feature", 403));
+    };
+};
+
 // Per-employee ownership guard. Use after isAuthenticated on routes
 // whose path/query carries an :empId — admins pass through, but a
 // worker can only access their own employee record. Closes the
