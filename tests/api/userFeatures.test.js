@@ -10,6 +10,7 @@ const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+const { expectGatePassed } = require('../helpers/expectRouteHit');
 const { featuresForDepartment } = require('../../utils/features');
 
 let mongo, app, User, admin;
@@ -242,7 +243,7 @@ describe('feature config drives API enforcement (writes only)', () => {
       department: 'production', features: ['/jobs'],   // explicit, no /wastage
     });
     const res = await request(app)
-      .post('/api/v2/wastage/anything')
+      .post('/api/v2/wastage/add-wastage')
       .set('Cookie', cookie(c.body.user.id, 'production'))
       .send({});
     expect(res.status).toBe(403);
@@ -254,10 +255,10 @@ describe('feature config drives API enforcement (writes only)', () => {
       department: 'production', features: ['/jobs', '/wastage'],
     });
     const res = await request(app)
-      .post('/api/v2/wastage/anything')
+      .post('/api/v2/wastage/add-wastage')
       .set('Cookie', cookie(c.body.user.id, 'production'))
       .send({});
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   // Closing the read gap: a GET is now blocked exactly like a write when
@@ -292,7 +293,7 @@ describe('feature config drives API enforcement (writes only)', () => {
     expect(doc.features).toEqual([]);
 
     const res = await request(app)
-      .post('/api/v2/wastage/anything')
+      .post('/api/v2/wastage/add-wastage')
       .set('Cookie', cookie(c.body.user.id, 'production'))
       .send({});
     expect(res.status).toBe(403);
@@ -308,10 +309,10 @@ describe('feature config drives API enforcement (writes only)', () => {
     expect(legacy.features).toBeUndefined();
 
     const res = await request(app)
-      .post('/api/v2/wastage/anything')
+      .post('/api/v2/wastage/add-wastage')
       .set('Cookie', cookie(legacy._id, 'production'))
       .send({});
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   // The lockout this fix had to avoid: the owner login is created with no
@@ -349,6 +350,6 @@ describe('feature config drives API enforcement (writes only)', () => {
       .post('/api/v2/attendance/mark')
       .set('Cookie', cookie(allowed.body.user.id, 'admin'))
       .send({});
-    expect(aRes.status).not.toBe(403);
+    expectGatePassed(aRes);
   });
 });

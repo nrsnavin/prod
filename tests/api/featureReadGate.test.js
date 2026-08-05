@@ -17,6 +17,7 @@ const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+const { expectGatePassed } = require('../helpers/expectRouteHit');
 
 let mongo, app, User, Employee, admin;
 
@@ -65,7 +66,7 @@ describe('leaf-feature reads are blocked without the feature', () => {
     const res = await request(app)
       .get('/api/v2/wastage/jobs-for-wastage')
       .set('Cookie', cookie(c.body.user.id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('an explicitly empty feature list blocks reads too', async () => {
@@ -91,7 +92,7 @@ describe('leaf-feature reads are blocked without the feature', () => {
     const res = await request(app)
       .get('/api/v2/wastage/jobs-for-wastage')
       .set('Cookie', cookie(legacy._id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 });
 
@@ -106,7 +107,7 @@ describe('shared master-data reads', () => {
     const res = await request(app)
       .get('/api/v2/machine/get-machines')
       .set('Cookie', cookie(c.body.user.id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('machine reads are blocked for a feature list with neither key', async () => {
@@ -139,7 +140,7 @@ describe('shared master-data reads', () => {
     const res = await request(app)
       .get('/api/v2/customer/all-customers')
       .set('Cookie', cookie(c.body.user.id, 'accounts'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 });
 
@@ -163,7 +164,7 @@ describe('a sibling feature gets the picker, not the whole module', () => {
     const res = await request(app)
       .get('/api/v2/customer/all-customers')
       .set('Cookie', cookie(ordersOnly, 'accounts'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('CANNOT read a customer\'s full record', async () => {
@@ -188,7 +189,7 @@ describe('a sibling feature gets the picker, not the whole module', () => {
     });
     for (const p of ['/api/v2/customer/all-customers', '/api/v2/customer/customerDetail']) {
       const res = await request(app).get(p).set('Cookie', cookie(c.body.user.id, 'accounts'));
-      expect(res.status).not.toBe(403);
+      expectGatePassed(res);
     }
   });
 
@@ -200,7 +201,7 @@ describe('a sibling feature gets the picker, not the whole module', () => {
     const list = await request(app)
       .get('/api/v2/machine/get-machines')
       .set('Cookie', cookie(c.body.user.id, 'production'));
-    expect(list.status).not.toBe(403);
+    expectGatePassed(list);
 
     const detail = await request(app)
       .get(`/api/v2/machine/${new mongoose.Types.ObjectId()}`)
@@ -220,7 +221,7 @@ describe('a granted module can reach the data its own screens need', () => {
     const res = await request(app)
       .get('/api/v2/materials/materialForNewElastic')
       .set('Cookie', cookie(c.body.user.id, 'accounts'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('Employees can load the pay summary card', async () => {
@@ -231,7 +232,7 @@ describe('a granted module can reach the data its own screens need', () => {
     const res = await request(app)
       .get(`/api/v2/payroll/employee-overview/${new mongoose.Types.ObjectId()}`)
       .set('Cookie', cookie(c.body.user.id, 'accounts'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('Elastic Groups can load its production breakdown', async () => {
@@ -243,7 +244,7 @@ describe('a granted module can reach the data its own screens need', () => {
       .get('/api/v2/production/breakdown')
       .query({ start: '2026-01-01', end: '2026-01-31', groupBy: 'group', shift: 'all' })
       .set('Cookie', cookie(c.body.user.id, 'admin'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('Machine Issues can log service against the machine it resolves', async () => {
@@ -258,7 +259,7 @@ describe('a granted module can reach the data its own screens need', () => {
       .post('/api/v2/machine/add-service-log')
       .set('Cookie', cookie(c.body.user.id, 'production'))
       .send({ machineId: String(new mongoose.Types.ObjectId()), type: 'Corrective', description: 'resolved' });
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
     // Prove the HANDLER ran (past both gates) rather than the router
     // 404ing on a path that doesn't exist: the handler answers a random
     // machineId with its own distinctive "Machine not found".
@@ -297,21 +298,21 @@ describe('worker self-service reads stay open regardless of the feature list', (
     const res = await request(app)
       .get(`/api/v2/payroll/slip/${empDoc._id}`)
       .set('Cookie', cookie(worker._id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('own leave history read is not feature-gated', async () => {
     const res = await request(app)
       .get(`/api/v2/leave/employee/${empDoc._id}`)
       .set('Cookie', cookie(worker._id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('own bonus record read is not feature-gated', async () => {
     const res = await request(app)
       .get(`/api/v2/bonus/employee/${empDoc._id}`)
       .set('Cookie', cookie(worker._id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('own attendance history read is not feature-gated', async () => {
@@ -319,7 +320,7 @@ describe('worker self-service reads stay open regardless of the feature list', (
       .get(`/api/v2/attendance/employee/${empDoc._id}`)
       .query({ startDate: '2024-01-01', endDate: '2024-01-31' })
       .set('Cookie', cookie(worker._id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('but an admin-only read on the same router is still feature-gated for that worker', async () => {
@@ -361,7 +362,7 @@ describe('employee-app self-service reads survive a feature list without the mod
       .get('/api/v2/shift/employee-open-shifts')
       .query({ id: String(packerEmp._id) })
       .set('Cookie', cookie(packer._id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('own closed shifts are readable', async () => {
@@ -369,7 +370,7 @@ describe('employee-app self-service reads survive a feature list without the mod
       .get('/api/v2/shift/employee-closed-shifts')
       .query({ id: String(packerEmp._id) })
       .set('Cookie', cookie(packer._id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('own wastage is readable', async () => {
@@ -377,7 +378,7 @@ describe('employee-app self-service reads survive a feature list without the mod
       .get('/api/v2/wastage/get-by-employee')
       .query({ id: String(packerEmp._id) })
       .set('Cookie', cookie(packer._id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   // The exemption is scoped by identity, so it can't be used as a way
@@ -497,7 +498,7 @@ describe('elastic reads are feature-gated across their three consuming screens',
     const res = await request(app)
       .get('/api/v2/elastic/get-elastics')
       .set('Cookie', cookie(c.body.user.id, 'accounts'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   // The Order form picks elastics off this endpoint, so /orders alone
@@ -510,7 +511,7 @@ describe('elastic reads are feature-gated across their three consuming screens',
     const res = await request(app)
       .get('/api/v2/elastic/get-elastics')
       .set('Cookie', cookie(c.body.user.id, 'accounts'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 
   test('writing still needs /elastics — a broader read key does not grant it', async () => {
@@ -562,7 +563,7 @@ describe('admin-only modules are feature-gated, not just role-gated', () => {
     });
     for (const path of ['/api/v2/io/export', '/api/v2/user/manage/list', '/api/v2/notify/settings']) {
       const res = await request(app).get(path).set('Cookie', cookie(ok.body.user.id, 'admin'));
-      expect(res.status).not.toBe(403);
+      expectGatePassed(res);
     }
   });
 
@@ -571,7 +572,7 @@ describe('admin-only modules are feature-gated, not just role-gated', () => {
     // also serves unauthenticated login/OTP endpoints — a 401/400 here is
     // fine, a 403 would mean the gate leaked onto public routes.
     const res = await request(app).post('/api/v2/user/login-user').send({});
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 });
 
@@ -592,6 +593,6 @@ describe('always-on modules stay reachable for a narrowed feature list', () => {
     const res = await request(app)
       .get('/api/v2/machine-issue')
       .set('Cookie', cookie(c.body.user.id, 'production'));
-    expect(res.status).not.toBe(403);
+    expectGatePassed(res);
   });
 });
