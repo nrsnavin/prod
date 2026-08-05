@@ -34,15 +34,19 @@ router.post("/sign-up",
   // Users page and the feature gates rely on. Role is derived and the
   // feature list sanitized here exactly as /manage/create does.
   const department = req.body.department || null;
+  // Intersect with what the department can reach, the same way
+  // /manage/create does — otherwise this path can store keys the role
+  // gate will always refuse, which reads as access the user doesn't have.
+  const signupScope = new Set(featuresForDepartment(department));
   const user = await User.create({
     name:       req.body.name,
     email:      req.body.email,
     password:   req.body.password,
     department,
     role:       roleForDepartment(department) || req.body.role,
-    features:   sanitizeFeatures(
-      Array.isArray(req.body.features) ? req.body.features : featuresForDepartment(department)
-    ),
+    features:   Array.isArray(req.body.features)
+      ? sanitizeFeatures(req.body.features).filter((k) => signupScope.has(k))
+      : featuresForDepartment(department),
     ...(req.body.employee ? { employee: req.body.employee } : {}),
   });
   try {
@@ -626,9 +630,23 @@ router.post(
     // reach — intersect so a feature the role gate would block can never
     // be stored (keeps the per-user set and the role gate consistent).
     const scope = new Set(featuresForDepartment(department));
-    const features = Array.isArray(req.body.features)
-      ? sanitizeFeatures(req.body.features).filter((k) => scope.has(k))
-      : featuresForDepartment(department);
+    let features;
+    if (Array.isArray(req.body.features)) {
+      const requested = sanitizeFeatures(req.body.features);
+      features = requested.filter((k) => scope.has(k));
+      // An explicit [] means "grant nothing" and is honoured. But a
+      // non-empty request that scopes down to nothing means the caller
+      // sent another department's keys — since [] now means "granted
+      // nothing" rather than "defer to the role gate", silently storing
+      // it would create an account locked out of everything at birth.
+      if (requested.length > 0 && features.length === 0) {
+        return next(new ErrorHandler(
+          `None of the selected features are available to the ${department} department`, 400
+        ));
+      }
+    } else {
+      features = featuresForDepartment(department);
+    }
 
     const user = await User.create({
       name, email, password, department, role: roleForDepartment(department), features,
@@ -671,7 +689,19 @@ router.put(
     if (Array.isArray(req.body.features)) {
       // Scope to the user's (possibly just-changed) department/role.
       const scope = new Set(featuresForDepartment(user.department || user.role));
-      user.features = sanitizeFeatures(req.body.features).filter((k) => scope.has(k));
+      const requested = sanitizeFeatures(req.body.features);
+      const scoped = requested.filter((k) => scope.has(k));
+      // Sending a non-empty list that scopes down to nothing means the
+      // caller changed the department without re-picking features. That
+      // is a mismatch, not a revocation — and since [] now means "granted
+      // nothing", storing it would silently lock the account out of every
+      // module. An explicit [] still means exactly that, deliberately.
+      if (requested.length > 0 && scoped.length === 0) {
+        return next(new ErrorHandler(
+          `None of the selected features are available to the ${user.department || user.role} department`, 400
+        ));
+      }
+      user.features = scoped;
     }
 
     await user.save();

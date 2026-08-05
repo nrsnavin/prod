@@ -113,6 +113,71 @@ describe('sign-up cannot set privileged fields directly', () => {
   });
 });
 
+// Now that [] means "granted nothing" rather than "defer to the role
+// gate", a request whose features all fall outside the department's scope
+// must NOT be quietly stored as [] — that would lock the account out of
+// every module. The likely trigger is changing the department without
+// re-picking features (both shipped clients re-seed, but the API is
+// callable directly).
+describe('an out-of-scope feature list is a mismatch, not a revocation', () => {
+  test('create rejects a list that scopes down to nothing', async () => {
+    const res = await createUser({
+      name: 'Mismatch', email: 'mismatch@t.co', password: 'pass1234',
+      department: 'finance',
+      features: ['/warping', '/covering'], // production keys, not finance
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/none of the selected features/i);
+    expect(await User.findOne({ email: 'mismatch@t.co' })).toBeNull();
+  });
+
+  test('update rejects a list that scopes down to nothing', async () => {
+    const created = await createUser({
+      name: 'DeptSwap', email: 'deptswap@t.co', password: 'pass1234',
+      department: 'production', features: ['/warping'],
+    });
+    const id = created.body.user.id;
+
+    // Move them to finance while still sending the production keys.
+    const put = await request(app)
+      .put(`/api/v2/user/manage/${id}`)
+      .set('Cookie', adminCookie())
+      .send({ department: 'finance', features: ['/warping'] });
+
+    expect(put.status).toBe(400);
+    // And the stored list is untouched — not silently emptied.
+    const doc = await User.findById(id).lean();
+    expect(doc.features).toEqual(['/warping']);
+  });
+
+  test('but an explicit empty list is still honoured as "grant nothing"', async () => {
+    const created = await createUser({
+      name: 'DeliberateNone', email: 'deliberatenone@t.co', password: 'pass1234',
+      department: 'production', features: ['/warping'],
+    });
+    const put = await request(app)
+      .put(`/api/v2/user/manage/${created.body.user.id}`)
+      .set('Cookie', adminCookie())
+      .send({ features: [] });
+
+    expect(put.status).toBe(200);
+    const doc = await User.findById(created.body.user.id).lean();
+    // Persisted as a real empty array — if it came back undefined it would
+    // read as "never configured" and grant everything the role allows.
+    expect(Array.isArray(doc.features)).toBe(true);
+    expect(doc.features).toEqual([]);
+  });
+
+  test('a partially out-of-scope list keeps the in-scope keys', async () => {
+    const res = await createUser({
+      name: 'Partial', email: 'partial@t.co', password: 'pass1234',
+      department: 'production', features: ['/warping', '/orders'], // /orders is finance
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.user.features).toEqual(['/warping']);
+  });
+});
+
 describe('admin edits features', () => {
   test('PUT replaces the feature list and the change persists', async () => {
     const created = await createUser({
