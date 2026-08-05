@@ -113,6 +113,29 @@ describe('/user/me effective features', () => {
     expect(me.status).toBe(200);
     expect(me.body.user.features.sort()).toEqual(featuresForDepartment('packing').sort());
   });
+
+  // The profile page's "member since" reads this — without it, the only
+  // way to answer "when was this account created?" is a database query.
+  test('carries the account creation date, for the profile page', async () => {
+    const created = await createUser({
+      name: 'DateCheck', email: 'datecheck@t.co', password: 'pass1234', department: 'finance',
+    });
+    const me = await request(app).get('/api/v2/user/me')
+      .set('Cookie', cookie(created.body.user.id, 'finance'));
+    expect(me.status).toBe(200);
+    expect(me.body.user.createdAt).toBeTruthy();
+    expect(new Date(me.body.user.createdAt).getTime()).not.toBeNaN();
+  });
+
+  test('carries email, department and the linked employee record', async () => {
+    const me = await request(app).get('/api/v2/user/me').set('Cookie', adminCookie());
+    expect(me.status).toBe(200);
+    expect(me.body.user.email).toBe('owner@t.co');
+    expect(me.body.user.department).toBe('admin');
+    // This admin fixture has no linked Employee — must read as null, not
+    // undefined or a throw, so the page can render "not linked" cleanly.
+    expect(me.body.user.employee).toBeNull();
+  });
 });
 
 describe('feature config drives API enforcement (writes only)', () => {

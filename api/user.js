@@ -373,6 +373,8 @@ router.get(
         role:       user.role,
         department: user.department || null,
         employee:   user.employee || null,
+        // When this login was created — the profile page's "member since".
+        createdAt:  user.createdAt,
         // Effective per-user feature set (falls back to the department
         // default for legacy users with none stored) so the client can
         // refresh access on load without re-login. NOTE: this is the one
