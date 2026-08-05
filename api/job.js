@@ -6,7 +6,7 @@ const mongoose = require('mongoose');
 
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const ErrorHandler     = require('../utils/ErrorHandler');
-const { isAuthenticated } = require('../middleware/auth');
+const { isAuthenticated, isAdmin } = require('../middleware/auth');
 
 const JobOrder    = require('../models/JobOrder');
 const Order       = require('../models/Order');
@@ -51,6 +51,7 @@ const {
 // cancelling a job on a CANCELLED order set it back to Approved.
 const { applyOrderStatus } = require('../domain/orderStatus');
 const { isProductionLocked } = require('../utils/productionLock');
+const { outsourcingBlockers, outsourcingDerived } = require('../utils/outsourcingRecord');
 
 function fullJobPopulate(query) {
   return query
@@ -543,6 +544,25 @@ router.post(
         );
         err.code = 'WEAVING_NOT_READY';
         err.details = { status: job.status, stages: readiness.stages, blockers: readiness.blockers };
+        return next(err);
+      }
+    }
+
+    // An outsourced job has no shift trail, so its vendor record IS the
+    // production record — and `finishing` is where production and the
+    // outsource toggle both close (utils/productionLock.js). A record
+    // left blank at this moment stays blank for good, so the move is
+    // refused until it reconciles. Same shape as the weaving gate above:
+    // the job keeps its status and the caller is told what is missing.
+    if (nextStatus === 'finishing' && job.productionMode === 'outsource') {
+      const blockers = outsourcingBlockers(job.outsourcing);
+      if (blockers.length > 0) {
+        const err = new ErrorHandler(
+          `Job cannot move to finishing yet — complete the vendor record: ${blockers.join('; ')}`,
+          409
+        );
+        err.code = 'OUTSOURCING_INCOMPLETE';
+        err.details = { status: job.status, vendor: job.outsourceVendor || '', blockers };
         return next(err);
       }
     }
@@ -1154,6 +1174,15 @@ router.get('/:jobId', async (req, res) => {
         // shift list rather than an "unrecorded" empty state.
         productionMode:  job.productionMode || 'in_house',
         outsourceVendor: job.outsourceVendor || '',
+        // The vendor record, with the figures the planner reads rather
+        // than types, and what still blocks the move to finishing.
+        outsourcing: job.productionMode === 'outsource'
+          ? {
+              ...(job.outsourcing?.toObject?.() ?? job.outsourcing ?? {}),
+              derived:  outsourcingDerived(job.outsourcing),
+              blockers: outsourcingBlockers(job.outsourcing),
+            }
+          : null,
         // ── Per-stage audit pointers ──
         createdBy:   fpUser(job.createdBy),
         createdAt:   job.createdAt || null,
@@ -1257,6 +1286,81 @@ async function _buildMrpData(jobId) {
     materials,
   };
 }
+
+// ════════════════════════════════════════════════════════════════
+//  PUT /:jobId/outsourcing — save the vendor job-work record.
+//
+//  Saved progressively: the consignment goes out, then comes back, and
+//  the planner fills what they know as they know it. Completeness is not
+//  required here — it is enforced at the finishing gate, so a half-filled
+//  record can still be parked. Editing stays open after `finishing` on
+//  purpose: spotting a typo in the efficiency you just entered should not
+//  need a status rollback, and every write is fingerprinted.
+// ════════════════════════════════════════════════════════════════
+router.put('/:jobId/outsourcing', isAdmin('admin', 'production', 'accounts'), async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    if (!/^[a-f\d]{24}$/i.test(jobId))
+      return res.status(400).json({ success: false, message: 'Invalid job ID.' });
+
+    const job = await JobOrder.findById(jobId);
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
+    if (job.productionMode !== 'outsource') {
+      return res.status(409).json({
+        success: false,
+        message: 'This job is produced in-house — set it to outsourced before recording vendor work.',
+      });
+    }
+
+    const b = req.body || {};
+    const num = (v) => (v === '' || v === null || v === undefined ? null : Number(v));
+    const date = (v) => (v ? new Date(v) : null);
+
+    const next = {
+      qtySentMeters:      num(b.qtySentMeters),
+      qtyReceivedMeters:  num(b.qtyReceivedMeters),
+      efficiencyPct:      num(b.efficiencyPct),
+      actualReturnDate:   date(b.actualReturnDate),
+      notes:              typeof b.notes === 'string' ? b.notes.trim() : '',
+      dispatchDate:       date(b.dispatchDate),
+      expectedReturnDate: date(b.expectedReturnDate),
+      rejectedMeters:     num(b.rejectedMeters),
+      ratePerMeter:       num(b.ratePerMeter),
+      outwardChallanNo:   typeof b.outwardChallanNo === 'string' ? b.outwardChallanNo.trim() : '',
+      inwardChallanNo:    typeof b.inwardChallanNo === 'string' ? b.inwardChallanNo.trim() : '',
+      recordedBy:         req.user?._id || null,
+      recordedAt:         new Date(),
+    };
+    for (const [k, v] of Object.entries(next)) {
+      if (Number.isNaN(v)) {
+        return res.status(400).json({ success: false, message: `${k} must be a number.` });
+      }
+    }
+
+    job.outsourcing = { ...(job.outsourcing?.toObject?.() ?? job.outsourcing ?? {}), ...next };
+    job.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
+      entityId: job._id,
+      actor: actorFromRequest(req),
+      meta: {
+        vendorRecordSaved: true,
+        vendor:            job.outsourceVendor || '',
+        efficiencyPct:     next.efficiencyPct,
+        qtySentMeters:     next.qtySentMeters,
+        qtyReceivedMeters: next.qtyReceivedMeters,
+      },
+    }));
+    await job.save();
+
+    const rec = job.outsourcing?.toObject?.() ?? job.outsourcing;
+    return res.json({ success: true, data: {
+      ...rec,
+      derived:  outsourcingDerived(rec),
+      blockers: outsourcingBlockers(rec),
+    }});
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
 
 router.patch('/:jobId/production-mode', async (req, res) => {
   try {

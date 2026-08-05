@@ -56,6 +56,40 @@ const JobOrderSchema = new mongoose.Schema(
     // productionMode === "outsource".
     outsourceVendor: { type: String, default: "" },
 
+    // ── Outsourced job-work record ────────────────────────────────
+    // An outsourced job produces no shifts here, so this IS its
+    // production record: what went to the vendor, what came back, the
+    // yield, and when. The job cannot move to `finishing` until the
+    // reconciliation fields are filled — see utils/outsourcingRecord.js,
+    // which owns that rule for both the gate and the UI.
+    //
+    // Nothing here is `required` at the schema level: the record is
+    // filled in progressively as the consignment goes out and comes
+    // back, and completeness is enforced at the finishing gate instead.
+    outsourcing: {
+      // The reconciliation set — required to reach `finishing`.
+      qtySentMeters:     { type: Number, default: null },
+      qtyReceivedMeters: { type: Number, default: null },
+      // Entered by the planner, not derived: the vendor's own figure is
+      // what gets agreed and paid against. The derived yield is shown
+      // beside it so a disagreement is visible rather than silent.
+      efficiencyPct:     { type: Number, default: null },
+      actualReturnDate:  { type: Date,   default: null },
+      notes:             { type: String, default: "" },
+
+      // Optional planning / costing / compliance detail.
+      dispatchDate:       { type: Date,   default: null },
+      expectedReturnDate: { type: Date,   default: null },
+      rejectedMeters:     { type: Number, default: null },
+      ratePerMeter:       { type: Number, default: null },
+      outwardChallanNo:   { type: String, default: "" },
+      inwardChallanNo:    { type: String, default: "" },
+
+      // Who last wrote the record, for the audit trail.
+      recordedBy: { type: mongoose.Types.ObjectId, ref: "User", default: null },
+      recordedAt: { type: Date, default: null },
+    },
+
     elastics:        { type: [ElasticQtySchema], default: [] },
     producedElastic: { type: [ElasticQtySchema], default: [] },
     packedElastic:   { type: [ElasticQtySchema], default: [] },
