@@ -152,3 +152,35 @@ describe('an in-house job is not flagged', () => {
     expect(row.outsourceVendor).toBe('');
   });
 });
+
+// The job DETAIL page's "Shifts on this job" card swaps the shift table
+// for a vendor panel when the job is outsourced, so the detail endpoint
+// has to carry the mode — it is a different projection from the three
+// Shifts endpoints above and was missing it.
+describe('the job detail endpoint carries the production mode', () => {
+  test('an outsourced job reports its mode and vendor', async () => {
+    const job = await JobOrder.create({
+      status: 'weaving', ...refs,
+      productionMode: 'outsource', outsourceVendor: 'Sunrise Weaving',
+    });
+    const res = await request(app)
+      .get(`/api/v2/job/${job._id}`)
+      .set('Cookie', cookie(admin._id, 'admin'));
+
+    expect(res.status).toBe(200);
+    const body = res.body.data ?? res.body.job ?? res.body;
+    expect(body.productionMode).toBe('outsource');
+    expect(body.outsourceVendor).toBe('Sunrise Weaving');
+  });
+
+  test('an in-house job reports in_house, so the card keeps its shifts', async () => {
+    const job = await JobOrder.create({ status: 'weaving', ...refs });
+    const res = await request(app)
+      .get(`/api/v2/job/${job._id}`)
+      .set('Cookie', cookie(admin._id, 'admin'));
+
+    expect(res.status).toBe(200);
+    const body = res.body.data ?? res.body.job ?? res.body;
+    expect(body.productionMode).toBe('in_house');
+  });
+});

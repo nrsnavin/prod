@@ -1149,6 +1149,11 @@ router.get('/:jobId', async (req, res) => {
         packedElastics: mapElasticQty(job.packedElastic),
         wastageElastics: mapElasticQty(job.wastageElastic),
         warping, covering, shiftDetails, shiftSummary, wastages, packingDetails,
+        // An outsourced job is made by a vendor, so it has no shifts of its
+        // own — the detail page shows the vendor in place of the (empty)
+        // shift list rather than an "unrecorded" empty state.
+        productionMode:  job.productionMode || 'in_house',
+        outsourceVendor: job.outsourceVendor || '',
         // ── Per-stage audit pointers ──
         createdBy:   fpUser(job.createdBy),
         createdAt:   job.createdAt || null,
