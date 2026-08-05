@@ -460,6 +460,15 @@ app.use("/api/v2/production",  gate('production'),
 // Management reports span operations and finance — either (or an admin)
 // may pull them; each report is read-only.
 app.use("/api/v2/reports",     gate('production', 'accounts'), requireFeature('/reports'), requireFeatureRead('/reports'), require("./api/reports.js"));
+
+// Order P&L — what each order earned against what it cost. Its own
+// feature (/order-pnl) rather than riding on /orders: opening an order
+// and seeing the margin on it are different permissions, and plenty of
+// people need the first without the second.
+app.use("/api/v2/pnl",         gate('accounts'),
+  requireFeature('/order-pnl'),
+  requireFeatureRead('/order-pnl'),
+  require("./api/pnl.js"));
 // QC is a leaf, but the Jobs screen reads QC results, so /jobs passes too.
 app.use("/api/v2/qc",          gate('production'), requireFeature('/qc', '/jobs'), requireFeatureRead('/qc', '/jobs'), require("./api/qc.js"));
 app.use("/api/v2/payroll",     gate('accounts', 'production'), payroll);

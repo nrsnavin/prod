@@ -11,6 +11,29 @@ const ElasticQtySchema = new mongoose.Schema(
   { _id: false }
 );
 
+// What the customer ordered, and what they agreed to pay for it.
+//
+// The sale price existed nowhere on the order — the only rate in the
+// system sat on a delivery challan line, which is cut at dispatch. So
+// an order had no revenue figure until goods shipped, while its cost
+// had been accumulating since approval. The order P&L reads the rate
+// from here, and shows the invoiced DC value beside it.
+//
+// Only `elasticOrdered` uses this shape; produced / packed / pending
+// stay plain quantities, because a rate on them would be a second
+// place for the same number to live.
+const OrderedElasticSchema = new mongoose.Schema(
+  {
+    elastic:  { type: mongoose.Types.ObjectId, ref: "Elastic", required: true },
+    quantity: { type: Number, required: true, default: 0, min: 0 },
+    // ₹ per unit (the elastic's own unit — meters for elastic).
+    // 0 means "not priced yet", and the P&L says so out loud rather
+    // than reporting the order as a total loss.
+    rate: { type: Number, default: 0, min: 0 },
+  },
+  { _id: false }
+);
+
 // ── Reservation sub-schema ─────────────────────────────────
 // Tracks how much of each elastic this order still has *reserved*
 // against Elastic.reservedStock. Approval seeds it from
@@ -67,7 +90,7 @@ const OrderSchema = new mongoose.Schema(
     supplyDate:  { type: Date, required: true },
     description: { type: String, default: "" },
 
-    elasticOrdered:      { type: [ElasticQtySchema], default: [] },
+    elasticOrdered:      { type: [OrderedElasticSchema], default: [] },
     producedElastic:     { type: [ElasticQtySchema], default: [] },
     packedElastic:       { type: [ElasticQtySchema], default: [] },
     pendingElastic:      { type: [ElasticQtySchema], default: [] },

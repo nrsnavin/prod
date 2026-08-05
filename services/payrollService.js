@@ -14,9 +14,11 @@ const AdvanceRequest  = require('../models/Advance');
 const Wastage         = require('../models/Wastage');
 const ShiftDetail     = require('../models/ShiftDetail');
 
-const SHIFT_HOURS = { DAY: 12, NIGHT: 12 };
+// Shared with the order P&L, which charges a job's labour against the
+// same scheduled length payroll pays it at — see utils/shiftHours.js.
+const { shiftHours } = require('../utils/shiftHours');
+
 const r2 = (n) => Math.round(n * 100) / 100;
-const shiftHours = (s) => SHIFT_HOURS[s] ?? 12;
 const dayKey = (d, sh) => `${new Date(d).toISOString().slice(0, 10)}|${sh}`;
 
 // Resolve a shift's actual worked minutes for actual-hours pay. Priority:

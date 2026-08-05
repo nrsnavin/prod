@@ -90,6 +90,26 @@ const JobOrderSchema = new mongoose.Schema(
       recordedAt: { type: Date, default: null },
     },
 
+    // ── Actual conversion cost, when it differs from the rate card ──
+    // Finishing, checking and packing are costed from the ₹/meter rate
+    // card in CostSettings. A job that actually cost something else
+    // carries the real figure here, in RUPEES for the whole job, and it
+    // wins over the rate.
+    //
+    // null means "no override" — deliberately distinct from 0, which is
+    // a planner saying this job cost nothing to finish. Defaulting these
+    // to 0 would have made every job an override of zero and quietly
+    // zeroed the rate card for the entire factory.
+    costOverrides: {
+      finishing: { type: Number, default: null, min: 0 },
+      checking:  { type: Number, default: null, min: 0 },
+      packing:   { type: Number, default: null, min: 0 },
+      overhead:  { type: Number, default: null, min: 0 },
+      notes:     { type: String, default: "" },
+      recordedBy: { type: mongoose.Types.ObjectId, ref: "User", default: null },
+      recordedAt: { type: Date, default: null },
+    },
+
     elastics:        { type: [ElasticQtySchema], default: [] },
     producedElastic: { type: [ElasticQtySchema], default: [] },
     packedElastic:   { type: [ElasticQtySchema], default: [] },

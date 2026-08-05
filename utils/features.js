@@ -17,6 +17,10 @@ const FEATURES = [
   { key: "/",                    label: "Dashboard",           section: "Overview",       depts: "all" },
   { key: "/analytics",           label: "Analytics",           section: "Overview",       depts: ["admin", "production"] },
   { key: "/reports",             label: "Reports",             section: "Overview",       depts: ["admin", "finance"] },
+  // What each order earned against what it cost. Its own key rather
+  // than riding on /orders: plenty of people need to open an order
+  // without seeing the margin on it.
+  { key: "/order-pnl",           label: "Order P&L",           section: "Overview",       depts: ["admin", "finance"] },
   { key: "/audit",               label: "Audit Trail",         section: "Overview",       depts: ["admin"] },
 
   { key: "/orders",              label: "Orders",              section: "Sales",          depts: ["admin", "finance"] },
