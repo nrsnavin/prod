@@ -251,11 +251,33 @@ describe('a granted module can reach the data its own screens need', () => {
       name: 'IssuesOnly', email: 'issuesonly@t.co', password: 'pass1234',
       department: 'production', features: ['/machine-issues'],
     });
+    // The real route is FLAT — machineId travels in the body (see
+    // machines/api.ts addServiceLog). An earlier version of this test hit
+    // /:id/add-service-log, which doesn't exist, and passed on the 404.
     const res = await request(app)
-      .post(`/api/v2/machine/${new mongoose.Types.ObjectId()}/add-service-log`)
+      .post('/api/v2/machine/add-service-log')
       .set('Cookie', cookie(c.body.user.id, 'production'))
-      .send({ note: 'resolved' });
+      .send({ machineId: String(new mongoose.Types.ObjectId()), type: 'Corrective', description: 'resolved' });
     expect(res.status).not.toBe(403);
+    // Prove the HANDLER ran (past both gates) rather than the router
+    // 404ing on a path that doesn't exist: the handler answers a random
+    // machineId with its own distinctive "Machine not found".
+    expect(res.body.message).toMatch(/machine not found/i);
+  });
+
+  // The carve-out above must stay a carve-out: /machine-issues is
+  // always-on, so if it ever lands in the router-wide write list, every
+  // configured user can create and delete machines.
+  test('but Machine Issues alone cannot make OTHER machine writes', async () => {
+    const c = await createUser({
+      name: 'IssuesOnly2', email: 'issuesonly2@t.co', password: 'pass1234',
+      department: 'production', features: ['/machine-issues'],
+    });
+    const res = await request(app)
+      .post('/api/v2/machine/create-machine')
+      .set('Cookie', cookie(c.body.user.id, 'production'))
+      .send({ ID: 'M-999' });
+    expect(res.status).toBe(403);
   });
 });
 

@@ -343,8 +343,16 @@ app.use("/api/v2/pdf-templates", gate('production', 'accounts'), pdfTemplates);
 // AND read from the Jobs screen, Machine Issues, and Analytics.
 app.use("/api/v2/machine",     gate('production'),
   // Machine Issues resolves an issue by logging service against the
-  // machine, so it must be able to WRITE here without holding /machines.
-  requireFeature('/machines', '/jobs', '/machine-issues'),
+  // machine, so THAT ONE WRITE accepts /machine-issues. It must not go
+  // in the router-wide list: /machine-issues is always-on, so every
+  // configured user holds it, and adding it there would silently remove
+  // the feature gate from every machine write (create/delete included).
+  (req, res, next) => {
+    const keys = (req.method === 'POST' && req.path === '/add-service-log')
+      ? ['/machines', '/jobs', '/machine-issues']
+      : ['/machines', '/jobs'];
+    return requireFeature(...keys)(req, res, next);
+  },
   requireFeatureReadPaths(['/machines'], {
     '/get-machines': ['/jobs', '/machine-issues', '/analytics'],
     '/free':         ['/jobs'],
