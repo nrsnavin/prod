@@ -6,7 +6,7 @@ const router = express.Router();
 const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const sendToken = require("../utils/jwtToken.js");
-const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 const { DEPARTMENTS, roleForDepartment, isDepartment } = require("../utils/roles");
 const { FEATURES, featuresForDepartment, sanitizeFeatures } = require("../utils/features");
@@ -569,6 +569,16 @@ function generateToken(user) {
 // NOTE: GET /user/me lives above (near the profile routes) and already
 // returns the effective feature set. A second /me here would be shadowed
 // by Express (first match wins), so it is intentionally not redefined.
+
+// The Users screen is a revocable feature (/users), so being admin-ROLE
+// is not enough to reach it — an admin-department account whose list
+// omits /users must not be able to read the roster (every account, its
+// department and its exact feature grants) or edit anyone. This can't be
+// gated at the mount in app.js: this router also hosts the public
+// login / OTP / forgot-password routes, so the gate is scoped to the
+// /manage prefix here instead. It must stay ABOVE the routes it guards —
+// Express runs middleware in declaration order.
+router.use("/manage", isAuthenticated, requireFeature('/users'), requireFeatureRead('/users'));
 
 // List all users (no password) for the admin Users screen.
 router.get(

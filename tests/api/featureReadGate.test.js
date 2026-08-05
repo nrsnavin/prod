@@ -257,6 +257,58 @@ describe('employee-app self-service reads survive a feature list without the mod
 // the Order form and the Elastic Group form (the latter two pull the
 // elastic list to pick from) — so all three keys grant the read and
 // nothing else does.
+// Structural guard. Four admin modules (/data-io, /users,
+// /notification-settings, /advisor) shipped with a role gate and no
+// feature gate, and nothing caught it because no test named them. This
+// asserts the catalog itself: every revocable feature must be referenced
+// by a real gate somewhere, so adding a feature without wiring its
+// router fails here rather than in production.
+describe('every revocable feature is actually enforced somewhere', () => {
+  test('no non-always-on feature key is missing a gate', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { FEATURES, ALWAYS_ON } = require('../../utils/features');
+
+    const root = path.join(__dirname, '..', '..');
+    const sources = [
+      path.join(root, 'app.js'),
+      ...fs.readdirSync(path.join(root, 'api'))
+        .filter((f) => f.endsWith('.js'))
+        .map((f) => path.join(root, 'api', f)),
+    ];
+
+    const gated = new Set();
+    for (const file of sources) {
+      const src = fs.readFileSync(file, 'utf8');
+      // Collect the keys inside every requireFeature/requireFeatureRead
+      // call, including the multi-line ones in app.js.
+      for (const m of src.matchAll(/requireFeatureRead?\s*\(([^)]*)\)/g)) {
+        const args = m[1];
+        for (const key of args.matchAll(/['"](\/[^'"]*)['"]/g)) gated.add(key[1]);
+
+        // Some routers spread a named constant — requireFeature(...KEYS).
+        // Resolve it from its declaration in the same file rather than
+        // loosening the scan to every quoted path in the file, which
+        // would let a mere mention in a comment pass as enforcement.
+        const spread = args.match(/\.\.\.\s*([A-Za-z_$][\w$]*)/);
+        if (spread) {
+          const decl = src.match(
+            new RegExp(`${spread[1]}\\s*=\\s*\\[([^\\]]*)\\]`)
+          );
+          if (decl) {
+            for (const key of decl[1].matchAll(/['"](\/[^'"]*)['"]/g)) gated.add(key[1]);
+          }
+        }
+      }
+    }
+
+    const revocable = FEATURES.map((f) => f.key).filter((k) => !ALWAYS_ON.includes(k));
+    const ungated = revocable.filter((k) => !gated.has(k));
+
+    expect({ ungated }).toEqual({ ungated: [] });
+  });
+});
+
 describe('elastic reads are feature-gated across their three consuming screens', () => {
   test('blocked without /elastics, /orders or /elastic-groups', async () => {
     const c = await createUser({
@@ -315,6 +367,55 @@ describe('elastic reads are feature-gated across their three consuming screens',
       .set('Cookie', cookie(c.body.user.id, 'accounts'))
       .send({});
     expect(res.status).toBe(403);
+  });
+});
+
+// The admin-only modules were role-gated but never feature-gated, so an
+// admin-DEPARTMENT account whose list had been narrowed on the Users page
+// still reached them: the nav item was hidden and the API answered anyway.
+// /io/export is the worst of these — it dumps the whole database.
+describe('admin-only modules are feature-gated, not just role-gated', () => {
+  let narrowedAdmin;
+
+  beforeAll(async () => {
+    const created = await createUser({
+      name: 'NarrowAdmin', email: 'narrowadmin@t.co', password: 'pass1234',
+      department: 'admin',
+      features: ['/orders'], // admin ROLE, but none of the admin modules below
+    });
+    narrowedAdmin = created.body.user.id;
+  });
+
+  const denied = [
+    ['full database export', '/api/v2/io/export'],
+    ['import template',      '/api/v2/io/template'],
+    ['notification settings','/api/v2/notify/settings'],
+    ['notification log',     '/api/v2/notify/log'],
+    ['the user roster',      '/api/v2/user/manage/list'],
+  ];
+
+  test.each(denied)('cannot read %s', async (_label, path) => {
+    const res = await request(app).get(path).set('Cookie', cookie(narrowedAdmin, 'admin'));
+    expect(res.status).toBe(403);
+  });
+
+  test('granting the feature restores access', async () => {
+    const ok = await createUser({
+      name: 'WideAdmin', email: 'wideadmin@t.co', password: 'pass1234',
+      department: 'admin', features: ['/data-io', '/users', '/notification-settings'],
+    });
+    for (const path of ['/api/v2/io/export', '/api/v2/user/manage/list', '/api/v2/notify/settings']) {
+      const res = await request(app).get(path).set('Cookie', cookie(ok.body.user.id, 'admin'));
+      expect(res.status).not.toBe(403);
+    }
+  });
+
+  test('the public login routes on the user router are NOT caught by the /manage gate', async () => {
+    // The /users gate is scoped to the /manage prefix because this router
+    // also serves unauthenticated login/OTP endpoints — a 401/400 here is
+    // fine, a 403 would mean the gate leaked onto public routes.
+    const res = await request(app).post('/api/v2/user/login-user').send({});
+    expect(res.status).not.toBe(403);
   });
 });
 

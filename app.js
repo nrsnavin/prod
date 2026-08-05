@@ -437,10 +437,19 @@ app.use("/api/v2/machine-issue", gate('production', 'accounts'), machineIssue);
 app.use("/api/v2/announcement", gate('production', 'accounts'), announcement);
 app.use("/api/v2/feedback",    gate('production', 'accounts'), feedback);
 app.use("/api/v2/dashboard",   gate('production', 'accounts'), dashboard);
-// AI Advisor aggregates across every router, which only admin can
-// reach, so it stays admin-only (see note re: feature catalog).
-app.use("/api/v2/advisor",     gate(), advisor);
-app.use("/api/v2/io",          gate(), io);
+// AI Advisor aggregates across every router. Being admin-ROLE is not
+// enough: /advisor is a revocable feature, so an admin-department
+// account whose list omits it must not reach the aggregate either.
+app.use("/api/v2/advisor",     gate(),
+  requireFeature('/advisor'),
+  requireFeatureRead('/advisor'),
+  advisor);
+// /io/export dumps the entire database and /io/import writes it back —
+// the single most sensitive surface here, and it was role-gated only.
+app.use("/api/v2/io",          gate(),
+  requireFeature('/data-io'),
+  requireFeatureRead('/data-io'),
+  io);
 app.use("/api/v2/audit",       ADMIN_GATE, requireFeature('/audit'), requireFeatureRead('/audit'), audit);
 
 // Cron-triggerable morning digest — authenticated by a shared secret
@@ -503,7 +512,12 @@ app.post("/api/v2/notify/incoming", webhookLimiter, async (req, res) => {
   }
 });
 
-app.use("/api/v2/notify",      ADMIN_GATE, notify);
+// Notification settings, delivery log and stats — a revocable feature
+// (/notification-settings), so the role gate alone is not sufficient.
+app.use("/api/v2/notify",      ADMIN_GATE,
+  requireFeature('/notification-settings'),
+  requireFeatureRead('/notification-settings'),
+  notify);
 
 // ── Customer portal API (v3) ────────────────────────────────────
 // Mounted unauthenticated at the router level — the portal auth
