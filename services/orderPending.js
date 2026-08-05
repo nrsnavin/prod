@@ -50,12 +50,17 @@ async function recomputePending(order, session) {
     }
   }
 
-  order.pendingElastic = (order.elasticOrdered || []).map((o) => ({
-    elastic: o.elastic,
-    // Never negative: over-planning an order is a data problem, not a
-    // reason to show a negative outstanding quantity.
-    quantity: Math.max(0, (o.quantity || 0) - (planned[o.elastic.toString()] || 0)),
-  }));
+  // Guard o.elastic like the jobs loop above guards e.elastic: the
+  // app-wide blank-ref normaliser can leave a null ref on a malformed
+  // row, and one such row would crash every recompute on this order.
+  order.pendingElastic = (order.elasticOrdered || [])
+    .filter((o) => o?.elastic)
+    .map((o) => ({
+      elastic: o.elastic,
+      // Never negative: over-planning an order is a data problem, not a
+      // reason to show a negative outstanding quantity.
+      quantity: Math.max(0, (o.quantity || 0) - (planned[o.elastic.toString()] || 0)),
+    }));
 
   return order.pendingElastic;
 }
