@@ -98,7 +98,7 @@ router.post(
           id: user._id,
           role: user.role,
           department: user.department || null,
-          features: (user.features && user.features.length)
+          features: Array.isArray(user.features)
             ? user.features
             : featuresForDepartment(user.department || user.role),
           token: token,
@@ -396,7 +396,7 @@ router.get(
         // default for legacy users with none stored) so the client can
         // refresh access on load without re-login. NOTE: this is the one
         // live GET /me — do not add a second, it would be shadowed.
-        features:   (user.features && user.features.length)
+        features:   Array.isArray(user.features)
           ? user.features
           : featuresForDepartment(user.department || user.role),
       },
@@ -593,7 +593,7 @@ router.get(
     // so the admin screen shows what they can actually access.
     const withFeatures = users.map((u) => ({
       ...u,
-      features: (u.features && u.features.length)
+      features: Array.isArray(u.features)
         ? u.features
         : featuresForDepartment(u.department || u.role),
     }));

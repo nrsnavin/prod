@@ -68,7 +68,7 @@ describe('leaf-feature reads are blocked without the feature', () => {
     expect(res.status).not.toBe(403);
   });
 
-  test('an empty feature list defers to the role gate (read not blocked)', async () => {
+  test('an explicitly empty feature list blocks reads too', async () => {
     const c = await createUser({
       name: 'EmptyReader', email: 'emptyreader@t.co', password: 'pass1234',
       department: 'production', features: [],
@@ -76,6 +76,21 @@ describe('leaf-feature reads are blocked without the feature', () => {
     const res = await request(app)
       .get('/api/v2/wastage/jobs-for-wastage')
       .set('Cookie', cookie(c.body.user.id, 'production'));
+    expect(res.status).toBe(403);
+  });
+
+  // ...but an account that never had a list configured (legacy logins,
+  // the create-admin owner, the WhatsApp bot) still defers to the role
+  // gate, which is what keeps this change from locking anyone out.
+  test('an account with no feature list at all still reads', async () => {
+    const legacy = await User.create({
+      name: 'LegacyReader', email: 'legacyreader@t.co', password: 'pass1234',
+      role: 'production', department: 'production',
+    });
+    expect(legacy.features).toBeUndefined();
+    const res = await request(app)
+      .get('/api/v2/wastage/jobs-for-wastage')
+      .set('Cookie', cookie(legacy._id, 'production'));
     expect(res.status).not.toBe(403);
   });
 });

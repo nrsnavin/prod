@@ -141,12 +141,14 @@ const TOOL_FEATURES = {
   get_machine_status:       ['/machines'],
 };
 
-// Same allow rule as requireFeature: an account with no explicit feature
-// list (owner / legacy) defers to the role gate and keeps every tool.
+// Same allow rule as requireFeature, and it has to stay the same or
+// Jarvis becomes the way around it: an account with NO list at all
+// (owner / legacy) defers to the role gate and keeps every tool, while an
+// explicitly EMPTY list is a deliberate "nothing" and gets none.
 function allowedToolNames(user) {
-  const explicit = Array.isArray(user?.features) ? user.features : [];
   const all = Object.keys(TOOL_FEATURES);
-  if (explicit.length === 0) return all;
+  if (!Array.isArray(user?.features)) return all;
+  const explicit = user.features;
   return all.filter((t) => TOOL_FEATURES[t].some((k) => explicit.includes(k)));
 }
 

@@ -209,17 +209,57 @@ describe('feature config drives API enforcement (writes only)', () => {
     expect(res.status).toBe(403);
   });
 
-  test('an empty feature list defers to the role gate (write not blocked)', async () => {
+  // An EMPTY list is a decision — the admin ticked nothing — and is
+  // denied. An ABSENT list is an account that predates the feature system
+  // (the create-admin owner, the WhatsApp bot, legacy logins) and defers
+  // to the role gate. The two used to be the same value, so the guards
+  // could only honour the permissive reading.
+  test('an explicitly empty feature list grants nothing (write blocked)', async () => {
     const c = await createUser({
       name: 'Empty', email: 'empty@t.co', password: 'pass1234',
       department: 'production', features: [],
     });
     expect(c.body.user.features).toEqual([]);
+    // Stored as a real empty array, not dropped back to undefined —
+    // otherwise it would read as "never configured" and grant everything.
+    const doc = await User.findById(c.body.user.id).lean();
+    expect(Array.isArray(doc.features)).toBe(true);
+    expect(doc.features).toEqual([]);
+
     const res = await request(app)
       .post('/api/v2/wastage/anything')
       .set('Cookie', cookie(c.body.user.id, 'production'))
       .send({});
+    expect(res.status).toBe(403);
+  });
+
+  test('an account with NO feature list still defers to the role gate', async () => {
+    // Created straight through the model, the way scripts/create-admin.js
+    // and the WhatsApp bot do — no features key at all.
+    const legacy = await User.create({
+      name: 'NoList', email: 'nolist@t.co', password: 'pass1234',
+      role: 'production', department: 'production',
+    });
+    expect(legacy.features).toBeUndefined();
+
+    const res = await request(app)
+      .post('/api/v2/wastage/anything')
+      .set('Cookie', cookie(legacy._id, 'production'))
+      .send({});
     expect(res.status).not.toBe(403);
+  });
+
+  // The lockout this fix had to avoid: the owner login is created with no
+  // features, so it must keep reaching the Users screen.
+  test('the create-admin style owner keeps full access', async () => {
+    const owner = await User.create({
+      name: 'Owner2', email: 'owner2@t.co', password: 'pass1234',
+      role: 'admin', department: 'admin',
+    });
+    const res = await request(app)
+      .get('/api/v2/user/manage/list')
+      .set('Cookie', cookie(owner._id, 'admin'));
+    expect(res.status).toBe(200);
   });
 
   // The exact case reported: an ADMIN-role user whose custom features omit

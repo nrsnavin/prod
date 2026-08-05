@@ -40,12 +40,18 @@ const userSchema = new mongoose.Schema(
     },
     // Per-user custom feature access (keys mirror the web nav paths, e.g.
     // "/orders", "/wastage"). When set, this is the source of truth for
-    // what the user can SEE/open. Empty/unset → the app falls back to the
-    // department-derived default set (utils/features.js), so pre-existing
-    // users keep working. `admin` always has everything regardless.
+    // what the user can SEE/open.
+    //
+    // ABSENT and [] mean DIFFERENT things, and the guards rely on it:
+    //   • absent → never configured (legacy account, the create-admin
+    //     owner, the WhatsApp bot) → defer to the role gate;
+    //   • []     → configured to have nothing → denied everywhere.
+    // Hence `default: undefined` rather than `default: []` — a default of
+    // [] would stamp every new account as "explicitly nothing" and lock
+    // it out. See migrations/20260805000002-unset-empty-user-features.js.
     features: {
       type: [String],
-      default: [],
+      default: undefined,
     },
     // Optional link to the Employee document. Set on User creation
     // for any user that's also a workforce member, so the mobile

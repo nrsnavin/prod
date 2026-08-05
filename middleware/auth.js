@@ -53,14 +53,18 @@ exports.isAdmin = (...roles) => {
 // (own payslip/leave/attendance) can never be blocked by a feature gate.
 //
 // A write passes when ANY holds:
-//   • the user has NO explicit feature list — the owner / legacy accounts
-//     defer to the preceding role gate (an admin with no custom list
-//     keeps everything);
+//   • the account has NO feature list AT ALL (the field is absent) — a
+//     legacy account, the create-admin owner or the WhatsApp bot — which
+//     defers to the preceding role gate;
 //   • the user's explicit `features` list includes ANY of `keys`.
 // Otherwise the write is 403 — including for an admin whose custom list
 // omits the feature. `keys` accepts the owning feature plus any sibling
 // feature that legitimately writes through the same router (e.g. an
 // elastic group created from the Order form → also accept /orders).
+//
+// An EMPTY list is a decision, not an absence: an admin who ticked no
+// boxes gets nothing. Absent-vs-empty is the whole distinction — see
+// models/User.js and migrations/20260805000002-unset-empty-user-features.js.
 exports.requireFeature = (...keys) => {
     return (req, res, next) => {
         const m = req.method;
@@ -70,10 +74,10 @@ exports.requireFeature = (...keys) => {
             return next(new ErrorHandler("Please login to continue", 401));
         }
 
-        const explicit = Array.isArray(req.user.features) ? req.user.features : [];
-        // No explicit customization → defer to the preceding role gate.
-        if (explicit.length === 0) return next();
+        // Never configured → defer to the preceding role gate.
+        if (!Array.isArray(req.user.features)) return next();
 
+        const explicit = req.user.features;
         if (keys.some((k) => explicit.includes(k))) return next();
 
         return next(new ErrorHandler("You don't have access to this feature", 403));
@@ -87,9 +91,9 @@ exports.requireFeature = (...keys) => {
 // every record in it by calling the read routes directly, feature list or
 // not. This closes that gap, using the identical allow rule requireFeature
 // already applies to writes:
-//   • no explicit feature list → defer to the role gate (unaffected);
+//   • no feature list at all (field absent) → defer to the role gate;
 //   • explicit list includes ANY of `keys` → allowed;
-//   • otherwise → 403.
+//   • otherwise (including an explicitly EMPTY list) → 403.
 //
 // Mount this ONLY where every route on the router is either genuinely
 // module-owned data or is independently scoped by identity (selfOrAdmin) —
@@ -112,9 +116,11 @@ exports.requireFeatureRead = (...keys) => {
             return next(new ErrorHandler("Please login to continue", 401));
         }
 
-        const explicit = Array.isArray(req.user.features) ? req.user.features : [];
-        if (explicit.length === 0) return next();
+        // Never configured → defer to the role gate. An empty list is a
+        // deliberate "nothing", and falls through to the 403 below.
+        if (!Array.isArray(req.user.features)) return next();
 
+        const explicit = req.user.features;
         if (keys.some((k) => explicit.includes(k))) return next();
 
         return next(new ErrorHandler("You don't have access to this feature", 403));

@@ -34,10 +34,17 @@ describe('assistant tool scoping', () => {
     expect(allowedToolNames({ features: ['/jobs'] })).toEqual([]);
   });
 
-  test('an account with no explicit list keeps every tool (defers to the role gate)', () => {
-    expect(allowedToolNames({ features: [] }).sort())
-      .toEqual(Object.keys(TOOL_FEATURES).sort());
+  // Jarvis must read absent-vs-empty exactly as requireFeature does, or it
+  // becomes the way around it: an admin who granted nothing could still
+  // ask for the data in words.
+  test('an explicitly empty list exposes no tools', () => {
+    expect(allowedToolNames({ features: [] })).toEqual([]);
+  });
+
+  test('an account with NO list keeps every tool (defers to the role gate)', () => {
     expect(allowedToolNames({}).sort())
+      .toEqual(Object.keys(TOOL_FEATURES).sort());
+    expect(allowedToolNames({ features: undefined }).sort())
       .toEqual(Object.keys(TOOL_FEATURES).sort());
   });
 

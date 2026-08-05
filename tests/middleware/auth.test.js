@@ -118,9 +118,21 @@ describe("requireFeature (writes only, admins included)", () => {
     expect(passed(run({ role: "admin", features: ["/reports"] }, "POST", "/reports"))).toBe(true);
   });
 
-  it("defers when the user has no explicit features (owner / legacy)", () => {
-    expect(passed(run({ role: "admin", features: [] }, "POST", "/reports"))).toBe(true);
-    expect(passed(run({ role: "production" }, "PUT", "/reports"))).toBe(true); // absent list
+  it("defers when the account has NO feature list at all (owner / legacy)", () => {
+    // Absent means "never configured" — the create-admin owner, the
+    // WhatsApp bot, pre-feature-system logins — so the role gate decides.
+    expect(passed(run({ role: "production" }, "PUT", "/reports"))).toBe(true);
+    expect(passed(run({ role: "admin", features: undefined }, "POST", "/reports"))).toBe(true);
+  });
+
+  it("403s when the list is explicitly EMPTY (granted nothing)", () => {
+    // [] is a decision, not an absence: an admin who ticked no boxes gets
+    // nothing. These two used to be the same value, so the guard could
+    // only honour the permissive reading and an empty grant meant full
+    // role-level access.
+    const next = run({ role: "admin", features: [] }, "POST", "/reports");
+    expect(passed(next)).toBe(false);
+    expect(next.mock.calls[0][0].statusCode).toBe(403);
   });
 
   it("passes a write when the explicit list includes any required key", () => {
