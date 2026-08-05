@@ -150,7 +150,10 @@ router.get('/shift-detail/:shiftPlanId', async (req, res) => {
         populate:[
           { path:'machine',  model:'Machine',  select:'ID manufacturer NoOfHead NoOfHooks status' },
           { path:'employee', model:'Employee', select:'name department skill role performance' },
-          { path:'job',      model:'JobOrder', select:'jobOrderNo status' },
+          // productionMode/outsourceVendor feed the "Outsourced" marker on
+          // the production view — without them in the select they arrive
+          // undefined and the flag silently never shows.
+          { path:'job',      model:'JobOrder', select:'jobOrderNo status productionMode outsourceVendor' },
           { path:'elastics.elastic', model:'Elastic', select:'name weaveType spandexEnds pick noOfHook weight' },
         ],
       }).lean();
@@ -188,7 +191,13 @@ router.get('/shift-detail/:shiftPlanId', async (req, res) => {
           department:d.employee.department, skill:d.employee.skill,
           role:d.employee.role, performance:d.employee.performance,
         } : null,
-        job: d.job ? { id:d.job._id, jobNo:d.job.jobOrderNo, status:d.job.status } : null,
+        // productionMode rides along so the production view can flag a
+        // shift whose job is outsourced rather than made in-house.
+        job: d.job ? {
+          id: d.job._id, jobNo: d.job.jobOrderNo, status: d.job.status,
+          productionMode: d.job.productionMode || 'in_house',
+          outsourceVendor: d.job.outsourceVendor || '',
+        } : null,
         elastics: (d.elastics||[]).map(e=>({
           head:e.head,
           elastic: e.elastic ? {

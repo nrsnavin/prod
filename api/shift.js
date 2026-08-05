@@ -195,9 +195,18 @@ router.get(
         );
 
         let jobOrderNo = "";
+        // Carry the job's production mode onto the row so the shift plan
+        // can mark an outsourced job — the floor needs to see at a glance
+        // that a machine's job is being made by a vendor, not here.
+        let productionMode = "";
+        let outsourceVendor = "";
         if (machine?.orderRunning) {
           const job = await JobOrder.findById(machine.orderRunning);
-          if (job) jobOrderNo = job.jobOrderNo.toString();
+          if (job) {
+            jobOrderNo = job.jobOrderNo.toString();
+            productionMode = job.productionMode || "in_house";
+            outsourceVendor = job.outsourceVendor || "";
+          }
         }
 
         return {
@@ -205,6 +214,8 @@ router.get(
           machineName: detail.machine.ID ||
             `${detail.machine.manufacturer ?? ""} ${detail.machine.ID ?? ""}`.trim(),
           jobOrderNo,
+          productionMode,
+          outsourceVendor,
           operatorName: detail.employee?.name ?? "—",
           production:   detail.productionMeters || 0,
           timer:        detail.timer,
