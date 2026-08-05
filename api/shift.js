@@ -17,7 +17,7 @@ const JobOrder    = require("../models/JobOrder");
 const Attendance  = require("../models/Attendence.js");
 const { ACTION_CODES } = require("../utils/fingerprint");
 const { requireReason } = require("../utils/auditReason");
-const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 // Production cascade + anomaly detection live in their own service
 // (Phase 4 god-file split). The verify route calls applyProductionCascade;
 // it is re-exported on the router below for the characterization test.
@@ -38,6 +38,25 @@ const sheetUpload = multer({
 });
 
 router.use(isAuthenticated);
+
+// Per-user feature gate. The two employee self-service reads are exempt:
+// a worker listing their OWN shifts answers to their identity (selfOrAdmin
+// on those routes) rather than to whether the admin ticked a Shift Plans /
+// Verification / Production box. Without the carve-out a packing-department
+// worker — whose defaults carry none of those three keys — would be locked
+// out of their own shift history and the production-entry screen in the
+// employee app, which are the only callers of these two routes.
+const SHIFT_FEATURE_KEYS = ['/shift-plans', '/shift-verification', '/production'];
+const SELF_SHIFT_READS = new Set(['/employee-open-shifts', '/employee-closed-shifts']);
+router.use((req, res, next) => {
+  if ((req.method === 'GET' || req.method === 'HEAD') && SELF_SHIFT_READS.has(req.path)) {
+    return next();
+  }
+  requireFeature(...SHIFT_FEATURE_KEYS)(req, res, (err) => {
+    if (err) return next(err);
+    requireFeatureRead(...SHIFT_FEATURE_KEYS)(req, res, next);
+  });
+});
 
 function normDate(raw) {
   return new Date(new Date(raw).setHours(0, 0, 0, 0));
@@ -601,8 +620,13 @@ router.get(
   })
 );
 
+// selfOrAdmin (reads ?id= from the query): this route is exempt from the
+// feature gate above, so identity is what scopes it — without this guard
+// any logged-in user could read another worker's shifts, and the exemption
+// would be a way around the gate rather than a carve-out of it.
 router.get(
   "/employee-open-shifts",
+  selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));
@@ -620,8 +644,10 @@ router.get(
   })
 );
 
+// selfOrAdmin for the same reason as /employee-open-shifts above.
 router.get(
   "/employee-closed-shifts",
+  selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));

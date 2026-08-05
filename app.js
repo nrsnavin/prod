@@ -276,11 +276,14 @@ const gate = (...roles) => [isAuthenticated, isAdmin('admin', ...roles)];
 
 // Phase 4 — per-user FEATURE enforcement: requireFeature gates writes,
 // requireFeatureRead gates reads, both below. Layered ON TOP of the role
-// gate for every router here, plus warping/covering/wastage/packing/
+// gate for every router here, plus warping/covering/wastage/packing/shift/
 // payroll/leave/bonus/attendance which gate themselves inside the router
-// (payroll/leave/bonus/attendance also carve out their selfOrAdmin routes
-// there — a worker's own payslip/leave/bonus/attendance answers to their
-// identity, not to whether the admin ticked that module's box for them).
+// (shift/wastage/payroll/leave/bonus/attendance also carve out their
+// self-service routes there — a worker's own payslip, leave, bonus,
+// attendance, shift list and wastage answer to their identity, not to
+// whether the admin ticked that module's box for them; every one of those
+// carve-outs is scoped by selfOrAdmin on the route itself, so exempting it
+// from the feature gate never becomes a way around the gate).
 // requireFeature/requireFeatureRead are no-ops for a user with no explicit
 // feature list, so legacy accounts and admins without a customised list
 // are unaffected either way.
@@ -337,10 +340,9 @@ app.use("/api/v2/machine",     gate('production'),
   requireFeature('/machines', '/jobs'),
   requireFeatureRead('/machines', '/jobs', '/machine-issues', '/analytics'),
   machine);
-app.use("/api/v2/shift",       gate('production'),
-  requireFeature('/shift-plans', '/shift-verification', '/production'),
-  requireFeatureRead('/shift-plans', '/shift-verification', '/production'),
-  shift);
+// shift gates itself inside the router — it has to carve out the two
+// employee self-service reads the mobile app uses.
+app.use("/api/v2/shift",       gate('production'), shift);
 // Analytics and the Order/Elastic-group forms all read the customer list
 // without ever writing one.
 app.use("/api/v2/customer",    gate('accounts'),

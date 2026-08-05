@@ -180,6 +180,79 @@ describe('worker self-service reads stay open regardless of the feature list', (
   });
 });
 
+// The employee mobile app is the only caller of these three routes, and it
+// always passes the logged-in worker's own employee id. A packing-department
+// worker's default features carry none of /production, /shift-plans,
+// /shift-verification or /wastage, so gating these reads would black out
+// their shift history, production-entry and wastage screens.
+describe('employee-app self-service reads survive a feature list without the module keys', () => {
+  let packer, packerEmp, otherEmp;
+
+  beforeAll(async () => {
+    packerEmp = await Employee.create({ name: 'Packer One', department: 'packing', hourlyRate: 40 });
+    otherEmp  = await Employee.create({ name: 'Someone Else', department: 'production', hourlyRate: 40 });
+    const created = await createUser({
+      name: 'PackerOne', email: 'packerone@t.co', password: 'pass1234',
+      department: 'packing', // defaults: no /production, /shift-plans, /shift-verification, /wastage
+    });
+    packer = await User.findByIdAndUpdate(created.body.user.id, { employee: packerEmp._id }, { new: true });
+    // Guard the premise: if packing ever gains these keys the carve-out
+    // below stops proving anything, and this assertion says so loudly.
+    for (const k of ['/production', '/shift-plans', '/shift-verification', '/wastage']) {
+      expect(packer.features).not.toContain(k);
+    }
+  });
+
+  test('own open shifts are readable', async () => {
+    const res = await request(app)
+      .get('/api/v2/shift/employee-open-shifts')
+      .query({ id: String(packerEmp._id) })
+      .set('Cookie', cookie(packer._id, 'production'));
+    expect(res.status).not.toBe(403);
+  });
+
+  test('own closed shifts are readable', async () => {
+    const res = await request(app)
+      .get('/api/v2/shift/employee-closed-shifts')
+      .query({ id: String(packerEmp._id) })
+      .set('Cookie', cookie(packer._id, 'production'));
+    expect(res.status).not.toBe(403);
+  });
+
+  test('own wastage is readable', async () => {
+    const res = await request(app)
+      .get('/api/v2/wastage/get-by-employee')
+      .query({ id: String(packerEmp._id) })
+      .set('Cookie', cookie(packer._id, 'production'));
+    expect(res.status).not.toBe(403);
+  });
+
+  // The exemption is scoped by identity, so it can't be used as a way
+  // around the gate by passing someone else's id.
+  test('ANOTHER employee\'s shifts are not readable through the exempt route', async () => {
+    const res = await request(app)
+      .get('/api/v2/shift/employee-open-shifts')
+      .query({ id: String(otherEmp._id) })
+      .set('Cookie', cookie(packer._id, 'production'));
+    expect(res.status).toBe(403);
+  });
+
+  test('ANOTHER employee\'s wastage is not readable through the exempt route', async () => {
+    const res = await request(app)
+      .get('/api/v2/wastage/get-by-employee')
+      .query({ id: String(otherEmp._id) })
+      .set('Cookie', cookie(packer._id, 'production'));
+    expect(res.status).toBe(403);
+  });
+
+  test('the admin-facing shift reads on the same router ARE still gated', async () => {
+    const res = await request(app)
+      .get('/api/v2/shift/today')
+      .set('Cookie', cookie(packer._id, 'production'));
+    expect(res.status).toBe(403);
+  });
+});
+
 describe('elastic.js reads stay open by design (shop-floor stock lookup)', () => {
   test('GET /elastic/get-elastics is not feature-gated even without /elastics', async () => {
     const c = await createUser({

@@ -17,7 +17,7 @@ const Elastic       = require("../models/Elastic");
 const Machine       = require("../models/Machine");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const { enqueue }   = require("../utils/outbox");
-const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 const { resolveEmployeeId } = require("../utils/resolveEmployee");
 const { applyMovement } = require("../utils/elasticStock");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
@@ -25,9 +25,18 @@ const { requireReason } = require("../utils/auditReason");
 
 router.use(isAuthenticated);
 // Per-user feature gate: Wastage is a leaf screen. No-op for legacy users
-// without an explicit feature list — see requireFeature.
+// without an explicit feature list — see requireFeature. GET
+// /get-by-employee is exempt from the READ gate: it is a worker listing
+// their OWN wastage in the employee app (scoped by selfOrAdmin on the
+// route), and a packing-department worker has no '/wastage' key by
+// default, so gating it would lock them out of their own report.
 router.use(requireFeature('/wastage'));
-router.use(requireFeatureRead('/wastage'));
+router.use((req, res, next) => {
+  if ((req.method === 'GET' || req.method === 'HEAD') && req.path === '/get-by-employee') {
+    return next();
+  }
+  return requireFeatureRead('/wastage')(req, res, next);
+});
 
 // ═══════════════════════════════════════════════════════════
 //  ADD WASTAGE — P0-4: wastage no longer deducts elastic stock.
@@ -570,8 +579,12 @@ router.get(
   })
 );
 
+// selfOrAdmin (reads ?id= from the query): exempt from the feature read
+// gate above, so identity is what scopes it — without this guard any
+// logged-in user could read another worker's wastage history.
 router.get(
   "/get-by-employee",
+  selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("Employee id required", 400));
