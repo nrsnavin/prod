@@ -253,14 +253,87 @@ describe('employee-app self-service reads survive a feature list without the mod
   });
 });
 
-describe('elastic.js reads stay open by design (shop-floor stock lookup)', () => {
-  test('GET /elastic/get-elastics is not feature-gated even without /elastics', async () => {
+// Elastic reads are consumed by exactly three screens — Elastics itself,
+// the Order form and the Elastic Group form (the latter two pull the
+// elastic list to pick from) — so all three keys grant the read and
+// nothing else does.
+describe('elastic reads are feature-gated across their three consuming screens', () => {
+  test('blocked without /elastics, /orders or /elastic-groups', async () => {
     const c = await createUser({
       name: 'ProdNoElastics', email: 'prodnoelastics@t.co', password: 'pass1234',
-      department: 'production', features: ['/jobs'], // /elastics isn't even in production's default set
+      department: 'production', features: ['/jobs'],
     });
     const res = await request(app)
       .get('/api/v2/elastic/get-elastics')
+      .set('Cookie', cookie(c.body.user.id, 'production'));
+    expect(res.status).toBe(403);
+  });
+
+  test('the per-elastic stock, orders and jobs roll-ups are gated too', async () => {
+    const c = await createUser({
+      name: 'ProdNoElastics2', email: 'prodnoelastics2@t.co', password: 'pass1234',
+      department: 'production', features: ['/jobs'],
+    });
+    const id = new mongoose.Types.ObjectId().toString();
+    for (const path of [`/api/v2/elastic/${id}/stock`, `/api/v2/elastic/${id}/orders`, `/api/v2/elastic/${id}/jobs`]) {
+      const res = await request(app).get(path).set('Cookie', cookie(c.body.user.id, 'production'));
+      expect(res.status).toBe(403);
+    }
+  });
+
+  test('allowed with /elastics', async () => {
+    const c = await createUser({
+      name: 'HasElastics', email: 'haselastics@t.co', password: 'pass1234',
+      department: 'finance', features: ['/elastics'],
+    });
+    const res = await request(app)
+      .get('/api/v2/elastic/get-elastics')
+      .set('Cookie', cookie(c.body.user.id, 'accounts'));
+    expect(res.status).not.toBe(403);
+  });
+
+  // The Order form picks elastics off this endpoint, so /orders alone
+  // has to grant the read or order entry breaks.
+  test('allowed with /orders alone (the Order form picks from this list)', async () => {
+    const c = await createUser({
+      name: 'OrdersOnly', email: 'ordersonly@t.co', password: 'pass1234',
+      department: 'finance', features: ['/orders'],
+    });
+    const res = await request(app)
+      .get('/api/v2/elastic/get-elastics')
+      .set('Cookie', cookie(c.body.user.id, 'accounts'));
+    expect(res.status).not.toBe(403);
+  });
+
+  test('writing still needs /elastics — a broader read key does not grant it', async () => {
+    const c = await createUser({
+      name: 'OrdersNoWrite', email: 'ordersnowrite@t.co', password: 'pass1234',
+      department: 'finance', features: ['/orders'],
+    });
+    const res = await request(app)
+      .post('/api/v2/elastic/create-elastic')
+      .set('Cookie', cookie(c.body.user.id, 'accounts'))
+      .send({});
+    expect(res.status).toBe(403);
+  });
+});
+
+// Always-on features (depts:"all") must never be feature-gated: the web
+// nav shows them to every user regardless of their list (navigation.ts
+// canAccess), so a server-side gate would render a nav item that everyone
+// can see and a narrowed user cannot open.
+describe('always-on modules stay reachable for a narrowed feature list', () => {
+  // GET / is isAdmin('admin','production','accounts'), so a production
+  // user clears the role gate — a 403 here could only come from a
+  // feature gate, which is exactly what must not exist on an always-on
+  // module.
+  test('machine-issues is readable by a user whose list omits it', async () => {
+    const c = await createUser({
+      name: 'NarrowList', email: 'narrowlist@t.co', password: 'pass1234',
+      department: 'production', features: ['/jobs'], // no /machine-issues
+    });
+    const res = await request(app)
+      .get('/api/v2/machine-issue')
       .set('Cookie', cookie(c.body.user.id, 'production'));
     expect(res.status).not.toBe(403);
   });

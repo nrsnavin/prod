@@ -297,14 +297,16 @@ const gate = (...roles) => [isAuthenticated, isAdmin('admin', ...roles)];
 // feature call site in prod_web and the employee mobile app before this
 // was enabled, so a legitimate read never trips it.
 //
-// `elastic` is the one deliberate exception: several of its reads
-// (product list, detail, stock, and the per-elastic order/job rollups)
-// have no per-route role gate at all today, by design — the stock
-// screen is a shop-floor lookup for anyone in Production or Accounts,
-// not an Elastics-feature action, and /elastics isn't even in
-// Production's default feature set. Feature-gating those reads would
-// 403 that floor lookup for the department it exists for, so this
-// router's reads stay ungated, exactly as before.
+// The always-on features (`depts: "all"` in utils/features.js —
+// dashboard, announcements, feedback, machine-issues, Ask Jarvis,
+// settings) are NOT feature-gated, and must not be. The web nav treats
+// them as unconditionally visible (navigation.ts canAccess returns true
+// for an item with no `departments`, whatever the user's list says), so
+// gating them server-side would leave a nav item everyone can see and
+// nobody without the key can open. Their routers are protected by role
+// and by identity per route instead — see machineIssue.js, where the
+// per-employee read is selfOrAdmin, the roll-ups are isAdmin and delete
+// is owner-checked.
 
 // Throttle credential-guessing before the login handler runs.
 app.use("/api/v2", apiLimiter);
@@ -354,10 +356,14 @@ app.use("/api/v2/employee",    gate('accounts', 'production'),
   requireFeature('/employees'),
   requireFeatureRead('/employees', '/leave'),
   employee);
-// Elastic's own reads (product list/detail, the worker-facing stock
-// lookup, and its per-elastic order/job rollups) stay UNGATED on
-// purpose — see the note above this block. Only writes are feature-gated.
-app.use("/api/v2/elastic",     gate('accounts', 'production'), requireFeature('/elastics'), elastic);
+// Elastic reads come from three screens only: Elastics itself, the Order
+// form and the Elastic Group form (both pull the elastic list to pick
+// from). Global search also queries it, but settles each source
+// independently, so a 403 there just drops elastic hits.
+app.use("/api/v2/elastic",     gate('accounts', 'production'),
+  requireFeature('/elastics'),
+  requireFeatureRead('/elastics', '/orders', '/elastic-groups'),
+  elastic);
 // Elastic groups can be created from the Order form and Customer detail
 // (finance flows), so those features may write — and read — here too.
 app.use("/api/v2/elastic-group", gate('accounts'),
