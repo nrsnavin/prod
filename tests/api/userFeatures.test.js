@@ -81,6 +81,38 @@ describe('admin configures features on create', () => {
   });
 });
 
+// /sign-up used to pass req.body straight into User.create, so a request
+// could set any schema path — arbitrary feature strings, or a role that
+// contradicts the department — producing accounts the Users page and the
+// feature gates then reason about incorrectly.
+describe('sign-up cannot set privileged fields directly', () => {
+  test('role is derived from department, not taken from the body', async () => {
+    const res = await request(app)
+      .post('/api/v2/user/sign-up')
+      .set('Cookie', adminCookie())
+      .send({
+        name: 'Sneaky', email: 'sneaky@t.co', password: 'pass1234',
+        department: 'production', role: 'admin',
+      });
+    expect(res.status).toBe(200);
+    const doc = await User.findById(res.body.user._id ?? res.body.user.id).lean();
+    expect(doc.role).toBe('production');
+  });
+
+  test('unknown feature keys are dropped rather than stored verbatim', async () => {
+    const res = await request(app)
+      .post('/api/v2/user/sign-up')
+      .set('Cookie', adminCookie())
+      .send({
+        name: 'Sneaky2', email: 'sneaky2@t.co', password: 'pass1234',
+        department: 'production', features: ['/jobs', '/not-a-real-feature'],
+      });
+    expect(res.status).toBe(200);
+    const doc = await User.findById(res.body.user._id ?? res.body.user.id).lean();
+    expect(doc.features).toEqual(['/jobs']);
+  });
+});
+
 describe('admin edits features', () => {
   test('PUT replaces the feature list and the change persists', async () => {
     const created = await createUser({

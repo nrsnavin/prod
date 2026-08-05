@@ -229,7 +229,9 @@ router.get('/employee/:empId', isAuthenticated, selfOrAdmin, async (req, res) =>
 // ─────────────────────────────────────────────────────────────
 router.put('/:id/approve', isAuthenticated, isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const { reviewNotes='' } = req.body;
+    // The HR page sends this as `note`; accept either so the
+    // reviewer's note is actually recorded instead of silently dropped.
+    const reviewNotes = req.body?.reviewNotes ?? req.body?.note ?? '';
     const leave = await LeaveRequest.findById(req.params.id)
       .populate('employee','name department');
     if (!leave) return res.status(404).json({ success:false, message:'Leave request not found.' });
@@ -271,7 +273,9 @@ router.put('/:id/approve', isAuthenticated, isAdmin('admin', 'accounts'), async 
 // ─────────────────────────────────────────────────────────────
 router.put('/:id/reject', isAuthenticated, isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const { reviewNotes='' } = req.body;
+    // The HR page sends this as `note`; accept either so the
+    // reviewer's note is actually recorded instead of silently dropped.
+    const reviewNotes = req.body?.reviewNotes ?? req.body?.note ?? '';
     const leave = await LeaveRequest.findById(req.params.id)
       .populate('employee','name department');
     if (!leave) return res.status(404).json({ success:false, message:'Leave request not found.' });
@@ -298,6 +302,21 @@ router.delete('/:id', isAuthenticated, async (req, res) => {
   try {
     const leave = await LeaveRequest.findById(req.params.id);
     if (!leave) return res.status(404).json({ success:false, message:'Not found.' });
+
+    // Cancel YOUR OWN request only. This route is deliberately exempt
+    // from the feature gate (cancelling is self-service), so without an
+    // ownership test any logged-in worker could delete any colleague's
+    // pending leave just by guessing the id — silently, and with no
+    // audit trail. admin/accounts administer leave for everyone.
+    const isAdminRole = req.user?.role === 'admin' || req.user?.role === 'accounts';
+    const isOwner = req.user?.employee &&
+      String(req.user.employee) === String(leave.employee);
+    if (!isAdminRole && !isOwner) {
+      return res.status(403).json({
+        success:false, message:'Forbidden — you can only cancel your own leave requests.',
+      });
+    }
+
     if (leave.status !== 'pending')
       return res.status(400).json({ success:false, message:'Only pending requests can be cancelled.' });
     await leave.deleteOne();
@@ -320,29 +339,43 @@ router.get('/conflicts', isAuthenticated, isAdmin('admin', 'accounts'), async (_
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
+    // Leave is a single date + shift, so an upcoming leave is one whose
+    // date is today or later. This used to filter and match on
+    // startDate/endDate, which no leave has ever carried — the endpoint
+    // could only ever return an empty list.
     const leaves = await LeaveRequest.find({
-      status:  'approved',
-      endDate: { $gte: today },
+      status: 'approved',
+      date:   { $gte: today },
     })
       .populate('employee', 'name')
       .lean();
 
+    // One indexed lookup for every employee/date pair at once, rather
+    // than a findOne per leave inside the loop.
+    const openShifts = leaves.length === 0 ? [] : await ShiftDetail.find({
+      employee: { $in: leaves.map((lv) => lv.employee?._id).filter(Boolean) },
+      date:     { $in: leaves.map((lv) => lv.date) },
+      status:   { $in: ['open', 'running', 'pending_verification'] },
+    }).select('_id employee date shift status').lean();
+
+    const shiftKey = (emp, date) => `${String(emp)}|${new Date(date).toISOString().slice(0, 10)}`;
+    const shiftsByKey = new Map();
+    for (const s of openShifts) {
+      const k = shiftKey(s.employee, s.date);
+      if (!shiftsByKey.has(k)) shiftsByKey.set(k, s);
+    }
+
     const conflicts = [];
     for (const lv of leaves) {
       if (!lv.employee) continue;
-      const shift = await ShiftDetail.findOne({
-        employee: lv.employee._id,
-        date:     { $gte: lv.startDate, $lte: lv.endDate },
-        status:   { $in: ['open', 'running', 'pending_verification'] },
-      }).select('_id date shift status').lean();
-
+      const shift = shiftsByKey.get(shiftKey(lv.employee._id, lv.date));
       if (shift) {
         conflicts.push({
           leaveId:      lv._id,
           employeeId:   lv.employee._id,
           employeeName: lv.employee.name,
-          leaveStart:   lv.startDate,
-          leaveEnd:     lv.endDate,
+          leaveDate:    lv.date,
+          leaveShift:   lv.shift,
           shiftId:      shift._id,
           shiftDate:    shift.date,
           shiftType:    shift.shift,

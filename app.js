@@ -143,7 +143,10 @@ app.use(cors(corsConfig));
 app.options('*', cors(corsConfig));
 // Bound the JSON body. The default (100kb) is fine for this API; the
 // old 50mb urlencoded ceiling was a DoS amplifier for the bulk-array
-// endpoints. File uploads use multer (memoryStorage, own 5mb cap).
+// endpoints. File uploads bypass this and carry their own multer
+// (memoryStorage) caps, which differ per route — 5 MB for data import
+// (io.js), 25 MB for scanned shift sheets (shift.js, ~19 pages), and
+// per-type limits in machine.js and qc.js. Check the route, not here.
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 app.use(bodyParser.urlencoded({ extended: true, limit: "1mb" }));

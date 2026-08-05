@@ -27,7 +27,24 @@ router.post("/sign-up",
   if (typeof req.body.email === "string") {
     req.body.email = req.body.email.trim().toLowerCase();
   }
-  const user = await User.create(req.body);
+  // Allowlist the fields a create may set. This used to pass req.body
+  // straight to User.create, so a request could set ANY schema path —
+  // including arbitrary `features` strings and a `role` inconsistent with
+  // the department — producing accounts that break the invariants the
+  // Users page and the feature gates rely on. Role is derived and the
+  // feature list sanitized here exactly as /manage/create does.
+  const department = req.body.department || null;
+  const user = await User.create({
+    name:       req.body.name,
+    email:      req.body.email,
+    password:   req.body.password,
+    department,
+    role:       roleForDepartment(department) || req.body.role,
+    features:   sanitizeFeatures(
+      Array.isArray(req.body.features) ? req.body.features : featuresForDepartment(department)
+    ),
+    ...(req.body.employee ? { employee: req.body.employee } : {}),
+  });
   try {
     res.status(200).json({
       success: true,
