@@ -50,6 +50,7 @@ const {
 // those writes used to ask where the order actually was — which is how
 // cancelling a job on a CANCELLED order set it back to Approved.
 const { applyOrderStatus } = require('../domain/orderStatus');
+const { isProductionLocked } = require('../utils/productionLock');
 
 function fullJobPopulate(query) {
   return query
@@ -1269,6 +1270,20 @@ router.patch('/:jobId/production-mode', async (req, res) => {
         ? req.body.outsourceVendor.trim() : '';
     } else {
       update.outsourceVendor = '';
+    }
+
+    // Once the job leaves the loom (finishing onward) how it was made is
+    // history — flipping it to outsourced would rewrite the record of work
+    // that is already done. Read the status BEFORE writing, so a locked
+    // job is refused rather than updated and then complained about.
+    const existing = await JobOrder.findById(jobId).select('jobOrderNo status');
+    if (!existing) return res.status(404).json({ success: false, message: 'Job not found.' });
+    if (isProductionLocked(existing.status)) {
+      return res.status(409).json({
+        success: false,
+        message: `Cannot change production mode — J-${existing.jobOrderNo} has moved to ${existing.status}. ` +
+                 `Production closes once a job leaves the loom.`,
+      });
     }
 
     const job = await JobOrder.findByIdAndUpdate(jobId, update, { new: true })

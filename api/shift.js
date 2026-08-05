@@ -17,6 +17,7 @@ const JobOrder    = require("../models/JobOrder");
 const Attendance  = require("../models/Attendence.js");
 const { ACTION_CODES } = require("../utils/fingerprint");
 const { requireReason } = require("../utils/auditReason");
+const { assertShiftProductionOpen } = require("../utils/productionLock");
 const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 // Production cascade + anomaly detection live in their own service
 // (Phase 4 god-file split). The verify route calls applyProductionCascade;
@@ -200,12 +201,17 @@ router.get(
         // that a machine's job is being made by a vendor, not here.
         let productionMode = "";
         let outsourceVendor = "";
+        // The job's own status drives the production lock: once it reaches
+        // finishing the machine is released and entry is refused, so the
+        // row carries it and the UI stops offering the button.
+        let jobStatus = "";
         if (machine?.orderRunning) {
           const job = await JobOrder.findById(machine.orderRunning);
           if (job) {
             jobOrderNo = job.jobOrderNo.toString();
             productionMode = job.productionMode || "in_house";
             outsourceVendor = job.outsourceVendor || "";
+            jobStatus = job.status || "";
           }
         }
 
@@ -216,6 +222,7 @@ router.get(
           jobOrderNo,
           productionMode,
           outsourceVendor,
+          jobStatus,
           operatorName: detail.employee?.name ?? "—",
           production:   detail.productionMeters || 0,
           timer:        detail.timer,
@@ -390,6 +397,7 @@ router.post(
     if (shift.status === "closed") {
       return next(new ErrorHandler("Shift is already closed", 400));
     }
+    await assertShiftProductionOpen(shift, { JobOrder, Machine }, "enter production");
 
     shift.submittedProductionMeters = prodValue;
     shift.submittedTimer            = timer    || "00:00:00";
@@ -424,6 +432,7 @@ router.post(
         `Shift cannot be updated in status '${shift.status}'`, 400
       ));
     }
+    await assertShiftProductionOpen(shift, { JobOrder, Machine }, "update production");
 
     if (production != null) {
       const prodValue = Number(production);
@@ -513,6 +522,7 @@ router.post(
           throw new ErrorHandler("Shift is already closed", 400);
         }
         await assertPlanNotFinalized(shift, session);
+        await assertShiftProductionOpen(shift, { JobOrder, Machine }, "verify production");
 
         const machine = await Machine.findById(shift.machine).session(session);
 
@@ -1410,6 +1420,7 @@ router.put(
         if (!shift) throw new ErrorHandler("Shift not found", 404);
         if (shift.status !== "closed") throw new ErrorHandler("Only verified (closed) production entries can be corrected", 400);
         await assertPlanNotFinalized(shift, session);
+        await assertShiftProductionOpen(shift, { JobOrder, Machine }, "correct production");
 
         await _rederiveShiftProduction(session, {
           shift, newTotalMeters: newTotal, req, auditReason, code: ACTION_CODES.SHIFT_PRODUCTION_EDITED,
@@ -1440,6 +1451,7 @@ router.delete(
         if (!shift) throw new ErrorHandler("Shift not found", 404);
         if (shift.status !== "closed") throw new ErrorHandler("Only verified (closed) production entries can be deleted", 400);
         await assertPlanNotFinalized(shift, session);
+        await assertShiftProductionOpen(shift, { JobOrder, Machine }, "delete production");
 
         // Reverse the full contribution, then un-verify so it can be re-entered.
         await _rederiveShiftProduction(session, {
