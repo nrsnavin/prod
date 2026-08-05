@@ -8,6 +8,7 @@ jest.mock("../../middleware/auth.js", () => ({
   selfOrAdmin:     (_req, _res, next) => next(),
   requireFeature:  () => (_req, _res, next) => next(),
   requireFeatureRead: () => (_req, _res, next) => next(),
+  requireFeatureReadPaths: () => (_req, _res, next) => next(),
 }));
 
 jest.mock("../../models/User");

@@ -143,6 +143,122 @@ describe('shared master-data reads', () => {
   });
 });
 
+// Cross-feature reads are PICKER calls — the Order form wants the customer
+// list, Analytics wants the machine list. Granting that at router level
+// also handed over the detail routes, so a user with only /orders could
+// pull a customer's full record and their portal logins. Sharing is now
+// per-path.
+describe('a sibling feature gets the picker, not the whole module', () => {
+  let ordersOnly;
+
+  beforeAll(async () => {
+    const c = await createUser({
+      name: 'OrdersPicker', email: 'orderspicker@t.co', password: 'pass1234',
+      department: 'finance', features: ['/orders'], // no /customers
+    });
+    ordersOnly = c.body.user.id;
+  });
+
+  test('CAN read the customer picker list (the Order form needs it)', async () => {
+    const res = await request(app)
+      .get('/api/v2/customer/all-customers')
+      .set('Cookie', cookie(ordersOnly, 'accounts'));
+    expect(res.status).not.toBe(403);
+  });
+
+  test('CANNOT read a customer\'s full record', async () => {
+    const res = await request(app)
+      .get('/api/v2/customer/customerDetail')
+      .query({ id: new mongoose.Types.ObjectId().toString() })
+      .set('Cookie', cookie(ordersOnly, 'accounts'));
+    expect(res.status).toBe(403);
+  });
+
+  test('CANNOT read a customer\'s portal logins', async () => {
+    const res = await request(app)
+      .get(`/api/v2/customer/${new mongoose.Types.ObjectId()}/portal-users`)
+      .set('Cookie', cookie(ordersOnly, 'accounts'));
+    expect(res.status).toBe(403);
+  });
+
+  test('the owning feature still reads everything on the router', async () => {
+    const c = await createUser({
+      name: 'RealCustomers', email: 'realcustomers@t.co', password: 'pass1234',
+      department: 'finance', features: ['/customers'],
+    });
+    for (const p of ['/api/v2/customer/all-customers', '/api/v2/customer/customerDetail']) {
+      const res = await request(app).get(p).set('Cookie', cookie(c.body.user.id, 'accounts'));
+      expect(res.status).not.toBe(403);
+    }
+  });
+
+  test('the same split applies to machines: list yes, detail no', async () => {
+    const c = await createUser({
+      name: 'JobsPicker', email: 'jobspicker@t.co', password: 'pass1234',
+      department: 'production', features: ['/jobs'], // no /machines
+    });
+    const list = await request(app)
+      .get('/api/v2/machine/get-machines')
+      .set('Cookie', cookie(c.body.user.id, 'production'));
+    expect(list.status).not.toBe(403);
+
+    const detail = await request(app)
+      .get(`/api/v2/machine/${new mongoose.Types.ObjectId()}`)
+      .set('Cookie', cookie(c.body.user.id, 'production'));
+    expect(detail.status).toBe(403);
+  });
+});
+
+// The other half of the report: pages whose own feature IS granted were
+// 403ing on a dependency the module genuinely needs.
+describe('a granted module can reach the data its own screens need', () => {
+  test('Elastics can load the raw-material catalogue for a new elastic', async () => {
+    const c = await createUser({
+      name: 'ElasticsOnly', email: 'elasticsonly@t.co', password: 'pass1234',
+      department: 'finance', features: ['/elastics'],
+    });
+    const res = await request(app)
+      .get('/api/v2/materials/materialForNewElastic')
+      .set('Cookie', cookie(c.body.user.id, 'accounts'));
+    expect(res.status).not.toBe(403);
+  });
+
+  test('Employees can load the pay summary card', async () => {
+    const c = await createUser({
+      name: 'EmployeesOnly', email: 'employeesonly@t.co', password: 'pass1234',
+      department: 'finance', features: ['/employees'],
+    });
+    const res = await request(app)
+      .get(`/api/v2/payroll/employee-overview/${new mongoose.Types.ObjectId()}`)
+      .set('Cookie', cookie(c.body.user.id, 'accounts'));
+    expect(res.status).not.toBe(403);
+  });
+
+  test('Elastic Groups can load its production breakdown', async () => {
+    const c = await createUser({
+      name: 'GroupsOnly', email: 'groupsonly@t.co', password: 'pass1234',
+      department: 'admin', features: ['/elastic-groups'],
+    });
+    const res = await request(app)
+      .get('/api/v2/production/breakdown')
+      .query({ start: '2026-01-01', end: '2026-01-31', groupBy: 'group', shift: 'all' })
+      .set('Cookie', cookie(c.body.user.id, 'admin'));
+    expect(res.status).not.toBe(403);
+  });
+
+  test('Machine Issues can log service against the machine it resolves', async () => {
+    const c = await createUser({
+      name: 'IssuesOnly', email: 'issuesonly@t.co', password: 'pass1234',
+      department: 'production', features: ['/machine-issues'],
+    });
+    const res = await request(app)
+      .post(`/api/v2/machine/${new mongoose.Types.ObjectId()}/add-service-log`)
+      .set('Cookie', cookie(c.body.user.id, 'production'))
+      .send({ note: 'resolved' });
+    expect(res.status).not.toBe(403);
+  });
+});
+
 describe('worker self-service reads stay open regardless of the feature list', () => {
   let worker, empDoc;
 
@@ -297,7 +413,10 @@ describe('every revocable feature is actually enforced somewhere', () => {
       const src = fs.readFileSync(file, 'utf8');
       // Collect the keys inside every requireFeature/requireFeatureRead
       // call, including the multi-line ones in app.js.
-      for (const m of src.matchAll(/requireFeatureRead?\s*\(([^)]*)\)/g)) {
+      // requireFeature, requireFeatureRead and requireFeatureReadPaths —
+      // the last takes its keys in an array plus a per-path widening map,
+      // and both forms are just quoted keys inside the call.
+      for (const m of src.matchAll(/requireFeature\w*\s*\(([^)]*)\)/g)) {
         const args = m[1];
         for (const key of args.matchAll(/['"](\/[^'"]*)['"]/g)) gated.add(key[1]);
 

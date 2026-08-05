@@ -127,6 +127,46 @@ exports.requireFeatureRead = (...keys) => {
     };
 };
 
+// Read gate with PER-PATH widening.
+//
+// requireFeatureRead applies one key list to a whole router, which is too
+// blunt for the shared master-data routers. Every cross-feature read in
+// the app is a picker/list call — the Order form needs the customer LIST,
+// Analytics needs the machine LIST — but granting that at router level
+// also handed over the detail routes, so a user with only /orders could
+// read a customer's full record and portal logins.
+//
+// `base` is who may read the router at all (normally just the owning
+// feature). `wider` maps a specific read path to the EXTRA features
+// allowed to read only that path. Match is exact or by "/path/" prefix,
+// so "/all-customers" won't accidentally open "/all-customers-export".
+exports.requireFeatureReadPaths = (base, wider = {}) => {
+    const entries = Object.entries(wider);
+    return (req, res, next) => {
+        const m = req.method;
+        if (m !== "GET" && m !== "HEAD") return next(); // writes: requireFeature's job
+
+        if (!req.user) {
+            return next(new ErrorHandler("Please login to continue", 401));
+        }
+
+        // Never configured → defer to the role gate, as everywhere else.
+        if (!Array.isArray(req.user.features)) return next();
+        const explicit = req.user.features;
+
+        let keys = base;
+        for (const [p, extra] of entries) {
+            if (req.path === p || req.path.startsWith(p + "/")) {
+                keys = base.concat(extra);
+                break;
+            }
+        }
+
+        if (keys.some((k) => explicit.includes(k))) return next();
+        return next(new ErrorHandler("You don't have access to this feature", 403));
+    };
+};
+
 // Per-employee ownership guard. Use after isAuthenticated on routes
 // whose path/query carries an :empId — admins pass through, but a
 // worker can only access their own employee record. Closes the

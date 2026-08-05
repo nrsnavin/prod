@@ -19,7 +19,7 @@ const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
 const ShiftDetail      = require('../models/ShiftDetail');
 const Wastage          = require('../models/Wastage');
-const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead, requireFeatureReadPaths } = require('../middleware/auth');
 const { EMPLOYEE_CARD_FIELDS } = require('../utils/populateFields');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
 // The ~200-line pure pay computation lives in services/payrollService.js.
@@ -44,7 +44,11 @@ router.use((req, res, next) => {
   if (isSelfRead) return next();
   requireFeature('/payroll')(req, res, (err) => {
     if (err) return next(err);
-    requireFeatureRead('/payroll')(req, res, next);
+    // The Employees detail page shows a pay summary card, so /employees
+    // may read that ONE rollup — not the payroll module at large.
+    requireFeatureReadPaths(['/payroll'], {
+      '/employee-overview': ['/employees'],
+    })(req, res, next);
   });
 });
 

@@ -21,7 +21,7 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const sanitizeMongo = require("./middleware/sanitizeMongo.js");
 const { setUserContext } = require("./middleware/userContext.js");
-const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("./middleware/auth.js");
+const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead, requireFeatureReadPaths } = require("./middleware/auth.js");
 
 // Trust the reverse proxy (nginx/ALB) so req.protocol, req.ip, and the
 // `secure` cookie flag reflect the real client connection rather than
@@ -342,8 +342,13 @@ app.use("/api/v2/pdf-templates", gate('production', 'accounts'), pdfTemplates);
 // requireFeatureRead (reads). Machine head assignment is also written
 // AND read from the Jobs screen, Machine Issues, and Analytics.
 app.use("/api/v2/machine",     gate('production'),
-  requireFeature('/machines', '/jobs'),
-  requireFeatureRead('/machines', '/jobs', '/machine-issues', '/analytics'),
+  // Machine Issues resolves an issue by logging service against the
+  // machine, so it must be able to WRITE here without holding /machines.
+  requireFeature('/machines', '/jobs', '/machine-issues'),
+  requireFeatureReadPaths(['/machines'], {
+    '/get-machines': ['/jobs', '/machine-issues', '/analytics'],
+    '/free':         ['/jobs'],
+  }),
   machine);
 // shift gates itself inside the router — it has to carve out the two
 // employee self-service reads the mobile app uses.
@@ -352,12 +357,17 @@ app.use("/api/v2/shift",       gate('production'), shift);
 // without ever writing one.
 app.use("/api/v2/customer",    gate('accounts'),
   requireFeature('/customers'),
-  requireFeatureRead('/customers', '/orders', '/elastic-groups', '/analytics'),
+  // Sibling screens need the customer PICKER, not the customer file.
+  requireFeatureReadPaths(['/customers'], {
+    '/all-customers': ['/orders', '/elastic-groups', '/analytics'],
+  }),
   customer);
 // HR's Leave page reads an employee's record; only Employees itself writes.
 app.use("/api/v2/employee",    gate('accounts', 'production'),
   requireFeature('/employees'),
-  requireFeatureRead('/employees', '/leave'),
+  requireFeatureReadPaths(['/employees'], {
+    '/get-employees': ['/leave'],
+  }),
   employee);
 // Elastic reads come from three screens only: Elastics itself, the Order
 // form and the Elastic Group form (both pull the elastic list to pick
@@ -365,7 +375,9 @@ app.use("/api/v2/employee",    gate('accounts', 'production'),
 // independently, so a 403 there just drops elastic hits.
 app.use("/api/v2/elastic",     gate('accounts', 'production'),
   requireFeature('/elastics'),
-  requireFeatureRead('/elastics', '/orders', '/elastic-groups'),
+  requireFeatureReadPaths(['/elastics'], {
+    '/get-elastics': ['/orders', '/elastic-groups'],
+  }),
   elastic);
 // Elastic groups can be created from the Order form and Customer detail
 // (finance flows), so those features may write — and read — here too.
@@ -382,11 +394,16 @@ app.use("/api/v2/dc",          gate('accounts'),
 // (and Materials' stock-ops reads) land here too.
 app.use("/api/v2/supplier",    gate('accounts'),
   requireFeature('/suppliers', '/purchase-orders'),
-  requireFeatureRead('/suppliers', '/purchase-orders', '/materials'),
+  requireFeatureReadPaths(['/suppliers', '/purchase-orders'], {
+    '/get-suppliers': ['/materials'],
+  }),
   supplier);
 app.use("/api/v2/order",       gate('accounts'),
   requireFeature('/orders'),
-  requireFeatureRead('/orders', '/delivery-challans', '/analytics'),
+  requireFeatureReadPaths(['/orders'], {
+    '/list':      ['/delivery-challans', '/analytics'],
+    '/eta-risks': ['/analytics'],
+  }),
   order);
 app.use("/api/v2/planner",     gate('production'), requireFeature('/planner'), requireFeatureRead('/planner'), planner);
 // Ask Jarvis is an always-on feature — open to any authenticated user
@@ -396,7 +413,11 @@ app.use("/api/v2/assistant",   isAuthenticated, assistant);
 // without writing it through this router.
 app.use("/api/v2/materials",   gate('production', 'accounts'),
   requireFeature('/materials'),
-  requireFeatureRead('/materials', '/warping', '/covering', '/suppliers', '/purchase-orders'),
+  requireFeatureReadPaths(['/materials'], {
+    '/get-raw-materials':      ['/warping', '/covering', '/suppliers', '/purchase-orders'],
+    // The elastic form picks its yarn composition from this catalogue.
+    '/materialForNewElastic':  ['/elastics'],
+  }),
   material);
 // Dye lots are a materials concept — same gate, so anyone who can see
 // stock can see how it breaks down by lot.
@@ -423,7 +444,10 @@ app.use("/api/v2/packing",     gate('production'), packing);
 // either feature may read it.
 app.use("/api/v2/production",  gate('production'),
   requireFeature('/production', '/analytics'),
-  requireFeatureRead('/production', '/analytics'),
+  requireFeatureReadPaths(['/production', '/analytics'], {
+    // The elastic-group page shows a production rollup for its own group.
+    '/breakdown': ['/elastic-groups'],
+  }),
   production);
 // Management reports span operations and finance — either (or an admin)
 // may pull them; each report is read-only.
