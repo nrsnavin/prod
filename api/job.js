@@ -993,7 +993,27 @@ router.get(
       const produced = find(job.producedElastic);
       const packed   = find(job.packedElastic);
       const wasted   = find(job.wastageElastic);
-      return { elasticId: e.elastic._id, elasticName: e.elastic.name, planned, produced, packed, wasted, remaining: Math.max(0, planned - produced - wasted), packingPct: planned > 0 ? Math.round((packed / planned) * 100) : 0 };
+      return {
+        elasticId: e.elastic._id, elasticName: e.elastic.name,
+        planned, produced, packed, wasted,
+        // planned − produced, and NOT − wasted.
+        //
+        // `producedElastic` is GROSS: it is what came off the loom, and
+        // recording wastage only adds to `wastageElastic` — api/wastage.js
+        // never decrements produced. So the wasted meters are already
+        // inside `produced`, and subtracting them here took them out a
+        // second time: a job that had run its full quantity and rejected
+        // 50 m read as 50 m still to weave, and the error grew with every
+        // wastage entry.
+        //
+        // Wastage is a record, not a claim on the plan. It is reported on
+        // its own column above. How much GOOD elastic the customer is
+        // owed is a different question with a different answer — the
+        // order's `pendingDelivery` (ordered − packed), which is why the
+        // two are kept apart.
+        remaining: Math.max(0, planned - produced),
+        packingPct: planned > 0 ? Math.round((packed / planned) * 100) : 0,
+      };
     });
     res.json({ success: true, jobId: job._id, jobNo: job.jobOrderNo, status: job.status, summary });
   })
