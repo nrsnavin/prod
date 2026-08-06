@@ -11,6 +11,20 @@
 //    them is a human decision, not a migration side-effect.
 //
 // Down: drops the index and the seeded counters (data itself untouched).
+//
+// The counters are seeded into "doc_counters", not "counters". This
+// migration originally wrote to "counters", and on a fresh database that
+// worked — but the real database is not fresh: mongoose-sequence
+// (Order.orderNo, JobOrder.jobOrderNo) already owns "counters" there and
+// has put a UNIQUE index on { id, reference_value }. Our rows carry
+// neither field, so they all index as (null, null): the poNo row went in
+// and the first DC row died with E11000, taking the whole chain with it
+// before a single migration was recorded.
+//
+// 20260725000002-move-doc-counters moves any rows an earlier run of this
+// migration left in "counters", so a database that already applied the
+// old version is unaffected — its counters are in "doc_counters" too,
+// and this migration never runs again there.
 
 module.exports = {
   async up(db) {
@@ -39,7 +53,7 @@ module.exports = {
       .project({ poNo: 1 })
       .toArray();
     const poSeed = Math.max(1000, maxPo?.poNo || 1000);
-    await db.collection('counters').updateOne(
+    await db.collection('doc_counters').updateOne(
       { _id: 'poNo' },
       { $max: { seq: poSeed } },
       { upsert: true }
@@ -54,7 +68,7 @@ module.exports = {
     ]).toArray();
     for (const row of dcMaxes) {
       if (!row._id.type || !row._id.fy) continue;
-      await db.collection('counters').updateOne(
+      await db.collection('doc_counters').updateOne(
         { _id: `dc:${row._id.type}:${row._id.fy}` },
         { $max: { seq: row.maxSeq || 0 } },
         { upsert: true }
@@ -72,7 +86,7 @@ module.exports = {
     try {
       await db.collection('purchaseorders').dropIndex('poNo_unique');
     } catch (_) { /* index may not exist */ }
-    await db.collection('counters').deleteOne({ _id: 'poNo' });
-    await db.collection('counters').deleteMany({ _id: /^dc:/ });
+    await db.collection('doc_counters').deleteOne({ _id: 'poNo' });
+    await db.collection('doc_counters').deleteMany({ _id: /^dc:/ });
   },
 };

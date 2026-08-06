@@ -73,6 +73,60 @@ describe("migration chain (real CLI)", () => {
     expect(await db.collection("counters").findOne({ _id: "poNo" })).toBeNull();
   }, 60_000);
 
+  // The real database is not a fresh one: the app has been running for
+  // months, so mongoose-sequence has already created "counters" and put
+  // its unique { id, reference_value } index on it. Our rows carry
+  // neither field, so they all index as (null, null) — the first row
+  // inserts and every later one dies with E11000. A migration chain that
+  // only ever runs against a virgin database never meets that index, and
+  // that is exactly how it reached a production deploy and stopped it.
+  it("runs on a database where mongoose-sequence already owns \"counters\"", async () => {
+    await db.collection("counters").createIndex(
+      { id: 1, reference_value: 1 },
+      { unique: true, name: "id_1_reference_value_1" }
+    );
+    // A row belonging to the plugin — Order.orderNo's sequence.
+    await db.collection("counters").insertOne({ id: "orderNo", reference_value: "", seq: 812 });
+
+    // Two of OUR counters, which is what triggers it: one poNo and one
+    // DC sequence both landing as (null, null).
+    await db.collection("purchaseorders").insertOne({ poNo: 1042, status: "Open" });
+    await db.collection("deliverychallans").insertMany([
+      { type: "elastic", financialYear: "25/26", sequence: 7 },
+      { type: "yarn", financialYear: "25/26", sequence: 3 },
+    ]);
+
+    run(["up"]); // must not throw
+
+    const dc = db.collection("doc_counters");
+    expect((await dc.findOne({ _id: "poNo" })).seq).toBeGreaterThanOrEqual(1042);
+    expect((await dc.findOne({ _id: "dc:elastic:25/26" })).seq).toBe(7);
+    expect((await dc.findOne({ _id: "dc:yarn:25/26" })).seq).toBe(3);
+
+    // The plugin's own row is untouched.
+    const plugin = await db.collection("counters").findOne({ id: "orderNo" });
+    expect(plugin.seq).toBe(812);
+  }, 60_000);
+
+  // What the failed deploy actually left behind: the poNo row reached
+  // "counters" before the DC row hit the index, and nothing was recorded
+  // in the changelog. Re-running has to pick that up rather than leave a
+  // second copy of a live sequence in the plugin's collection.
+  it("clears a counter left in \"counters\" by an earlier failed run", async () => {
+    await db.collection("counters").createIndex(
+      { id: 1, reference_value: 1 },
+      { unique: true, name: "id_1_reference_value_1" }
+    );
+    await db.collection("counters").insertOne({ _id: "poNo", seq: 1099 });
+    await db.collection("purchaseorders").insertOne({ poNo: 1042, status: "Open" });
+
+    run(["up"]);
+
+    // The higher of the two wins, so no number can ever be re-issued.
+    expect((await db.collection("doc_counters").findOne({ _id: "poNo" })).seq).toBe(1099);
+    expect(await db.collection("counters").findOne({ _id: "poNo" })).toBeNull();
+  }, 60_000);
+
   it("installs DB validators that reject negative stock", async () => {
     run(["up"]);
 
