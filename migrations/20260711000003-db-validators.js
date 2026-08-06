@@ -16,6 +16,8 @@
 // not worth blocking a production boot over (unlike duplicate PO
 // numbers, which are financial documents).
 
+const { ensureIndex } = require("../utils/ensureIndex");
+
 function nonNegative(field) {
   return { [field]: { bsonType: ["double", "int", "long", "decimal"], minimum: 0 } };
 }
@@ -91,10 +93,8 @@ module.exports = {
         );
         continue;
       }
-      await db.collection(coll).createIndex(
-        { name: 1 },
-        { unique: true, sparse: true, name: "name_unique" }
-      );
+      await ensureIndex(db, coll, { name: 1 },
+        { unique: true, sparse: true, name: "name_unique" });
     }
   },
 

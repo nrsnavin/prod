@@ -24,12 +24,14 @@ const INDEXES = [
   ["stockmovements",   { elastic: 1, createdAt: -1 },        "elastic_createdAt"],
 ];
 
+const { ensureIndex } = require('../utils/ensureIndex');
+
 module.exports = {
   async up(db) {
     for (const [coll, keys, name] of INDEXES) {
       const exists = await db.listCollections({ name: coll }).hasNext();
       if (!exists) await db.createCollection(coll);
-      await db.collection(coll).createIndex(keys, { name, background: true });
+      await ensureIndex(db, coll, keys, { name, background: true });
     }
   },
 

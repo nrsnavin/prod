@@ -127,6 +127,51 @@ describe("migration chain (real CLI)", () => {
     expect(await db.collection("counters").findOne({ _id: "poNo" })).toBeNull();
   }, 60_000);
 
+  // The other half of "the real database is not a fresh one": mongoose
+  // autoIndex has already built every index the schemas declare, under
+  // ITS naming. createIndex refuses a key pattern it already knows under
+  // a different name — "Index already exists with a different name" —
+  // and takes the chain down with it. Every index the migrations create
+  // has a mongoose-named twin, so this builds them all first.
+  it("runs where mongoose autoIndex already built the same indexes under its own names", async () => {
+    await db.collection("leaverequests")
+      .createIndex({ employee: 1, date: 1, shift: 1 }, { unique: true }); // employee_1_date_1_shift_1
+    await db.collection("leaverequests").createIndex({ date: 1 });
+    await db.collection("purchaseorders").createIndex({ poNo: 1 }, { unique: true, sparse: true });
+    await db.collection("packings").createIndex({ requestId: 1 }, { unique: true, sparse: true });
+    await db.collection("suppliers").createIndex({ name: 1 }, { unique: true, sparse: true });
+    await db.collection("shiftdetails").createIndex({ status: 1, date: 1 });
+
+    run(["up"]); // must not throw
+
+    const status = run(["status"]);
+    expect(status).not.toMatch(/PENDING/);
+
+    // The constraint is what matters, not the label: the existing index
+    // is kept rather than rebuilt, so a live unique index is never
+    // dropped just to rename it.
+    const lr = await db.collection("leaverequests").indexes();
+    const guard = lr.find((i) => i.key.employee === 1 && i.key.date === 1 && i.key.shift === 1);
+    expect(guard.unique).toBe(true);
+    // …and there is exactly one index on that key, not two.
+    expect(lr.filter((i) => i.key.employee === 1 && i.key.date === 1 && i.key.shift === 1))
+      .toHaveLength(1);
+  }, 60_000);
+
+  // An index that exists but does NOT do the job the migration needs has
+  // to be replaced, or the migration silently leaves the constraint off.
+  it("replaces an index whose keys match but whose behaviour does not", async () => {
+    // Non-unique where the migration needs unique.
+    await db.collection("purchaseorders").createIndex({ poNo: 1 }, { name: "poNo_1" });
+
+    run(["up"]);
+
+    const idx = await db.collection("purchaseorders").indexes();
+    const poNo = idx.filter((i) => i.key.poNo === 1);
+    expect(poNo).toHaveLength(1);
+    expect(poNo[0].unique).toBe(true);
+  }, 60_000);
+
   it("installs DB validators that reject negative stock", async () => {
     run(["up"]);
 

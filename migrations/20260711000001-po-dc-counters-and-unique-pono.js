@@ -26,6 +26,8 @@
 // old version is unaffected — its counters are in "doc_counters" too,
 // and this migration never runs again there.
 
+const { ensureIndex } = require('../utils/ensureIndex');
+
 module.exports = {
   async up(db) {
     // ── 1. Refuse to proceed if duplicate poNos already exist ─────────
@@ -76,10 +78,8 @@ module.exports = {
     }
 
     // ── 4. Unique sparse index on poNo (DB-level last line of defense) ─
-    await db.collection('purchaseorders').createIndex(
-      { poNo: 1 },
-      { unique: true, sparse: true, name: 'poNo_unique' }
-    );
+    await ensureIndex(db, 'purchaseorders', { poNo: 1 },
+      { unique: true, sparse: true, name: 'poNo_unique' });
   },
 
   async down(db) {

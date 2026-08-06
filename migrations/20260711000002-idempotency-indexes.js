@@ -11,18 +11,16 @@
 
 const TTL_SECONDS = 60 * 60 * 24 * 30;
 
+const { ensureIndex } = require('../utils/ensureIndex');
+
 module.exports = {
   async up(db) {
     for (const coll of ['packings', 'wastages', 'deliverychallans']) {
-      await db.collection(coll).createIndex(
-        { requestId: 1 },
-        { unique: true, sparse: true, name: 'requestId_unique' }
-      );
+      await ensureIndex(db, coll, { requestId: 1 },
+        { unique: true, sparse: true, name: 'requestId_unique' });
     }
-    await db.collection('idempotencykeys').createIndex(
-      { createdAt: 1 },
-      { expireAfterSeconds: TTL_SECONDS, name: 'createdAt_ttl' }
-    );
+    await ensureIndex(db, 'idempotencykeys', { createdAt: 1 },
+      { expireAfterSeconds: TTL_SECONDS, name: 'createdAt_ttl' });
   },
 
   async down(db) {

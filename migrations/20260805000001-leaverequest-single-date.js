@@ -26,6 +26,8 @@
 // Down: reverses the renames. The dropped index and totalDays are not
 // restored (totalDays defaulted to 1 and nothing consumed it).
 
+const { ensureIndex } = require('../utils/ensureIndex');
+
 module.exports = {
   async up(db) {
     const col = db.collection('leaverequests');
@@ -62,8 +64,12 @@ module.exports = {
       );
     }
 
-    await col.createIndex({ employee: 1, date: 1, shift: 1 }, { unique: true, name: 'employee_date_shift_unique' });
-    await col.createIndex({ date: 1 }, { name: 'date_1' });
+    // ensureIndex, not createIndex: mongoose autoIndex has already built
+    // these from the schema under its own naming, and createIndex refuses
+    // a known key pattern that carries a different name.
+    await ensureIndex(db, 'leaverequests', { employee: 1, date: 1, shift: 1 },
+      { unique: true, name: 'employee_date_shift_unique' });
+    await ensureIndex(db, 'leaverequests', { date: 1 }, { name: 'date_1' });
 
     console.log(`[leaverequest-single-date] renamed ${renamed.modifiedCount} row(s) from startDate → date; unique index created`);
   },
