@@ -133,7 +133,13 @@ const corsConfig = {
     // No Origin header → non-browser client (mobile/curl/server). Allow.
     if (!origin) return cb(null, true);
     if (_allowedOrigins.has(origin)) return cb(null, true);
-    return cb(new Error(`Origin ${origin} not allowed by CORS`), false);
+    // 403, not the ErrorHandler default of 500. A refused origin is an
+    // authorization denial, not a server fault — reporting it as 5xx
+    // sends every drive-by scan to the error sink and buries real
+    // faults under noise.
+    const err = new Error(`Origin ${origin} not allowed by CORS`);
+    err.statusCode = 403;
+    return cb(err, false);
   },
   credentials: true,
 };

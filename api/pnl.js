@@ -30,6 +30,7 @@ const JobOrder = require('../models/JobOrder.js');
 const CostSettings = require('../models/CostSettings.js');
 const { orderPnl } = require('../services/orderPnl.js');
 const { buildOrderPnlPdf } = require('../utils/orderPnlPdf.js');
+const { parseMoney, MAX_RATE, MAX_AMOUNT } = require('../utils/money.js');
 const { getPdfBranding } = require('../services/documentSettings.js');
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint.js');
 
@@ -79,11 +80,13 @@ router.put(
     const update = {};
     for (const field of RATE_CARD_FIELDS) {
       if (req.body[field] === undefined) continue;
-      const v = Number(req.body[field]);
-      if (!Number.isFinite(v) || v < 0) {
-        return next(new ErrorHandler(`${field} must be a number ≥ 0`, 400));
-      }
-      update[field] = v;
+      // Strict: null, '', true and 1e308 all pass a
+      // Number.isFinite(Number(v)) check and none of them is a rate.
+      // This one re-costs EVERY order in the factory, so it is the
+      // last place to be lenient.
+      const parsed = parseMoney(req.body[field], { max: MAX_RATE, label: field });
+      if (!parsed.ok) return next(new ErrorHandler(parsed.reason, 400));
+      update[field] = parsed.value;
     }
     if (req.body.notes !== undefined) update.notes = String(req.body.notes).slice(0, 2000);
 
@@ -127,12 +130,13 @@ router.put(
     const wanted = new Map();
     for (const r of rates) {
       const id = String(r?.elastic ?? '');
-      const v = Number(r?.rate);
       if (!id) return next(new ErrorHandler('Every rate needs an elastic id', 400));
-      if (!Number.isFinite(v) || v < 0) {
-        return next(new ErrorHandler('Every rate must be a number ≥ 0', 400));
-      }
-      wanted.set(id, v);
+      // NOT allowNull. A rate of 0 is this app's signal for "not
+      // priced", so accepting null here would silently un-price a line
+      // and answer 200 OK. Clearing a price is not an operation.
+      const parsed = parseMoney(r?.rate, { max: MAX_RATE, label: 'Selling rate' });
+      if (!parsed.ok) return next(new ErrorHandler(parsed.reason, 400));
+      wanted.set(id, parsed.value);
     }
 
     const previous = {};
@@ -191,15 +195,16 @@ router.put(
     const next$ = {};
     for (const field of OVERRIDE_FIELDS) {
       if (!(field in req.body)) continue;
-      const raw = req.body[field];
       // null / "" clears the override and hands the line back to the
-      // rate card. 0 is a real override meaning "this cost nothing".
-      if (raw === null || raw === '') { next$[field] = null; continue; }
-      const v = Number(raw);
-      if (!Number.isFinite(v) || v < 0) {
-        return next(new ErrorHandler(`${field} must be a number ≥ 0, or null to clear it`, 400));
+      // rate card — a real operation here, unlike on a selling rate.
+      // 0 is a different answer again: "this stage cost nothing".
+      const parsed = parseMoney(req.body[field], {
+        max: MAX_AMOUNT, label: field, allowNull: true,
+      });
+      if (!parsed.ok) {
+        return next(new ErrorHandler(`${parsed.reason}, or null to clear it`, 400));
       }
-      next$[field] = v;
+      next$[field] = parsed.value;
     }
     if (req.body.notes !== undefined) next$.notes = String(req.body.notes).slice(0, 2000);
 

@@ -60,7 +60,13 @@ const DeliveryChallan  = require('../models/DeliveryChallan');
 const CostSettings     = require('../models/CostSettings');
 const { shiftHours }   = require('../utils/shiftHours');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// `Math.round((Number(n) || 0) * 100) / 100` laundered a broken number
+// into a plausible one: `NaN || 0` is 0, so an overflowed order reported
+// a confident margin of exactly 0% instead of an obvious fault. r2 now
+// returns null rather than inventing a figure — a backstop behind the
+// input bounds in utils/money.js, not a substitute for them.
+const { round2 } = require('../utils/money');
+const r2 = (n) => round2(n);
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 // A shift the factory has not paid for yet. `open` means the row was
@@ -368,7 +374,12 @@ async function orderPnl(orderId) {
       // A margin on zero revenue is not 0% or -100%, it is unknown —
       // and an unpriced order showing "-100% margin" in a list is how
       // a real loss gets lost among the noise.
-      marginPct:      orderValue > 0 ? r2((profit / orderValue) * 100) : null,
+      // Not finite → UNKNOWN, which is the same answer an unpriced
+      // order gets. Reporting 0% for a corrupted order is worse than
+      // reporting nothing, because 0% looks like a figure.
+      marginPct:      orderValue > 0 && Number.isFinite(orderValue) && Number.isFinite(profit)
+        ? r2((profit / orderValue) * 100)
+        : null,
       costPerMeter:   producedMeters > 0 ? r2(costs.total / producedMeters) : null,
       revenuePerMeter: producedMeters > 0 ? r2(orderValue / producedMeters) : null,
     },
