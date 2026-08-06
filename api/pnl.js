@@ -29,6 +29,8 @@ const Order = require('../models/Order.js');
 const JobOrder = require('../models/JobOrder.js');
 const CostSettings = require('../models/CostSettings.js');
 const { orderPnl } = require('../services/orderPnl.js');
+const { buildOrderPnlPdf } = require('../utils/orderPnlPdf.js');
+const { getPdfBranding } = require('../services/documentSettings.js');
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint.js');
 
 // A P&L is several queries per order, so the list is hard-capped rather
@@ -215,6 +217,28 @@ router.put(
       message: 'Cost overrides saved',
       costOverrides: job.costOverrides,
     });
+  })
+);
+
+// ── One order's P&L, as a printed statement ──────────────────────
+//
+// Declared BEFORE /order/:orderId so the ".pdf" suffix is not swallowed
+// by the id parameter. Both are fed by the same service, so the screen
+// and the paper can never tell different stories.
+router.get(
+  '/order/:orderId.pdf',
+  catchAsyncErrors(async (req, res, next) => {
+    const pnl = await orderPnl(req.params.orderId);
+    if (!pnl) return next(new ErrorHandler('Order not found', 404));
+
+    pnl.branding = await getPdfBranding();
+    const pdf = await buildOrderPnlPdf(pnl);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="order-pnl-${pnl.order.orderNo ?? req.params.orderId}.pdf"`
+    );
+    res.send(pdf);
   })
 );
 
