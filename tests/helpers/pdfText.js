@@ -21,7 +21,17 @@ const WINANSI_HIGH = {
   0xa0: ' ', 0xb7: '·', 0xb9: '¹',
 };
 
-function pdfText(buffer) {
+/**
+ * Every drawn text run, IN DRAW ORDER.
+ *
+ * pdfkit emits one run per `.text()` call, so a table row arrives as
+ * consecutive runs — cell, cell, cell. That ordering is what lets a
+ * test assert a FIGURE SAT IN A PARTICULAR ROW rather than merely
+ * appearing somewhere on the sheet. Without it, "is 40,710 on the
+ * page?" passes even when the cost summary has lost its overhead line,
+ * because the same number is in the job table's total.
+ */
+function pdfRuns(buffer) {
   const out = [];
   const re = /stream\r?\n([\s\S]*?)endstream/g;
   let m;
@@ -53,7 +63,26 @@ function pdfText(buffer) {
       if (line.trim()) out.push(line);
     }
   }
-  return out.join('\n');
+  return out;
+}
+
+/** The same runs, joined — for assertions that only need presence. */
+function pdfText(buffer) {
+  return pdfRuns(buffer).join('\n');
+}
+
+/**
+ * Do these values appear as CONSECUTIVE runs — i.e. as one row?
+ * Each expected value must be contained in the run at that position,
+ * so a cell may carry extra text (a marker, a unit) around it.
+ */
+function hasRow(runs, expected) {
+  const [first, ...rest] = expected.map(String);
+  for (let i = 0; i < runs.length; i++) {
+    if (!runs[i].includes(first)) continue;
+    if (rest.every((v, k) => (runs[i + 1 + k] ?? '').includes(v))) return true;
+  }
+  return false;
 }
 
 /** How many pages the document ended up with. */
@@ -64,4 +93,4 @@ function pdfPageCount(buffer) {
   return (s.match(/\/Type\s*\/Page[^s]/g) || []).length;
 }
 
-module.exports = { pdfText, pdfPageCount };
+module.exports = { pdfText, pdfRuns, hasRow, pdfPageCount };
