@@ -373,6 +373,9 @@ router.get(
       ...(order.producedElastic || []),
       ...(order.packedElastic || []),
       ...(order.pendingElastic || []),
+      // Excess rows name their own elastic; it is always on the order
+      // too, but relying on that would break the day it isn't.
+      ...(order.excessPlanning || []),
     ]
       .map((row) => row?.elastic)
       .filter(Boolean);
@@ -528,6 +531,28 @@ router.get(
         elastics,
         jobs,
         rawMaterialRequired: liveRawMaterials,
+        // Jobs planned past what this order asked for. Surfaced as its
+        // own list rather than folded into the job rows: an excess is a
+        // decision someone made and had to justify, and it is the thing
+        // that explains why this order's yarn draw exceeds its lines.
+        excessPlanning: (order.excessPlanning || []).map((x) => ({
+          elastic:         x.elastic,
+          // The snapshot survives a rename; the live name is preferred
+          // when the master is still there, as everywhere else here.
+          name:            elasticNames.get(String(x.elastic)) || x.elasticName || "—",
+          job:             x.job,
+          jobOrderNo:      x.jobOrderNo ?? null,
+          jobNo:           x.jobOrderNo != null ? `J-${x.jobOrderNo}` : "—",
+          orderedQuantity: x.orderedQuantity ?? 0,
+          plannedQuantity: x.plannedQuantity ?? 0,
+          excessQuantity:  x.excessQuantity ?? 0,
+          excessPct:       x.excessPct ?? 0,
+          // "" means the excess was inside the free allowance and no
+          // reason was ever asked for — not that one was withheld.
+          reason:          x.reason || "",
+          materialsDrawn:  x.materialsDrawn || [],
+          recordedAt:      x.recordedAt || null,
+        })),
         canApprove,
         createdBy:   order.createdBy  || null,
         createdAt:   order.createdAt  || null,

@@ -102,6 +102,49 @@ const OrderSchema = new mongoose.Schema(
     // by DC create/cancel/delete against this order.
     reservations: { type: [ReservationSchema], default: [] },
 
+    // ── Excess planning ───────────────────────────────────────
+    // A job may be planned past what this order asked for — up to 20%
+    // of a line freely, beyond that only with a reason. Every such
+    // event is appended here (never overwritten: two jobs can each
+    // over-plan the same elastic, and both are worth seeing).
+    //
+    // The material figures are the yarn the EXCESS drew, over and
+    // above what approval already deducted for the ordered quantity.
+    // Kept on the order rather than derived on read because it is a
+    // decision someone made on a date, not a calculation — and the
+    // rate card, the elastic's recipe and stock all move afterwards.
+    excessPlanning: {
+      type: [new mongoose.Schema({
+        elastic:     { type: mongoose.Types.ObjectId, ref: "Elastic", required: true },
+        elasticName: { type: String, default: "" },   // survives a rename
+        job:         { type: mongoose.Types.ObjectId, ref: "JobOrder" },
+        jobOrderNo:  { type: Number },
+
+        orderedQuantity: { type: Number, default: 0 },
+        plannedQuantity: { type: Number, default: 0 },
+        excessQuantity:  { type: Number, default: 0 },
+        excessPct:       { type: Number, default: 0 },
+
+        // Empty when the excess was inside the free allowance — the
+        // planner was never asked, so an empty string here means "not
+        // required", not "not given".
+        reason: { type: String, default: "" },
+
+        materialsDrawn: {
+          type: [new mongoose.Schema({
+            rawMaterial: { type: mongoose.Types.ObjectId, ref: "RawMaterial" },
+            name:        { type: String, default: "" },
+            quantity:    { type: Number, default: 0 },
+          }, { _id: false })],
+          default: [],
+        },
+
+        recordedBy: { type: mongoose.Types.ObjectId, ref: "User" },
+        recordedAt: { type: Date, default: Date.now },
+      }, { _id: false })],
+      default: [],
+    },
+
     status: {
       type:    String,
       enum:    ["Open", "Approved", "InProgress", "Completed", "Cancelled", "Deleted"],

@@ -52,6 +52,14 @@ const {
 const { applyOrderStatus } = require('../domain/orderStatus');
 const { isProductionLocked } = require('../utils/productionLock');
 const { outsourcingBlockers, outsourcingDerived } = require('../utils/outsourcingRecord');
+const {
+  FREE_EXCESS_PCT, assessLines, plannedFromJobs, excessMaterialRequirement,
+  stockShortfalls, linesNeedingReason, reasonIsUsable, describeLine,
+} = require('../services/excessPlanning');
+const RawMaterial = require('../models/RawMaterial');
+const MaterialOutward = require('../models/MaterialOut.cjs');
+const Elastic = require('../models/Elastic');
+const { appendStockMovement } = require('../utils/stockLedger');
 
 function fullJobPopulate(query) {
   return query
@@ -175,11 +183,113 @@ router.post(
       ));
     }
 
-    for (const e of elastics) {
-      const pending = order.pendingElastic.find(p => p.elastic.toString() === e.elastic.toString());
-      if (!pending) return next(new ErrorHandler(`Elastic ${e.elastic} is not part of this order`, 400));
-      if (pending.quantity < e.quantity)
-        return next(new ErrorHandler(`Requested quantity (${e.quantity}) exceeds pending (${pending.quantity})`, 400));
+    // ── Excess planning ─────────────────────────────────────────
+    // A line may be planned up to 120% of what was ORDERED with no
+    // comment; past that only with a reason. This replaced a flat
+    // "requested must not exceed pending", which refused the ordinary
+    // case of setting a loom for a round number of meters.
+    const siblings = await JobOrder.find({
+      order: order._id, status: { $ne: 'cancelled' },
+    }).select('elastics').lean();
+
+    const rows = assessLines(elastics, order, plannedFromJobs(siblings));
+
+    const offOrder = rows.find((r) => !r.onOrder);
+    if (offOrder) {
+      return next(new ErrorHandler(`Elastic ${offOrder.elastic} is not part of this order`, 400));
+    }
+
+    // Name the elastics in the messages — an id tells the planner nothing.
+    const elasticDocs = await Elastic.find({ _id: { $in: rows.map((r) => r.elastic) } })
+      .select('name').lean();
+    const nameOf = (id) =>
+      elasticDocs.find((d) => String(d._id) === String(id))?.name || 'Unnamed elastic';
+
+    const excessRows = rows.filter((r) => r.excess > 0);
+    const overAllowance = linesNeedingReason(rows);
+    const excessReason = typeof req.body.excessReason === 'string' ? req.body.excessReason.trim() : '';
+
+    if (overAllowance.length > 0 && !reasonIsUsable(excessReason)) {
+      const err = new ErrorHandler(
+        `Planning more than ${FREE_EXCESS_PCT}% over the ordered quantity needs a reason — `
+        + overAllowance.map((r) => describeLine(r, nameOf)).join('; '),
+        409
+      );
+      err.code = 'EXCESS_PLANNING_REASON_REQUIRED';
+      err.details = {
+        freeExcessPct: FREE_EXCESS_PCT,
+        lines: overAllowance.map((r) => ({ ...r, name: nameOf(r.elastic) })),
+      };
+      return next(err);
+    }
+
+    // ── The material the excess needs ───────────────────────────
+    // Approval drew yarn for the ORDERED quantity and no more, so every
+    // excess meter is yarn nobody has deducted. Compute it, refuse if
+    // the stock is not there, and draw it below.
+    let excessRequirement = [];
+    const priceById = new Map();
+    if (excessRows.length > 0) {
+      excessRequirement = await excessMaterialRequirement(rows);
+      const materials = await RawMaterial.find({
+        _id: { $in: excessRequirement.map((r) => r.rawMaterial) },
+      }).select('name stock price').lean();
+      const stockById = new Map(materials.map((m) => [String(m._id), m.stock]));
+      // Price the draw from the same read. Writing the row at 0 and
+      // correcting it afterwards leaves a window where the P&L values
+      // this yarn at nothing.
+      for (const m of materials) priceById.set(String(m._id), Number(m.price) || 0);
+
+      const shortfalls = stockShortfalls(excessRequirement, stockById);
+      if (shortfalls.length > 0) {
+        const err = new ErrorHandler(
+          'Not enough raw material for the excess quantity — '
+          + shortfalls.map((s) => `${s.name} short by ${s.short} kg`).join('; '),
+          409
+        );
+        err.code = 'INSUFFICIENT_STOCK_FOR_EXCESS';
+        err.details = { shortfalls, requirement: excessRequirement };
+        return next(err);
+      }
+    }
+
+    // Deduct BEFORE the job exists, so a job can never reach the floor
+    // on yarn that was not there. Each deduction is a single atomic
+    // conditional update — `stock: { $gte: qty }` is the real guard
+    // against a concurrent draw, not the read above. This route is not
+    // transactional (it runs on a standalone mongod in test), so a
+    // failure part-way compensates the deductions already applied.
+    const drawn = [];
+    if (excessRequirement.length > 0) {
+      for (const r of excessRequirement) {
+        const qty = Number(r.requiredWeight) || 0;
+        if (qty <= 0) continue;
+        const updated = await RawMaterial.findOneAndUpdate(
+          { _id: r.rawMaterial, stock: { $gte: qty } },
+          { $inc: { stock: -qty, totalConsumption: qty } },
+          { new: true }
+        );
+        if (!updated) {
+          for (const back of drawn) {
+            await RawMaterial.updateOne(
+              { _id: back.rawMaterial },
+              { $inc: { stock: back.quantity, totalConsumption: -back.quantity } }
+            );
+          }
+          const err = new ErrorHandler(
+            `Raw material ran out while raising this job (${r.name || 'material'}) — nothing was deducted. Try again.`,
+            409
+          );
+          err.code = 'INSUFFICIENT_STOCK_FOR_EXCESS';
+          return next(err);
+        }
+        drawn.push({
+          rawMaterial: r.rawMaterial,
+          name: r.name || updated.name || '',
+          quantity: qty,
+          balance: updated.stock,
+        });
+      }
     }
 
     const zeroed = elastics.map(e => ({ elastic: e.elastic, quantity: 0 }));
@@ -208,16 +318,87 @@ router.post(
         jobOrderNo:    job.jobOrderNo,
         elasticCount:  elastics.length,
         totalQuantity: elastics.reduce((s, e) => s + (e.quantity || 0), 0),
+        excessLines:   excessRows.length,
+        excessQuantity: excessRows.reduce((s, r) => s + r.excess, 0),
+        excessReason:  excessReason || undefined,
+        excessMaterialDrawn: drawn.map((d) => `${d.name} ${d.quantity}`),
       },
     });
     job.fingerprints.push(jobFp);
     await job.save();
+
+    // ── Book the excess draw ────────────────────────────────────
+    // The stock is already down (above); these are the records that
+    // explain where it went. JOB_CONSUMPTION, not ORDER_APPROVAL: it
+    // belongs to this job, and the order P&L already counts that type,
+    // so excess yarn lands on the order's cost without further wiring.
+    if (drawn.length > 0) {
+      await MaterialOutward.create(drawn.map((d) => ({
+        rawMaterial: d.rawMaterial,
+        quantity:    d.quantity,
+        job:         job._id,
+        type:        'JOB_CONSUMPTION',
+        outwardDate: new Date(),
+        unitPrice:   priceById.get(String(d.rawMaterial)) ?? 0,
+        remarks:     `Excess planning on J-${job.jobOrderNo} (order #${order.orderNo})`,
+      })));
+      for (const d of drawn) {
+        await appendStockMovement(d.rawMaterial, {
+          type: 'JOB_CONSUMPTION',
+          refNo: job.jobOrderNo != null ? String(job.jobOrderNo) : '',
+          quantity: -d.quantity,
+          balance: d.balance,
+        });
+      }
+    }
+
+    // ── Record the excess on the order ──────────────────────────
+    // Appended, never replaced: two jobs can each over-plan the same
+    // elastic and both are worth seeing on the order detail page.
+    for (const r of excessRows) {
+      const forThisLine = r.needsReason ? excessReason : '';
+      order.excessPlanning.push({
+        elastic:         r.elastic,
+        elasticName:     nameOf(r.elastic),
+        job:             job._id,
+        jobOrderNo:      job.jobOrderNo,
+        orderedQuantity: r.ordered,
+        plannedQuantity: r.totalPlanned,
+        excessQuantity:  r.excess,
+        excessPct:       Number.isFinite(r.excessPct) ? r.excessPct : 0,
+        reason:          forThisLine,
+        // The whole draw is attributed to the job, not split per line —
+        // the requirement was computed from all the excess lines at once
+        // and there is no honest way to divide a shared material back out.
+        materialsDrawn:  drawn.map((d) => ({
+          rawMaterial: d.rawMaterial, name: d.name, quantity: d.quantity,
+        })),
+        recordedBy:      req.user?._id || null,
+        recordedAt:      new Date(),
+      });
+    }
 
     order.jobs.push({ job: job._id, no: job.jobOrderNo });
     // Pending = ordered − planned, recomputed from the order's live jobs
     // (now including the one just created) rather than decremented in
     // place, so every path agrees and a re-run can't double-count.
     await recomputePending(order);
+
+    // "Recalculate materials required": the order's requirement was
+    // computed for the ordered quantity. Now that more is being made,
+    // it is restated for what is actually PLANNED, so the requirement
+    // sheet and the yarn that left stock tell the same story.
+    if (excessRows.length > 0) {
+      const plannedLines = (order.elasticOrdered || []).map((l) => {
+        const row = rows.find((r) => r.elastic === String(l.elastic));
+        return {
+          elastic: l.elastic,
+          quantity: row ? Math.max(row.ordered, row.totalPlanned) : Number(l.quantity) || 0,
+        };
+      });
+      order.rawMaterialRequired = await computeMaterialRequirement(plannedLines);
+      order.updatedItemsAt = new Date();
+    }
     // Approved → InProgress. A no-op when the order is already running,
     // and refused outright for anything terminal — raising a job must
     // not be a way to reopen a finished order.
