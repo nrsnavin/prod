@@ -341,6 +341,17 @@ router.post(
         id: user._id,
         role: user.role,
         department: user.department || null,
+        // The comment above promises the SAME shape as /login-user, and
+        // it did not: `features` was missing here. The web app offers
+        // ONLY the OTP path, and its session mapper reads
+        // `res.features ?? undefined` — so every web login landed with
+        // no feature list, and the client fell back to the DEPARTMENT
+        // defaults. Per-user access was invisible in the UI: nav entries
+        // and buttons the admin had revoked stayed on screen, and the
+        // API's 403 was the first anyone heard of it.
+        features: Array.isArray(user.features)
+          ? user.features
+          : featuresForDepartment(user.department || user.role),
         token: token,
       });
   })

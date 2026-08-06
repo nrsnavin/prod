@@ -71,6 +71,70 @@ describe('POST /user/request-otp', () => {
   });
 });
 
+// ══════════════════════════════════════════════════════════════════
+//  The OTP response is the WEB APP'S ONLY LOGIN. Its shape is not a
+//  detail — the client builds the session from it, and the sidebar,
+//  the route guard and every per-feature button read the session's
+//  `features` list. When that field was missing the client fell back
+//  to the DEPARTMENT defaults, so per-user access simply did not exist
+//  in the UI: revoked modules stayed in the nav, their pages opened,
+//  and the API's 403 was the first anyone heard of it.
+//
+//  The old assertion here was `toMatchObject({ username, role,
+//  department })` under a title claiming "same JSON shape as login" —
+//  which passes just as happily with the field gone. These compare the
+//  two responses against each other instead.
+// ══════════════════════════════════════════════════════════════════
+describe("the OTP response carries everything /login-user does", () => {
+  const otpLogin = async (user, code = '424242') => {
+    await stampOtp(user, code);
+    return request(app).post('/api/v2/user/verify-otp').send({ email: user.email, otp: code });
+  };
+
+  test('sends the user\'s explicit feature list', async () => {
+    const u = await User.create({
+      name: 'Restricted', email: 'restricted@t.co', password: 'pass1234',
+      role: 'accounts', department: 'finance', features: ['/orders', '/customers'],
+    });
+
+    const res = await otpLogin(u);
+    expect(res.status).toBe(201);
+    expect(res.body.features).toEqual(['/orders', '/customers']);
+    // Specifically NOT the department default, which is far wider.
+    expect(res.body.features).not.toContain('/order-pnl');
+  });
+
+  test('falls back to the department default for a user with no list', async () => {
+    const u = await User.create({
+      name: 'Legacy', email: 'legacy@t.co', password: 'pass1234',
+      role: 'accounts', department: 'finance',
+    });
+
+    const res = await otpLogin(u);
+    expect(Array.isArray(res.body.features)).toBe(true);
+    expect(res.body.features).toContain('/orders');
+  });
+
+  test('key-for-key, the OTP body matches the password login body', async () => {
+    const u = await User.create({
+      name: 'Both Paths', email: 'bothpaths@t.co', password: 'pass1234',
+      role: 'accounts', department: 'finance', features: ['/orders'],
+    });
+
+    const pwd = await request(app)
+      .post('/api/v2/user/login-user')
+      .send({ email: 'bothpaths@t.co', password: 'pass1234' });
+    const otp = await otpLogin(u);
+
+    expect(pwd.status).toBe(201);
+    expect(otp.status).toBe(201);
+    // The token differs by design (fresh signature); everything the
+    // client builds a session from must not.
+    const shape = (b) => { const { token, ...rest } = b; return rest; };
+    expect(shape(otp.body)).toEqual(shape(pwd.body));
+  });
+});
+
 describe('POST /user/verify-otp', () => {
   test('correct code signs in: 201, token cookie, same JSON shape as login', async () => {
     const u = await seedUser();
