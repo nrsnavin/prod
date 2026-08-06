@@ -475,6 +475,15 @@ app.use("/api/v2/pnl",         gate('accounts'),
   requireFeature('/order-pnl'),
   requireFeatureRead('/order-pnl'),
   require("./api/pnl.js"));
+// Sample requests — a log per request, raised by sales, worked by
+// production, ended by an admin. Both departments reach it because both
+// write to it: the customer's ask arrives on one side and the trial
+// result on the other, and splitting them would put half the story out
+// of reach of the people who add the other half.
+app.use("/api/v2/sample",      gate('accounts', 'production'),
+  requireFeature('/samples'),
+  requireFeatureRead('/samples'),
+  require("./api/sample.js"));
 // QC is a leaf, but the Jobs screen reads QC results, so /jobs passes too.
 app.use("/api/v2/qc",          gate('production'), requireFeature('/qc', '/jobs'), requireFeatureRead('/qc', '/jobs'), require("./api/qc.js"));
 app.use("/api/v2/payroll",     gate('accounts', 'production'), payroll);

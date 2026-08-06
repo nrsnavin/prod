@@ -26,6 +26,10 @@ const FEATURES = [
   { key: "/orders",              label: "Orders",              section: "Sales",          depts: ["admin", "finance"] },
   { key: "/jobs",                label: "Job Orders",          section: "Sales",          depts: ["admin", "production", "packing"] },
   { key: "/delivery-challans",   label: "Delivery Challans",   section: "Sales",          depts: ["admin", "finance"] },
+  // Sample requests are raised by sales and worked by production, so
+  // both default sets carry them — the log is only worth keeping if the
+  // people who know what happened can write in it.
+  { key: "/samples",             label: "Sample Requests",     section: "Sales",          depts: ["admin", "finance", "production"] },
 
   { key: "/planner",             label: "Auto Planner",        section: "Production",     depts: ["admin", "production"] },
   { key: "/warping",             label: "Warping",             section: "Production",     depts: ["admin", "production"] },
