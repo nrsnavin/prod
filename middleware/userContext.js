@@ -1,6 +1,7 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User.js');
+const { dbForUser, runInDb } = require('../db/tenants.js');
 
 // Per-request store for the authenticated user. Schema pre-save hooks
 // (see models/plugins/auditFields.js) read from here to stamp
@@ -26,7 +27,14 @@ const setUserContext = async (req, res, next) => {
   }
 
   if (req.user) {
-    return userStorage.run({ user: req.user }, () => next());
+    // The database is decided here and nowhere else: this is the first
+    // point at which the user is known, and it is before any route has
+    // touched a model. `users` itself is pinned to the primary (see
+    // db/tenants.js), so the lookup above is unaffected by the answer.
+    req.tenantDb = dbForUser(req.user);
+    return userStorage.run({ user: req.user }, () =>
+      runInDb(req.tenantDb, () => next())
+    );
   }
   next();
 };

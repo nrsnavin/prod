@@ -8,6 +8,13 @@ if (process.env.NODE_ENV !== "PRODUCTION") {
   });
 }
 
+// Per-user database routing. MUST be installed before the first model
+// file is required: it patches mongoose.model, and a model registered
+// ahead of it would be bound to the primary database for the life of the
+// process — writing a sandbox user's data into production, silently.
+// Inert unless SANDBOX_DB is set. See db/tenants.js.
+require("./db/tenants.js").install();
+
 const auditFields = require("./models/plugins/auditFields.js");
 mongoose.plugin(auditFields);
 

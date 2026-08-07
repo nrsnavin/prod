@@ -1,0 +1,248 @@
+'use strict';
+// ══════════════════════════════════════════════════════════════════
+//  PER-USER DATABASE ROUTING
+//
+//  Named users work in a sandbox database; everyone else works in the
+//  live one. The failure this suite exists to catch is the one that
+//  cannot be seen from the outside: a request served from the WRONG
+//  database. Nothing errors, the screen looks right, and a sandbox
+//  experiment quietly becomes a production row — or a real order
+//  disappears into a database nobody looks at.
+//
+//  So every case asserts which database the bytes actually landed in,
+//  by reading both with the driver rather than through the app.
+// ══════════════════════════════════════════════════════════════════
+
+process.env.JWT_SECRET_KEY = process.env.JWT_SECRET_KEY || 'test-secret';
+process.env.NODE_ENV = 'test';
+// Set before app.js is required — install() reads nothing at load time,
+// but the model files must be registered through the patched
+// mongoose.model, and app.js is what installs it.
+process.env.SANDBOX_DB = 'sandbox_db';
+process.env.SANDBOX_USERS = 'rsnavin02@gmail.com';
+
+const request = require('supertest');
+const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
+const { MongoMemoryServer } = require('mongodb-memory-server');
+
+let mongo, app, M = {}, tenants;
+let admin, sandboxUser;
+
+const cookie = (u) => [`token=${jwt.sign({ id: u._id, role: u.role }, process.env.JWT_SECRET_KEY)}`];
+
+/** Read a collection straight from a named database, bypassing the app. */
+const raw = (dbName, coll) =>
+  mongoose.connection.useDb(dbName, { useCache: true }).db.collection(coll);
+
+beforeAll(async () => {
+  mongo = await MongoMemoryServer.create();
+  await mongoose.connect(`${mongo.getUri()}primary_db`);
+  app = require('../../app.js');
+  tenants = require('../../db/tenants.js');
+  for (const n of ['User', 'Customer', 'SampleRequest', 'Counter']) {
+    M[n] = require(`../../models/${n}.js`);
+  }
+
+  admin = await M.User.create({
+    name: 'Owner', email: 'owner@t.co', password: 'pass1234',
+    role: 'admin', department: 'admin',
+  });
+  sandboxUser = await M.User.create({
+    name: 'Sandbox', email: 'rsnavin02@gmail.com', password: 'pass1234',
+    role: 'admin', department: 'admin',
+  });
+}, 120_000);
+
+afterAll(async () => {
+  await mongoose.disconnect();
+  await mongo.stop();
+});
+
+beforeEach(async () => {
+  for (const db of ['primary_db', 'sandbox_db']) {
+    for (const coll of ['samplerequests', 'customers', 'doc_counters']) {
+      await raw(db, coll).deleteMany({});
+    }
+  }
+});
+
+const raiseSample = (as, title) =>
+  request(app).post('/api/v2/sample').set('Cookie', cookie(as)).send({
+    title, details: 'Spec as given by the customer.',
+  });
+
+// ── The whole point ──────────────────────────────────────────────
+describe('which database a request lands in', () => {
+  it('writes an ordinary user\'s data to the primary and not the sandbox', async () => {
+    const res = await raiseSample(admin, 'Live sample');
+    expect(res.status).toBe(201);
+
+    expect(await raw('primary_db', 'samplerequests').countDocuments()).toBe(1);
+    expect(await raw('sandbox_db', 'samplerequests').countDocuments()).toBe(0);
+  });
+
+  it('writes a sandbox user\'s data to the sandbox and not the primary', async () => {
+    const res = await raiseSample(sandboxUser, 'Sandbox sample');
+    expect(res.status).toBe(201);
+
+    expect(await raw('sandbox_db', 'samplerequests').countDocuments()).toBe(1);
+    expect(await raw('primary_db', 'samplerequests').countDocuments()).toBe(0);
+  });
+
+  it('keeps the two invisible to each other', async () => {
+    await raiseSample(admin, 'Live sample');
+    await raiseSample(sandboxUser, 'Sandbox sample');
+
+    const live = await request(app).get('/api/v2/sample').set('Cookie', cookie(admin));
+    const sand = await request(app).get('/api/v2/sample').set('Cookie', cookie(sandboxUser));
+
+    expect(live.body.samples.map((s) => s.title)).toEqual(['Live sample']);
+    expect(sand.body.samples.map((s) => s.title)).toEqual(['Sandbox sample']);
+  });
+
+  it('does not leak a sandbox row into the live totals', async () => {
+    await raiseSample(sandboxUser, 'Sandbox sample');
+    const live = await request(app).get('/api/v2/sample').set('Cookie', cookie(admin));
+    expect(live.body.total).toBe(0);
+    expect(live.body.counts).toMatchObject({ open: 0 });
+  });
+
+  // Both databases number from their own counter, so a sandbox trial does
+  // not consume a PO or DC number the live ledger was going to use.
+  it('gives each database its own document numbering', async () => {
+    const a = await raiseSample(admin, 'Live one');
+    const b = await raiseSample(admin, 'Live two');
+    const c = await raiseSample(sandboxUser, 'Sandbox one');
+
+    expect([a.body.sample.sampleNo, b.body.sample.sampleNo]).toEqual([1, 2]);
+    expect(c.body.sample.sampleNo).toBe(1);
+  });
+});
+
+// ── Logins ───────────────────────────────────────────────────────
+describe('logins', () => {
+  // Pinned to the primary: one set of credentials, and no way for a
+  // sandbox account to become a production one.
+  it('reads users from the primary even inside a sandbox request', async () => {
+    expect(await raw('primary_db', 'users').countDocuments()).toBeGreaterThan(0);
+    expect(await raw('sandbox_db', 'users').countDocuments()).toBe(0);
+
+    // A sandbox request that reads the user list still resolves it there.
+    const res = await request(app).get('/api/v2/sample').set('Cookie', cookie(sandboxUser));
+    expect(res.status).toBe(200);
+    expect(await raw('sandbox_db', 'users').countDocuments()).toBe(0);
+  });
+
+  it('routes on the email, not the role', () => {
+    expect(tenants.dbForUser({ email: 'rsnavin02@gmail.com' })).toBe('sandbox_db');
+    expect(tenants.dbForUser({ email: 'RSNavin02@Gmail.com' })).toBe('sandbox_db');
+    expect(tenants.dbForUser({ email: 'owner@t.co' })).toBeNull();
+    expect(tenants.dbForUser({})).toBeNull();
+    expect(tenants.dbForUser(null)).toBeNull();
+  });
+});
+
+// ── The default path ─────────────────────────────────────────────
+describe('when no sandbox is configured', () => {
+  const saved = process.env.SANDBOX_DB;
+  afterEach(() => { process.env.SANDBOX_DB = saved; });
+
+  // Every deployment today runs with SANDBOX_DB unset. Routing has to be
+  // completely inert there, or this change breaks all of them.
+  it('sends everyone, including the named user, to the connected database', async () => {
+    process.env.SANDBOX_DB = '';
+    expect(tenants.dbForUser({ email: 'rsnavin02@gmail.com' })).toBeNull();
+
+    const res = await raiseSample(sandboxUser, 'Nowhere to go but home');
+    expect(res.status).toBe(201);
+    expect(await raw('primary_db', 'samplerequests').countDocuments()).toBe(1);
+    expect(await raw('sandbox_db', 'samplerequests').countDocuments()).toBe(0);
+  });
+
+  it('sends an unauthenticated request to the primary', async () => {
+    // No cookie: there is no user, so there is nothing to route on.
+    const res = await request(app).get('/api/v2/health');
+    expect(res.status).toBe(200);
+    expect(tenants.currentDb()).toBeNull();
+  });
+});
+
+// ── Reads that cross documents ───────────────────────────────────
+describe('joins inside a sandbox request', () => {
+  // populate() resolves a ref through the CONNECTION's model registry and
+  // throws MissingSchemaError if the schema was never registered there —
+  // which would only show on whichever route happened to join first.
+  it('populates a reference without a missing-schema error', async () => {
+    const customer = await raw('sandbox_db', 'customers').insertOne({
+      name: 'Sandbox Customer', contactName: 'A', phoneNumber: '9000000000',
+    });
+
+    const created = await request(app)
+      .post('/api/v2/sample')
+      .set('Cookie', cookie(sandboxUser))
+      .send({
+        title: 'With a customer',
+        details: 'Spec.',
+        customerId: String(customer.insertedId),
+      });
+
+    expect(created.status).toBe(201);
+    expect(created.body.sample.customerName).toBe('Sandbox Customer');
+
+    const detail = await request(app)
+      .get(`/api/v2/sample/${created.body.sample._id}`)
+      .set('Cookie', cookie(sandboxUser));
+    expect(detail.status).toBe(200);
+    expect(detail.body.sample.customer).toMatchObject({ name: 'Sandbox Customer' });
+  });
+
+  it('does not find a primary customer from a sandbox request', async () => {
+    const customer = await raw('primary_db', 'customers').insertOne({
+      name: 'Live Customer', contactName: 'B', phoneNumber: '9000000001',
+    });
+
+    const res = await request(app)
+      .post('/api/v2/sample')
+      .set('Cookie', cookie(sandboxUser))
+      .send({ title: 'x', details: 'y', customerId: String(customer.insertedId) });
+
+    expect(res.status).toBe(404);
+  });
+});
+
+// ── The proxy itself ─────────────────────────────────────────────
+describe('the model proxy', () => {
+  it('hands back the real model when there is no sandbox in play', () => {
+    const Customer = require('../../models/Customer.js');
+    expect(Customer.modelName).toBe('Customer');
+    expect(typeof Customer.find).toBe('function');
+  });
+
+  it('constructs documents on the routed database', async () => {
+    const SampleRequest = require('../../models/SampleRequest.js');
+    await tenants.runInDb('sandbox_db', async () => {
+      const doc = new SampleRequest({ sampleNo: 99, title: 't', details: 'd' });
+      await doc.save();
+    });
+    expect(await raw('sandbox_db', 'samplerequests').countDocuments()).toBe(1);
+    expect(await raw('primary_db', 'samplerequests').countDocuments()).toBe(0);
+  });
+
+  it('runs an explicit primary block on the primary, inside a sandbox request', async () => {
+    const SampleRequest = require('../../models/SampleRequest.js');
+    await tenants.runInDb('sandbox_db', async () => {
+      await tenants.runOnPrimary(async () => {
+        await SampleRequest.create({ sampleNo: 1, title: 'forced home', details: 'd' });
+      });
+    });
+    expect(await raw('primary_db', 'samplerequests').countDocuments()).toBe(1);
+    expect(await raw('sandbox_db', 'samplerequests').countDocuments()).toBe(0);
+  });
+
+  it('leaves the pinned models unproxied', () => {
+    const User = require('../../models/User.js');
+    expect(User.__baseModel).toBeUndefined(); // not wrapped at all
+    expect(tenants.PINNED_TO_PRIMARY.has('User')).toBe(true);
+  });
+});
