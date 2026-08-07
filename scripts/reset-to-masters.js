@@ -28,9 +28,19 @@
 //  --overwrite-target is given, because a half-merged database is worse
 //  than either of the two it came from.
 //
-//  ⚠️  THERE IS NO UNDO. Back up first, and check the dump is readable:
-//        mongodump --uri "$MONGO_URL" --out ~/backup-$(date +%F)
-//        mongorestore --uri "$MONGO_URL" --dryRun ~/backup-$(date +%F)
+//  ⚠️  THERE IS NO UNDO, so --yes will not run without a backup. Either:
+//
+//    --backup-to <db>       clone this database first, using the driver.
+//                           Needs nothing installed, and restores with
+//                             node scripts/copy-db.js --from <db> --to <this> --overwrite
+//                           Same cluster, so it is an undo button rather
+//                           than an offsite backup.
+//
+//    --i-have-a-backup      you took a mongodump, and you checked it
+//                           reads back:
+//                             mongodump --uri "$MONGO_URL" --out ~/backup-$(date +%F)
+//                           (mongodump ships separately from the server —
+//                            sudo apt-get install -y mongodb-database-tools)
 //
 //  WHY A KEEP-LIST, NOT A WIPE-LIST
 //  The existing reset-for-production.js names the collections to clear.
@@ -58,6 +68,7 @@
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../config/.env') });
 const mongoose = require('mongoose');
+const { copyDatabase, countDocuments } = require('../db/copyDatabase');
 
 // ── The five the request named ───────────────────────────────────
 const MASTERS = [
@@ -113,6 +124,9 @@ const DB_ARG = valuesOf('--db')[0] ?? null;
 // is not "baluelastics".
 const COPY_TO = (argv.map((a, i) => (a === '--copy-to' ? argv[i + 1] : null))
   .find((v) => v && !v.startsWith('--'))) ?? null;
+const BACKUP_TO = (argv.map((a, i) => (a === '--backup-to' ? argv[i + 1] : null))
+  .find((v) => v && !v.startsWith('--'))) ?? null;
+const HAVE_BACKUP = argv.includes('--i-have-a-backup');
 const OVERWRITE_TARGET = argv.includes('--overwrite-target');
 
 const bail = (msg) => { console.error(`\n${msg}\n`); process.exit(1); };
@@ -147,6 +161,21 @@ async function main() {
 
   const keep = new Set([...MASTERS, ...ATTACHED, ...SYSTEM, ...EXTRA_KEEP]);
   for (const name of EXTRA_WIPE) keep.delete(name);
+
+  // The backup is not advice, it is a precondition: this erases most of
+  // a production database and there is nothing to fall back on.
+  if (EXECUTE && !BACKUP_TO && !HAVE_BACKUP) {
+    bail(
+      'Refusing to erase without a backup. Either:\n\n' +
+      `    --backup-to ${dbName}_backup_${new Date().toISOString().slice(0, 10).replace(/-/g, '_')}\n` +
+      '        clones this database first, using the driver — nothing to install.\n\n' +
+      '    --i-have-a-backup\n' +
+      '        you took a mongodump AND checked that it reads back.'
+    );
+  }
+  if (BACKUP_TO && BACKUP_TO === dbName) {
+    bail(`--backup-to ${BACKUP_TO} is the database you are about to erase.`);
+  }
 
   if (!keep.has('users') && !ALLOW_LOCKOUT) {
     bail(
@@ -225,10 +254,36 @@ async function main() {
     if (targetDocs > 0) console.log('  --overwrite-target: it will be EMPTIED first');
   }
 
+  if (BACKUP_TO) {
+    const backup = mongoose.connection.useDb(BACKUP_TO, { useCache: true }).db;
+    const existing = await countDocuments(backup);
+    console.log(`\nBACKUP TO "${BACKUP_TO}" (before anything is erased)`);
+    console.log(`  target currently holds ${existing} doc(s)`);
+    if (existing > 0) {
+      bail(
+        `Refusing to back up into "${BACKUP_TO}" — it already holds ${existing} document(s).\n` +
+        'Writing a backup on top of something else gives you neither. Pick another name.'
+      );
+    }
+  }
+
   if (!EXECUTE) {
     console.log('\nDry run complete. Nothing was changed.\n');
     await mongoose.disconnect();
     return;
+  }
+
+  // Before anything is destroyed, and separately from --copy-to, which
+  // runs afterwards and carries only the masters.
+  if (BACKUP_TO) {
+    console.log(`\nBacking up "${dbName}" → "${BACKUP_TO}"…`);
+    const backup = mongoose.connection.useDb(BACKUP_TO, { useCache: true }).db;
+    const result = await copyDatabase(db, backup, { log: (l) => console.log(l) });
+    if (result.documents === 0) {
+      bail('The backup copied 0 documents. Refusing to erase anything.');
+    }
+    console.log(`  ${result.documents} document(s) in ${result.collections} collection(s) backed up.`);
+    console.log(`  Restore with:  node scripts/copy-db.js --from ${BACKUP_TO} --to ${dbName} --overwrite`);
   }
 
   console.log('\nErasing…');

@@ -112,15 +112,78 @@ describe('refusing to run by accident', () => {
   }, 60_000);
 
   it('refuses to erase the logins that are the way back in', async () => {
-    const out = runExpectingFailure(['--yes', '--db', dbName, '--wipe', 'users']);
+    const out = runExpectingFailure(['--yes', '--db', dbName, '--i-have-a-backup', '--wipe', 'users']);
     expect(out).toMatch(/locks you out|Refusing to erase "users"/);
     expect(await count('users')).toBe(1);
   }, 60_000);
 });
 
+describe('the backup it insists on', () => {
+  const backupDb = () => mongoose.connection.useDb('test_backup', { useCache: true }).db;
+
+  // mongodump ships separately from the server and is routinely missing
+  // on the box, which is exactly when somebody runs this anyway.
+  it('will not erase without one, and names both ways to get one', async () => {
+    const out = runExpectingFailure(['--yes', '--db', dbName]);
+    expect(out).toMatch(/Refusing to erase without a backup/);
+    expect(out).toMatch(/--backup-to/);
+    expect(out).toMatch(/--i-have-a-backup/);
+    expect(await count('orders')).toBe(2);
+  }, 60_000);
+
+  it('clones the whole database first — not just what survives', async () => {
+    run(['--yes', '--db', dbName, '--backup-to', 'test_backup']);
+    const b = backupDb();
+
+    // Everything erased from the source is still in the backup.
+    expect(await b.collection('orders').countDocuments()).toBe(2);
+    expect(await b.collection('employees').countDocuments()).toBe(2);
+    expect(await b.collection('stockmovements').countDocuments()).toBe(2);
+    // …and the masters, in the state they were in BEFORE the reset.
+    const elastic = await b.collection('elastics').findOne({ name: '20mm' });
+    expect(elastic.reservedStock).toBe(40);
+    expect(elastic.stockMovements).toHaveLength(2);
+  }, 60_000);
+
+  it('restores what it erased, through copy-db', async () => {
+    run(['--yes', '--db', dbName, '--backup-to', 'test_backup']);
+    expect(await count('orders')).toBe(0);
+
+    execFileSync('node', [
+      path.join(__dirname, '..', '..', 'scripts', 'copy-db.js'),
+      '--from', 'test_backup', '--to', dbName, '--overwrite',
+    ], { env: { ...process.env, MONGO_URL: uri }, encoding: 'utf8' });
+
+    expect(await count('orders')).toBe(2);
+    expect(await count('employees')).toBe(2);
+    const elastic = await db.collection('elastics').findOne({ name: '20mm' });
+    expect(elastic.reservedStock).toBe(40);
+  }, 60_000);
+
+  it('refuses to write a backup on top of an existing one', async () => {
+    await backupDb().collection('orders').insertOne({ orderNo: 999 });
+    const out = runExpectingFailure(['--yes', '--db', dbName, '--backup-to', 'test_backup']);
+    expect(out).toMatch(/already holds/);
+    // Nothing was erased on the way to refusing.
+    expect(await count('orders')).toBe(2);
+  }, 60_000);
+
+  it('refuses to back a database up onto itself', async () => {
+    const out = runExpectingFailure(['--yes', '--db', dbName, '--backup-to', dbName]);
+    expect(out).toMatch(/about to erase/);
+    expect(await count('orders')).toBe(2);
+  }, 60_000);
+
+  it('reports the backup in the dry run without taking it', async () => {
+    const out = run(['--backup-to', 'test_backup']);
+    expect(out).toMatch(/BACKUP TO "test_backup"/);
+    expect(await backupDb().collection('orders').countDocuments()).toBe(0);
+  }, 60_000);
+});
+
 describe('what it erases', () => {
   it('empties everything that is not a master', async () => {
-    run(['--yes', '--db', dbName]);
+    run(['--yes', '--db', dbName, '--i-have-a-backup']);
     for (const name of ERASED) expect(await count(name)).toBe(0);
   }, 60_000);
 
@@ -129,7 +192,7 @@ describe('what it erases', () => {
   // supposedly fresh production ledger.
   it('erases a collection nobody ever listed', async () => {
     await db.collection('somethingaddedlater').insertMany([{ a: 1 }, { a: 2 }]);
-    const out = run(['--yes', '--db', dbName]);
+    const out = run(['--yes', '--db', dbName, '--i-have-a-backup']);
     expect(await count('somethingaddedlater')).toBe(0);
     expect(out).toMatch(/somethingaddedlater/);
   }, 60_000);
@@ -143,7 +206,7 @@ describe('what it erases', () => {
 
 describe('what it keeps', () => {
   it('leaves the five master lists alone', async () => {
-    run(['--yes', '--db', dbName]);
+    run(['--yes', '--db', dbName, '--i-have-a-backup']);
     expect(await count('customers')).toBe(2);
     expect(await count('suppliers')).toBe(2);
     expect(await count('elasticgroups')).toBe(2);
@@ -152,7 +215,7 @@ describe('what it keeps', () => {
   }, 60_000);
 
   it('leaves the logins, the settings and the migration changelog alone', async () => {
-    run(['--yes', '--db', dbName]);
+    run(['--yes', '--db', dbName, '--i-have-a-backup']);
     expect(await count('users')).toBe(1);
     expect(await count('documentsettings')).toBe(1);
     expect(await count('costings')).toBe(1);
@@ -161,13 +224,13 @@ describe('what it keeps', () => {
   }, 60_000);
 
   it('spares a collection named with --keep', async () => {
-    run(['--yes', '--db', dbName, '--keep', 'machines']);
+    run(['--yes', '--db', dbName, '--i-have-a-backup', '--keep', 'machines']);
     expect(await count('machines')).toBe(2);
     expect(await count('orders')).toBe(0);
   }, 60_000);
 
   it('erases a kept collection named with --wipe', async () => {
-    run(['--yes', '--db', dbName, '--wipe', 'costings']);
+    run(['--yes', '--db', dbName, '--i-have-a-backup', '--wipe', 'costings']);
     expect(await count('costings')).toBe(0);
     expect(await count('users')).toBe(1);
   }, 60_000);
@@ -175,7 +238,7 @@ describe('what it keeps', () => {
 
 describe('the masters that stay', () => {
   it('clears the embedded stock ledger and the counters derived from erased work', async () => {
-    run(['--yes', '--db', dbName]);
+    run(['--yes', '--db', dbName, '--i-have-a-backup']);
 
     const elastic = await db.collection('elastics').findOne({ name: '20mm' });
     expect(elastic.stockMovements).toEqual([]);
@@ -189,14 +252,14 @@ describe('the masters that stay', () => {
   }, 60_000);
 
   it('keeps the stock BALANCES by default, and says they now have no history', async () => {
-    const out = run(['--yes', '--db', dbName]);
+    const out = run(['--yes', '--db', dbName, '--i-have-a-backup']);
     expect((await db.collection('elastics').findOne({ name: '20mm' })).stock).toBe(500);
     expect((await db.collection('rawmaterials').findOne({ name: 'Nylon 70D' })).stock).toBe(300);
     expect(out).toMatch(/nothing behind those/i);
   }, 60_000);
 
   it('zeroes the balances with --reset-stock', async () => {
-    run(['--yes', '--db', dbName, '--reset-stock']);
+    run(['--yes', '--db', dbName, '--i-have-a-backup', '--reset-stock']);
     expect((await db.collection('elastics').findOne({ name: '20mm' })).stock).toBe(0);
     expect((await db.collection('rawmaterials').findOne({ name: 'Nylon 70D' })).stock).toBe(0);
   }, 60_000);
@@ -206,7 +269,7 @@ describe('copying what survived into a second database', () => {
   const targetDb = () => mongoose.connection.useDb('baluElastics', { useCache: true }).db;
 
   it('lands the masters, and nothing that was erased', async () => {
-    run(['--yes', '--db', dbName, '--copy-to', 'baluElastics']);
+    run(['--yes', '--db', dbName, '--i-have-a-backup', '--copy-to', 'baluElastics']);
     const t = targetDb();
 
     expect(await t.collection('customers').countDocuments()).toBe(2);
@@ -223,7 +286,7 @@ describe('copying what survived into a second database', () => {
   }, 60_000);
 
   it('copies the reset masters, not the pre-reset ones', async () => {
-    run(['--yes', '--db', dbName, '--copy-to', 'baluElastics']);
+    run(['--yes', '--db', dbName, '--i-have-a-backup', '--copy-to', 'baluElastics']);
     const elastic = await targetDb().collection('elastics').findOne({ name: '20mm' });
     expect(elastic.reservedStock).toBe(0);
     expect(elastic.stockMovements).toEqual([]);
@@ -231,7 +294,7 @@ describe('copying what survived into a second database', () => {
 
   it('keeps the same _id, so nothing that referenced a master breaks', async () => {
     const before = await db.collection('customers').findOne({});
-    run(['--yes', '--db', dbName, '--copy-to', 'baluElastics']);
+    run(['--yes', '--db', dbName, '--i-have-a-backup', '--copy-to', 'baluElastics']);
     const after = await targetDb().collection('customers').findOne({ _id: before._id });
     expect(after).not.toBeNull();
   }, 60_000);
@@ -241,7 +304,7 @@ describe('copying what survived into a second database', () => {
   // where.
   it('refuses a target that already holds documents', async () => {
     await targetDb().collection('customers').insertOne({ name: 'Already here' });
-    const out = runExpectingFailure(['--yes', '--db', dbName, '--copy-to', 'baluElastics']);
+    const out = runExpectingFailure(['--yes', '--db', dbName, '--i-have-a-backup', '--copy-to', 'baluElastics']);
     expect(out).toMatch(/already holds/);
     // …and the source is not erased on the way to refusing.
     expect(await count('orders')).toBe(2);
@@ -249,14 +312,14 @@ describe('copying what survived into a second database', () => {
 
   it('empties the target first with --overwrite-target', async () => {
     await targetDb().collection('customers').insertOne({ name: 'Already here' });
-    run(['--yes', '--db', dbName, '--copy-to', 'baluElastics', '--overwrite-target']);
+    run(['--yes', '--db', dbName, '--i-have-a-backup', '--copy-to', 'baluElastics', '--overwrite-target']);
     const names = await targetDb().collection('customers').find({}).toArray();
     expect(names.some((c) => c.name === 'Already here')).toBe(false);
     expect(names).toHaveLength(2);
   }, 60_000);
 
   it('refuses to copy a database onto itself', async () => {
-    const out = runExpectingFailure(['--yes', '--db', dbName, '--copy-to', dbName]);
+    const out = runExpectingFailure(['--yes', '--db', dbName, '--i-have-a-backup', '--copy-to', dbName]);
     expect(out).toMatch(/is the database you are connected to/);
   }, 60_000);
 
