@@ -65,6 +65,26 @@ const listFromEnv = (value) =>
 const sandboxDb = () => String(process.env.SANDBOX_DB || '').trim();
 const sandboxUsers = () => new Set(listFromEnv(process.env.SANDBOX_USERS));
 
+let warnedSameDb = false;
+
+/**
+ * Is SANDBOX_DB the database the app is already connected to?
+ *
+ * This is the failure that looks like success. Routing "works", every
+ * request is served, nothing errors — and the sandbox user is sitting in
+ * production, doing the things people do when they believe nothing they
+ * touch is real. It happens because a MongoDB URI puts the database in
+ * the PATH, so
+ *     mongodb+srv://host/?appName=X/mydb        ← no database at all
+ * silently connects to `test`, and SANDBOX_DB=test then points at the
+ * same place. It has to be
+ *     mongodb+srv://host/mydb?appName=X
+ */
+function sandboxIsPrimary() {
+  const db = sandboxDb();
+  return Boolean(db) && db === mongoose.connection.name;
+}
+
 /**
  * The database this user works in, or null for the primary.
  * Unknown user, no email, or no sandbox configured → primary.
@@ -72,6 +92,21 @@ const sandboxUsers = () => new Set(listFromEnv(process.env.SANDBOX_USERS));
 function dbForUser(user) {
   const db = sandboxDb();
   if (!db) return null;
+
+  if (sandboxIsPrimary()) {
+    if (!warnedSameDb) {
+      warnedSameDb = true;
+      // eslint-disable-next-line no-console
+      console.error(
+        `[tenants] SANDBOX_DB="${db}" is the database MONGO_URL already connects to. ` +
+        'Sandbox users would be working in production while believing otherwise, so ' +
+        'routing is disabled. Check that MONGO_URL names its database in the PATH: ' +
+        'mongodb+srv://host/<database>?options'
+      );
+    }
+    return null;
+  }
+
   const email = user && (user.email || user.get?.('email'));
   if (!email) return null;
   return sandboxUsers().has(String(email).toLowerCase()) ? db : null;
@@ -205,6 +240,7 @@ module.exports = {
   install,
   tenantAware,
   dbForUser,
+  sandboxIsPrimary,
   currentDb,
   connectionFor,
   runInDb,

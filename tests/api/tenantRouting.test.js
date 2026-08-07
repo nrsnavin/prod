@@ -211,6 +211,80 @@ describe('joins inside a sandbox request', () => {
   });
 });
 
+// ── Saying which database you are in ─────────────────────────────
+describe('GET /session/database', () => {
+  // Routing is invisible from the outside by design, which makes
+  // "is it even switched on?" unanswerable without writing a row and
+  // going to look for it.
+  it('tells a sandbox user they are in the sandbox', async () => {
+    const res = await request(app)
+      .get('/api/v2/session/database').set('Cookie', cookie(sandboxUser));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      email: 'rsnavin02@gmail.com',
+      database: 'sandbox_db',
+      sandbox: true,
+      configured: true,
+    });
+  });
+
+  it('tells an ordinary user which live database they are on', async () => {
+    const res = await request(app)
+      .get('/api/v2/session/database').set('Cookie', cookie(admin));
+    expect(res.body).toMatchObject({
+      database: 'primary_db', sandbox: false, configured: true,
+    });
+  });
+
+  // The two reasons the answer can be "not the sandbox" are different
+  // problems with different fixes, so they read differently.
+  it('separates "not configured on this box" from "not on the list"', async () => {
+    const saved = process.env.SANDBOX_DB;
+    process.env.SANDBOX_DB = '';
+    try {
+      const res = await request(app)
+        .get('/api/v2/session/database').set('Cookie', cookie(sandboxUser));
+      expect(res.body).toMatchObject({ sandbox: false, configured: false });
+    } finally {
+      process.env.SANDBOX_DB = saved;
+    }
+  });
+
+  it('needs a login', async () => {
+    const res = await request(app).get('/api/v2/session/database');
+    expect([401, 403]).toContain(res.status);
+  });
+});
+
+// ── The failure that looks like success ──────────────────────────
+describe('when SANDBOX_DB is the database already connected to', () => {
+  const saved = process.env.SANDBOX_DB;
+  afterEach(() => { process.env.SANDBOX_DB = saved; });
+
+  // A MongoDB URI names its database in the PATH. Put it in the query
+  // string by mistake — mongodb+srv://host/?appName=X/mydb — and the
+  // driver silently connects to `test`; SANDBOX_DB=test then points at
+  // the same place. Everything "works": the sandbox user is in
+  // production, believing nothing they touch is real.
+  it('refuses to route rather than pretending to', async () => {
+    process.env.SANDBOX_DB = mongoose.connection.name; // 'primary_db'
+    expect(tenants.sandboxIsPrimary()).toBe(true);
+    expect(tenants.dbForUser({ email: 'rsnavin02@gmail.com' })).toBeNull();
+
+    const res = await raiseSample(sandboxUser, 'Would have looked sandboxed');
+    expect(res.status).toBe(201);
+    expect(await raw('primary_db', 'samplerequests').countDocuments()).toBe(1);
+  });
+
+  it('says so, instead of reporting a healthy sandbox', async () => {
+    process.env.SANDBOX_DB = mongoose.connection.name;
+    const res = await request(app)
+      .get('/api/v2/session/database').set('Cookie', cookie(sandboxUser));
+    expect(res.body.sandbox).toBe(false);
+    expect(res.body.warning).toMatch(/names its database in the PATH/);
+  });
+});
+
 // ── The proxy itself ─────────────────────────────────────────────
 describe('the model proxy', () => {
   it('hands back the real model when there is no sandbox in play', () => {

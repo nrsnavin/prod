@@ -270,6 +270,33 @@ app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), (req, res) =>
   });
 });
 
+// Which database is serving THIS session.
+//
+// Per-user routing (db/tenants.js) is invisible from the outside by
+// design — a sandbox request looks exactly like a live one, which is the
+// point and also the problem: "am I in the sandbox?" had no answer short
+// of writing a row and going to look for it. This says so directly, and
+// separates the two reasons the answer might be "no":
+//   configured:false → SANDBOX_DB is not set on this box at all
+//   configured:true, sandbox:false → set, but this user is not on the list
+app.get("/api/v2/session/database", isAuthenticated, (req, res) => {
+  const { currentDb, sandboxIsPrimary } = require("./db/tenants.js");
+  const routed = currentDb();
+  const sameDb = sandboxIsPrimary();
+  res.json({
+    email: req.user?.email ?? null,
+    database: routed || mongoose.connection.name,
+    sandbox: Boolean(routed),
+    configured: Boolean(String(process.env.SANDBOX_DB || "").trim()),
+    ...(sameDb && {
+      warning:
+        `SANDBOX_DB="${process.env.SANDBOX_DB}" is the database MONGO_URL already ` +
+        "connects to, so routing is disabled. A MongoDB URI names its database in " +
+        "the PATH: mongodb+srv://host/<database>?options",
+    }),
+  });
+});
+
 
 // Mount-level admin gate for the all-ADMIN router groups.
 //
