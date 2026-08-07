@@ -7,8 +7,13 @@
 //  box where you need it. This does the same job with the driver the
 //  app already has.
 //
-//  Back up before a destructive change:
+//  Back up before a destructive change, then CHECK IT:
 //    node scripts/copy-db.js --from test --to test_backup_2026_08_07
+//    node scripts/copy-db.js --verify --from test --to test_backup_2026_08_07
+//
+//  Verify by document count, never by size on disk: a copy carries no
+//  indexes, so a complete backup is routinely about half the size of the
+//  database it came from, which looks exactly like a failed one.
 //
 //  Put it back:
 //    node scripts/copy-db.js --from test_backup_2026_08_07 --to test --overwrite
@@ -29,7 +34,7 @@
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../config/.env') });
 const mongoose = require('mongoose');
-const { copyDatabase, countDocuments } = require('../db/copyDatabase');
+const { copyDatabase, countDocuments, compareDatabases } = require('../db/copyDatabase');
 
 const argv = process.argv.slice(2);
 const valueOf = (flag) => {
@@ -41,6 +46,7 @@ const FROM = valueOf('--from');
 const TO = valueOf('--to');
 const OVERWRITE = argv.includes('--overwrite');
 const LIST = argv.includes('--list');
+const VERIFY = argv.includes('--verify');
 
 const bail = (msg) => { console.error(`\n${msg}\n`); process.exit(1); };
 
@@ -71,6 +77,31 @@ async function main() {
 
   const source = mongoose.connection.useDb(FROM, { useCache: true }).db;
   const target = mongoose.connection.useDb(TO, { useCache: true }).db;
+
+  // Verify BEFORE anything irreversible, and trust document counts, not
+  // size on disk: a copy carries no indexes, so a complete backup is
+  // routinely about half the size of its source.
+  if (VERIFY) {
+    const { ok, rows } = await compareDatabases(source, target);
+    console.log(`\nComparing ${FROM} → ${TO}\n`);
+    console.log(`  ${'COLLECTION'.padEnd(26)}${'SOURCE'.padStart(9)}${'TARGET'.padStart(9)}`);
+    for (const r of rows) {
+      console.log(
+        `  ${r.name.padEnd(26)}${String(r.source).padStart(9)}${String(r.target).padStart(9)}` +
+        `  ${r.ok ? '' : '  ← MISMATCH'}`
+      );
+    }
+    if (!ok) {
+      bail('\n❌ The two databases do not match. Do NOT rely on this as a backup.');
+    }
+    console.log(
+      `\n✅ Every collection matches. ${rows.length} collection(s) checked.\n` +
+      '   (Size on disk differs because indexes are not copied — they are rebuilt\n' +
+      '    from the schemas on boot. Document counts are the check that matters.)\n'
+    );
+    await mongoose.disconnect();
+    return;
+  }
 
   const sourceDocs = await countDocuments(source);
   const targetDocs = await countDocuments(target);

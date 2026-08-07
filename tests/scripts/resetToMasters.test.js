@@ -160,6 +160,52 @@ describe('the backup it insists on', () => {
     expect(elastic.reservedStock).toBe(40);
   }, 60_000);
 
+  // Size on disk is not evidence — a copy carries no indexes, so a
+  // complete backup looks about half the size of its source. Counting is.
+  it('exits non-zero when the two do not match, so a script cannot ignore it', async () => {
+    run(['--yes', '--db', dbName, '--backup-to', 'test_backup']);
+
+    // The source was reset after the backup was taken, so they SHOULD
+    // differ — and saying so has to be a failure, not a line of output
+    // scrolling past in a deploy log.
+    let failed = false;
+    try {
+      execFileSync('node', [
+        path.join(__dirname, '..', '..', 'scripts', 'copy-db.js'),
+        '--verify', '--from', dbName, '--to', 'test_backup',
+      ], { env: { ...process.env, MONGO_URL: uri }, encoding: 'utf8' });
+    } catch (err) {
+      failed = true;
+      const text = `${err.stdout || ''}${err.stderr || ''}`;
+      expect(text).toMatch(/MISMATCH/);
+      expect(text).toMatch(/do NOT rely on this as a backup/i);
+    }
+    expect(failed).toBe(true);
+  }, 60_000);
+
+  it('passes verification on an untouched copy, and fails on a short one', async () => {
+    const copy = path.join(__dirname, '..', '..', 'scripts', 'copy-db.js');
+    const env = { ...process.env, MONGO_URL: uri };
+
+    execFileSync('node', [copy, '--from', dbName, '--to', 'test_backup'], { env, encoding: 'utf8' });
+    const good = execFileSync('node', [copy, '--verify', '--from', dbName, '--to', 'test_backup'],
+      { env, encoding: 'utf8' });
+    expect(good).toMatch(/Every collection matches/);
+    expect(good).not.toMatch(/MISMATCH/);
+
+    // Lose one document from the backup — verification must catch it.
+    await backupDb().collection('orders').deleteOne({});
+    let failed = false;
+    try {
+      execFileSync('node', [copy, '--verify', '--from', dbName, '--to', 'test_backup'],
+        { env, encoding: 'utf8' });
+    } catch (err) {
+      failed = true;
+      expect(`${err.stdout}${err.stderr}`).toMatch(/do NOT rely on this as a backup/i);
+    }
+    expect(failed).toBe(true);
+  }, 60_000);
+
   it('refuses to write a backup on top of an existing one', async () => {
     await backupDb().collection('orders').insertOne({ orderNo: 999 });
     const out = runExpectingFailure(['--yes', '--db', dbName, '--backup-to', 'test_backup']);

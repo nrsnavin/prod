@@ -87,4 +87,35 @@ async function countDocuments(db) {
   return total;
 }
 
-module.exports = { copyDatabase, countDocuments, BATCH };
+/** Per-collection document counts, as a Map. */
+async function countByCollection(db) {
+  const counts = new Map();
+  for (const c of await db.listCollections().toArray()) {
+    if (isSystem(c.name)) continue;
+    counts.set(c.name, await db.collection(c.name).countDocuments());
+  }
+  return counts;
+}
+
+/**
+ * Compare two databases collection by collection.
+ *
+ * Size on disk is not evidence: a copy carries no indexes (they are
+ * rebuilt from the schemas), so a complete backup is routinely half the
+ * size of its source and looks alarming. Counting documents is the only
+ * check worth trusting before something irreversible.
+ *
+ * @returns {Promise<{ok: boolean, rows: Array<{name, source, target, ok}>}>}
+ */
+async function compareDatabases(source, target) {
+  const [a, b] = await Promise.all([countByCollection(source), countByCollection(target)]);
+  const names = [...new Set([...a.keys(), ...b.keys()])].sort();
+  const rows = names.map((name) => {
+    const s = a.get(name) ?? 0;
+    const t = b.get(name) ?? 0;
+    return { name, source: s, target: t, ok: s === t };
+  });
+  return { ok: rows.every((r) => r.ok), rows };
+}
+
+module.exports = { copyDatabase, countDocuments, countByCollection, compareDatabases, BATCH };
