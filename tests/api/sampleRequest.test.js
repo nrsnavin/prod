@@ -432,6 +432,42 @@ describe('photos', () => {
     expect(JSON.stringify(list.body)).not.toContain('base64');
   });
 
+  // Dio's MultipartFile labels every part application/octet-stream
+  // unless the caller passes a media type, and which class that is moved
+  // between Dio releases. Refusing the mobile app's JPEG over a header it
+  // cannot easily set would be the API's problem, not the phone's.
+  it('takes an unlabelled part, resolving the type from its extension', async () => {
+    const { body } = await raise();
+    const res = await request(app)
+      .post(`/api/v2/sample/${body.sample._id}/photo`)
+      .set('Cookie', cookie(production))
+      .attach('photo', PNG, {
+        filename: 'trial.png',
+        contentType: 'application/octet-stream',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.photo.contentType).toBe('image/png');
+    // …and it is served back under the resolved type, not the sent one.
+    const file = await request(app)
+      .get(`/api/v2/sample/photo/${res.body.photo._id}/file`)
+      .set('Cookie', cookie(sales));
+    expect(file.headers['content-type']).toMatch(/image\/png/);
+  });
+
+  it('still refuses an unlabelled part whose extension is not a photo', async () => {
+    const { body } = await raise();
+    const res = await request(app)
+      .post(`/api/v2/sample/${body.sample._id}/photo`)
+      .set('Cookie', cookie(production))
+      .attach('photo', Buffer.from('%PDF-1.4'), {
+        filename: 'quote.pdf',
+        contentType: 'application/octet-stream',
+      });
+    expect(res.status).toBe(400);
+    expect(await M.SamplePhoto.countDocuments({})).toBe(0);
+  });
+
   it('refuses a file that is not a photo', async () => {
     const { body } = await raise();
     const res = await attach(body.sample._id, production, {

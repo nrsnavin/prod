@@ -68,6 +68,41 @@ function handlePhotoUpload(req, res, next) {
   });
 }
 
+/** Extension → type, for clients that do not label the part. */
+const EXTENSION_TYPES = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp',
+  heic: 'image/heic',
+  heif: 'image/heic',
+};
+
+/**
+ * The type of an uploaded photo, or null if it is not one we take.
+ *
+ * multer reports whatever content type the client put on the multipart
+ * part, and plenty of clients put nothing — Dio's MultipartFile defaults
+ * every part to application/octet-stream unless the caller passes a
+ * media type, and which class that is moved between Dio releases. A
+ * mobile app that cannot name its own JPEG is not a reason to refuse the
+ * photo, so an unlabelled part falls back to its extension. Both routes
+ * end at the same allow-list, and an unrecognised extension is still
+ * refused.
+ */
+function resolveImageType(file) {
+  const declared = String(file.mimetype || '').toLowerCase();
+  if (ALLOWED_CONTENT_TYPES.includes(declared)) return declared;
+
+  const unlabelled = !declared
+    || declared === 'application/octet-stream'
+    || declared === 'binary/octet-stream';
+  if (!unlabelled) return null;
+
+  const ext = String(file.originalname || '').split('.').pop().toLowerCase();
+  return EXTENSION_TYPES[ext] ?? null;
+}
+
 /** Metadata only — the bytes are never in a list response. */
 const photoMeta = (p) => ({
   _id: p._id,
@@ -381,7 +416,8 @@ router.post(
     if (!req.file) {
       return next(new ErrorHandler('No photo uploaded (field name must be "photo").', 400));
     }
-    if (!ALLOWED_CONTENT_TYPES.includes(req.file.mimetype)) {
+    const contentType = resolveImageType(req.file);
+    if (!contentType) {
       return next(new ErrorHandler(
         `Unsupported file type "${req.file.mimetype}". Upload a photo (JPEG, PNG, WebP or HEIC).`,
         400
@@ -404,7 +440,7 @@ router.post(
       sample: req.params.id,
       caption: caption.value,
       filename: req.file.originalname || '',
-      contentType: req.file.mimetype,
+      contentType,
       size: req.file.size,
       data: `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`,
       uploadedBy: who.by,
