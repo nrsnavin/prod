@@ -196,6 +196,40 @@ describe('service & spare bills', () => {
     expect(await MachineServiceBill.countDocuments()).toBe(0);
   });
 
+  // Dio's MultipartFile labels every part application/octet-stream unless
+  // the caller names a media type, and the class that names it moved
+  // between Dio releases. A phone that cannot name its own PDF is not a
+  // reason to lose the bill.
+  test('falls back to the extension when the part is unlabelled', async () => {
+    const { machine, logId } = await machineWithLog();
+    const res = await uploadBill({
+      machineId: machine._id, logId,
+      file: Buffer.from('%PDF-1.4\n'), name: 'vendor-invoice.PDF',
+      type: 'application/octet-stream',
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.bill.contentType).toBe('application/pdf');
+
+    // The stored data URL must agree with the stored type, or the
+    // download route sends a header contradicting its own payload.
+    const stored = await MachineServiceBill.findById(res.body.bill._id).lean();
+    expect(stored.data.startsWith('data:application/pdf;base64,')).toBe(true);
+  });
+
+  test('does not rescue a part that names a type we do not take', async () => {
+    const { machine, logId } = await machineWithLog();
+    // A client asserting video/mp4 is telling us something; .pdf on the
+    // end of the name would not make it a PDF.
+    const res = await uploadBill({
+      machineId: machine._id, logId,
+      file: Buffer.from('....'), name: 'clip.pdf', type: 'video/mp4',
+    });
+
+    expect(res.status).toBe(400);
+    expect(await MachineServiceBill.countDocuments()).toBe(0);
+  });
+
   test('rejects an unknown bill kind', async () => {
     const { machine, logId } = await machineWithLog();
     const res = await uploadBill({ machineId: machine._id, logId, kind: 'lunch_receipt' });

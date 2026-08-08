@@ -58,6 +58,45 @@ function handleBillUpload(req, res, next) {
 /** Strips the file payload; every listing returns metadata only. */
 const BILL_METADATA = "-data";
 
+const BILL_EXTENSION_TYPES = {
+  pdf:  "application/pdf",
+  jpg:  "image/jpeg",
+  jpeg: "image/jpeg",
+  png:  "image/png",
+  webp: "image/webp",
+  heic: "image/heic",
+  heif: "image/heic",
+};
+
+/**
+ * The content type of an uploaded bill, or null if it is not one we take.
+ *
+ * multer reports whatever content type the client put on the multipart
+ * part, and plenty of clients put nothing — Dio's MultipartFile defaults
+ * every part to application/octet-stream unless the caller passes a media
+ * type, and which class that is moved between Dio releases. A phone that
+ * cannot name its own PDF is not a reason to refuse the bill, so an
+ * unlabelled part falls back to its extension. A part that DOES name a
+ * type we do not take is still refused on that name rather than being
+ * given a second chance at guessing — a client asserting "video/mp4" is
+ * telling us something, and .pdf on the end would not make it a PDF.
+ *
+ * Same shape as resolveImageType in api/sample.js, and the two end at the
+ * same place: an unrecognised extension is refused.
+ */
+function resolveBillType(file) {
+  const declared = String(file.mimetype || "").toLowerCase();
+  if (ALLOWED_CONTENT_TYPES.includes(declared)) return declared;
+
+  const unlabelled = !declared
+    || declared === "application/octet-stream"
+    || declared === "binary/octet-stream";
+  if (!unlabelled) return null;
+
+  const ext = String(file.originalname || "").split(".").pop().toLowerCase();
+  return BILL_EXTENSION_TYPES[ext] ?? null;
+}
+
 /** How many past shifts the machine detail page shows. */
 const RECENT_SHIFT_LIMIT = 6;
 
@@ -661,7 +700,8 @@ router.post(
         new ErrorHandler(`kind must be one of: ${BILL_KINDS.join(", ")}`, 400)
       );
     }
-    if (!ALLOWED_CONTENT_TYPES.includes(req.file.mimetype)) {
+    const contentType = resolveBillType(req.file);
+    if (!contentType) {
       return next(
         new ErrorHandler(
           `Unsupported file type "${req.file.mimetype}". Upload a PDF or a photo.`,
@@ -677,9 +717,12 @@ router.post(
       serviceLog:  serviceLogId,
       kind,
       filename:    req.file.originalname || "",
-      contentType: req.file.mimetype,
+      // The resolved type, not the declared one: the data URL and the
+      // stored contentType have to agree, or the download route sends a
+      // header that contradicts its own payload.
+      contentType,
       size:        req.file.size,
-      data:        `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`,
+      data:        `data:${contentType};base64,${req.file.buffer.toString("base64")}`,
       amount:      Number(amount) > 0 ? Number(amount) : 0,
       vendor:      vendor   || "",
       billNo:      billNo   || "",
