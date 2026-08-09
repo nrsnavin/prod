@@ -15,6 +15,7 @@ const RawMaterial = require('../models/RawMaterial');
 const Elastic     = require('../models/Elastic');
 const Costing     = require('../models/Costing');
 const { calculateElasticCosting } = require('./elasticCosting.js');
+const { elasticNameKey } = require('./elasticName.js');
 
 // ── Sheet column contracts (single source of truth) ────────────
 const COLUMNS = {
@@ -294,8 +295,18 @@ async function importWorkbook(wb) {
     const conversionCost = 1.25;
     const totalCost = materialCost + conversionCost;
 
+    // Matched on the folded key, not the name as typed. An upsert keyed
+    // on the exact string treats "Newday Romeo Black" in a sheet as a
+    // different product from "NEWDAY ROMEO BLACK" in the catalogue and
+    // inserts a second row — a duplicate created by the one path that
+    // never goes near the API's own check. Keying on nameKey updates
+    // the elastic that is already there, which is what somebody
+    // importing a sheet of their own products means by it.
+    //
+    // The name in `$set` still wins, so a sheet CAN restyle the
+    // capitalisation of an existing product. It just cannot fork it.
     const elastic = await Elastic.findOneAndUpdate(
-      { name }, { $set: doc },
+      { nameKey: elasticNameKey(name) }, { $set: doc },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
     const costing = await Costing.findOneAndUpdate(

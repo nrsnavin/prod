@@ -14,9 +14,44 @@ const StockMovement = require("../models/StockMovement");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
+const { elasticNameKey } = require("../utils/elasticName.js");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
 router.use(isAuthenticated);
+
+/**
+ * Refuse a name another elastic already answers to.
+ *
+ * The database index is the thing that finally cannot be raced, but it
+ * can only say "E11000 duplicate key" — which tells somebody entering a
+ * product nothing about what to do. This check runs first so the answer
+ * can name the elastic in the way, and say when it is archived: a name
+ * that appears free on the list and is refused anyway is otherwise a
+ * mystery, and the fix (rename the old one, or unarchive and edit it)
+ * depends on knowing.
+ *
+ * @param {string} name        as typed
+ * @param {string} [excludeId] the elastic being edited, so renaming it
+ *                             to its own name is not a clash
+ * @returns {Promise<ErrorHandler|null>}
+ */
+async function nameClash(name, excludeId) {
+  const key = elasticNameKey(name);
+  if (!key) return null; // `required` on the schema owns the empty case
+
+  const filter = { nameKey: key };
+  if (excludeId) filter._id = { $ne: excludeId };
+
+  const clash = await Elastic.findOne(filter).select("name archived").lean();
+  if (!clash) return null;
+
+  return new ErrorHandler(
+    clash.archived
+      ? `An archived elastic is already called "${clash.name}". Rename it, or unarchive it and edit that one.`
+      : `An elastic called "${clash.name}" already exists.`,
+    409
+  );
+}
 
 const _populate = (q) =>
   q
@@ -55,8 +90,18 @@ router.post(
       const elasticData = req.body;
       console.log("Received elastic data:", JSON.stringify(elasticData, null, 2));
 
+      // Before anything is written. A clash discovered after the
+      // Costing row exists would leave an orphan behind every refusal.
+      const clash = await nameClash(elasticData.name);
+      if (clash) return next(clash);
+
       const planTemplate = elasticData.warpingPlanTemplate ?? null;
       delete elasticData.warpingPlanTemplate;
+
+      // Derived from `name` by the model. Accepting it from the body
+      // would let a caller point a new elastic's key at another name
+      // and walk straight past the check above.
+      delete elasticData.nameKey;
 
       // An opening balance is a movement, not a property of the item.
       // The whole body used to be handed to create(), so stock posted
@@ -651,6 +696,14 @@ router.put(
       const elastic = await Elastic.findById(elasticData._id);
       if (!elastic)
         return next(new ErrorHandler("Elastic not found", 404));
+
+      // Only when the name is actually being changed — an edit that
+      // leaves the name alone must not be refused by the elastic's own
+      // row, and `excludeId` covers a rename that only changes case.
+      if (elasticData.name !== undefined) {
+        const clash = await nameClash(elasticData.name, elastic._id);
+        if (clash) return next(clash);
+      }
 
       const fieldsToCopy = [
         "name", "weaveType", "pick", "noOfHook", "weight",

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { elasticNameKey } = require("../utils/elasticName.js");
 
 // ── Warping plan template sub-schemas ──────────────────
 // Embedded on the Elastic doc so any Warping created for a job
@@ -61,7 +62,22 @@ const ElasticMovementSchema = new mongoose.Schema(
 // ── Main elastic schema ───────────────────────────
 const ElasticSchema = new mongoose.Schema(
   {
-    name: { type: String, required: true },
+    // Stored exactly as typed — the operator chose that capitalisation
+    // and it goes on the programme sheet. Only the ends are trimmed,
+    // because a trailing space is never intentional and it is the
+    // easiest way to smuggle a second copy of a product past a check.
+    name: { type: String, required: true, trim: true },
+
+    // What "the same elastic" means, derived from `name` on every save
+    // (see the hook below and utils/elasticName.js). Case-folded and
+    // whitespace-collapsed, so "Newday Romeo Black" cannot join
+    // "NEWDAY  ROMEO BLACK" in the catalogue as a separate product.
+    //
+    // Not marked unique here on purpose: mongoose would build that
+    // index at startup, and on a database that still holds duplicates
+    // the build fails and logs, every boot, forever. The unique index
+    // is the migration's job, which can look first and report instead.
+    nameKey: { type: String, index: true },
 
     weaveType: { type: String, required: true, default: "8" },
 
@@ -150,6 +166,35 @@ const ElasticSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// Derived, never supplied. A hook rather than a line in each route
+// because every write goes through save() — create-elastic, the demo
+// seeder, and anything added later — and a route that forgot to set it
+// would write a row the uniqueness check cannot see.
+ElasticSchema.pre("validate", function deriveNameKey(next) {
+  // The `undefined` arm self-heals a row written before any of this
+  // existed: the first save after the upgrade derives its key without
+  // needing the backfill to have run.
+  if (this.isModified("name") || this.nameKey === undefined) {
+    this.nameKey = elasticNameKey(this.name);
+  }
+  next();
+});
+
+// The same invariant for the update pipeline, which does not run
+// document hooks. Nothing renames an elastic this way today; the point
+// is that if something ever does, it cannot leave a stale key behind —
+// and a stale key is worse than no key, because it holds the OLD name
+// reserved while leaving the new one free.
+ElasticSchema.pre(["findOneAndUpdate", "updateOne", "updateMany"],
+  function syncNameKey(next) {
+    const u = this.getUpdate();
+    if (!u) return next();
+    const name = u.name ?? u.$set?.name;
+    if (name === undefined) return next();
+    this.set("nameKey", elasticNameKey(name));
+    next();
+  });
 
 const Elastic = mongoose.model("Elastic", ElasticSchema);
 module.exports = Elastic;
