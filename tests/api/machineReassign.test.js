@@ -60,7 +60,9 @@ const makeMachine = (heads = 2) =>
 async function seed() {
   const customer = await Customer.create({ name: 'Acme', contactName: 'R', phoneNumber: '9000000001' });
   const elastic = await Elastic.create({
-    name: '20mm', weaveType: '8',
+    // Unique per seed: two jobs in this file are two DIFFERENT
+    // products. One name would now be one row, which is the rule.
+    name: `20mm ${Math.random().toString(36).slice(2, 8)}`, weaveType: '8',
     spandexEnds: 40, yarnEnds: 120, pick: 12, noOfHook: 8, weight: 2.4,
   });
   const order = await Order.create({

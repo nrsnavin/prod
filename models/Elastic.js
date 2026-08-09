@@ -73,11 +73,9 @@ const ElasticSchema = new mongoose.Schema(
     // whitespace-collapsed, so "Newday Romeo Black" cannot join
     // "NEWDAY  ROMEO BLACK" in the catalogue as a separate product.
     //
-    // Not marked unique here on purpose: mongoose would build that
-    // index at startup, and on a database that still holds duplicates
-    // the build fails and logs, every boot, forever. The unique index
-    // is the migration's job, which can look first and report instead.
-    nameKey: { type: String, index: true },
+    // The unique index on this is declared below and built by mongoose
+    // at startup rather than by a migration — see the note there.
+    nameKey: { type: String },
 
     weaveType: { type: String, required: true, default: "8" },
 
@@ -196,5 +194,37 @@ ElasticSchema.pre(["findOneAndUpdate", "updateOne", "updateMany"],
     next();
   });
 
+// The constraint under the API's own duplicate check. It lives here,
+// not in a migration: an index created at the end of the migration
+// chain does not return — the command never reaches an idle database —
+// and a step that can stall `npm start` is worse than no index. Built
+// by autoIndex at startup instead, where a failure is recoverable and
+// gets retried on the next boot.
+//
+// sparse, because an elastic with no name has no key, and several of
+// those must not collide with each other.
+ElasticSchema.index(
+  { nameKey: 1 },
+  { unique: true, sparse: true, name: "elastic_nameKey_unique" }
+);
+
 const Elastic = mongoose.model("Elastic", ElasticSchema);
+
+// On a catalogue that still holds duplicates, that build fails. Left
+// unhandled it is an unhandled rejection, and this process exits on
+// those (index.js) — which would turn a data problem into a crash loop
+// under systemd. So it is handled: say what is wrong, keep serving.
+// New duplicates are refused by the API either way; the existing ones
+// need a person, and the build is retried every boot until they are
+// dealt with.
+Elastic.on("index", (err) => {
+  if (!err) return;
+  console.warn(
+    `[elastic] unique name index not built — ${err.message}. ` +
+    `New duplicate names are still refused by the API. Run ` +
+    `"node scripts/find-duplicate-elastics.js", resolve what it lists, ` +
+    `and restart to build it.`
+  );
+});
+
 module.exports = Elastic;

@@ -196,7 +196,7 @@ describe('AUDIT D: order detail resolves materials in one query', () => {
   test('one round trip regardless of how many materials the order needs', async () => {
     const customer = await mkCustomer();
     const elastic = await Elastic.create({
-      name: 'E-100', weight: 10, noOfHook: 24, pick: 12, spandexEnds: 4,
+      name: 'E-200', weight: 10, noOfHook: 24, pick: 12, spandexEnds: 4,
     });
     const materials = await Promise.all(
       Array.from({ length: 12 }, (_, i) => mkMaterial({ name: `Yarn ${i}` }))

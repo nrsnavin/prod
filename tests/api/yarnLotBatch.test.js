@@ -86,7 +86,8 @@ async function makeJob() {
     address: 'Tiruppur', email: 'a@t.co',
   });
   const elastic = await Elastic.create({
-    name: '25mm Woven', weight: 5, noOfHook: 24, pick: 40, spandexEnds: 8,
+    name: `25mm Woven ${Math.random().toString(36).slice(2, 8)}`,
+    weight: 5, noOfHook: 24, pick: 40, spandexEnds: 8,
   });
   const order = await Order.create({
     customer: customer._id, po: 'PO-9001', date: new Date(), supplyDate: new Date(),
@@ -101,7 +102,7 @@ async function makeJob() {
 
 /** A warping with a two-beam plan, ready to batch against. */
 async function makeWarping(material) {
-  const { job, order, customer } = await makeJob();
+  const { job, order, customer, elastic } = await makeJob();
   const warping = await Warping.create({ job: job._id, status: 'open' });
   const plan = await WarpingPlan.create({
     warping: warping._id,
@@ -114,7 +115,7 @@ async function makeWarping(material) {
   });
   warping.warpingPlan = plan._id;
   await warping.save();
-  return { warping, plan, job, order, customer };
+  return { warping, plan, job, order, customer, elastic };
 }
 
 const createBatch = (body) =>
@@ -125,7 +126,7 @@ const issueBatch = (id) =>
 
 /** Batch created and issued in one go — the common setup. */
 async function issuedBatch(material, lot, qty = 40) {
-  const { warping, job, order, customer } = await makeWarping(material);
+  const { warping, job, order, customer, elastic } = await makeWarping(material);
   const res = await createBatch({
     warpingId: String(warping._id),
     beamNos: [1],
@@ -133,7 +134,7 @@ async function issuedBatch(material, lot, qty = 40) {
   });
   const batch = res.body.batch;
   await issueBatch(batch._id);
-  return { batch, warping, job, order, customer };
+  return { batch, warping, job, order, customer, elastic };
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -652,14 +653,16 @@ describe('yarn lots on a job', () => {
   it('reports the lot under the elastic it was warped for', async () => {
     const material = await makeMaterial();
     const lot = await makeLot(material, { lotNo: 'D-5150', shade: 'Ecru' });
-    const { job } = await issuedBatch(material, lot, 40);
+    const { job, elastic } = await issuedBatch(material, lot, 40);
 
     const res = await jobLots(job._id);
     expect(res.status).toBe(200);
 
     const { byElastic, lots } = res.body.data;
     expect(byElastic).toHaveLength(1);
-    expect(byElastic[0].elasticName).toBe('25mm Woven');
+    // Against the elastic actually seeded — the fixture names each one
+    // distinctly now that two products cannot share a name.
+    expect(byElastic[0].elasticName).toBe(elastic.name);
     expect(byElastic[0].lots[0]).toMatchObject({
       lotNo: 'D-5150', shade: 'Ecru', materialName: 'Nylon 70D', quantity: 40,
     });
