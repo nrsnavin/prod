@@ -61,6 +61,7 @@ const MaterialOutward = require('../models/MaterialOut.cjs');
 const Elastic = require('../models/Elastic');
 const { appendStockMovement } = require('../utils/stockLedger');
 const { costOf } = require('../utils/materialValuation');
+const { checkHookFit, hookFitError } = require('../utils/machineFit');
 
 function fullJobPopulate(query) {
   return query
@@ -600,6 +601,18 @@ router.post(
     // Safe to allow because the old machine is released inside the same
     // transaction as the new claim (below) — the refusal was standing in
     // for a release that did not exist.
+    // ── Can the machine actually run what is being put on it? ────────
+    // Before the transaction, so the caller gets a clean 409 it can act
+    // on rather than a claimed machine and an aborted write. The same
+    // check guards /assign-machine — both routes reach the same head
+    // map, and a rule enforced on one of them is not a rule.
+    const machineForFit = await Machine.findById(machineId).select('ID NoOfHooks');
+    if (!machineForFit) return next(new ErrorHandler('Machine not found', 404));
+    const fit = await checkHookFit(machineForFit, Object.values(headElasticMap));
+    if (!fit.fits && req.body?.confirmHooks !== true) {
+      return next(hookFitError(machineForFit, fit, ErrorHandler));
+    }
+
     const movingWhileRunning =
       job.status === 'weaving' &&
       job.machine &&
@@ -1150,6 +1163,19 @@ router.post(
     for (const entry of elastics) {
       if (entry.elastic != null && !jobElasticIds.has(entry.elastic.toString()))
         return next(new ErrorHandler(`Elastic "${entry.elastic}" (head ${entry.head}) is not part of this job.`, 400));
+    }
+
+    // ── Can the machine actually run what is being put on it? ────────
+    // Everything above checks the SHAPE of the head map — no gaps, no
+    // duplicates, the right count, every elastic on the job. None of it
+    // asks whether the machine has enough hooks for the product, so a
+    // 24-hook elastic went onto a 12-hook machine without a word and
+    // was found out at the machine with the beam already up.
+    //
+    // A confirmation, not a refusal: see utils/machineFit.js.
+    const fit = await checkHookFit(machine, elastics.map((e) => e.elastic));
+    if (!fit.fits && req.body?.confirmHooks !== true) {
+      return next(hookFitError(machine, fit, ErrorHandler));
     }
 
     // ── Let go of whatever this job was on ───────────────────────────

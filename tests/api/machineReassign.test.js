@@ -496,3 +496,287 @@ describe('a machine breaking down mid-run', () => {
     expect(String((await reload(theirs)).orderRunning)).toBe(String(other.job._id));
   });
 });
+
+// ── What the machines list says a machine is doing ────────────────────
+//
+// Reported as: the Running Job column is empty on every row, including
+// machines that are plainly running.
+//
+// The field was never the problem — it is set on assignment and cleared
+// on release, and the detail route reads it correctly. The list route's
+// projection simply did not include it, so it never left the server, and
+// the column had nothing to render.
+
+describe('the machines list', () => {
+  const list = () =>
+    request(app).get('/api/v2/machine/get-machines').set('Cookie', adminCookie());
+
+  const rowFor = (body, machine) =>
+    body.machines.find((m) => String(m._id) === String(machine._id));
+
+  it('carries the running job, with its number', async () => {
+    const { job, elastic } = await seed();
+    const machine = await makeMachine(2);
+    await assign(job, machine, elastic);
+
+    const res = await list();
+    expect(res.status).toBe(200);
+
+    const row = rowFor(res.body, machine);
+    expect(row.status).toBe('running');
+    // Populated, not a bare id: the column wants the NUMBER, and the
+    // machine document only stores a reference.
+    expect(row.orderRunning).toBeTruthy();
+    expect(row.orderRunning.jobOrderNo).toBe(job.jobOrderNo);
+  });
+
+  it('carries the job id too, so the number can be a link', async () => {
+    const { job, elastic } = await seed();
+    const machine = await makeMachine(2);
+    await assign(job, machine, elastic);
+
+    const row = rowFor((await list()).body, machine);
+    expect(String(row.orderRunning._id)).toBe(String(job._id));
+  });
+
+  it('says nothing for a machine that is free', async () => {
+    // Not zero, not an empty object — null, so the screen can tell
+    // "no job" apart from "job with no number".
+    const machine = await makeMachine(2);
+
+    const row = rowFor((await list()).body, machine);
+    expect(row.status).toBe('free');
+    expect(row.orderRunning).toBeNull();
+  });
+
+  it('clears the job when the machine is released', async () => {
+    // The column has to follow the machine back to free, or it reports
+    // a job that finished — which is worse than reporting nothing.
+    const { job, elastic } = await seed();
+    const first = await makeMachine(2);
+    const second = await makeMachine(2);
+    await assign(job, first, elastic);
+    await assign(job, second, elastic);
+
+    const body = (await list()).body;
+    expect(rowFor(body, first).orderRunning).toBeNull();
+    expect(rowFor(body, second).orderRunning.jobOrderNo).toBe(job.jobOrderNo);
+  });
+});
+
+// ── Will the product fit on the machine? ──────────────────────────────
+//
+// A weaving head has a fixed number of hooks and an elastic's recipe
+// says how many it needs. Nothing checked the two against each other:
+// the head map validated head NUMBERS — no gaps, no duplicates, the
+// right count, every elastic on the job — and never asked whether the
+// machine could run what was being put on it. A 24-hook product went
+// onto a 12-hook machine silently, and was found out at the machine
+// with the beam already up.
+//
+// Refused with a confirmation rather than outright, because the floor
+// sometimes runs a product on a smaller machine deliberately, and a
+// hard block just gets worked around by assigning something else and
+// swapping it back.
+
+describe('putting an elastic on a machine that has too few hooks', () => {
+  /** A job whose elastic needs `hooks`, and a machine with `machineHooks`. */
+  async function seedFit({ hooks, machineHooks, heads = 2 }) {
+    const customer = await Customer.create({
+      name: 'Acme', contactName: 'R', phoneNumber: '9000000009',
+    });
+    const elastic = await Elastic.create({
+      name: `20mm ${Math.random().toString(36).slice(2, 8)}`, weaveType: '8',
+      spandexEnds: 40, yarnEnds: 120, pick: 12, noOfHook: hooks, weight: 2.4,
+    });
+    const order = await Order.create({
+      orderNo: Math.floor(Math.random() * 100000),
+      customer: customer._id, status: 'InProgress', po: 'PO-F',
+      date: new Date(), supplyDate: new Date(),
+      elasticOrdered: [{ elastic: elastic._id, quantity: 1000 }],
+    });
+    const job = await JobOrder.create({
+      date: new Date(), order: order._id, customer: customer._id,
+      status: 'preparatory', elastics: [{ elastic: elastic._id, quantity: 500 }],
+    });
+    const machine = await Machine.create({
+      ID: `M-${Math.floor(Math.random() * 100000)}`, manufacturer: 'Comez',
+      NoOfHead: heads, NoOfHooks: machineHooks, status: 'free',
+      orderRunning: null, elastics: [],
+    });
+    return { job, elastic, machine };
+  }
+
+  const assignWith = (job, machine, elastic, extra = {}) =>
+    request(app).post('/api/v2/job/assign-machine')
+      .set('Cookie', adminCookie())
+      .send({
+        jobId: String(job._id),
+        machineId: String(machine._id),
+        elastics: Array.from({ length: machine.NoOfHead }, (_, i) => ({
+          head: i + 1, elastic: String(elastic._id),
+        })),
+        ...extra,
+      });
+
+  const planWith = (job, machine, elastic, extra = {}) =>
+    request(app).post('/api/v2/job/plan-weaving')
+      .set('Cookie', adminCookie())
+      .send({
+        jobId: String(job._id),
+        machineId: String(machine._id),
+        headElasticMap: Object.fromEntries(
+          Array.from({ length: machine.NoOfHead }, (_, i) => [String(i), String(elastic._id)])
+        ),
+        ...extra,
+      });
+
+  it('stops the assignment and says what does not fit', async () => {
+    const { job, elastic, machine } = await seedFit({ hooks: 24, machineHooks: 12 });
+
+    const res = await assignWith(job, machine, elastic);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('HOOKS_EXCEED_MACHINE');
+    expect(res.body.message).toMatch(/12 hooks/);
+    expect(res.body.message).toMatch(/needs 24/);
+    // And nothing was claimed on the way to refusing.
+    expect((await reload(machine)).status).toBe('free');
+  });
+
+  it('names the elastic, so somebody can act on it', async () => {
+    const { job, elastic, machine } = await seedFit({ hooks: 24, machineHooks: 12 });
+    const res = await assignWith(job, machine, elastic);
+
+    expect(res.body.details).toMatchObject({ machineHooks: 12 });
+    expect(res.body.details.elastics[0]).toMatchObject({
+      name: elastic.name, noOfHook: 24, excess: 12,
+    });
+  });
+
+  it('goes ahead once it is confirmed', async () => {
+    const { job, elastic, machine } = await seedFit({ hooks: 24, machineHooks: 12 });
+
+    const res = await assignWith(job, machine, elastic, { confirmHooks: true });
+
+    expect(res.status).toBeLessThan(400);
+    expect((await reload(machine)).status).toBe('running');
+  });
+
+  it('says nothing when the product fits', async () => {
+    // Equal counts fit — the rule is "more hooks than the machine has",
+    // and an elastic needing exactly what the machine offers is normal.
+    const { job, elastic, machine } = await seedFit({ hooks: 12, machineHooks: 12 });
+
+    const res = await assignWith(job, machine, elastic);
+    expect(res.status).toBeLessThan(400);
+    expect((await reload(machine)).status).toBe('running');
+  });
+
+  it('guards /plan-weaving too, which is what the picker calls', async () => {
+    // A rule enforced on one of two routes to the same head map is not
+    // a rule.
+    const { job, elastic, machine } = await seedFit({ hooks: 24, machineHooks: 12 });
+
+    const res = await planWith(job, machine, elastic);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('HOOKS_EXCEED_MACHINE');
+    expect((await reload(machine)).status).toBe('free');
+  });
+
+  it('lets /plan-weaving through on confirmation', async () => {
+    const { job, elastic, machine } = await seedFit({ hooks: 24, machineHooks: 12 });
+
+    const res = await planWith(job, machine, elastic, { confirmHooks: true });
+
+    expect(res.status).toBeLessThan(400);
+    expect((await reload(machine)).status).toBe('running');
+  });
+
+  it('counts one elastic once, however many heads it is on', async () => {
+    const { job, elastic, machine } = await seedFit({
+      hooks: 24, machineHooks: 12, heads: 8,
+    });
+    const res = await assignWith(job, machine, elastic);
+
+    expect(res.body.details.elastics).toHaveLength(1);
+  });
+});
+
+// ── The third way into a head map ─────────────────────────────────────
+//
+// The machine page has its own head-map editor, which writes through
+// PUT /machine/updateOrder. Guarding only the two job-side routes would
+// leave this as a way straight past the rule — and a rule with a door
+// next to it is not a rule.
+
+describe('editing the head map from the machine page', () => {
+  async function seedMachineWithElastic({ hooks, machineHooks }) {
+    const elastic = await Elastic.create({
+      name: `20mm ${Math.random().toString(36).slice(2, 8)}`, weaveType: '8',
+      spandexEnds: 40, yarnEnds: 120, pick: 12, noOfHook: hooks, weight: 2.4,
+    });
+    const machine = await Machine.create({
+      ID: `M-${Math.floor(Math.random() * 100000)}`, manufacturer: 'Comez',
+      NoOfHead: 2, NoOfHooks: machineHooks, status: 'free',
+      orderRunning: null, elastics: [],
+    });
+    return { elastic, machine };
+  }
+
+  const saveMap = (machine, elastic, extra = {}) =>
+    request(app).put('/api/v2/machine/updateOrder')
+      .set('Cookie', adminCookie())
+      .send({
+        id: String(machine._id),
+        elastics: [
+          { head: 1, elastic: String(elastic._id) },
+          { head: 2, elastic: String(elastic._id) },
+        ],
+        ...extra,
+      });
+
+  it('refuses a product the machine has too few hooks for', async () => {
+    const { elastic, machine } = await seedMachineWithElastic({ hooks: 24, machineHooks: 12 });
+
+    const res = await saveMap(machine, elastic);
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('HOOKS_EXCEED_MACHINE');
+    // Nothing was written on the way to refusing.
+    expect((await reload(machine)).elastics).toHaveLength(0);
+  });
+
+  it('saves it once confirmed', async () => {
+    const { elastic, machine } = await seedMachineWithElastic({ hooks: 24, machineHooks: 12 });
+
+    const res = await saveMap(machine, elastic, { confirmHooks: true });
+
+    expect(res.status).toBe(200);
+    expect((await reload(machine)).elastics).toHaveLength(2);
+  });
+
+  it('says nothing when the product fits', async () => {
+    const { elastic, machine } = await seedMachineWithElastic({ hooks: 8, machineHooks: 12 });
+
+    const res = await saveMap(machine, elastic);
+
+    expect(res.status).toBe(200);
+    expect((await reload(machine)).elastics).toHaveLength(2);
+  });
+
+  it('ignores empty heads rather than tripping over them', async () => {
+    // A head with no elastic is a normal thing to save — a partial map.
+    const { machine } = await seedMachineWithElastic({ hooks: 8, machineHooks: 12 });
+
+    const res = await request(app).put('/api/v2/machine/updateOrder')
+      .set('Cookie', adminCookie())
+      .send({
+        id: String(machine._id),
+        elastics: [{ head: 1, elastic: null }, { head: 2, elastic: null }],
+      });
+
+    expect(res.status).toBe(200);
+  });
+});

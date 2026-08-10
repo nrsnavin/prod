@@ -16,6 +16,7 @@ const MachineServiceBill = require("../models/MachineServiceBill");
 const { shiftFigures, clockToMinutes, SHIFT_MINUTES } = require("../utils/shiftFigures");
 const { notify }       = require("../utils/notify");
 const { actorFromRequest } = require("../utils/fingerprint");
+const { checkHookFit, hookFitError } = require("../utils/machineFit");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 
 // ─────────────────────────────────────────────────────────────
@@ -205,7 +206,17 @@ router.get(
     }
 
     const machines = await Machine.find(filter)
-      .select("ID manufacturer NoOfHead NoOfHooks status DateOfPurchase")
+      // `orderRunning` was missing from this projection, so the list
+      // never carried it and the Running Job column on the machines
+      // screen showed a dash on every row — including machines that
+      // were plainly running. The field itself was always right; it
+      // just never left the server.
+      //
+      // Populated, because the column wants the job NUMBER and the
+      // machine only stores the id. Selecting the id alone would have
+      // swapped one wrong answer for another.
+      .select("ID manufacturer NoOfHead NoOfHooks status DateOfPurchase orderRunning")
+      .populate("orderRunning", "jobOrderNo status")
       .sort({ ID: 1 });
 
     res.status(200).json({ success: true, machines });
@@ -452,6 +463,18 @@ router.put(
 
     if (!Array.isArray(elastics)) {
       return next(new ErrorHandler("elastics must be an array", 400));
+    }
+
+    // ── Can the machine run what is being put on it? ────────────────
+    // This is the third route that writes a head → elastic map, after
+    // /job/plan-weaving and /job/assign-machine. Guarding only those
+    // two would leave the machine page's head-map editor as a way
+    // straight past the rule, which is not a rule at all.
+    //
+    // A confirmation, not a refusal — see utils/machineFit.js.
+    const fit = await checkHookFit(machine, elastics.map((e) => e?.elastic));
+    if (!fit.fits && req.body?.confirmHooks !== true) {
+      return next(hookFitError(machine, fit, ErrorHandler));
     }
 
     machine.elastics = elastics;
