@@ -313,3 +313,88 @@ describe('reading the ledger back', () => {
     expect(rows.reduce((t, r) => t + (r.reservedApplied || 0), 0)).toBe(live.reservedStock);
   });
 });
+
+// ── The promise side, when it cannot give back what was asked ─────────
+//
+// Both balances floor at zero, so a release can move by less than was
+// asked for. The goods side has recorded `requested` beside `applied`
+// since it was written; the promise side recorded only `reservedApplied`,
+// so a release of 400 against 250 held looked exactly like a release of
+// 250 — and the 150 that could not be given back was nowhere.
+
+describe('a reservation release larger than the promise held', () => {
+  const { applyMovement } = require('../../utils/elasticStock');
+
+  it('records what was asked for beside what it could release', async () => {
+    const s = await seed({ stock: 500 });
+    await approvedOrder(s.elastic, s.customer, 250);
+
+    await applyMovement(null, {
+      elasticId: s.elastic._id,
+      type:      'RESERVATION_RELEASE',
+      quantity:  400,
+      reason:    'order closed',
+    });
+
+    const row = await StockMovement.findOne({ elastic: s.elastic._id })
+      .sort({ date: -1, _id: -1 }).lean();
+    expect(row.reservedRequested).toBe(-400);
+    expect(row.reservedApplied).toBe(-250);
+    // The balance still follows from what was applied, not the ask.
+    expect(row.reservedBalance).toBe(0);
+  });
+
+  it('leaves the goods alone — a promise is not stock', async () => {
+    const s = await seed({ stock: 500 });
+    await approvedOrder(s.elastic, s.customer, 250);
+    await applyMovement(null, {
+      elasticId: s.elastic._id, type: 'RESERVATION_RELEASE', quantity: 400,
+    });
+
+    const live = await figures(s.elastic);
+    expect(live.stock).toBe(500);
+    expect(live.reservedStock).toBe(0);
+  });
+
+  it('agrees on both figures when nothing was clamped', async () => {
+    // The ordinary case: the two match, so nothing on the row stands out.
+    const s = await seed({ stock: 500 });
+    await approvedOrder(s.elastic, s.customer, 250);
+    await applyMovement(null, {
+      elasticId: s.elastic._id, type: 'RESERVATION_RELEASE', quantity: 250,
+    });
+
+    const row = await StockMovement.findOne({ elastic: s.elastic._id })
+      .sort({ date: -1, _id: -1 }).lean();
+    expect(row.reservedRequested).toBe(-250);
+    expect(row.reservedApplied).toBe(-250);
+  });
+
+  it('states the hold it was asked for, as well as the one it took', async () => {
+    const s = await seed({ stock: 500 });
+    await approvedOrder(s.elastic, s.customer, 300);
+
+    const row = await StockMovement.findOne({
+      elastic: s.elastic._id, type: 'RESERVATION_HOLD',
+    }).lean();
+    // A hold has no ceiling, so these always agree — but the field has
+    // to be there, or the reserved column reads as half a ledger.
+    expect(row.reservedRequested).toBe(300);
+    expect(row.reservedApplied).toBe(300);
+  });
+
+  it('shows the shortfall on the ledger the screen reads', async () => {
+    const s = await seed({ stock: 500 });
+    await approvedOrder(s.elastic, s.customer, 250);
+    await applyMovement(null, {
+      elasticId: s.elastic._id, type: 'RESERVATION_RELEASE', quantity: 400,
+    });
+
+    const live = await figures(s.elastic);
+    const row = live.movements.find((m) => m.type === 'RESERVATION_RELEASE');
+    expect(row.reservedShortfall).toBe(-150);
+    // The goods side of the same row moved nothing and asked for
+    // nothing, so it has no shortfall to report.
+    expect(row.shortfall).toBeNull();
+  });
+});

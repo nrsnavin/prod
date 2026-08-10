@@ -192,6 +192,77 @@ describe('a yarn lot correction', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+//  THE SAME FAULT ON THE ORDER APPROVAL PATH
+//
+//  Forcing an order through a shortfall draws what is there and stops.
+//  The quantity written was already honest — it is `applied` — but
+//  nothing on the row said how much more had been wanted, which is the
+//  only question anybody opens a forced approval to ask.
+// ══════════════════════════════════════════════════════════════════
+describe('a forced order approval', () => {
+  const seedOrder = async (materialStock, required) => {
+    const Customer = require('../../models/Customer');
+    const Elastic  = require('../../models/Elastic');
+    const Order    = require('../../models/Order');
+    const m = await makeMaterial({ stock: materialStock, avgCost: 330 });
+    const customer = await Customer.create({
+      name: 'Aravind Garments', contactName: 'Aravind', phoneNumber: '9111111113',
+      address: 'Tiruppur', email: `f${Math.random().toString(36).slice(2, 7)}@t.co`,
+    });
+    const elastic = await Elastic.create({
+      name: `20mm Woven ${Math.random().toString(36).slice(2, 8)}`,
+      weight: 5, noOfHook: 24, pick: 40, spandexEnds: 8,
+    });
+    const order = await Order.create({
+      customer: customer._id, po: 'PO-8001', date: new Date(), supplyDate: new Date(),
+      elasticOrdered: [{ elastic: elastic._id, quantity: 1000 }],
+      rawMaterialRequired: [{ rawMaterial: m._id, requiredWeight: required }],
+      status: 'Open',
+    });
+    return { m, order };
+  };
+
+  const approve = (order, body = {}) =>
+    request(app).post('/api/v2/order/approve').set('Cookie', adminCookie())
+      .send({ orderId: String(order._id), ...body });
+
+  it('says how much more was wanted than the shelf could give', async () => {
+    const { m, order } = await seedOrder(25, 40);
+
+    const res = await approve(order, {
+      force: true, forceReason: 'customer will not wait for the yarn',
+    });
+    expect(res.status).toBeLessThan(400);
+
+    const row = (await ledger(m)).at(-1);
+    expect(row).toMatchObject({ type: 'ORDER_APPROVAL', quantity: -25, requested: -40, balance: 0 });
+    // And it still reconciles: 25 on hand, 25 taken, nothing left.
+    expect(25 + row.quantity).toBe(row.balance);
+  });
+
+  it('draws only what was there, and books only that as consumed', async () => {
+    const { m, order } = await seedOrder(25, 40);
+    await approve(order, { force: true, forceReason: 'customer will not wait for the yarn' });
+
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(0);
+    // 40 kg booked out when 25 left the building would over-state the
+    // order's cost by the difference, for the life of the order.
+    const out = await MaterialOutward.findOne({ rawMaterial: m._id }).lean();
+    expect(out.quantity).toBe(25);
+    expect(out.remarks).toMatch(/short 15/);
+  });
+
+  it('records no `requested` on an ordinary approval', async () => {
+    const { m, order } = await seedOrder(100, 40);
+    await approve(order);
+
+    const row = (await ledger(m)).at(-1);
+    expect(row.quantity).toBe(-40);
+    expect(row.requested).toBeUndefined();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 //  HOW IT READS
 // ══════════════════════════════════════════════════════════════════
 describe('normaliseMovements', () => {

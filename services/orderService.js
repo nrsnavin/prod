@@ -111,8 +111,14 @@ async function approveOrderTxn(session, {
   for (const rm of order.rawMaterialRequired) {
     const material = await RawMaterial.findById(rm.rawMaterial).session(session);
     const _oldStock = Number(material.stock) || 0;
-    const applied = Math.min(rm.requiredWeight, material.stock);
-    material.stock = Math.max(0, material.stock - rm.requiredWeight);
+    // What was wanted, and what the shelf could actually give. These
+    // differ only on a forced approval through a shortfall — which is
+    // precisely the case somebody comes back to this ledger to
+    // understand, so the gap is recorded on the row rather than left
+    // to be inferred from the balance.
+    const wanted  = Math.max(0, Number(rm.requiredWeight) || 0);
+    const applied = Math.max(0, Math.min(wanted, _oldStock));
+    material.stock = Math.max(0, _oldStock - wanted);
     stockoutSnapshots.push({
       materialId: material._id,
       oldStock:   _oldStock,
@@ -128,6 +134,10 @@ async function approveOrderTxn(session, {
       // the order years later, when it may have been deleted.
       refNo: order.orderNo != null ? String(order.orderNo) : '',
       quantity: -applied, balance: material.stock,
+      // Only when the approval was forced through a shortfall. On the
+      // ordinary approval the two agree and the field stays absent, so
+      // its presence on a row is a signal rather than noise.
+      requested: applied === wanted ? undefined : -wanted,
       // What this yarn was worth as it left. Snapshotted on the row
       // because the average moves with the next receipt, so looking it
       // up later would price this movement at a cost it never had.
@@ -144,8 +154,8 @@ async function approveOrderTxn(session, {
       // costing it at the newest quote made every order look worse the
       // moment a supplier raised theirs — on yarn bought months before.
       unitPrice:   costOf(material),
-      remarks:     applied < rm.requiredWeight
-        ? `Order #${order.orderNo ?? ''} approval (forced — requested ${rm.requiredWeight}, short ${rm.requiredWeight - applied})`
+      remarks:     applied < wanted
+        ? `Order #${order.orderNo ?? ''} approval (forced — requested ${wanted}, short ${wanted - applied})`
         : `Order #${order.orderNo ?? ''} approval`,
     }], { session });
 
@@ -155,7 +165,7 @@ async function approveOrderTxn(session, {
       meta: {
         rawMaterialId:   rm.rawMaterial.toString(),
         rawMaterialName: material.name,
-        requested:       rm.requiredWeight,
+        requested:       wanted,
         applied,
         unit:            'kg',
         balanceAfter:    material.stock,

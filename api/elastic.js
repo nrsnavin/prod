@@ -336,10 +336,23 @@ router.get(
         m.reservedBalance === null || m.reservedBalance === undefined
           ? null
           : Number(m.reservedBalance);
+      const reservedApplied   = Number(m.reservedApplied) || 0;
+      const reservedRequested = Number(m.reservedRequested) || 0;
       return {
         ...m,
-        reservedApplied: Number(m.reservedApplied) || 0,
+        reservedApplied,
+        reservedRequested,
         reservedBalance,
+        // What could not be done, on either side. Both balances floor
+        // at zero, so a movement can apply less than was asked for —
+        // and a ledger that shows only the applied figure reads as
+        // though the difference never happened.
+        shortfall: Number(m.requested) === Number(m.applied)
+          ? null
+          : Number(m.requested) - Number(m.applied),
+        reservedShortfall: reservedRequested === reservedApplied
+          ? null
+          : reservedRequested - reservedApplied,
         available: reservedBalance === null
           ? null
           : Math.max(0, (Number(m.balance) || 0) - reservedBalance),

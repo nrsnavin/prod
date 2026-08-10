@@ -65,8 +65,16 @@ const StockMovementSchema = new mongoose.Schema(
     // required: rows written before the reserved balance was tracked
     // carry no figure, and a zero there would be a claim about history
     // this code cannot make.
-    reservedApplied: { type: Number, default: 0 },
-    reservedBalance: { type: Number, default: null },
+    //
+    // BOTH halves, for the same reason the goods side has both. The
+    // reserved balance floors at zero, so releasing 400 against 250
+    // held releases 250 — and with only `reservedApplied` on the row
+    // there was nothing to say the other 150 had been asked for and
+    // could not be given. A promise that quietly shrinks is exactly the
+    // kind of thing this ledger exists to make visible.
+    reservedRequested: { type: Number, default: 0 },
+    reservedApplied:   { type: Number, default: 0 },
+    reservedBalance:   { type: Number, default: null },
     refType:   { type: String },
     refId:     { type: mongoose.Types.ObjectId, index: true },
     reason:    { type: String },

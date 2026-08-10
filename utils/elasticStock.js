@@ -18,6 +18,12 @@
 //    quantity         — goods delta   (+in, −out)
 //    reservedQuantity — promise delta (+held, −released)
 //
+//  and each is recorded twice on the ledger row: what was asked for
+//  and what could be applied. Both balances floor at zero, so either
+//  side can move by less than the caller wanted, and a row that stated
+//  only the applied figure left no way to tell a release of 250 from a
+//  release of 400 that ran out of promise to give back.
+//
 //  Reserving goods creates none, so RESERVATION_HOLD moves only the
 //  promise. Shipping keeps a promise AND empties a shelf, so DC_OUT
 //  moves both. Available to promise is stock − reservedStock, derived
@@ -175,6 +181,10 @@ async function applyMovement(session, opts) {
           requested,
           applied,
           balance:   Number(updated.stock) || 0,
+          // Both halves of the promise side. `reservedApplied` alone
+          // could not distinguish a release of 250 that was asked for
+          // from one that was asked for as 400 and clamped at the floor.
+          reservedRequested,
           reservedApplied,
           reservedBalance: Number(updated.reservedStock) || 0,
           refType:   refType || undefined,
