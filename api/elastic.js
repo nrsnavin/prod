@@ -14,6 +14,7 @@ const StockMovement = require("../models/StockMovement");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
+const { countUsage } = require("../utils/masterUsage");
 const { elasticNameKey } = require("../utils/elasticName.js");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
@@ -892,9 +893,21 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 //  DELETE ELASTIC
 //
-//  Refuses to delete when stock > 0, reservedStock > 0, or any
-//  movements are on record. ?force=true overrides (admin escape
-//  hatch for test data only — cascades StockMovement deletion).
+//  An elastic named by an order, a job, a delivery challan or a
+//  packing entry is ARCHIVED rather than deleted, and force=true
+//  does NOT override that — see utils/masterUsage.js.
+//
+//  The guards below are a different question from the one archiving
+//  answers. They are about the elastic's OWN state: stock still on the
+//  shelf, units promised to an order, movements on its ledger. Those
+//  are the operator's problem and force is the admin's way past them
+//  on test data. Whether another document points at this one is not
+//  the operator's problem and not the admin's to override: deleting it
+//  breaks THAT document, and no flag on this request makes that safe.
+//
+//  Otherwise: refuses to delete when stock > 0, reservedStock > 0, or
+//  any movements are on record. ?force=true overrides those (admin
+//  escape hatch for test data only — cascades StockMovement deletion).
 // ─────────────────────────────────────────────────────────────
 router.delete(
   "/delete-elastic",
@@ -904,6 +917,42 @@ router.delete(
     if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
 
     const force = String(req.query.force || "").toLowerCase() === "true";
+
+    // Before anything else, and before `force` gets a say.
+    //
+    // Its own StockMovement rows are excluded: they belong to this
+    // elastic and are cascaded below, so counting them would make
+    // every elastic that has ever moved permanently undeletable —
+    // including the test data force exists for.
+    const usage = await countUsage("Elastic", elastic._id);
+    const external = usage.places.filter((p) => p.label !== 'stock movement');
+
+    if (external.length > 0) {
+      const summary = external
+        .map((p) => `${p.count} ${p.label}${p.count === 1 ? '' : 's'}`)
+        .join(', ');
+
+      if (elastic.archived) {
+        return res.status(200).json({
+          success: true, archived: true, deleted: false, usage: external,
+          message:
+            `"${elastic.name}" is used by ${summary}, so it cannot be deleted. ` +
+            `It is already archived and hidden from the pickers.`,
+        });
+      }
+
+      elastic.archived   = true;
+      elastic.archivedAt = new Date();
+      await elastic.save();
+
+      return res.status(200).json({
+        success: true, archived: true, deleted: false, usage: external,
+        message:
+          `"${elastic.name}" is used by ${summary}, so it was archived instead ` +
+          `of deleted — hidden from the pickers, with every existing record ` +
+          `still pointing at it.`,
+      });
+    }
 
     if (!force) {
       const currentStock = Number(elastic.stock) || 0;
@@ -942,6 +991,8 @@ router.delete(
 
     res.json({
       success:               true,
+      archived:              false,
+      deleted:               true,
       message:               "Elastic deleted successfully",
       forced:                force,
       cascadedMoves:         deletedMoves.deletedCount || 0,

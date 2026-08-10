@@ -29,6 +29,13 @@ jest.mock("../../models/YarnLot");
 // The stockout alert now goes through the transactional outbox; stub it
 // so this pure-mock suite never touches a real collection.
 jest.mock("../../utils/outbox.js", () => ({ enqueue: jest.fn().mockResolvedValue(undefined) }));
+// Deleting a master now asks where it is used first. That probe queries
+// every model that references a raw material, which this pure-mock suite
+// has no connection for — so it is stubbed here and exercised for real in
+// tests/api/archiveNotDelete.test.js.
+jest.mock("../../utils/masterUsage.js", () => ({
+  countUsage: jest.fn().mockResolvedValue({ used: false, total: 0, places: [], summary: "" }),
+}));
 
 const request = require("supertest");
 const app = require("../../app");
@@ -36,6 +43,10 @@ const RawMaterial = require("../../models/RawMaterial");
 const PurchaseOrder = require("../../models/PurchaseOrder");
 const MaterialInward = require("../../models/MaterialInward");
 const Supplier = require("../../models/Supplier");
+const { countUsage } = require("../../utils/masterUsage.js");
+
+/** A valid ObjectId string — the delete route rejects anything else. */
+const OID = "000000000000000000000011";
 
 const fakeMaterial = (overrides = {}) => ({
   _id: "mat1",
@@ -203,28 +214,64 @@ describe("GET /api/v2/materials/get-raw-material-detail", () => {
 // ─── DELETE /delete-raw-material ───────────────────────────────────────────
 
 describe("DELETE /api/v2/materials/delete-raw-material", () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    countUsage.mockResolvedValue({ used: false, total: 0, places: [], summary: "" });
+  });
 
   it("returns 400 when id is missing", async () => {
     const res = await request(app).delete("/api/v2/materials/delete-raw-material");
     expect(res.status).toBe(400);
   });
 
-  it("returns 404 when material not found", async () => {
-    RawMaterial.findByIdAndDelete = jest.fn().mockResolvedValue(null);
-
+  it("returns 400 for an id that is not an id", async () => {
     const res = await request(app).delete("/api/v2/materials/delete-raw-material?id=bad");
+    expect(res.status).toBe(400);
+    // And it never got as far as asking the database.
+    expect(RawMaterial.findById).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when material not found", async () => {
+    RawMaterial.findById = jest.fn().mockResolvedValue(null);
+
+    const res = await request(app).delete(`/api/v2/materials/delete-raw-material?id=${OID}`);
     expect(res.status).toBe(404);
   });
 
-  it("deletes material and returns 200", async () => {
-    RawMaterial.findByIdAndDelete = jest.fn().mockResolvedValue(fakeMaterial());
+  it("deletes a material nothing has used", async () => {
+    const doc = { ...fakeMaterial(), deleteOne: jest.fn().mockResolvedValue(undefined) };
+    RawMaterial.findById = jest.fn().mockResolvedValue(doc);
 
-    const res = await request(app).delete("/api/v2/materials/delete-raw-material?id=mat1");
+    const res = await request(app).delete(`/api/v2/materials/delete-raw-material?id=${OID}`);
 
     expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
-    expect(res.body.message).toMatch(/deleted/i);
+    expect(res.body).toMatchObject({ success: true, deleted: true, archived: false });
+    expect(doc.deleteOne).toHaveBeenCalled();
+  });
+
+  it("archives a material something uses, rather than deleting it", async () => {
+    // The whole point: the documents naming this material are the
+    // record of what happened, and deleting it orphans them.
+    countUsage.mockResolvedValue({
+      used: true, total: 3,
+      places: [{ label: "goods receipt", count: 3 }],
+      summary: "3 goods receipts",
+    });
+    const doc = {
+      ...fakeMaterial(),
+      archived: false,
+      save: jest.fn().mockResolvedValue(undefined),
+      deleteOne: jest.fn(),
+    };
+    RawMaterial.findById = jest.fn().mockResolvedValue(doc);
+
+    const res = await request(app).delete(`/api/v2/materials/delete-raw-material?id=${OID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ archived: true, deleted: false });
+    expect(res.body.message).toMatch(/3 goods receipts/);
+    expect(doc.archived).toBe(true);
+    expect(doc.deleteOne).not.toHaveBeenCalled();
   });
 });
 

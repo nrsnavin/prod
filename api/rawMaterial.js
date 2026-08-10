@@ -15,6 +15,7 @@ const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { appendStockMovement, normaliseMovements } = require("../utils/stockLedger");
 const { receiveAtCost, costOf } = require("../utils/materialValuation");
+const { countUsage } = require("../utils/masterUsage");
 const YarnLot           = require("../models/YarnLot");
 const { creditLot, drawFromLot, unplacedQuantity } = require("../services/yarnLotService");
 const {
@@ -61,6 +62,11 @@ router.get(
     const { search, category, lowStock } = req.query;
 
     const filter = {};
+    // Archived materials are out of the pickers by default — that is
+    // the whole point of archiving one. `$ne: true` rather than
+    // `false`, because rows written before the field existed have no
+    // value and must read as active.
+    if (req.query.includeArchived !== "true") filter.archived = { $ne: true };
     if (category)            filter.category = category;
     if (search)              filter.name = { $regex: escapeRegex(search), $options: "i" };
     if (lowStock === "true") filter.$expr = { $lte: ["$stock", "$minStock"] };
@@ -200,17 +206,130 @@ router.get(
 // ══════════════════════════════════════════════════════════════
 //  4.  DELETE RAW MATERIAL
 //      DELETE /materials/delete-raw-material?id=<id>
+//
+//  Deletes only a material nothing has ever used. Anything else is
+//  ARCHIVED instead — see utils/masterUsage.js for why, at length.
+//
+//  Briefly: this route had no guard at all. Deleting a yarn named by
+//  an order requirement, a PO line, a goods receipt, a dye lot or an
+//  elastic's recipe left every one of those documents pointing at
+//  nothing, and the screens that read them showing a blank where a
+//  yarn name belongs. The history is the business's record of what
+//  happened; it is not the master's to take with it.
+//
+//  The caller is told which it was, and where the material is used, so
+//  "delete" quietly becoming "archive" is never a surprise.
 // ══════════════════════════════════════════════════════════════
 router.delete(
   "/delete-raw-material",
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("Material ID required", 400));
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid material id", 400));
+    }
 
-    const material = await RawMaterial.findByIdAndDelete(id);
+    const material = await RawMaterial.findById(id);
     if (!material) return next(new ErrorHandler("Raw material not found", 404));
 
-    res.status(200).json({ success: true, message: "Material deleted" });
+    const usage = await countUsage("RawMaterial", material._id);
+
+    if (usage.used) {
+      // Already archived: say so plainly rather than reporting a second
+      // archive as though something had happened.
+      if (material.archived) {
+        return res.status(200).json({
+          success:  true,
+          archived: true,
+          deleted:  false,
+          usage:    usage.places,
+          message:
+            `"${material.name}" is used by ${usage.summary}, so it cannot be deleted. ` +
+            `It is already archived and hidden from the pickers.`,
+        });
+      }
+
+      material.archived   = true;
+      material.archivedAt = new Date();
+      await material.save();
+
+      return res.status(200).json({
+        success:  true,
+        archived: true,
+        deleted:  false,
+        usage:    usage.places,
+        message:
+          `"${material.name}" is used by ${usage.summary}, so it was archived ` +
+          `instead of deleted — hidden from the pickers, with every existing ` +
+          `record still pointing at it.`,
+      });
+    }
+
+    // Never used: nothing to orphan, so a typo entered five minutes ago
+    // is still a typo and can go.
+    await material.deleteOne();
+    res.status(200).json({
+      success:  true,
+      archived: false,
+      deleted:  true,
+      message:  `"${material.name}" deleted — nothing had used it.`,
+    });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  4b. ARCHIVE / RESTORE RAW MATERIAL
+//      PATCH /materials/:id/archive   { archived: true|false }
+//
+//  The deliberate version of what the delete route falls back to.
+//  Nothing is removed: the material stops appearing in the pickers
+//  (override with ?includeArchived=true) and every reference to it
+//  still resolves, so history reads exactly as it did.
+//
+//  Guard: a material an open order still needs cannot be archived.
+//  Hiding it would take it out of the MRP and the reorder suggestions
+//  at the moment somebody has to buy it — the same reason a customer
+//  with live orders is protected.
+// ══════════════════════════════════════════════════════════════
+router.patch(
+  "/:id/archive",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid material id", 400));
+    }
+    const wantArchived = req.body?.archived !== false; // default: archive
+
+    const material = await RawMaterial.findById(id).select("_id name archived stock");
+    if (!material) return next(new ErrorHandler("Raw material not found", 404));
+
+    if (wantArchived) {
+      const live = await Order.countDocuments({
+        "rawMaterialRequired.rawMaterial": material._id,
+        status: { $nin: ["Completed", "Cancelled"] },
+      });
+      if (live > 0) {
+        return next(new ErrorHandler(
+          `Cannot archive "${material.name}" — ${live} open order${live === 1 ? "" : "s"} still ` +
+          `require${live === 1 ? "s" : ""} it. Complete or cancel them first.`,
+          400
+        ));
+      }
+    }
+
+    material.archived   = wantArchived;
+    material.archivedAt = wantArchived ? new Date() : undefined;
+    await material.save();
+
+    res.json({
+      success:    true,
+      materialId: material._id,
+      name:       material.name,
+      archived:   material.archived,
+      message:    wantArchived
+        ? `"${material.name}" archived — hidden from the pickers`
+        : `"${material.name}" restored to active lists`,
+    });
   })
 );
 

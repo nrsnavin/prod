@@ -106,6 +106,23 @@ const RawMaterialSchema = new mongoose.Schema(
 
     totalConsumption: { type: Number, default: 0, min: 0 },
 
+    // ── Soft delete ────────────────────────────────────────────────
+    // A material named by an order requirement, a PO line, a goods
+    // receipt or an elastic's recipe cannot be deleted without
+    // orphaning all of them — the documents survive, pointing at
+    // nothing, and every screen that reads them renders a blank where
+    // a yarn name should be. So a used material is archived instead:
+    // excluded from the pickers so nobody chooses it again, while
+    // every existing reference still resolves.
+    //
+    // Filter with `{ archived: { $ne: true } }`, never
+    // `{ archived: false }` — rows written before this field existed
+    // have no value at all and must behave as active. Mirrors
+    // Elastic.archived and Customer.archived, deliberately: three soft
+    // deletes that behave differently are three things to remember.
+    archived:   { type: Boolean, default: false, index: true },
+    archivedAt: { type: Date },
+
     // ── Price history (appended on every price change) ────────
     priceHistory: {
       type: [PriceHistorySchema],
