@@ -265,6 +265,38 @@ router.post(
     // transactional (it runs on a standalone mongod in test), so a
     // failure part-way compensates the deductions already applied.
     const drawn = [];
+
+    // Put back everything drawn so far. Used both when a later line
+    // finds no stock and when the job itself fails to be created — the
+    // yarn must never be left down with nothing to explain it, and a
+    // half-applied draw is exactly how a stock figure becomes a number
+    // nobody can account for. Best-effort per material: one failed
+    // refund must not stop the others, but it does get said out loud,
+    // because at that point the figure IS wrong and only a person can
+    // put it right.
+    const refundDraw = async (rows) => {
+      const stranded = [];
+      for (const back of rows) {
+        try {
+          await RawMaterial.updateOne(
+            { _id: back.rawMaterial },
+            { $inc: { stock: back.quantity, totalConsumption: -back.quantity } }
+          );
+        } catch (refundErr) {
+          stranded.push(`${back.name || back.rawMaterial} ${back.quantity}`);
+          console.error(
+            `[job/create] could not refund ${back.quantity} of ${back.rawMaterial}:`,
+            refundErr.message
+          );
+        }
+      }
+      if (stranded.length > 0) {
+        console.error(
+          `[job/create] STOCK LEFT SHORT with no job to explain it: ${stranded.join('; ')}`
+        );
+      }
+    };
+
     if (excessRequirement.length > 0) {
       for (const r of excessRequirement) {
         const qty = Number(r.requiredWeight) || 0;
@@ -275,12 +307,7 @@ router.post(
           { new: true }
         );
         if (!updated) {
-          for (const back of drawn) {
-            await RawMaterial.updateOne(
-              { _id: back.rawMaterial },
-              { $inc: { stock: back.quantity, totalConsumption: -back.quantity } }
-            );
-          }
+          await refundDraw(drawn);
           const err = new ErrorHandler(
             `Raw material ran out while raising this job (${r.name || 'material'}) — nothing was deducted. Try again.`,
             409
@@ -298,11 +325,56 @@ router.post(
     }
 
     const zeroed = elastics.map(e => ({ elastic: e.elastic, quantity: 0 }));
-    const job = await JobOrder.create({
-      date: new Date(date), order: order._id, customer: order.customer,
-      status: 'preparatory', elastics,
-      producedElastic: zeroed, packedElastic: zeroed, wastageElastic: zeroed,
-    });
+
+    // The stock is already down. Until the job exists there is nothing
+    // to attribute it to, so a failure here has to put it back — the
+    // draw loop above compensates itself, but everything from this line
+    // on used to be outside that guard, and a job that failed to save
+    // took the yarn with it silently.
+    let job;
+    try {
+      job = await JobOrder.create({
+        date: new Date(date), order: order._id, customer: order.customer,
+        status: 'preparatory', elastics,
+        producedElastic: zeroed, packedElastic: zeroed, wastageElastic: zeroed,
+      });
+    } catch (err) {
+      await refundDraw(drawn);
+      throw err;
+    }
+
+    // ── Book the excess draw ────────────────────────────────────
+    // The stock is already down (above); these are the records that
+    // explain where it went. JOB_CONSUMPTION, not ORDER_APPROVAL: it
+    // belongs to this job, and the order P&L already counts that type,
+    // so excess yarn lands on the order's cost without further wiring.
+    //
+    // Immediately after the job exists, and before anything else. This
+    // ran at the end of the route, so a failure creating the warping
+    // programme — or saving the order — left stock drawn with no
+    // outward row, no ledger row and no refund: yarn gone from the
+    // system with nothing anywhere to say where. Everything below this
+    // point can now fail without the stock figure lying.
+    if (drawn.length > 0) {
+      await MaterialOutward.create(drawn.map((d) => ({
+        rawMaterial: d.rawMaterial,
+        quantity:    d.quantity,
+        job:         job._id,
+        type:        'JOB_CONSUMPTION',
+        outwardDate: new Date(),
+        unitPrice:   priceById.get(String(d.rawMaterial)) ?? 0,
+        remarks:     `Excess planning on J-${job.jobOrderNo} (order #${order.orderNo})`,
+      })));
+      for (const d of drawn) {
+        await appendStockMovement(d.rawMaterial, {
+          type: 'JOB_CONSUMPTION',
+          refNo: job.jobOrderNo != null ? String(job.jobOrderNo) : '',
+          quantity: -d.quantity,
+          balance: d.balance,
+          unitCost: priceById.get(String(d.rawMaterial)) ?? 0,
+        });
+      }
+    }
 
     const [warping, covering] = await Promise.all([
       Warping.create({ date: new Date(), job: job._id, elasticOrdered: elastics }),
@@ -331,32 +403,6 @@ router.post(
     });
     job.fingerprints.push(jobFp);
     await job.save();
-
-    // ── Book the excess draw ────────────────────────────────────
-    // The stock is already down (above); these are the records that
-    // explain where it went. JOB_CONSUMPTION, not ORDER_APPROVAL: it
-    // belongs to this job, and the order P&L already counts that type,
-    // so excess yarn lands on the order's cost without further wiring.
-    if (drawn.length > 0) {
-      await MaterialOutward.create(drawn.map((d) => ({
-        rawMaterial: d.rawMaterial,
-        quantity:    d.quantity,
-        job:         job._id,
-        type:        'JOB_CONSUMPTION',
-        outwardDate: new Date(),
-        unitPrice:   priceById.get(String(d.rawMaterial)) ?? 0,
-        remarks:     `Excess planning on J-${job.jobOrderNo} (order #${order.orderNo})`,
-      })));
-      for (const d of drawn) {
-        await appendStockMovement(d.rawMaterial, {
-          type: 'JOB_CONSUMPTION',
-          refNo: job.jobOrderNo != null ? String(job.jobOrderNo) : '',
-          quantity: -d.quantity,
-          balance: d.balance,
-          unitCost: priceById.get(String(d.rawMaterial)) ?? 0,
-        });
-      }
-    }
 
     // ── Record the excess on the order ──────────────────────────
     // Appended, never replaced: two jobs can each over-plan the same

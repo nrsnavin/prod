@@ -329,3 +329,105 @@ describe('what the order detail page is told', () => {
     expect(rows[1].reason).toMatch(/Second beam/);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  WHEN THE JOB ITSELF FAILS
+//
+//  The yarn comes off the shelf before the job exists — deliberately,
+//  so a job can never reach the floor on stock that was not there. But
+//  everything between that deduction and the records explaining it used
+//  to be outside any guard: the job created, then a warping programme,
+//  then a covering programme, then the order saved, and only then the
+//  outward rows and the ledger. A throw anywhere in that stretch took
+//  the yarn with it — stock down, nothing anywhere to say where it went,
+//  and no refund.
+//
+//  This route cannot use a transaction (it runs on a standalone mongod
+//  here, and in production the same code path must work either way), so
+//  the guarantee is compensation: either the yarn is booked to a job, or
+//  it goes back on the shelf.
+// ══════════════════════════════════════════════════════════════════
+describe('a job that fails after the yarn has been drawn', () => {
+  test('puts the yarn back rather than losing it', async () => {
+    const { elastic, nylon, spandex } = await makeElastic(1000);
+    const order = await makeOrder(elastic, 1000);
+    const before = { n: await stockOf(nylon._id), s: await stockOf(spandex._id) };
+
+    // Fail the job insert itself — the first thing after the draw.
+    const boom = jest
+      .spyOn(M.JobOrder, 'create')
+      .mockRejectedValueOnce(new Error('write conflict'));
+
+    const res = await createJob(order, elastic, 1200);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+
+    expect(await stockOf(nylon._id)).toBe(before.n);
+    expect(await stockOf(spandex._id)).toBe(before.s);
+    // And no orphan job, obviously.
+    expect(await M.JobOrder.countDocuments({ order: order._id })).toBe(0);
+    boom.mockRestore();
+  });
+
+  test('leaves no outward row for yarn that went back', async () => {
+    // A refund with a consumption row still standing would be worse
+    // than the original fault: the P&L would charge the order for yarn
+    // that is on the shelf.
+    const { elastic, nylon } = await makeElastic(1000);
+    const order = await makeOrder(elastic, 1000);
+    const boom = jest
+      .spyOn(M.JobOrder, 'create')
+      .mockRejectedValueOnce(new Error('write conflict'));
+
+    await createJob(order, elastic, 1200);
+
+    // Scoped to this test's own material: the suite shares a database
+    // across cases, so an unscoped count would read every other job's
+    // rows and pass — or fail — for reasons that have nothing to do
+    // with what is being tested here.
+    expect(await M.MaterialOutward.countDocuments({ rawMaterial: nylon._id })).toBe(0);
+    boom.mockRestore();
+  });
+
+  test('restores the consumption counter too, not just the stock', async () => {
+    const { elastic, nylon } = await makeElastic(1000);
+    const order = await makeOrder(elastic, 1000);
+    const before = (await M.RawMaterial.findById(nylon._id).lean()).totalConsumption || 0;
+    const boom = jest
+      .spyOn(M.JobOrder, 'create')
+      .mockRejectedValueOnce(new Error('write conflict'));
+
+    await createJob(order, elastic, 1200);
+
+    const after = (await M.RawMaterial.findById(nylon._id).lean()).totalConsumption || 0;
+    expect(after).toBe(before);
+    boom.mockRestore();
+  });
+
+  test('books the draw before the warping programme can fail', async () => {
+    // The booking used to run at the very end of the route. Moving it
+    // to directly after the job exists is what shrinks the window to
+    // nothing — so a failure this late leaves the yarn explained.
+    const Warping = require('../../models/Warping.js');
+    const { elastic, nylon } = await makeElastic(1000);
+    const order = await makeOrder(elastic, 1000);
+    const boom = jest
+      .spyOn(Warping, 'create')
+      .mockRejectedValueOnce(new Error('warping blew up'));
+
+    const res = await createJob(order, elastic, 1200);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+
+    // Stock is down — the job exists, so that is correct — and there is
+    // a row saying so on both records.
+    const rows = await M.MaterialOutward.find({
+      rawMaterial: nylon._id, type: 'JOB_CONSUMPTION',
+    }).lean();
+    expect(rows.length).toBeGreaterThan(0);
+    const doc = await M.RawMaterial.findById(nylon._id).select('+stockMovements').lean();
+    const move = doc.stockMovements.at(-1);
+    expect(move.type).toBe('JOB_CONSUMPTION');
+    expect(move.quantity).toBeLessThan(0);
+    expect(doc.stock).toBe(move.balance);
+    boom.mockRestore();
+  });
+});
