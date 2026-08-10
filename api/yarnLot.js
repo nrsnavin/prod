@@ -21,6 +21,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { creditLot, unplacedQuantity, appendLotMovement } = require("../services/yarnLotService");
 const { appendStockMovement } = require("../utils/stockLedger");
+const { costOf } = require("../utils/materialValuation");
 const { describeLotMovements } = require("../utils/lotLedger");
 const { isAdmin } = require("../middleware/auth");
 
@@ -295,13 +296,22 @@ router.post(
         // The aggregate moves with it.
         const material = await RawMaterial.findById(lot.rawMaterial).session(session);
         if (material) {
-          material.stock = Math.max(0, (Number(material.stock) || 0) + delta);
+          const before = Number(material.stock) || 0;
+          material.stock = Math.max(0, before + delta);
+          // The aggregate floors at zero, so it can move by less than
+          // the lot did — a lot correction of −40 against 25 on hand
+          // moves 25. The row records what moved and, beside it, what
+          // was asked for; recording the ask as though it happened left
+          // a ledger whose balances did not follow from its quantities.
+          const applied = material.stock - before;
           await material.save({ session });
           await appendStockMovement(material._id, {
             type: "STOCK_ADJUST",
-            quantity: delta,
+            quantity: applied,
+            requested: applied === delta ? undefined : delta,
             balance: material.stock,
             reason: `Lot ${lot.lotNo}: ${reason}`,
+            unitCost: costOf(material),
           }, session);
         }
 

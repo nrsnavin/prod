@@ -67,6 +67,10 @@ const ACTION_CODES = Object.freeze({
   PO_DELETED:               'PO_DELETED',
   PO_STOCK_INWARD:          'PO_STOCK_INWARD',
   ELASTIC_STOCK_ADJUST:     'ELASTIC_STOCK_ADJUST',
+  // Physical stock counts (models/StockCount.js)
+  STOCK_COUNT_OPENED:       'STOCK_COUNT_OPENED',
+  STOCK_COUNT_POSTED:       'STOCK_COUNT_POSTED',
+  STOCK_COUNT_CANCELLED:    'STOCK_COUNT_CANCELLED',
   // Elastic reservation lifecycle (Order ↔ Elastic.reservedStock)
   STOCK_RESERVED:           'STOCK_RESERVED',
   STOCK_RELEASED:           'STOCK_RELEASED',
@@ -116,6 +120,9 @@ const ACTION_LABELS = Object.freeze({
   PO_DELETED:               'Purchase Order Deleted',
   PO_STOCK_INWARD:          'Stock Received Against PO',
   ELASTIC_STOCK_ADJUST:     'Elastic Stock Adjusted',
+  STOCK_COUNT_OPENED:       'Stock Count Opened',
+  STOCK_COUNT_POSTED:       'Stock Count Posted',
+  STOCK_COUNT_CANCELLED:    'Stock Count Cancelled',
   STOCK_RESERVED:           'Stock Reserved',
   STOCK_RELEASED:           'Stock Released',
   DC_CREATED:               'Delivery Challan Created',

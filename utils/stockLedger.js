@@ -21,7 +21,14 @@ const { MAX_EMBEDDED_MOVEMENTS } = RawMaterial;
  * array to its cap in the same atomic update.
  *
  * @param {ObjectId|string} materialId
- * @param {{date?: Date, type: string, order?: any, quantity: number, balance: number}} movement
+ * `quantity` is always the delta stock ACTUALLY moved by — not what the
+ * caller asked for. Stock floors at zero, so a write-off of 50 against
+ * 30 on hand moves 30, and a row recording the 50 leaves a ledger whose
+ * balances do not follow from its quantities. Pass the ask as
+ * `requested` when the two differ; omit it when they do not.
+ *
+ * @param {{date?: Date, type: string, order?: any, quantity: number,
+ *          balance: number, requested?: number, unitCost?: number}} movement
  * @param {ClientSession} [session]
  */
 async function appendStockMovement(materialId, movement, session) {
@@ -152,6 +159,25 @@ function normaliseMovements(movements = [], currentStock = 0) {
     // Math.abs first: a row already stored with the right sign must not
     // be flipped back by applying the direction a second time.
     row.quantity = dir ? Math.abs(qty) * dir : qty;
+
+    // What this movement was worth. Priced from the cost snapshotted on
+    // the row, never from the material's cost today — the average moves
+    // with every receipt, so pricing an old movement at it would value
+    // yarn at a cost it never had.
+    const unitCost = Number(row.unitCost);
+    row.value = Number.isFinite(unitCost)
+      ? Math.round(Math.abs(row.quantity) * unitCost * 100) / 100
+      : null;
+
+    // Stock floors at zero, so a write-off can move less than was asked
+    // for. `requested` is only stored when the two differ, and saying so
+    // in the row is the difference between a ledger that explains a
+    // short write-off and one that looks like it lost a number.
+    const requested = Number(row.requested);
+    row.shortfall = Number.isFinite(requested) && requested !== row.quantity
+      ? Math.round((requested - row.quantity) * 1e6) / 1e6
+      : null;
+
     // Say why, in words, beside every row. Done here rather than in each
     // caller so the material page, the report and any future reader
     // phrase the same movement the same way.

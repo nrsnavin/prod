@@ -21,6 +21,7 @@ const { requireReason } = require("../utils/auditReason.js");
 const { assertVersion } = require("../utils/versioning.js");
 const { applyMovement } = require("../utils/elasticStock.js");
 const { appendStockMovement } = require("../utils/stockLedger.js");
+const { receiveAtCost } = require("../utils/materialValuation.js");
 const { estimateOrderEta } = require("../utils/orderEta.js");
 const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
@@ -139,18 +140,36 @@ async function _refundRawMaterialsForOrder(session, order, actor, userObjectId) 
     const material = await RawMaterial.findById(ow.rawMaterial).session(session);
     if (!material) continue;
 
-    material.stock = (Number(material.stock) || 0) + qty;
+    // The consumption counter first, on its own — `stock` and `avgCost`
+    // are moved by receiveAtCost below and must not also be written
+    // from this stale in-memory copy.
     material.totalConsumption = Math.max(
       0,
       (Number(material.totalConsumption) || 0) - qty
     );
     await material.save({ session });
+
+    // Back at exactly what it left at. The outward row this is
+    // reversing recorded the unit cost at issue time, so the yarn
+    // returns to the shelf carrying the value it took off it —
+    // crediting it at TODAY's average would quietly create money every
+    // time an order was cancelled after a price rise.
+    //
+    // receiveAtCost moves the weighted average in the same atomic
+    // update as the stock, the way any other receipt does.
+    const refundCost = Number(ow.unitPrice) || 0;
+    const restored = await receiveAtCost(ow.rawMaterial, qty, refundCost, session);
+    material.stock = restored
+      ? Number(restored.stock) || 0
+      : (Number(material.stock) || 0) + qty;
+
     await appendStockMovement(material._id, {
       type:     "ORDER_CANCEL_REFUND",
       order:    order._id,
       refNo:    order.orderNo != null ? String(order.orderNo) : "",
       quantity: qty,
       balance:  material.stock,
+      unitCost: refundCost,
     }, session);
 
     // Mark the outward row as reversed so audit + the dedupe filter

@@ -90,6 +90,7 @@ const customer = require("./api/customer.js");
 const supplier = require("./api/supplier.js");
 const material = require("./api/rawMaterial.js");
 const yarnLot  = require("./api/yarnLot.js");
+const stockCount = require("./api/stockCount.js");
 const elastic  = require("./api/elastic.js");
 const elasticGroup = require("./api/elasticGroup.js");
 const order    = require("./api/order.js");
@@ -473,6 +474,13 @@ app.use("/api/v2/yarn-lots",   gate('production', 'accounts'),
   requireFeature('/materials'),
   requireFeatureRead('/materials', '/warping', '/covering'),
   yarnLot);
+// Physical stock counts. Same gate as materials — a count is a
+// statement about the stock this router already exposes, and the
+// routes that write (post, cancel) gate themselves to admin/accounts
+// on top of it.
+app.use("/api/v2/stock-counts", gate('production', 'accounts'),
+  requireFeature('/materials'),
+  stockCount);
 // warping/covering/wastage/packing/attendance/payroll/leave/bonus gate
 // themselves inside their own router — several mix admin-only data with
 // a worker's selfOrAdmin-scoped reads (own payslip, own attendance, own

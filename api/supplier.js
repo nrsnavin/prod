@@ -30,6 +30,7 @@ const { nextNumber } = require("../utils/sequence");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
 const { creditLot } = require("../services/yarnLotService");
 const { appendStockMovement } = require("../utils/stockLedger");
+const { receiveAtCost } = require("../utils/materialValuation");
 const PdfTemplate = require("../models/PdfTemplate");
 const { renderTemplatePdf } = require("../services/pdf/templateRenderer");
 const { starterTemplate }   = require("../services/pdf/docTypes");
@@ -639,7 +640,16 @@ router.post(
         //
         //    The $inc is still atomic, so the balance recorded here is
         //    the real one even if another receipt lands at the same time.
-        stockCredits.push({ rawMaterial: inItem.rawMaterial, qty, inItem });
+        // What this consignment cost, per unit. Taken from the PO line —
+        // the price that was agreed for these goods — so the material's
+        // weighted average moves by what was actually paid rather than
+        // by whatever the price field happened to say at receipt time.
+        const poLine = po.items.find(
+          (p) => p.rawMaterial.toString() === inItem.rawMaterial.toString()
+        );
+        const unitPrice = Math.max(0, Number(poLine?.price) || 0);
+
+        stockCredits.push({ rawMaterial: inItem.rawMaterial, qty, unitPrice, inItem });
 
         // 3. Prepare MaterialInward document
         const over = excessByMaterial.get(String(inItem.rawMaterial));
@@ -654,6 +664,9 @@ router.post(
           lotNo:         inItem.lotNo ? String(inItem.lotNo).trim() : "",
           excessQuantity: over?.excess || 0,
           excessReason:   over?.reason || "",
+          // The receipt keeps its own price, so the average can be
+          // audited back to the consignments that formed it.
+          unitPrice,
         });
       }
 
@@ -715,10 +728,13 @@ router.post(
           po.markModified("fingerprints");
           await po.save({ session });
           for (const credit of stockCredits) {
-            const updated = await RawMaterial.findOneAndUpdate(
-              { _id: credit.rawMaterial },
-              { $inc: { stock: credit.qty } },
-              { new: true, session }
+            // Credits the stock AND moves the weighted average, in one
+            // atomic pipeline update — the average has to be computed
+            // against the stock as it stood before this receipt, and
+            // two receipts landing together must not each average from
+            // the same stale figure. See utils/materialValuation.js.
+            const updated = await receiveAtCost(
+              credit.rawMaterial, credit.qty, credit.unitPrice, session
             );
             await appendStockMovement(credit.rawMaterial, {
               date: credit.inItem.inwardDate
@@ -735,6 +751,7 @@ router.post(
               // beside it so the row survives the PO being deleted.
               purchaseOrder: po._id,
               refNo:         po.poNo != null ? String(po.poNo) : "",
+              unitCost:      credit.unitPrice,
             }, session);
           }
           created = await MaterialInward.insertMany(inwardDocs, { session });

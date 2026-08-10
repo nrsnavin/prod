@@ -60,6 +60,7 @@ const RawMaterial = require('../models/RawMaterial');
 const MaterialOutward = require('../models/MaterialOut.cjs');
 const Elastic = require('../models/Elastic');
 const { appendStockMovement } = require('../utils/stockLedger');
+const { costOf } = require('../utils/materialValuation');
 
 function fullJobPopulate(query) {
   return query
@@ -233,12 +234,16 @@ router.post(
       excessRequirement = await excessMaterialRequirement(rows);
       const materials = await RawMaterial.find({
         _id: { $in: excessRequirement.map((r) => r.rawMaterial) },
-      }).select('name stock price').lean();
+      }).select('name stock price avgCost').lean();
       const stockById = new Map(materials.map((m) => [String(m._id), m.stock]));
       // Price the draw from the same read. Writing the row at 0 and
       // correcting it afterwards leaves a window where the P&L values
       // this yarn at nothing.
-      for (const m of materials) priceById.set(String(m._id), Number(m.price) || 0);
+      //
+      // costOf, not `price`: the weighted average of what the stock
+      // cost, falling back to the latest purchase price for material
+      // that has not been received since averaging existed.
+      for (const m of materials) priceById.set(String(m._id), costOf(m));
 
       const shortfalls = stockShortfalls(excessRequirement, stockById);
       if (shortfalls.length > 0) {
@@ -348,6 +353,7 @@ router.post(
           refNo: job.jobOrderNo != null ? String(job.jobOrderNo) : '',
           quantity: -d.quantity,
           balance: d.balance,
+          unitCost: priceById.get(String(d.rawMaterial)) ?? 0,
         });
       }
     }

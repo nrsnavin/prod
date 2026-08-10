@@ -43,8 +43,29 @@ const StockMovementSchema = new mongoose.Schema(
     // the rest are explained by the document they point at.
     reason: { type: String, trim: true, default: "" },
 
+    // What actually happened to stock — the delta the balance below
+    // moved by. A row where `quantity` and `balance` disagree with the
+    // row before it is a ledger that cannot be reconciled, which is the
+    // one thing a ledger has to be.
     quantity: { type: Number, required: true },
     balance:  { type: Number },
+
+    // What was asked for, when it differs from what was applied.
+    //
+    // Stock floors at zero, so a write-off of 50 against 30 on hand
+    // moves 30 — and the row used to record the 50, leaving a ledger
+    // whose arithmetic did not close. Now `quantity` is always the
+    // applied figure and this says what the person actually typed, so
+    // the gap is visible rather than baked into the numbers.
+    //
+    // Absent on the ordinary case where nothing was clamped.
+    requested: { type: Number },
+
+    // What one unit was worth when it moved (utils/materialValuation).
+    // Snapshotted, not looked up later: the whole point of a weighted
+    // average is that it changes, so a movement priced at today's
+    // average is priced wrong.
+    unitCost: { type: Number },
   },
   { _id: false }
 );
@@ -64,6 +85,21 @@ const RawMaterialSchema = new mongoose.Schema(
     // route validation can never persist into money / stock math.
     price:    { type: Number, default: 0, min: 0 },  // per kg — current price
 
+    // ── What the stock on the shelf actually cost ──────────────────
+    // `price` above is the LATEST purchase price. It is what a new PO
+    // should default to, and it is what everything used to be costed
+    // at — which meant buying 100 kg at ₹300 and then 100 kg at ₹360
+    // instantly revalued all 200 kg at ₹360, over-stating consumption
+    // and under-stating margin every time a supplier moved their quote.
+    //
+    // This is the weighted average of what the stock on hand cost, and
+    // it is what issues are priced at. Moved only by a receipt; see
+    // utils/materialValuation.js for the arithmetic and the reasoning
+    // behind weighted average rather than FIFO.
+    //
+    // 0 means "never received since averaging existed" — readers fall
+    // back to `price` for those, which is what they were using anyway.
+    avgCost:  { type: Number, default: 0, min: 0 },
 
     stock:            { type: Number, default: 0, min: 0 },
     minStock:         { type: Number, default: 0, min: 0 },

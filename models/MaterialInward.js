@@ -20,6 +20,23 @@ const materialInwardSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+
+    // ── What this receipt cost, per unit ────────────────────────────
+    // A goods receipt used to record only how much arrived, never what
+    // it cost — so the one document that knows the price of a specific
+    // consignment did not keep it, and the material's weighted average
+    // could not be audited back to the receipts that formed it.
+    //
+    // Taken from the purchase order line when the receipt is made
+    // against a PO, and from the material's current price when it is
+    // not. 0 means the price was genuinely unknown, and a receipt at 0
+    // deliberately leaves the average alone rather than dragging it
+    // down — missing information is not free yarn.
+    unitPrice: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     remarks: {
       type: String,
       trim: true,

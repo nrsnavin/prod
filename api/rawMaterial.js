@@ -14,6 +14,7 @@ const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { appendStockMovement, normaliseMovements } = require("../utils/stockLedger");
+const { receiveAtCost, costOf } = require("../utils/materialValuation");
 const YarnLot           = require("../models/YarnLot");
 const { creditLot, drawFromLot, unplacedQuantity } = require("../services/yarnLotService");
 const {
@@ -176,9 +177,22 @@ router.get(
       mv.referenceDerived = true;
     }
 
+    // What this shelf is worth. `avgCost` is 0 for material that has
+    // not been received since averaging existed, and costOf falls back
+    // to the latest purchase price for those — which is what they were
+    // valued at before, so nothing on screen jumps on the day this
+    // ships. Derived here rather than in each client so the material
+    // page, the report and the phone all agree on one figure.
+    const unitCost = costOf(material);
+
     res.status(200).json({
       success: true,
-      material: { ...material, inwards, outwards, lots, unplacedQty },
+      material: {
+        ...material,
+        unitCost,
+        stockValue: Math.round((Number(material.stock) || 0) * unitCost * 100) / 100,
+        inwards, outwards, lots, unplacedQty,
+      },
     });
   })
 );
@@ -361,8 +375,30 @@ router.post(
     if (!po)       return next(new ErrorHandler("Purchase order not found", 404));
 
     const _stockBefore = Number(material.stock) || 0;
-    material.stock += qtyNum;
-    await material.save();
+
+    // What this consignment cost. The PO line is the authority — it is
+    // the price that was agreed for these goods — and the material's
+    // own latest price is the fallback for a receipt against a line
+    // that never carried one.
+    const poLine = po.items.find(
+      (i) => i.rawMaterial.toString() === String(rawMaterialId)
+    );
+    const unitPrice = Math.max(
+      0,
+      Number(poLine?.price ?? material.price) || 0
+    );
+
+    // Credit the stock and move the weighted average in one atomic
+    // update. This used to be `material.stock += qty; material.save()`,
+    // which loses one of two receipts landing together — and now that a
+    // receipt also moves what the stock is WORTH, a lost update would
+    // corrupt money and not just a count.
+    const credited = await receiveAtCost(material._id, qtyNum, unitPrice);
+    // Keep the in-memory document in step: the alert below and the
+    // response both read it.
+    material.stock   = credited?.stock   ?? _stockBefore + qtyNum;
+    material.avgCost = credited?.avgCost ?? material.avgCost;
+
     await appendStockMovement(material._id, {
       type:     "PO_INWARD",
       // Which purchase order these goods came in against. Without it the
@@ -371,6 +407,7 @@ router.post(
       refNo:         po.poNo != null ? String(po.poNo) : "",
       quantity: qtyNum,
       balance:  material.stock,
+      unitCost: unitPrice,
     });
 
     const lotNo = req.body.lotNo ? String(req.body.lotNo).trim() : "";
@@ -382,6 +419,7 @@ router.post(
       inwardDate:    new Date(),
       remarks:       remarks || "",
       lotNo,
+      unitPrice,
     });
 
     // Credit the dye lot, so the yarn can be issued to a warping batch
@@ -523,8 +561,24 @@ router.post(
             const material = await RawMaterial.findById(item._id).session(session);
             if (!material) throw new Error("Not found");
 
-            const oldStock = material.stock;
+            const oldStock = Number(material.stock) || 0;
             const newStock = Math.max(0, oldStock + item.adjustment);
+            // What the stock actually moved by. Stock floors at zero, so
+            // writing 50 off against 30 on hand moves 30 — and every row
+            // below used to record the 50 anyway: the ledger's arithmetic
+            // did not close, the outward row over-stated consumption
+            // straight into the order P&L, and the lot draw asked for
+            // yarn the lot never held. The requested figure is still
+            // recorded, beside the applied one, so the gap is visible.
+            const applied  = newStock - oldStock;
+            // Nothing to take. Silently writing a zero-quantity outward
+            // row and reporting success would tell the person their
+            // write-off went through when no stock moved at all.
+            if (applied === 0) {
+              throw new Error(
+                `Nothing to adjust — ${material.name} already holds ${oldStock}`
+              );
+            }
             material.stock = newStock;
 
             await material.save({ session });
@@ -537,8 +591,14 @@ router.post(
               // person typed IS the explanation, and it was being
               // computed on the next line and then thrown away.
               reason,
-              quantity: item.adjustment,
+              quantity: applied,
+              requested: applied === item.adjustment ? undefined : item.adjustment,
               balance:  newStock,
+              // An adjustment never moves the average — a count that
+              // finds 5 kg missing has not changed what the rest of it
+              // cost — but the row still says what the missing yarn was
+              // worth, which is the number a write-off is judged on.
+              unitCost: costOf(material),
             }, session);
 
             // ── The dye lot, when the adjustment names one ────────────
@@ -555,12 +615,16 @@ router.post(
             let lotRef = null;
             let lotLabel = lotNo;
 
-            if (item.adjustment > 0) {
+            // `applied` throughout, not `item.adjustment` — the lot and
+            // the outward row have to move by the same amount the stock
+            // did, or the lot ledger and the P&L drift away from the
+            // aggregate they are supposed to break down.
+            if (applied > 0) {
               if (lotNo) {
                 const lot = await creditLot({
                   rawMaterial: material._id,
                   lotNo,
-                  quantity:    item.adjustment,
+                  quantity:    applied,
                   shade:       item.shade,
                   supplier:    material.supplier,
                 }, session);
@@ -569,10 +633,14 @@ router.post(
               await MaterialInward.create([{
                 rawMaterial:   material._id,
                 purchaseOrder: item.purchaseOrderId || undefined,
-                quantity:      item.adjustment,
+                quantity:      applied,
                 inwardDate:    new Date(),
                 remarks:       `Stock adjustment: ${reason}`,
                 lotNo,
+                // Found stock is not a purchase, so it is valued at what
+                // the rest of the stock cost and deliberately does NOT
+                // move the average — see utils/materialValuation.js.
+                unitPrice:     costOf(material),
               }], { session });
             } else {
               // Removing stock draws the lot down. drawFromLot refuses
@@ -583,7 +651,7 @@ router.post(
                   throw new Error("Invalid yarn lot id");
                 }
                 const lot = await drawFromLot(
-                  item.yarnLot, Math.abs(item.adjustment), session,
+                  item.yarnLot, Math.abs(applied), session,
                   // Not a batch issue — say on the lot's ledger that a
                   // person wrote this off, and why.
                   { reason }
@@ -593,10 +661,12 @@ router.post(
               }
               await MaterialOutward.create([{
                 rawMaterial: material._id,
-                quantity:    Math.abs(item.adjustment),
+                quantity:    Math.abs(applied),
                 type:        "STOCK_ADJUST",
                 outwardDate: new Date(),
-                unitPrice:   material.price || 0,
+                // The weighted average, not the latest purchase price —
+                // this row is what the order P&L costs the yarn at.
+                unitPrice:   costOf(material),
                 remarks:     `Stock adjustment: ${reason}`,
                 yarnLot:     lotRef || undefined,
                 lotNo:       lotLabel,
@@ -620,7 +690,13 @@ router.post(
               category:   material.category,
               oldStock,
               newStock,
-              adjustment: item.adjustment,
+              // What was actually applied. The caller used to be handed
+              // back the figure it sent, so a clamped write-off looked
+              // to the UI exactly like one that went through in full.
+              adjustment: applied,
+              // Only when they differ, so the ordinary case is unchanged
+              // and the exceptional one is impossible to miss.
+              requested:  applied === item.adjustment ? undefined : item.adjustment,
               lotNo:      lotLabel || null,
             };
           });

@@ -96,13 +96,31 @@ async function _rows(from, to, groupBy) {
   }
 
   // material (default) — stock valuation snapshot.
+  //
+  // Valued at the weighted average of what the stock cost, not at the
+  // latest purchase price. Priced at the newest quote, this figure
+  // jumped every time a supplier moved theirs — revaluing yarn bought
+  // months earlier — and it is the number the whole shelf is worth.
+  // `price` is the fallback for material that has not been received
+  // since averaging existed, which is what it was valued at anyway.
+  const COST = { $cond: [{ $gt: [{ $ifNull: ["$avgCost", 0] }, 0] }, "$avgCost", { $ifNull: ["$price", 0] }] };
   const rows = await RawMaterial.aggregate([
-    { $project: { _id: 0, key: "$_id", label: "$name", stock: 1, price: 1, minStock: 1, value: { $multiply: ["$stock", "$price"] } } },
+    { $project: {
+        _id: 0, key: "$_id", label: "$name", stock: 1, minStock: 1,
+        // Kept as `price` so every existing reader — the report page,
+        // the PDF, the CSV — keeps working; it is now the cost the
+        // value beside it was computed from, which is what a valuation
+        // column should have shown all along.
+        price: COST,
+        latestPrice: { $ifNull: ["$price", 0] },
+        value: { $multiply: [{ $ifNull: ["$stock", 0] }, COST] },
+    } },
     { $sort: { value: -1 } },
   ]);
   return rows.map((r) => ({
     key: r.key, label: r.label,
     stock: round(r.stock, 2), price: round(r.price, 2), value: round(r.value),
+    latestPrice: round(r.latestPrice, 2),
     low: r.minStock > 0 && r.stock <= r.minStock,
   }));
 }

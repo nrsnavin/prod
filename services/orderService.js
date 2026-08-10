@@ -21,6 +21,7 @@ const MaterialOutward = require('../models/MaterialOut.cjs');
 const { buildFingerprint, ACTION_CODES } = require('../utils/fingerprint');
 const { applyMovement } = require('../utils/elasticStock');
 const { appendStockMovement } = require('../utils/stockLedger');
+const { costOf } = require('../utils/materialValuation');
 
 // Approve an Open order inside a transaction: pre-flight stock check,
 // (optional) forced-override fingerprint, raw-material deduction +
@@ -127,6 +128,10 @@ async function approveOrderTxn(session, {
       // the order years later, when it may have been deleted.
       refNo: order.orderNo != null ? String(order.orderNo) : '',
       quantity: -applied, balance: material.stock,
+      // What this yarn was worth as it left. Snapshotted on the row
+      // because the average moves with the next receipt, so looking it
+      // up later would price this movement at a cost it never had.
+      unitCost: costOf(material),
     }, session);
     await MaterialOutward.create([{
       rawMaterial: rm.rawMaterial,
@@ -134,7 +139,11 @@ async function approveOrderTxn(session, {
       order:       order._id,
       type:        'ORDER_APPROVAL',
       outwardDate: new Date(),
-      unitPrice:   material.price ?? 0,
+      // The weighted average of what the stock cost, not the latest
+      // purchase price. This row is what the order P&L reads, so
+      // costing it at the newest quote made every order look worse the
+      // moment a supplier raised theirs — on yarn bought months before.
+      unitPrice:   costOf(material),
       remarks:     applied < rm.requiredWeight
         ? `Order #${order.orderNo ?? ''} approval (forced — requested ${rm.requiredWeight}, short ${rm.requiredWeight - applied})`
         : `Order #${order.orderNo ?? ''} approval`,
