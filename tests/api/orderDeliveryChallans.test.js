@@ -327,3 +327,98 @@ describe('the order detail carries its version', () => {
     expect((await Order.findById(order._id).lean()).po).toBe('PO-EDIT-1');
   });
 });
+
+// ── Delivered, beside packed, on the order itself ─────────────────────
+//
+// Packed is goods in a box in this building; DELIVERED is goods that
+// left it on a delivery note. The order page reported the first and
+// called it progress, which reads as further along than the order really
+// is — it can be fully packed with nothing despatched.
+
+describe('the delivered quantity on the order detail', () => {
+  const detail = (order) =>
+    request(app).get(`/api/v2/order/get-orderDetail?id=${order._id}`)
+      .set('Cookie', adminCookie());
+
+  it('sums the notes, per elastic', async () => {
+    const { order, elastic } = await seedOrder(1000);
+    for (const q of [400, 250]) {
+      await makeDc({
+        order: order._id, orderNo: order.orderNo, totalQuantity: q,
+        items: [{ elastic: elastic._id, elasticName: '20mm', quantity: q, unit: 'm' }],
+      });
+    }
+
+    const row = (await detail(order)).body.data.elastics[0];
+    expect(row).toMatchObject({ ordered: 1000, delivered: 650, undelivered: 350 });
+  });
+
+  it('is zero before anything has gone out, not absent', async () => {
+    // A missing field renders as a blank cell, which reads as "unknown"
+    // rather than "none yet".
+    const { order } = await seedOrder(1000);
+    const row = (await detail(order)).body.data.elastics[0];
+    expect(row.delivered).toBe(0);
+    expect(row.undelivered).toBe(1000);
+  });
+
+  it('counts nothing from a cancelled note', async () => {
+    const { order, elastic } = await seedOrder(1000);
+    await makeDc({
+      order: order._id, orderNo: order.orderNo, status: 'cancelled', totalQuantity: 400,
+      items: [{ elastic: elastic._id, elasticName: '20mm', quantity: 400, unit: 'm' }],
+    });
+
+    const row = (await detail(order)).body.data.elastics[0];
+    expect(row.delivered).toBe(0);
+  });
+
+  it('finds a note carrying only the order number', async () => {
+    const { order, elastic } = await seedOrder(1000);
+    await makeDc({
+      orderNo: order.orderNo, totalQuantity: 300,
+      items: [{ elastic: elastic._id, elasticName: '20mm', quantity: 300, unit: 'm' }],
+    });
+
+    expect((await detail(order)).body.data.elastics[0].delivered).toBe(300);
+  });
+
+  it('never counts another order notes', async () => {
+    const a = await seedOrder(1000);
+    const b = await seedOrder(1000);
+    await makeDc({
+      order: b.order._id, orderNo: b.order.orderNo, totalQuantity: 900,
+      items: [{ elastic: b.elastic._id, elasticName: '20mm', quantity: 900, unit: 'm' }],
+    });
+
+    expect((await detail(a.order)).body.data.elastics[0].delivered).toBe(0);
+  });
+
+  it('reports an over-despatch rather than clamping it', async () => {
+    const { order, elastic } = await seedOrder(1000);
+    await makeDc({
+      order: order._id, orderNo: order.orderNo, totalQuantity: 1200,
+      items: [{ elastic: elastic._id, elasticName: '20mm', quantity: 1200, unit: 'm' }],
+    });
+
+    const row = (await detail(order)).body.data.elastics[0];
+    expect(row).toMatchObject({ delivered: 1200, undelivered: -200 });
+  });
+
+  it('leaves packed alone — the two are a step apart', async () => {
+    // Reporting one as the other is the confusion this exists to end.
+    const { order, elastic } = await seedOrder(1000);
+    await Order.updateOne(
+      { _id: order._id },
+      { $set: { packedElastic: [{ elastic: elastic._id, quantity: 800 }] } }
+    );
+    await makeDc({
+      order: order._id, orderNo: order.orderNo, totalQuantity: 300,
+      items: [{ elastic: elastic._id, elasticName: '20mm', quantity: 300, unit: 'm' }],
+    });
+
+    const row = (await detail(order)).body.data.elastics[0];
+    expect(row.packed).toBe(800);
+    expect(row.delivered).toBe(300);
+  });
+});

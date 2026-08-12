@@ -409,6 +409,37 @@ router.get(
     const qtyFor = (rows, id) =>
       (rows || []).find((p) => p?.elastic && String(p.elastic) === id)?.quantity;
 
+    // ── What has actually reached the customer ──────────────────────
+    // Packed is goods in a box in this building; DELIVERED is goods that
+    // left it on a delivery note. The page reported the first and called
+    // it progress, which reads as further along than the order really
+    // is — an order can be fully packed and nothing despatched.
+    //
+    // Summed from the notes rather than stored on the order, so it
+    // cannot drift from them. Matched on the reference AND the order
+    // number, because a note carries both and older rows can have one
+    // without the other. Cancelled notes are excluded: nothing left the
+    // building on them.
+    const dcMatch = [{ order: order._id }];
+    if (order.orderNo != null) dcMatch.push({ orderNo: order.orderNo });
+    const orderDcs = await DeliveryChallan.find({
+      $or: dcMatch,
+      status: { $ne: "cancelled" },
+    }).select("items").lean();
+
+    const deliveredByElastic = new Map();
+    for (const dc of orderDcs) {
+      for (const item of dc.items || []) {
+        if (!item.elastic) continue;
+        const key = String(item.elastic);
+        deliveredByElastic.set(
+          key,
+          (deliveredByElastic.get(key) || 0) + (Number(item.quantity) || 0)
+        );
+      }
+    }
+    const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
+
     const elastics = order.elasticOrdered.map((e) => {
       const id = String(e.elastic ?? "");
       return {
@@ -428,6 +459,15 @@ router.get(
           0,
           e.quantity - (qtyFor(order.packedElastic, id) || 0)
         ),
+        // Goods that have actually left, on a delivery note. Sits beside
+        // `packed` because the two are a step apart and are constantly
+        // read as one.
+        delivered: round3(deliveredByElastic.get(id) || 0),
+        // Ordered minus delivered — what the customer is still waiting
+        // for, as against `pendingDelivery` which stops at packed.
+        // Negative would mean an over-despatch, which happens and is
+        // worth seeing rather than clamped away.
+        undelivered: round3(e.quantity - (deliveredByElastic.get(id) || 0)),
         // Legacy alias for notAssigned — the mobile app reads it as the
         // allocation cap, so its meaning must not drift.
         pending:  qtyFor(order.pendingElastic, id)  ?? e.quantity,
