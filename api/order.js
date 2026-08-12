@@ -541,6 +541,13 @@ router.get(
       success: true,
       data: {
         _id:         order._id,
+        // The document version, for the optimistic lock on /update-order.
+        // This projection is hand-built and never included it, so the
+        // edit form has been sending `expectedVersion: undefined` — and
+        // assertVersion no-ops on an absent value, which left the lock
+        // decorative: two people editing the same order both saved, and
+        // the second silently won.
+        __v:         order.__v,
         orderNo:     order.orderNo,
         po:          order.po,
         status:      order.status,

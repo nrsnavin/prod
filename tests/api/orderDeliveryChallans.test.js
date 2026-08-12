@@ -281,3 +281,49 @@ describe('the route itself', () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ── The optimistic lock the edit form depends on ──────────────────────
+//
+// /update-order compares the client's `expectedVersion` against the
+// document's __v and 409s on a mismatch — but assertVersion no-ops when
+// the value is absent, and the order detail projection is hand-built and
+// never included __v. So the form sent `undefined` every time and the
+// lock was decorative: two people editing the same order both saved, and
+// the second silently overwrote the first.
+
+describe('the order detail carries its version', () => {
+  it('returns __v, so an edit can be locked against it', async () => {
+    const { order } = await seedOrder();
+    const res = await request(app)
+      .get(`/api/v2/order/get-orderDetail?id=${order._id}`)
+      .set('Cookie', adminCookie());
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.__v).toBe(order.__v);
+    expect(typeof res.body.data.__v).toBe('number');
+  });
+
+  it('refuses an edit that was written against an older version', async () => {
+    // Open, because /update-order is Open-only — approval is where the
+    // raw material is drawn, and changing the order after that would
+    // leave stock and requirement disagreeing.
+    const { order } = await seedOrder();
+    await Order.updateOne({ _id: order._id }, { $set: { status: 'Open' } });
+    const stale = order.__v;
+
+    const first = await request(app).post('/api/v2/order/update-order')
+      .set('Cookie', adminCookie())
+      .send({ orderId: String(order._id), po: 'PO-EDIT-1',
+              auditReason: 'first editor', expectedVersion: stale });
+    expect(first.status).toBe(200);
+
+    // Second editor loaded the order before that save.
+    const second = await request(app).post('/api/v2/order/update-order')
+      .set('Cookie', adminCookie())
+      .send({ orderId: String(order._id), po: 'PO-EDIT-2',
+              auditReason: 'second editor', expectedVersion: stale });
+
+    expect(second.status).toBe(409);
+    expect((await Order.findById(order._id).lean()).po).toBe('PO-EDIT-1');
+  });
+});

@@ -417,43 +417,6 @@ router.get(
 );
 
 
-// ─────────────────────────────────────────────────────────────────────────
-// PUT /edit-po
-// ─────────────────────────────────────────────────────────────────────────
-router.put(
-  "/edit-po",
-  catchAsyncErrors(async (req, res, next) => {
-    try {
-      const po = await PurchaseOrder.findById(req.body._id);
-      if (!po) return next(new ErrorHandler("Purchase Order not found", 404));
-      if (po.status === "Completed")
-        return next(new ErrorHandler("Completed POs cannot be edited", 400));
-
-      const existingQtyMap = {};
-      po.items.forEach((item) => {
-        existingQtyMap[item.rawMaterial.toString()] = item.receivedQuantity || 0;
-      });
-
-      po.supplier = req.body.supplier || po.supplier;
-      po.items    = (req.body.items || []).map((i) => ({
-        rawMaterial:      i.rawMaterial,
-        price:            i.price    || 0,
-        quantity:         i.quantity || 0,
-        receivedQuantity: existingQtyMap[i.rawMaterial] || 0,
-      }));
-      po.status = deriveStatus(po.items);
-      await po.save();
-
-      const populated = await PurchaseOrder.findById(po._id)
-        .populate("supplier",          "name phoneNumber gstin")
-        .populate("items.rawMaterial", "name unit");
-
-      res.status(200).json({ success: true, po: populated });
-    } catch (error) {
-      return next(new ErrorHandler(error.message, 400));
-    }
-  })
-);
 
 
 // ─────────────────────────────────────────────────────────────────────────
