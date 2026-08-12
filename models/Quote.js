@@ -1,6 +1,6 @@
 'use strict';
 //
-// A price quoted to a customer for one elastic, and the costing behind it.
+// A price quoted to a customer, and the costing behind every line of it.
 //
 // The costing is stored ALONGSIDE the rate rather than recomputed on
 // read. A quote is a commitment made on a particular day at particular
@@ -8,11 +8,25 @@
 // would silently restate itself at this month's costs and nobody could
 // answer why the customer was charged what they were charged.
 //
-// It is deliberately not tied to an Elastic. Quotes are written for
-// developments that do not exist in the system yet — that is most of
-// what quoting IS — so the product is described in words and its recipe
-// typed in. `elastic` is there for the day a quote is raised against a
-// product on file, and is never required.
+// SEVERAL PRODUCTS, ONE DOCUMENT
+//
+// A customer asking about elastic asks about three widths at once, so a
+// quotation carries lines. Each line is costed and priced on its own —
+// its own materials, conversion cost and margin — because they are
+// different cloths and averaging them would quote every one wrongly.
+//
+// GST sits on the QUOTE, not the line. It is a property of what is being
+// sold rather than of which row it lands on, and one quotation for
+// elastic tape carries one rate. Per-line tax would invite a document
+// that adds up to a figure the invoice cannot match.
+//
+// THE CUSTOMER
+//
+// `customer` links the master record when there is one, and the name and
+// address are ALSO copied onto the quote. That is deliberate: a quote is
+// a document that was sent, and it has to keep saying what it said even
+// after the customer master is edited or archived. The link is for
+// finding things; the snapshot is the document.
 
 const mongoose = require('mongoose');
 
@@ -29,6 +43,35 @@ const QuoteMaterialSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const QuoteLineSchema = new mongoose.Schema(
+  {
+    // Optional — quotes are written for developments that do not exist
+    // in the system yet, which is most of what quoting IS.
+    elastic:     { type: mongoose.Types.ObjectId, ref: 'Elastic' },
+    productName: { type: String, required: true, trim: true },
+    productSpec: { type: String, default: '', trim: true },
+
+    materials:      { type: [QuoteMaterialSchema], default: [] },
+    conversionCost: { type: Number, default: 0, min: 0 },
+    marginPercent:  { type: Number, default: 0, min: 0 },
+    quantityMetres: { type: Number, default: 0, min: 0 },
+
+    // ── Frozen costing, per metre of THIS product ──
+    totalWeightGrams: { type: Number, default: 0 },
+    materialCost:     { type: Number, default: 0 },
+    totalCost:        { type: Number, default: 0 },
+    marginAmount:     { type: Number, default: 0 },
+    rateBeforeTax:    { type: Number, default: 0 },
+    gstAmount:        { type: Number, default: 0 },
+    rateInclTax:      { type: Number, default: 0 },
+
+    // Extended over the quantity, when one was given.
+    valueBeforeTax: { type: Number, default: 0 },
+    valueInclTax:   { type: Number, default: 0 },
+  },
+  { _id: false }
+);
+
 const QuoteSchema = new mongoose.Schema(
   {
     // QT-25/26-0001
@@ -39,39 +82,22 @@ const QuoteSchema = new mongoose.Schema(
     date:      { type: Date, required: true, default: Date.now },
     validTill: { type: Date, required: true },
 
-    // Typed, or picked from the customer master. A quote often goes to
-    // somebody who is not a customer yet, so the name is what is
-    // required and the reference is what is optional.
-    customer:        { type: mongoose.Types.ObjectId, ref: 'Customer' },
+    // The link, and the snapshot. See the note above.
+    customer:        { type: mongoose.Types.ObjectId, ref: 'Customer', index: true },
     customerName:    { type: String, required: true, trim: true },
     customerAddress: { type: String, default: '', trim: true },
     customerGstin:   { type: String, default: '', trim: true },
+    customerPhone:   { type: String, default: '', trim: true },
     customerRef:     { type: String, default: '', trim: true },
 
-    // The product being quoted, described rather than referenced.
-    elastic:     { type: mongoose.Types.ObjectId, ref: 'Elastic' },
-    productName: { type: String, required: true, trim: true },
-    productSpec: { type: String, default: '', trim: true },
+    lines: { type: [QuoteLineSchema], default: [] },
 
-    materials: { type: [QuoteMaterialSchema], default: [] },
-
-    // ── The costing, per metre, frozen at the moment of quoting ──
-    totalWeightGrams: { type: Number, default: 0 },
-    materialCost:     { type: Number, default: 0 },
-    conversionCost:   { type: Number, default: 0 },
-    totalCost:        { type: Number, default: 0 },
-    marginPercent:    { type: Number, default: 0 },
-    marginAmount:     { type: Number, default: 0 },
-    rateBeforeTax:    { type: Number, default: 0 },
-    gstPercent:       { type: Number, default: 5 },
-    gstAmount:        { type: Number, default: 0 },
-    rateInclTax:      { type: Number, default: 0 },
-
-    // Optional — an indicative quantity, and what the order would come
-    // to at this rate. Not a commitment to supply it.
-    quantityMetres: { type: Number, default: 0, min: 0 },
-    valueBeforeTax: { type: Number, default: 0 },
-    valueInclTax:   { type: Number, default: 0 },
+    // ── Document totals ──
+    gstPercent:          { type: Number, default: 5 },
+    subTotal:            { type: Number, default: 0 },
+    gstAmount:           { type: Number, default: 0 },
+    grandTotal:          { type: Number, default: 0 },
+    totalQuantityMetres: { type: Number, default: 0 },
 
     remarks: { type: String, default: '', trim: true },
 

@@ -29,8 +29,9 @@ const { isAuthenticated, isAdmin } = require('../middleware/auth');
 const { requireReason } = require('../utils/auditReason');
 const { escapeRegex }   = require('../utils/escapeRegex');
 
-const Quote = require('../models/Quote');
-const { priceOneMetre, extend } = require('../utils/quoteCosting');
+const Quote    = require('../models/Quote');
+const Customer = require('../models/Customer');
+const { priceQuote } = require('../utils/quoteCosting');
 const { currentFinancialYear }  = require('../utils/financialYear');
 const { nextNumber }            = require('../utils/sequence');
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
@@ -60,45 +61,89 @@ async function nextSeq(financialYear) {
 const buildQuoteNo = (fy, seq) => `QT-${fy}-${String(seq).padStart(4, '0')}`;
 
 /**
- * Read the costing off a request body and price it.
+ * Read one product line off the request and validate it.
  *
  * Returns { error } for anything that cannot be priced, so the caller
- * answers with one clear refusal rather than storing a nonsense quote.
+ * answers with one clear refusal naming the line rather than storing a
+ * nonsense quote.
  */
-function costingFromBody(body) {
-  const raw = Array.isArray(body?.materials) ? body.materials : [];
+function readLine(raw, index) {
+  const where = `Product ${index + 1}`;
 
-  // An unlabelled row cannot be printed or understood later. Rows with
-  // no weight AND no rate are dropped rather than refused — the form
-  // ships with four named rows and leaving one unused is normal.
+  const productName = String(raw?.productName ?? '').trim();
+  if (!productName) return { error: `${where} has no name.` };
+
+  const rawMaterials = Array.isArray(raw?.materials) ? raw.materials : [];
+
+  // Rows with no weight AND no rate are dropped rather than refused —
+  // the form ships with four named rows and leaving one unused is
+  // normal. A row with figures but no name cannot be printed or
+  // understood later, so that one is refused.
   const materials = [];
-  for (const [i, m] of raw.entries()) {
+  for (const [i, m] of rawMaterials.entries()) {
     const label  = String(m?.label ?? '').trim();
     const weight = Number(m?.weightGrams);
     const rate   = Number(m?.ratePerKg);
 
-    const blank = !weight && !rate;
-    if (blank) continue;
+    if (!weight && !rate) continue;
 
     if (!label) {
-      return { error: `Line ${i + 1} has figures but no material name.` };
-    }
-    if (weight < 0 || rate < 0) {
-      return { error: `Line ${i + 1}: weight and rate cannot be negative.` };
+      return { error: `${where}, line ${i + 1} has figures but no material name.` };
     }
     if (!Number.isFinite(weight) || !Number.isFinite(rate)) {
-      return { error: `Line ${i + 1}: weight and rate must be numbers.` };
+      return { error: `${where}, line ${i + 1}: weight and rate must be numbers.` };
+    }
+    if (weight < 0 || rate < 0) {
+      return { error: `${where}, line ${i + 1}: weight and rate cannot be negative.` };
     }
     materials.push({ label, weightGrams: weight, ratePerKg: rate });
   }
 
   if (materials.length === 0) {
-    return { error: 'A quote needs at least one material with a weight and a rate.' };
+    return { error: `${where} needs at least one material with a weight and a rate.` };
   }
 
-  const marginPercent = Number(body?.marginPercent);
+  const marginPercent = Number(raw?.marginPercent);
   if (!Number.isFinite(marginPercent) || marginPercent < 0) {
-    return { error: 'Margin % must be zero or more.' };
+    return { error: `${where}: margin % must be zero or more.` };
+  }
+
+  const conversionCost = Number(raw?.conversionCost) || 0;
+  if (conversionCost < 0) {
+    return { error: `${where}: conversion cost cannot be negative.` };
+  }
+
+  return {
+    line: {
+      elastic: mongoose.Types.ObjectId.isValid(raw?.elastic) ? raw.elastic : undefined,
+      productName,
+      productSpec: String(raw?.productSpec ?? '').trim(),
+      materials,
+      conversionCost,
+      marginPercent,
+      quantityMetres: Math.max(0, Number(raw?.quantityMetres) || 0),
+    },
+  };
+}
+
+/**
+ * Read every line off a request body and price the whole document.
+ *
+ * Accepts a single-product body too — productName/materials at the top
+ * level — because that is what the first version of this route took and
+ * what older clients still send. One shape reaching the pricing code
+ * means there is no second arithmetic path to disagree with the first.
+ */
+function costingFromBody(body) {
+  const rawLines = Array.isArray(body?.lines) && body.lines.length
+    ? body.lines
+    : [body];
+
+  const lines = [];
+  for (const [i, raw] of rawLines.entries()) {
+    const { line, error } = readLine(raw, i);
+    if (error) return { error };
+    lines.push(line);
   }
 
   const gstPercent = body?.gstPercent === undefined || body?.gstPercent === null
@@ -108,46 +153,45 @@ function costingFromBody(body) {
     return { error: 'GST % must be zero or more.' };
   }
 
-  const conversionCost = Number(body?.conversionCost) || 0;
-  if (conversionCost < 0) {
-    return { error: 'Conversion cost cannot be negative.' };
-  }
+  const priced = priceQuote({ lines, gstPercent });
 
-  const priced = priceOneMetre({ materials, conversionCost, marginPercent, gstPercent });
-
-  const quantityMetres = Math.max(0, Number(body?.quantityMetres) || 0);
+  // Marry the input back onto the priced result: the costing helper
+  // knows about money, not about which elastic a line names.
   return {
-    priced,
-    quantityMetres,
-    valueBeforeTax: extend(priced.rateBeforeTax, quantityMetres),
-    valueInclTax:   extend(priced.rateInclTax,   quantityMetres),
+    priced: {
+      ...priced,
+      lines: priced.lines.map((p, i) => ({
+        elastic:        lines[i].elastic,
+        productName:    lines[i].productName,
+        productSpec:    lines[i].productSpec,
+        conversionCost: p.conversionCost,
+        marginPercent:  p.marginPercent,
+        quantityMetres: p.quantityMetres,
+        materials:      p.materials,
+        totalWeightGrams: p.totalWeightGrams,
+        materialCost:     p.materialCost,
+        totalCost:        p.totalCost,
+        marginAmount:     p.marginAmount,
+        rateBeforeTax:    p.rateBeforeTax,
+        gstAmount:        p.gstAmount,
+        rateInclTax:      p.rateInclTax,
+        valueBeforeTax:   p.valueBeforeTax,
+        valueInclTax:     p.valueInclTax,
+      })),
+    },
   };
 }
 
 /** Everything the costing decides, ready to assign onto a document. */
 const costingFields = (c) => ({
-  materials:        c.priced.materials,
-  totalWeightGrams: c.priced.totalWeightGrams,
-  materialCost:     c.priced.materialCost,
-  conversionCost:   c.priced.conversionCost,
-  totalCost:        c.priced.totalCost,
-  marginPercent:    c.priced.marginPercent,
-  marginAmount:     c.priced.marginAmount,
-  rateBeforeTax:    c.priced.rateBeforeTax,
-  gstPercent:       c.priced.gstPercent,
-  gstAmount:        c.priced.gstAmount,
-  rateInclTax:      c.priced.rateInclTax,
-  quantityMetres:   c.quantityMetres,
-  valueBeforeTax:   c.valueBeforeTax,
-  valueInclTax:     c.valueInclTax,
+  lines:               c.priced.lines,
+  gstPercent:          c.priced.gstPercent,
+  subTotal:            c.priced.subTotal,
+  gstAmount:           c.priced.gstAmount,
+  grandTotal:          c.priced.grandTotal,
+  totalQuantityMetres: c.priced.totalQuantityMetres,
 });
 
-// buildFingerprint takes { entityId, actor, meta } — the actor goes in
-// under its own key. Spreading actorFromRequest() across the options
-// instead put id/name/role at the top level where nothing reads them,
-// so `actor` arrived undefined and every quotation recorded "System" as
-// the person who raised it. An audit trail that cannot name anybody is
-// a log, not an audit.
 function stamp(doc, code, req, meta) {
   const fp = buildFingerprint(code, {
     entityId: doc._id,
@@ -166,16 +210,43 @@ router.post(
   gate,
   catchAsyncErrors(async (req, res, next) => {
     const {
-      customerName, customerAddress, customerGstin, customerRef, customer,
-      productName, productSpec, elastic,
+      customerName, customerAddress, customerGstin, customerPhone,
+      customerRef, customer,
       date, validTill, remarks,
     } = req.body || {};
 
-    if (!String(customerName ?? '').trim()) {
-      return next(new ErrorHandler('Customer name is required', 400));
+    // Either pick a customer from the master or type one. A quote often
+    // goes to somebody who is not a customer yet — that is what quoting
+    // is for — so the NAME is what is required and the link is what is
+    // optional.
+    const snapshot = {
+      customerName:    String(customerName ?? '').trim(),
+      customerAddress: String(customerAddress ?? '').trim(),
+      customerGstin:   String(customerGstin ?? '').trim(),
+      customerPhone:   String(customerPhone ?? '').trim(),
+    };
+
+    let customerId;
+    if (mongoose.Types.ObjectId.isValid(customer)) {
+      const master = await Customer.findById(customer)
+        .select('name gstin phoneNumber email').lean();
+      if (!master) return next(new ErrorHandler('Customer not found', 404));
+      customerId = master._id;
+      // The master fills the blanks; anything typed on the quote wins,
+      // because a quote sometimes goes to a different address or a
+      // different GSTIN of the same customer.
+      snapshot.customerName  = snapshot.customerName  || master.name        || '';
+      snapshot.customerGstin = snapshot.customerGstin || master.gstin       || '';
+      snapshot.customerPhone = snapshot.customerPhone || master.phoneNumber || '';
+      // The customer master holds no address — it never has. So the
+      // delivery address is typed on the quote, which is right anyway:
+      // a quotation often goes to a buying office rather than the mill.
+      // Left as whatever was typed, never blanked from a field that
+      // does not exist.
     }
-    if (!String(productName ?? '').trim()) {
-      return next(new ErrorHandler('Product name is required', 400));
+
+    if (!snapshot.customerName) {
+      return next(new ErrorHandler('Customer name is required', 400));
     }
 
     const costing = costingFromBody(req.body);
@@ -206,21 +277,19 @@ router.post(
     const quote = new Quote({
       quoteNo, financialYear, sequence,
       date: quoteDate, validTill: till,
-      customer: mongoose.Types.ObjectId.isValid(customer) ? customer : undefined,
-      customerName:    String(customerName).trim(),
-      customerAddress: String(customerAddress ?? '').trim(),
-      customerGstin:   String(customerGstin ?? '').trim(),
-      customerRef:     String(customerRef ?? '').trim(),
-      elastic: mongoose.Types.ObjectId.isValid(elastic) ? elastic : undefined,
-      productName: String(productName).trim(),
-      productSpec: String(productSpec ?? '').trim(),
+      customer: customerId,
+      ...snapshot,
+      customerRef: String(customerRef ?? '').trim(),
       remarks:     String(remarks ?? '').trim(),
       createdBy:   req.user?._id,
       ...costingFields(costing),
     });
 
     stamp(quote, ACTION_CODES.QUOTE_CREATED, req, {
-      quoteNo, rate: quote.rateBeforeTax, customer: quote.customerName,
+      quoteNo,
+      customer: quote.customerName,
+      products: quote.lines.length,
+      grandTotal: quote.grandTotal,
     });
     await quote.save();
 
@@ -259,20 +328,45 @@ router.put(
       ));
     }
 
-    const before = {
-      rateBeforeTax: quote.rateBeforeTax,
-      totalCost:     quote.totalCost,
-      marginPercent: quote.marginPercent,
-    };
+    const snapshotOf = (q) => ({
+      products:   q.lines.map((l) => l.productName),
+      subTotal:   q.subTotal,
+      grandTotal: q.grandTotal,
+      rates:      q.lines.map((l) => l.rateBeforeTax),
+    });
+    const before = snapshotOf(quote);
 
-    if (Array.isArray(req.body.materials)) {
-      const costing = costingFromBody(req.body);
+    if (Array.isArray(req.body.lines) || Array.isArray(req.body.materials)) {
+      // A reprice usually sends figures, not names: "same products, 30%
+      // margin". Each incoming line inherits what it does not restate
+      // from the line already in that position, so changing a margin
+      // cannot blank the product it belongs to.
+      const existing = quote.lines || [];
+      const incoming = Array.isArray(req.body.lines) && req.body.lines.length
+        ? req.body.lines
+        : [req.body];
+
+      const merged = incoming.map((raw, i) => ({
+        ...raw,
+        productName: raw?.productName ?? existing[i]?.productName,
+        productSpec: raw?.productSpec ?? existing[i]?.productSpec,
+        elastic:     raw?.elastic     ?? existing[i]?.elastic,
+        conversionCost: raw?.conversionCost ?? existing[i]?.conversionCost,
+        marginPercent:  raw?.marginPercent  ?? existing[i]?.marginPercent,
+        quantityMetres: raw?.quantityMetres ?? existing[i]?.quantityMetres,
+        materials: Array.isArray(raw?.materials) ? raw.materials : existing[i]?.materials,
+      }));
+
+      const costing = costingFromBody({
+        lines: merged,
+        gstPercent: req.body.gstPercent ?? quote.gstPercent,
+      });
       if (costing.error) return next(new ErrorHandler(costing.error, 400));
       Object.assign(quote, costingFields(costing));
     }
 
     for (const f of ['customerName', 'customerAddress', 'customerGstin',
-                     'customerRef', 'productName', 'productSpec', 'remarks']) {
+                     'customerPhone', 'customerRef', 'remarks']) {
       if (req.body[f] !== undefined) quote[f] = String(req.body[f]).trim();
     }
     if (req.body.validTill !== undefined) {
@@ -288,12 +382,7 @@ router.put(
     }
 
     stamp(quote, ACTION_CODES.QUOTE_UPDATED, req, {
-      auditReason, before,
-      after: {
-        rateBeforeTax: quote.rateBeforeTax,
-        totalCost:     quote.totalCost,
-        marginPercent: quote.marginPercent,
-      },
+      auditReason, before, after: snapshotOf(quote),
     });
     await quote.save();
 
@@ -342,7 +431,13 @@ router.get(
     if (req.query.status && req.query.status !== 'all') filter.status = req.query.status;
     if (req.query.search) {
       const rx = new RegExp(escapeRegex(String(req.query.search)), 'i');
-      filter.$or = [{ quoteNo: rx }, { customerName: rx }, { productName: rx }];
+      // The product name lives on the lines now, so searching the top
+      // level found quotes by customer and never by what was quoted.
+      filter.$or = [
+        { quoteNo: rx },
+        { customerName: rx },
+        { 'lines.productName': rx },
+      ];
     }
 
     const [quotes, total] = await Promise.all([

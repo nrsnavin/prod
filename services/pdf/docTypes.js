@@ -401,13 +401,12 @@ const QUOTE_FIELDS = [
   { key: "partyGstin", label: "Customer GSTIN" },
   { key: "productName", label: "Product" },
   { key: "productSpec", label: "Product specification" },
-  { key: "rateExclTax", label: "Rate per metre (ex-GST)" },
+  { key: "subTotal", label: "Sub-total (ex-GST)" },
   { key: "gstLabel", label: "GST rate label" },
-  { key: "gstAmount", label: "GST per metre" },
-  { key: "rateInclTax", label: "Rate per metre (inc-GST)" },
-  { key: "quantity", label: "Indicative quantity" },
-  { key: "valueBeforeTax", label: "Value (ex-GST)" },
-  { key: "valueInclTax", label: "Value (inc-GST)" },
+  { key: "gstAmount", label: "GST amount" },
+  { key: "grandTotal", label: "Grand total (inc-GST)" },
+  { key: "quantity", label: "Total quantity" },
+  { key: "lineCount", label: "Number of products" },
   { key: "remarks", label: "Remarks" },
   { key: "footerNote", label: "Footer note" },
   { key: "termsText", label: "Terms & conditions" },
@@ -441,22 +440,22 @@ function quoteSample() {
       partyName: "Ravi Textiles",
       partyAddress: "44 Cotton Street, Tiruppur, Tamil Nadu 641604",
       partyGstin: "GSTIN 33ZZZZZ9999Z1Z9",
-      productName: "20mm Woven Elastic",
-      productSpec: "Width 20mm · Elongation 120% · Recovery 90%",
-      rateExclTax: "4.91",
+      productName: "2 products",
+      productSpec: "20mm Woven Elastic, 32mm Knitted Elastic",
+      subTotal: "Rs. 41,050.00",
       gstLabel: "GST @ 5%",
-      gstAmount: "0.25",
-      rateInclTax: "5.16",
-      quantity: "5,000 m",
-      valueBeforeTax: "24,552.00",
-      valueInclTax: "25,779.60",
+      gstAmount: "Rs. 2,052.50",
+      grandTotal: "Rs. 43,102.50",
+      quantity: "8,000 m",
+      lineCount: "2",
       remarks: "Rate holds for the quantity quoted.",
       termsText:
         "1. Prices are per metre, ex-works.\n2. This quotation is valid until the date shown.\n3. Rates are subject to yarn price movement thereafter.",
       footerNote: "This is a computer-generated quotation.",
     },
     rows: [
-      { sno: 1, description: "20mm Woven Elastic", unit: "m", qty: 5000, rate: 4.91, amount: 24552 },
+      { sno: 1, description: "20mm Woven Elastic", unit: "m", qty: 5000, rate: 4.91, amount: 24550 },
+      { sno: 2, description: "32mm Knitted Elastic", unit: "m", qty: 3000, rate: 5.50, amount: 16500 },
     ],
   };
 }
@@ -522,25 +521,26 @@ function quoteStarter() {
       columns: QUOTE_COLUMNS,
     },
 
-    // ── Price build-up ────────────────────────────────────────
-    // Rate, tax and inclusive rate stacked, because a buyer reads down
-    // this block to the one number they will be invoiced at.
+    // ── Totals ────────────────────────────────────────────────
+    // A quotation can carry several products, so the block that closes
+    // it is a document total, not a per-metre stack: the reader adds the
+    // Amount column, checks it against Sub-total, and works down to the
+    // one figure they will be invoiced.
     { id: "totbox", type: "box", x: 318, y: 580, w: R - 318, h: 74, lineWidth: 0.6, color: RULE },
-    { id: "r_l", type: "text", text: "Rate per metre", x: 324, y: 587, w: 130, h: 12, fontSize: 8, color: MUTED },
-    { id: "r_v", type: "field", field: "rateExclTax", x: 452, y: 586, w: R - 458, h: 12, fontSize: 9, align: "right", color: INK },
-    { id: "g_l", type: "field", field: "gstLabel", x: 324, y: 601, w: 130, h: 12, fontSize: 8, color: MUTED },
+    { id: "st_l", type: "text", text: "Sub-total (ex. GST)", x: 324, y: 587, w: 140, h: 12, fontSize: 8, color: MUTED },
+    { id: "st_v", type: "field", field: "subTotal", x: 452, y: 586, w: R - 458, h: 12, fontSize: 9, align: "right", color: INK },
+    { id: "g_l", type: "field", field: "gstLabel", x: 324, y: 601, w: 140, h: 12, fontSize: 8, color: MUTED },
     { id: "g_v", type: "field", field: "gstAmount", x: 452, y: 600, w: R - 458, h: 12, fontSize: 9, align: "right", color: INK },
-    { id: "ri_rule", type: "line", x: 318, y: 615, w: R - 318, h: 0, lineWidth: 0.6, color: RULE },
-    { id: "ri_l", type: "text", text: "RATE PER METRE (INC. GST)", x: 324, y: 620, w: 145, h: 12, fontSize: 7.5, bold: true, color: MUTED },
-    { id: "ri_v", type: "field", field: "rateInclTax", x: 452, y: 618, w: R - 458, h: 16, fontSize: 12, bold: true, align: "right", color: INK },
-    { id: "tv_rule", type: "line", x: 318, y: 637, w: R - 318, h: 0, lineWidth: 0.6, color: RULE },
-    { id: "tv_l", type: "text", text: "VALUE FOR QUANTITY QUOTED", x: 324, y: 641, w: 150, h: 12, fontSize: 7.5, bold: true, color: MUTED },
-    { id: "tv_v", type: "field", field: "valueInclTax", x: 452, y: 640, w: R - 458, h: 12, fontSize: 9.5, bold: true, align: "right", color: INK },
+    { id: "gt_rule", type: "line", x: 318, y: 615, w: R - 318, h: 0, lineWidth: 0.6, color: RULE },
+    { id: "gt_l", type: "text", text: "GRAND TOTAL (INC. GST)", x: 324, y: 622, w: 150, h: 12, fontSize: 7.5, bold: true, color: MUTED },
+    { id: "gt_v", type: "field", field: "grandTotal", x: 430, y: 620, w: R - 436, h: 18, fontSize: 13, bold: true, align: "right", color: INK },
 
-    { id: "qty_l", type: "text", text: "Quantity quoted:", x: L, y: 587, w: 90, h: 12, fontSize: 8, color: MUTED },
-    { id: "qty_v", type: "field", field: "quantity", x: L + 92, y: 587, w: 110, h: 12, fontSize: 9, bold: true, color: INK },
-    { id: "rem_l", type: "text", text: "REMARKS", x: L, y: 610, w: 200, h: 10, fontSize: 6.5, bold: true, color: MUTED },
-    { id: "rem", type: "field", field: "remarks", x: L, y: 621, w: 270, h: 32, fontSize: 7.5, color: MUTED },
+    { id: "lines_l", type: "text", text: "Products quoted:", x: L, y: 587, w: 92, h: 12, fontSize: 8, color: MUTED },
+    { id: "lines_v", type: "field", field: "lineCount", x: L + 94, y: 587, w: 40, h: 12, fontSize: 9, bold: true, color: INK },
+    { id: "qty_l", type: "text", text: "Total quantity:", x: L, y: 600, w: 92, h: 12, fontSize: 8, color: MUTED },
+    { id: "qty_v", type: "field", field: "quantity", x: L + 94, y: 600, w: 110, h: 12, fontSize: 9, bold: true, color: INK },
+    { id: "rem_l", type: "text", text: "REMARKS", x: L, y: 618, w: 200, h: 10, fontSize: 6.5, bold: true, color: MUTED },
+    { id: "rem", type: "field", field: "remarks", x: L, y: 629, w: 270, h: 26, fontSize: 7.5, color: MUTED },
 
     // ── Terms ─────────────────────────────────────────────────
     { id: "l_terms", type: "text", text: "TERMS & CONDITIONS", x: L, y: 668, w: 200, h: 10, fontSize: 6.5, bold: true, color: MUTED },

@@ -31,25 +31,27 @@ function money(n, dp = 2) {
 }
 
 function quoteToContext(quote, branding = {}) {
-  const qty = Number(quote.quantityMetres) || 0;
+  const lines = Array.isArray(quote.lines) ? quote.lines : [];
 
-  // One line: a quote covers one product. The row still goes through the
-  // table so the layout is the same family as the PO and the challan,
-  // and so a second product can be added later without a new template.
-  const rows = [
-    {
-      sno: 1,
-      description: [quote.productName, quote.productSpec]
-        .filter(Boolean)
-        .join(" — "),
-      unit: "m",
-      qty,
-      rate: Number(quote.rateBeforeTax) || 0,
-      amount: Number(quote.valueBeforeTax) || 0,
-    },
-  ];
+  // One row per product. The description carries the specification only
+  // when there is one, so a line for a plain product does not print a
+  // trailing dash.
+  const rows = lines.map((l, i) => ({
+    sno: i + 1,
+    description: [l.productName, l.productSpec].filter(Boolean).join(' — '),
+    unit: 'm',
+    qty: Number(l.quantityMetres) || 0,
+    rate: Number(l.rateBeforeTax) || 0,
+    amount: Number(l.valueBeforeTax) || 0,
+  }));
 
   const gstPercent = Number(quote.gstPercent) || 0;
+  const anyQuantity = lines.some((l) => (Number(l.quantityMetres) || 0) > 0);
+
+  // A quote for a rate with no quantity is a legitimate thing to send —
+  // "what would 20mm cost?" — and printing Rs 0.00 against it would read
+  // as a price rather than an absence.
+  const totalOrDash = (n) => (anyQuantity ? money(n) : '—');
 
   return {
     logo: branding.logo || "",
@@ -79,19 +81,26 @@ function quoteToContext(quote, branding = {}) {
       partyAddress: quote.customerAddress || "",
       partyGstin:   quote.customerGstin ? `GSTIN ${quote.customerGstin}` : "",
 
-      productName: quote.productName || "",
-      productSpec: quote.productSpec || "",
+      // The product pane names what is being quoted. With one line that
+      // is the product; with several it is the count, because listing
+      // three names in a box sized for one truncates all three.
+      productName: lines.length === 1
+        ? (lines[0].productName || "")
+        : `${lines.length} products`,
+      productSpec: lines.length === 1
+        ? (lines[0].productSpec || "")
+        : lines.map((l) => l.productName).join(", "),
 
-      rateExclTax: money(quote.rateBeforeTax),
-      // The rate is part of the label so the buyer is never left working
-      // out which percentage produced the figure beside it.
-      gstLabel:    gstPercent > 0 ? `GST @ ${gstPercent}%` : "GST",
-      gstAmount:   money(quote.gstAmount),
-      rateInclTax: money(quote.rateInclTax),
+      // ── Document totals ──
+      subTotal:   totalOrDash(quote.subTotal),
+      gstLabel:   gstPercent > 0 ? `GST @ ${gstPercent}%` : "GST",
+      gstAmount:  totalOrDash(quote.gstAmount),
+      grandTotal: totalOrDash(quote.grandTotal),
 
-      quantity: qty > 0 ? `${qty.toLocaleString("en-IN")} m` : "—",
-      valueBeforeTax: qty > 0 ? money(quote.valueBeforeTax) : "—",
-      valueInclTax:   qty > 0 ? money(quote.valueInclTax)   : "—",
+      quantity: anyQuantity
+        ? `${(Number(quote.totalQuantityMetres) || 0).toLocaleString("en-IN")} m`
+        : "—",
+      lineCount: String(lines.length),
 
       remarks: quote.remarks || "",
       termsText:
