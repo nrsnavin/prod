@@ -332,6 +332,32 @@ router.post(
       return next(new ErrorHandler("At least one item is required", 400));
     }
 
+    // An elastic line must IDENTIFY its elastic, not merely name it.
+    //
+    // Everything downstream keys on the id: _applyDcItems skips a line
+    // without one, so no stock moves and no reservation is settled, and
+    // the order's delivered figure sums by it, so the despatch never
+    // appears against the order. A name-only line was accepted by this
+    // route and then quietly ignored by both — the challan printed, the
+    // goods went out of the gate, and as far as the system was concerned
+    // nothing had happened. That is the worst of the three possible
+    // outcomes, and it is the one we had.
+    //
+    // Machine parts are free text by nature and are not checked.
+    if (type === "elastic") {
+      const nameless = items.findIndex((item) => !item?.elastic);
+      if (nameless !== -1) {
+        const shown =
+          items[nameless]?.elasticName || items[nameless]?.description || "";
+        return next(new ErrorHandler(
+          `Line ${nameless + 1}${shown ? ` ("${shown}")` : ""} does not say which ` +
+          `elastic it is. Pick the product rather than typing its name — a line ` +
+          `without it moves no stock and never reaches the order.`,
+          400
+        ));
+      }
+    }
+
     const processedItems = items.map((item) => ({
       ...item,
       quantity: Number(item.quantity) || 0,
