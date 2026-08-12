@@ -4,7 +4,8 @@ const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
-const { isAuthenticated } = require("../middleware/auth");
+const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { requireReason } = require("../utils/auditReason");
 const { escapeRegex } = require("../utils/escapeRegex");
 
 const DeliveryChallan = require("../models/DeliveryChallan");
@@ -197,6 +198,103 @@ router.get(
 //  no entry for this elastic) the goods still leave; there is simply
 //  no promise to settle.
 // ─────────────────────────────────────────────────────────────
+/**
+ * Take the goods out and settle the promise, for every line on a DC.
+ *
+ * Extracted from /create so that /update can re-apply exactly what
+ * create applied. Two copies of reservation splitting is precisely how
+ * the two drift, and a despatch that consumes a reservation on one path
+ * and not the other leaves the order owing goods it has already had.
+ *
+ * Writes `consumedFromReservation` / `consumedFromStock` back onto each
+ * item, so a later reversal can read what this despatch actually did.
+ */
+async function _applyDcItems(session, dc, userId) {
+  if (dc.type !== "elastic") return;
+    // Resolve the parent order once. Only Approved/InProgress
+    // orders participate in reservation consumption — per
+    // user-confirmed scope decision.
+    let orderDoc = null;
+    if (dc.order) {
+      orderDoc = await Order.findById(dc.order).session(session);
+      if (orderDoc && !["Approved", "InProgress"].includes(orderDoc.status)) {
+        orderDoc = null; // ignore reservations on closed orders
+      }
+    }
+
+    for (let i = 0; i < dc.items.length; i++) {
+      const item = dc.items[i];
+      if (!item.elastic) continue;
+
+      // Compute the reservation split if applicable.
+      let consumeFromReservation = 0;
+      if (orderDoc) {
+        const entry = (orderDoc.reservations || []).find(
+          (r) => r.elastic.toString() === item.elastic.toString()
+        );
+        const reservedQty = entry ? Number(entry.quantity) || 0 : 0;
+        consumeFromReservation = Math.min(
+          Number(item.quantity) || 0,
+          reservedQty
+        );
+      }
+      const shipped = Number(item.quantity) || 0;
+      const consumeFromStock = Math.max(0, shipped - consumeFromReservation);
+
+      // ONE movement for the whole despatch.
+      //
+      // The quantity that left the building is `shipped`, all of
+      // it, however much of it had been promised to the order. A
+      // reservation is a claim on the goods, not a second pile to
+      // ship from — but this used to post DC_OUT for the stock
+      // portion only and merely release the promise for the rest,
+      // so a fully reserved order shipped its entire quantity
+      // without the stock figure moving at all. The warehouse
+      // went on listing goods that were on a lorry.
+      //
+      // `reservedQuantity` settles the promise on the same row:
+      // goods out, claim discharged, both balances stated.
+      if (shipped > 0) {
+        await applyMovement(session, {
+          elasticId:        item.elastic,
+          type:             "DC_OUT",
+          quantity:         -shipped,
+          reservedQuantity: -consumeFromReservation,
+          refType:          "DeliveryChallan",
+          refId:            dc._id,
+          reason: consumeFromReservation > 0
+            ? `DC ${dc.dcNumber}; ${consumeFromReservation} against order reservation`
+            : `DC ${dc.dcNumber}`,
+          by:               userId,
+        });
+      }
+
+      // The order's own reservation entry shrinks by what this
+      // despatch fulfilled, so a part-delivered order still holds
+      // the balance it is owed.
+      if (consumeFromReservation > 0 && orderDoc) {
+        const entry = (orderDoc.reservations || []).find(
+          (r) => r.elastic.toString() === item.elastic.toString()
+        );
+        if (entry) {
+          entry.quantity = Math.max(0, (Number(entry.quantity) || 0) - consumeFromReservation);
+        }
+      }
+
+      // Persist the split on the item.
+      dc.items[i].consumedFromReservation = consumeFromReservation;
+      dc.items[i].consumedFromStock       = consumeFromStock;
+    }
+
+    if (orderDoc) {
+      // Prune zero-quantity reservation entries.
+      orderDoc.reservations = (orderDoc.reservations || []).filter(
+        (r) => Number(r.quantity || 0) > 0
+      );
+      await orderDoc.save({ session });
+    }
+}
+
 router.post(
   "/create",
   catchAsyncErrors(async (req, res, next) => {
@@ -295,88 +393,7 @@ router.post(
         dc.fingerprints.push(fp);
 
         if (dc.type === "elastic") {
-          // Resolve the parent order once. Only Approved/InProgress
-          // orders participate in reservation consumption — per
-          // user-confirmed scope decision.
-          let orderDoc = null;
-          if (dc.order) {
-            orderDoc = await Order.findById(dc.order).session(session);
-            if (orderDoc && !["Approved", "InProgress"].includes(orderDoc.status)) {
-              orderDoc = null; // ignore reservations on closed orders
-            }
-          }
-
-          for (let i = 0; i < dc.items.length; i++) {
-            const item = dc.items[i];
-            if (!item.elastic) continue;
-
-            // Compute the reservation split if applicable.
-            let consumeFromReservation = 0;
-            if (orderDoc) {
-              const entry = (orderDoc.reservations || []).find(
-                (r) => r.elastic.toString() === item.elastic.toString()
-              );
-              const reservedQty = entry ? Number(entry.quantity) || 0 : 0;
-              consumeFromReservation = Math.min(
-                Number(item.quantity) || 0,
-                reservedQty
-              );
-            }
-            const shipped = Number(item.quantity) || 0;
-            const consumeFromStock = Math.max(0, shipped - consumeFromReservation);
-
-            // ONE movement for the whole despatch.
-            //
-            // The quantity that left the building is `shipped`, all of
-            // it, however much of it had been promised to the order. A
-            // reservation is a claim on the goods, not a second pile to
-            // ship from — but this used to post DC_OUT for the stock
-            // portion only and merely release the promise for the rest,
-            // so a fully reserved order shipped its entire quantity
-            // without the stock figure moving at all. The warehouse
-            // went on listing goods that were on a lorry.
-            //
-            // `reservedQuantity` settles the promise on the same row:
-            // goods out, claim discharged, both balances stated.
-            if (shipped > 0) {
-              await applyMovement(session, {
-                elasticId:        item.elastic,
-                type:             "DC_OUT",
-                quantity:         -shipped,
-                reservedQuantity: -consumeFromReservation,
-                refType:          "DeliveryChallan",
-                refId:            dc._id,
-                reason: consumeFromReservation > 0
-                  ? `DC ${dc.dcNumber}; ${consumeFromReservation} against order reservation`
-                  : `DC ${dc.dcNumber}`,
-                by:               req.user?._id,
-              });
-            }
-
-            // The order's own reservation entry shrinks by what this
-            // despatch fulfilled, so a part-delivered order still holds
-            // the balance it is owed.
-            if (consumeFromReservation > 0 && orderDoc) {
-              const entry = (orderDoc.reservations || []).find(
-                (r) => r.elastic.toString() === item.elastic.toString()
-              );
-              if (entry) {
-                entry.quantity = Math.max(0, (Number(entry.quantity) || 0) - consumeFromReservation);
-              }
-            }
-
-            // Persist the split on the item.
-            dc.items[i].consumedFromReservation = consumeFromReservation;
-            dc.items[i].consumedFromStock       = consumeFromStock;
-          }
-
-          if (orderDoc) {
-            // Prune zero-quantity reservation entries.
-            orderDoc.reservations = (orderDoc.reservations || []).filter(
-              (r) => Number(r.quantity || 0) > 0
-            );
-            await orderDoc.save({ session });
-          }
+          await _applyDcItems(session, dc, req.user?._id);
         }
 
         // Outbox: the late-dispatch alert commits WITH the challan —
@@ -406,6 +423,171 @@ router.post(
           });
         }
       }
+      return next(err);
+    } finally {
+      session.endSession();
+    }
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  PUT /update — edit a challan, moving the stock with it
+//
+//  A DC takes goods off the shelf and settles part of the order's
+//  reservation the moment it is cut. So an edit is not a text change:
+//  changing a quantity has to move stock, and changing the elastic has
+//  to put one product back and take another out.
+//
+//  Done by REVERSING every line and re-applying the new ones, rather
+//  than computing a per-line delta. The reversal already exists — it is
+//  what cancelling a DC does — and the re-application is the same
+//  helper /create uses. A delta calculation would be a third way of
+//  doing the same arithmetic, and the first to disagree with the other
+//  two would do so silently, in stock.
+//
+//  Both halves run inside one transaction, so a failure between them
+//  cannot leave the goods returned and never re-issued.
+//
+//  ── What cannot be edited ────────────────────────────────────────
+//  A DELIVERED challan: the customer has the goods and has signed for
+//  them; the note is their receipt, not our working copy. A CANCELLED
+//  one: its stock has already gone back, and editing it would re-issue
+//  goods against a document that says nothing was sent. Both are
+//  refused by name rather than silently ignored.
+// ─────────────────────────────────────────────────────────────
+router.put(
+  "/update",
+  isAdmin("admin", "accounts"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { id, items, dispatchDate, vehicleNo, driverName, transporter,
+            lrNumber, remarks, customerName } = req.body || {};
+    if (!id) return next(new ErrorHandler("id is required", 400));
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid challan id", 400));
+    }
+    const auditReason = requireReason(req);
+    if (!auditReason) {
+      return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
+    }
+
+    const changingItems = Array.isArray(items);
+    if (changingItems) {
+      if (items.length === 0) {
+        return next(new ErrorHandler(
+          "A challan needs at least one line — cancel it instead", 400
+        ));
+      }
+      for (const [i, item] of items.entries()) {
+        const q = Number(item?.quantity);
+        if (!Number.isFinite(q) || q <= 0) {
+          return next(new ErrorHandler(
+            `items[${i}].quantity must be a positive number`, 400
+          ));
+        }
+      }
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      let resp;
+      await session.withTransaction(async () => {
+        const dc = await DeliveryChallan.findById(id).session(session);
+        if (!dc) throw new ErrorHandler("Delivery Challan not found", 404);
+
+        if (dc.status === "delivered") {
+          throw new ErrorHandler(
+            `DC ${dc.dcNumber} has been delivered — the customer holds it as their ` +
+            `receipt. Raise a fresh challan for a correction.`, 409
+          );
+        }
+        if (dc.status === "cancelled") {
+          throw new ErrorHandler(
+            `DC ${dc.dcNumber} is cancelled and its stock has already gone back. ` +
+            `Raise a new challan instead.`, 409
+          );
+        }
+
+        const before = {
+          items: (dc.items || []).map((i) => ({
+            elastic:  i.elastic ? String(i.elastic) : null,
+            name:     i.elasticName || i.description || "",
+            quantity: i.quantity,
+            rate:     i.rate,
+          })),
+          totalQuantity: dc.totalQuantity,
+          totalAmount:   dc.totalAmount,
+        };
+
+        if (changingItems) {
+          // 1. Put back everything this challan took. Same reversal the
+          //    cancel path uses, so the two cannot disagree.
+          for (const item of dc.items || []) {
+            await _reverseDcItem(
+              session, dc, item, `DC ${dc.dcNumber} edited`, req.user?._id
+            );
+          }
+
+          // 2. Replace the lines.
+          dc.items = items.map((item) => ({
+            elastic:     item.elastic || undefined,
+            elasticName: item.elasticName || "",
+            description: item.description || "",
+            unit:        item.unit || "m",
+            quantity:    Number(item.quantity) || 0,
+            rate:        Number(item.rate) || 0,
+            amount:      (Number(item.quantity) || 0) * (Number(item.rate) || 0),
+            // Recomputed by the re-application below; a stale split
+            // would make the NEXT reversal put back the wrong figure.
+            consumedFromReservation: 0,
+            consumedFromStock:       0,
+          }));
+          dc.totalQuantity = dc.items.reduce((s, i) => s + i.quantity, 0);
+          dc.totalAmount   = dc.items.reduce((s, i) => s + i.amount,   0);
+
+          // 3. Take the new lines out again, through the same helper
+          //    /create uses.
+          await _applyDcItems(session, dc, req.user?._id);
+        }
+
+        // ── The despatch detail ─────────────────────────────────────
+        if (customerName !== undefined) dc.customerName = String(customerName).trim();
+        if (dispatchDate !== undefined) {
+          const d = dispatchDate ? new Date(dispatchDate) : null;
+          if (d && !isNaN(d.getTime())) dc.dispatchDate = d;
+        }
+        if (vehicleNo   !== undefined) dc.vehicleNo   = String(vehicleNo).trim();
+        if (driverName  !== undefined) dc.driverName  = String(driverName).trim();
+        if (transporter !== undefined) dc.transporter = String(transporter).trim();
+        if (lrNumber    !== undefined) dc.lrNumber    = String(lrNumber).trim();
+        if (remarks     !== undefined) dc.remarks     = String(remarks).trim();
+
+        const fp = buildFingerprint(ACTION_CODES.DC_STATUS_UPDATED, {
+          entityId: dc._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            change:   "edited",
+            dcNumber: dc.dcNumber,
+            auditReason,
+            before,
+            after: {
+              items: (dc.items || []).map((i) => ({
+                elastic:  i.elastic ? String(i.elastic) : null,
+                name:     i.elasticName || i.description || "",
+                quantity: i.quantity,
+                rate:     i.rate,
+              })),
+              totalQuantity: dc.totalQuantity,
+              totalAmount:   dc.totalAmount,
+            },
+          },
+        });
+        dc.fingerprints.push(fp);
+        await dc.save({ session });
+
+        resp = { dc, fingerprint: fp };
+      });
+      res.json({ success: true, message: "Delivery challan updated", ...resp });
+    } catch (err) {
       return next(err);
     } finally {
       session.endSession();
