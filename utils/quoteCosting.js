@@ -164,4 +164,62 @@ function extend(ratePerMetre, metres) {
   return roundTo(positive(ratePerMetre) * positive(metres), 2);
 }
 
-module.exports = { priceOneMetre, rowCost, extend, round, roundTo, DP };
+/**
+ * Price a whole quotation — several products on one document.
+ *
+ * Each line is costed and priced on its own: its own materials, its own
+ * conversion cost, its own margin. A customer asking for three widths is
+ * asking about three different cloths, and averaging them would quote
+ * every one of them wrongly.
+ *
+ * GST is a document-level rate rather than a per-line one. It is a
+ * property of what is being sold, not of which line it sits on, and one
+ * quotation covering elastic tape carries one rate. Per-line tax would
+ * invite a document that adds up to a number the invoice cannot match.
+ *
+ * The rollup adds the LINE totals, each already rounded to paise. So the
+ * grand total equals the column a reader adds by hand, which is the only
+ * definition of "correct" a printed document has.
+ *
+ * @param {object} input
+ * @param {Array}  input.lines       [{ materials, conversionCost, marginPercent, quantityMetres, ... }]
+ * @param {number} input.gstPercent
+ */
+function priceQuote({ lines = [], gstPercent = 0 } = {}) {
+  const gst = positive(gstPercent);
+
+  const priced = (Array.isArray(lines) ? lines : []).map((line) => {
+    const one = priceOneMetre({
+      materials:      line?.materials,
+      conversionCost: line?.conversionCost,
+      marginPercent:  line?.marginPercent,
+      gstPercent:     gst,
+    });
+    const quantityMetres = positive(line?.quantityMetres);
+    return {
+      ...one,
+      quantityMetres,
+      valueBeforeTax: extend(one.rateBeforeTax, quantityMetres),
+      valueInclTax:   extend(one.rateInclTax,   quantityMetres),
+    };
+  });
+
+  const sum = (pick) => roundTo(priced.reduce((s, l) => s + pick(l), 0), 2);
+  const subTotal   = sum((l) => l.valueBeforeTax);
+  const grandTotal = sum((l) => l.valueInclTax);
+
+  return {
+    lines: priced,
+    gstPercent: round(gst),
+    subTotal,
+    // Derived from the two totals rather than summed separately, so the
+    // three figures on the document always agree with each other.
+    gstAmount: roundTo(grandTotal - subTotal, 2),
+    grandTotal,
+    totalQuantityMetres: roundTo(
+      priced.reduce((s, l) => s + l.quantityMetres, 0), 3
+    ),
+  };
+}
+
+module.exports = { priceOneMetre, priceQuote, rowCost, extend, round, roundTo, DP };

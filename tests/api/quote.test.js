@@ -369,3 +369,64 @@ describe('the figures as the quotation prints them', () => {
     expect(line.rate * line.qty).toBeCloseTo(line.amount, 2);
   });
 });
+
+describe('the letterhead — our own details', () => {
+  // This is what the demo PDF hid. The context was written against an
+  // invented branding shape (companyName, companyAddress, companyGstin,
+  // companyContact) and NONE of those keys exist on the real object,
+  // which is { company, gstin, phone, email, addressLines[] }. Every
+  // quotation printed with a blank letterhead. Feeding the real mapper
+  // here is the whole point — a hand-made object would pass either way.
+  const { pdfBranding } = require('../../services/documentSettings');
+  const { quoteToContext } = require('../../services/pdf/quoteContext');
+
+  const settings = {
+    companyName: 'Balu Elastics',
+    tagline: 'Elastic Tape Manufacturing',
+    gstin: '33ABCDE1234F1Z5',
+    phone: '+91 90000 00000',
+    email: 'sales@baluelastics.in',
+    addressLines: ['12 Mill Road', 'Erode, Tamil Nadu 638001'],
+    footerNote: 'Computer generated.',
+  };
+
+  const fieldsFor = async () => {
+    const q = (await create()).body.quote;
+    return quoteToContext(q, pdfBranding(settings)).fields;
+  };
+
+  it('prints the company name from Document Settings', async () => {
+    expect((await fieldsFor()).companyName).toBe('Balu Elastics');
+  });
+
+  it('prints the address, joined from its lines', async () => {
+    expect((await fieldsFor()).companyAddress)
+      .toBe('12 Mill Road, Erode, Tamil Nadu 638001');
+  });
+
+  it('prints our GSTIN, labelled', async () => {
+    expect((await fieldsFor()).companyGstin).toBe('GSTIN: 33ABCDE1234F1Z5');
+  });
+
+  it('prints phone and email as the contact line', async () => {
+    expect((await fieldsFor()).companyContact)
+      .toContain('+91 90000 00000');
+    expect((await fieldsFor()).companyContact)
+      .toContain('sales@baluelastics.in');
+  });
+
+  it('leaves nothing blank that Document Settings has filled in', async () => {
+    const f = await fieldsFor();
+    for (const key of ['companyName', 'tagline', 'companyAddress',
+                       'companyGstin', 'companyContact', 'footerNote']) {
+      expect(f[key]).not.toBe('');
+    }
+  });
+
+  it('still prints a usable header when settings are empty', async () => {
+    const q = (await create()).body.quote;
+    const f = quoteToContext(q, pdfBranding(null)).fields;
+    expect(f.companyName).toBeTruthy();     // falls back rather than blank
+    expect(f.docTitle).toBe('QUOTATION');
+  });
+});

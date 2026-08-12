@@ -15,6 +15,8 @@ const router  = express.Router();
 const Order           = require("../models/Order");
 const JobOrder        = require("../models/JobOrder");
 const PurchaseOrder   = require("../models/PurchaseOrder");
+const Quote           = require("../models/Quote");
+const StockCount      = require("../models/StockCount");
 const DeliveryChallan = require("../models/DeliveryChallan");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -49,14 +51,21 @@ router.get(
   catchAsyncErrors(async (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
 
-    const [orders, jobs, pos, dcs] = await Promise.all([
+    // Quotations and stock counts were stamping fingerprints that nothing
+    // ever read: both write a full audit trail onto the document, and
+    // neither collection was listed here, so the record existed and was
+    // invisible. An audit trail that omits a whole document type is worse
+    // than none — it reads as complete.
+    const [orders, jobs, pos, dcs, quotes, counts] = await Promise.all([
       recentFrom(Order,           "Order",           "orderNo",    limit),
       recentFrom(JobOrder,        "JobOrder",        "jobOrderNo", limit),
       recentFrom(PurchaseOrder,   "PurchaseOrder",   "poNo",       limit),
       recentFrom(DeliveryChallan, "DeliveryChallan", "dcNumber",   limit),
+      recentFrom(Quote,           "Quote",           "quoteNo",    limit),
+      recentFrom(StockCount,      "StockCount",      "countNo",    limit),
     ]);
 
-    const entries = [...orders, ...jobs, ...pos, ...dcs]
+    const entries = [...orders, ...jobs, ...pos, ...dcs, ...quotes, ...counts]
       .filter((e) => e.at)
       .sort((a, b) => new Date(b.at) - new Date(a.at))
       .slice(0, limit);

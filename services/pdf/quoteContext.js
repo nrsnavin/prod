@@ -52,13 +52,21 @@ function quoteToContext(quote, branding = {}) {
   const gstPercent = Number(quote.gstPercent) || 0;
 
   return {
-    logo: branding.logo || null,
+    logo: branding.logo || "",
     fields: {
-      companyName:    branding.companyName    || "",
-      tagline:        branding.tagline        || "",
-      companyAddress: branding.companyAddress || "",
-      companyGstin:   branding.companyGstin ? `GSTIN ${branding.companyGstin}` : "",
-      companyContact: branding.companyContact || "",
+      // Straight off the Document Settings shape — `company`, `gstin`,
+      // `phone`/`email`, `addressLines[]`. Reading `companyName` and
+      // friends instead put an EMPTY letterhead on every quotation: the
+      // keys simply do not exist on the branding object, so the company
+      // name, address, GSTIN and contact all rendered blank. Same mapping
+      // poContext uses, so the two documents cannot disagree about who
+      // sent them.
+      companyName:    branding.company || "Balu Elastics",
+      tagline:        branding.tagline || "",
+      companyAddress: (branding.addressLines || []).join(", "),
+      companyGstin:   branding.gstin ? `GSTIN: ${branding.gstin}` : "",
+      companyContact: [branding.phone, branding.email, branding.website]
+        .filter(Boolean).join("  ·  "),
 
       docTitle:    "QUOTATION",
       docNo:       quote.quoteNo ? `Quote No: ${quote.quoteNo}` : "",
@@ -87,7 +95,7 @@ function quoteToContext(quote, branding = {}) {
 
       remarks: quote.remarks || "",
       termsText:
-        branding.quoteTerms ||
+        branding.termsText ||
         "1. Rates are per metre, ex-works, and exclude freight unless stated.\n" +
         "2. This quotation is valid until the date shown above.\n" +
         "3. Rates are subject to yarn price movement after that date.\n" +

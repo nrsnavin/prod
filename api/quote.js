@@ -142,8 +142,18 @@ const costingFields = (c) => ({
   valueInclTax:     c.valueInclTax,
 });
 
+// buildFingerprint takes { entityId, actor, meta } — the actor goes in
+// under its own key. Spreading actorFromRequest() across the options
+// instead put id/name/role at the top level where nothing reads them,
+// so `actor` arrived undefined and every quotation recorded "System" as
+// the person who raised it. An audit trail that cannot name anybody is
+// a log, not an audit.
 function stamp(doc, code, req, meta) {
-  const fp = buildFingerprint(code, { ...actorFromRequest(req), meta });
+  const fp = buildFingerprint(code, {
+    entityId: doc._id,
+    actor:    actorFromRequest(req),
+    meta,
+  });
   doc.fingerprints = [...(doc.fingerprints || []), fp];
   doc.markModified('fingerprints');
 }
