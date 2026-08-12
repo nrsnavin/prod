@@ -76,22 +76,38 @@ function buildDcNumber(type, financialYear, sequence) {
 async function _reverseDcItem(session, dc, item, reasonContext, userId) {
   if (!item.elastic) return { skipped: "no elastic on item" };
 
-  const originals = await StockMovement.find({
+  // BOTH movement types this challan can write, netted — not the
+  // DC_OUT rows alone.
+  //
+  // A challan can be edited more than once, and each edit reverses and
+  // re-applies, so after two edits the ledger holds three rows for one
+  // line: DC_OUT, DC_CANCEL_RETURN, DC_OUT. Summing only the DC_OUTs
+  // refunds every despatch the line has ever made, including the ones
+  // already given back — a second edit invented stock that had never
+  // existed, and a cancel after two edits returned more than the
+  // opening balance.
+  //
+  // The net of every row IS what this challan currently has out, which
+  // is exactly what a reversal owes. It is also self-correcting: run it
+  // against an already-reversed line and the net is zero, so there is
+  // nothing to give back and nothing is written.
+  const rows = await StockMovement.find({
     refType: "DeliveryChallan",
     refId:   dc._id,
     elastic: item.elastic,
-    type:    "DC_OUT",
+    type:    { $in: ["DC_OUT", "DC_CANCEL_RETURN"] },
   }).session(session);
 
-  if (originals.length === 0) return { skipped: "no source DC_OUT" };
+  const outs = rows.filter((m) => m.type === "DC_OUT");
+  if (outs.length === 0) return { skipped: "no source DC_OUT" };
 
-  const refund = -originals.reduce((s, m) => s + Number(m.applied || 0), 0);
+  const refund = -rows.reduce((s, m) => s + Number(m.applied || 0), 0);
 
   // A despatch made before DC_OUT carried a reserved figure recorded
   // the split on the item instead. Fall back to it rather than reading
   // an absent field as "no reservation was consumed" — that would
   // strand the promise on every DC cut before this change.
-  const ledgerReserved = originals.reduce(
+  const ledgerReserved = rows.reduce(
     (s, m) => s + Number(m.reservedApplied || 0), 0
   );
   const reReserve = ledgerReserved !== 0
@@ -118,7 +134,7 @@ async function _reverseDcItem(session, dc, item, reasonContext, userId) {
     refId:            dc._id,
     reason: strandedReservation > 0
       ? `${reasonContext}; goods returned, ${strandedReservation} reservation not restored (order closed or gone)`
-      : `${reasonContext}; reversal of ${originals.map((m) => m._id).join(",")}`,
+      : `${reasonContext}; reversal of ${outs.map((m) => m._id).join(",")}`,
     by:               userId,
   });
 
