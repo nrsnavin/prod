@@ -371,6 +371,193 @@ function poStarter() {
   ];
 }
 
+// ══════════════════════════════════════════════════════════════
+//  QUOTATION
+//
+//  A quote is the one document here that goes out BEFORE any work
+//  exists, so it carries what a buyer needs to decide: what the
+//  product is, what it costs per metre, what it comes to at the
+//  quantity discussed, and how long the price holds.
+//
+//  The costing behind the rate — grams of each yarn, rupees per kilo —
+//  is deliberately NOT on this layout. It is the recipe, and it goes to
+//  a customer only if somebody chooses to send it. The internal working
+//  copy is a separate print.
+// ══════════════════════════════════════════════════════════════
+const QUOTE_FIELDS = [
+  { key: "companyName", label: "Company name" },
+  { key: "tagline", label: "Tagline" },
+  { key: "companyAddress", label: "Company address" },
+  { key: "companyGstin", label: "Company GSTIN" },
+  { key: "companyContact", label: "Company phone/email" },
+  { key: "docTitle", label: "Document title" },
+  { key: "docNo", label: "Quote no. (prefixed)" },
+  { key: "quoteNumber", label: "Quote no. (bare)" },
+  { key: "docDate", label: "Quote date" },
+  { key: "validTill", label: "Valid till" },
+  { key: "customerRef", label: "Customer reference / enquiry" },
+  { key: "partyName", label: "Customer name" },
+  { key: "partyAddress", label: "Customer address" },
+  { key: "partyGstin", label: "Customer GSTIN" },
+  { key: "productName", label: "Product" },
+  { key: "productSpec", label: "Product specification" },
+  { key: "rateExclTax", label: "Rate per metre (ex-GST)" },
+  { key: "gstLabel", label: "GST rate label" },
+  { key: "gstAmount", label: "GST per metre" },
+  { key: "rateInclTax", label: "Rate per metre (inc-GST)" },
+  { key: "quantity", label: "Indicative quantity" },
+  { key: "valueBeforeTax", label: "Value (ex-GST)" },
+  { key: "valueInclTax", label: "Value (inc-GST)" },
+  { key: "remarks", label: "Remarks" },
+  { key: "footerNote", label: "Footer note" },
+  { key: "termsText", label: "Terms & conditions" },
+];
+
+const QUOTE_COLUMNS = [
+  { field: "sno", header: "S.No", width: 0.5, align: "left", format: "text" },
+  { field: "description", header: "Description of Goods", width: 3.4, align: "left", format: "text" },
+  { field: "unit", header: "UOM", width: 0.6, align: "center", format: "text" },
+  { field: "qty", header: "Quantity", width: 0.9, align: "right", format: "number" },
+  { field: "rate", header: "Rate", width: 1, align: "right", format: "currency" },
+  { field: "amount", header: "Amount", width: 1.15, align: "right", format: "currency" },
+];
+
+function quoteSample() {
+  return {
+    fields: {
+      companyName: "Balu Elastics",
+      tagline: "Elastic Manufacturing",
+      companyAddress: "12 Mill Road, Erode, Tamil Nadu 638001",
+      companyGstin: "GSTIN 33ABCDE1234F1Z5",
+      companyContact: "+91 90000 00000 · sales@baluelastics.in",
+      docTitle: "QUOTATION",
+      docNo: "Quote No: QT-25/26-0007",
+      quoteNumber: "QT-25/26-0007",
+      docDate: "12/08/2026",
+      validTill: "11/09/2026",
+      customerRef: "Enq. 4412",
+      partyName: "Ravi Textiles",
+      partyAddress: "44 Cotton Street, Tiruppur, Tamil Nadu 641604",
+      partyGstin: "GSTIN 33ZZZZZ9999Z1Z9",
+      productName: "20mm Woven Elastic",
+      productSpec: "Width 20mm · Elongation 120% · Recovery 90%",
+      rateExclTax: "4.91",
+      gstLabel: "GST @ 5%",
+      gstAmount: "0.25",
+      rateInclTax: "5.16",
+      quantity: "5,000 m",
+      valueBeforeTax: "24,552.00",
+      valueInclTax: "25,779.60",
+      remarks: "Rate holds for the quantity quoted.",
+      termsText:
+        "1. Prices are per metre, ex-works.\n2. This quotation is valid until the date shown.\n3. Rates are subject to yarn price movement thereafter.",
+      footerNote: "This is a computer-generated quotation.",
+    },
+    rows: [
+      { sno: 1, description: "20mm Woven Elastic", unit: "m", qty: 5000, rate: 4.91, amount: 24552 },
+    ],
+  };
+}
+
+function quoteStarter() {
+  const L = 34;
+  const R = 561;
+  const W = R - L;
+  const MID = L + W / 2;
+
+  const label = (id, text, x, y, w) => ({
+    id, type: "text", text, x, y, w, h: 10, fontSize: 6.5, bold: true, color: MUTED,
+  });
+  const value = (id, field, x, y, w, extra = {}) => ({
+    id, type: "field", field, x, y, w, h: 12, fontSize: 9, color: INK, ...extra,
+  });
+
+  return [
+    // ── Letterhead ────────────────────────────────────────────
+    { id: "logo", type: "image", x: L + 4, y: 40, w: 74, h: 36 },
+    { id: "company", type: "field", field: "companyName", x: L + 86, y: 40, w: 300, h: 20, fontSize: 15, bold: true, color: INK },
+    { id: "tagline", type: "field", field: "tagline", x: L + 86, y: 58, w: 300, h: 11, fontSize: 7.5, color: MUTED },
+    { id: "addr", type: "field", field: "companyAddress", x: L + 86, y: 70, w: 300, h: 11, fontSize: 7.5, color: MUTED },
+    { id: "contact", type: "field", field: "companyContact", x: L + 86, y: 82, w: 300, h: 11, fontSize: 7.5, color: MUTED },
+    { id: "cgstin", type: "field", field: "companyGstin", x: L + 86, y: 94, w: 300, h: 11, fontSize: 7.5, color: MUTED },
+
+    { id: "titlebox", type: "box", x: 396, y: 38, w: R - 396, h: 26, lineWidth: 0.8, color: INK },
+    { id: "title", type: "field", field: "docTitle", x: 400, y: 45, w: R - 404, h: 16, fontSize: 12, bold: true, align: "center", color: INK },
+
+    // ── Identity grid. Valid-till sits beside the date because on a
+    //    quote the two are read together — a price without its expiry
+    //    is the commonest thing to be held to unfairly.
+    { id: "idbox", type: "box", x: 396, y: 68, w: R - 396, h: 46, lineWidth: 0.6, color: RULE },
+    label("l_no", "QUOTE NUMBER", 401, 73, 80),
+    value("v_no", "quoteNumber", 401, 83, 80, { bold: true, fontSize: 8.5 }),
+    label("l_dt", "DATE", 486, 73, 70),
+    value("v_dt", "docDate", 486, 83, 70),
+    label("l_vt", "VALID UNTIL", 401, 95, 80),
+    value("v_vt", "validTill", 401, 104, 80, { bold: true, fontSize: 8.5 }),
+    label("l_ref", "YOUR REFERENCE", 486, 95, 75),
+    value("v_ref", "customerRef", 486, 104, 75, { fontSize: 8 }),
+
+    { id: "hrule", type: "line", x: L, y: 124, w: W, h: 0, lineWidth: 1.2, color: INK },
+
+    // ── Customer | Product panes ──────────────────────────────
+    { id: "pane", type: "box", x: L, y: 134, w: W, h: 92, lineWidth: 0.6, color: RULE },
+    { id: "panesplit", type: "line", x: MID, y: 134, w: 0, h: 92, lineWidth: 0.6, color: RULE },
+
+    label("l_cust", "QUOTATION FOR", L + 6, 140, 240),
+    value("v_cust", "partyName", L + 6, 152, 240, { bold: true, fontSize: 10 }),
+    value("v_custaddr", "partyAddress", L + 6, 167, 240, { fontSize: 8, color: MUTED }),
+    value("v_custgst", "partyGstin", L + 6, 205, 240, { fontSize: 8, color: MUTED }),
+
+    label("l_prod", "PRODUCT", MID + 6, 140, 240),
+    value("v_prod", "productName", MID + 6, 152, 240, { bold: true, fontSize: 10 }),
+    value("v_prodspec", "productSpec", MID + 6, 167, 240, { fontSize: 8, color: MUTED }),
+
+    // ── Items ─────────────────────────────────────────────────
+    {
+      id: "table", type: "table", x: L, y: 238, w: W, h: 330, fontSize: 8.5,
+      headerBg: "#E4E4E4", headerColor: INK, bodyColor: INK,
+      gridColor: RULE, grid: true, zebra: false,
+      columns: QUOTE_COLUMNS,
+    },
+
+    // ── Price build-up ────────────────────────────────────────
+    // Rate, tax and inclusive rate stacked, because a buyer reads down
+    // this block to the one number they will be invoiced at.
+    { id: "totbox", type: "box", x: 318, y: 580, w: R - 318, h: 74, lineWidth: 0.6, color: RULE },
+    { id: "r_l", type: "text", text: "Rate per metre", x: 324, y: 587, w: 130, h: 12, fontSize: 8, color: MUTED },
+    { id: "r_v", type: "field", field: "rateExclTax", x: 452, y: 586, w: R - 458, h: 12, fontSize: 9, align: "right", color: INK },
+    { id: "g_l", type: "field", field: "gstLabel", x: 324, y: 601, w: 130, h: 12, fontSize: 8, color: MUTED },
+    { id: "g_v", type: "field", field: "gstAmount", x: 452, y: 600, w: R - 458, h: 12, fontSize: 9, align: "right", color: INK },
+    { id: "ri_rule", type: "line", x: 318, y: 615, w: R - 318, h: 0, lineWidth: 0.6, color: RULE },
+    { id: "ri_l", type: "text", text: "RATE PER METRE (INC. GST)", x: 324, y: 620, w: 145, h: 12, fontSize: 7.5, bold: true, color: MUTED },
+    { id: "ri_v", type: "field", field: "rateInclTax", x: 452, y: 618, w: R - 458, h: 16, fontSize: 12, bold: true, align: "right", color: INK },
+    { id: "tv_rule", type: "line", x: 318, y: 637, w: R - 318, h: 0, lineWidth: 0.6, color: RULE },
+    { id: "tv_l", type: "text", text: "VALUE FOR QUANTITY QUOTED", x: 324, y: 641, w: 150, h: 12, fontSize: 7.5, bold: true, color: MUTED },
+    { id: "tv_v", type: "field", field: "valueInclTax", x: 452, y: 640, w: R - 458, h: 12, fontSize: 9.5, bold: true, align: "right", color: INK },
+
+    { id: "qty_l", type: "text", text: "Quantity quoted:", x: L, y: 587, w: 90, h: 12, fontSize: 8, color: MUTED },
+    { id: "qty_v", type: "field", field: "quantity", x: L + 92, y: 587, w: 110, h: 12, fontSize: 9, bold: true, color: INK },
+    { id: "rem_l", type: "text", text: "REMARKS", x: L, y: 610, w: 200, h: 10, fontSize: 6.5, bold: true, color: MUTED },
+    { id: "rem", type: "field", field: "remarks", x: L, y: 621, w: 270, h: 32, fontSize: 7.5, color: MUTED },
+
+    // ── Terms ─────────────────────────────────────────────────
+    { id: "l_terms", type: "text", text: "TERMS & CONDITIONS", x: L, y: 668, w: 200, h: 10, fontSize: 6.5, bold: true, color: MUTED },
+    { id: "terms", type: "field", field: "termsText", x: L, y: 679, w: 400, h: 60, fontSize: 7.5, color: MUTED },
+
+    // ── Signature strip ───────────────────────────────────────
+    { id: "sigbox", type: "box", x: L, y: 758, w: W, h: 52, lineWidth: 0.6, color: RULE },
+    { id: "sigsplit", type: "line", x: MID, y: 758, w: 0, h: 52, lineWidth: 0.6, color: RULE },
+    { id: "sig1", type: "text", text: "For " , x: L + 6, y: 764, w: 150, h: 10, fontSize: 7, color: MUTED },
+    { id: "sig1n", type: "field", field: "companyName", x: L + 20, y: 764, w: 200, h: 10, fontSize: 7, bold: true, color: MUTED },
+    { id: "sig1r", type: "text", text: "Authorised signatory", x: L + 6, y: 796, w: 180, h: 10, fontSize: 7, color: MUTED },
+    { id: "sig2", type: "text", text: "Customer acceptance (sign & seal)", x: MID + 6, y: 796, w: 200, h: 10, fontSize: 7, color: MUTED },
+
+    // ── Footer ────────────────────────────────────────────────
+    { id: "footer", type: "field", field: "footerNote", x: L, y: 818, w: 330, h: 10, fontSize: 7, color: MUTED },
+    { id: "pageno", type: "pageNumber", text: "Page {{n}} of {{total}}", x: 380, y: 818, w: R - 380, h: 10, fontSize: 7, align: "right", color: MUTED },
+  ];
+}
+
 const DOC_TYPES = {
   "delivery-challan": {
     label: "Delivery Challan",
@@ -385,6 +572,13 @@ const DOC_TYPES = {
     columns: PO_COLUMNS,
     sample: poSample,
     starter: poStarter,
+  },
+  "quotation": {
+    label: "Quotation",
+    fields: QUOTE_FIELDS,
+    columns: QUOTE_COLUMNS,
+    sample: quoteSample,
+    starter: quoteStarter,
   },
 };
 

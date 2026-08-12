@@ -44,6 +44,7 @@ const FEATURES = [
   { key: "/customers",           label: "Customers",           section: "Masters",        depts: ["admin", "finance"] },
   { key: "/suppliers",           label: "Suppliers",           section: "Masters",        depts: ["admin", "finance"] },
   { key: "/purchase-orders",     label: "Purchase Orders",     section: "Masters",        depts: ["admin", "finance"] },
+  { key: "/quotes",              label: "Quotations",          section: "Masters",        depts: ["admin", "finance"] },
   { key: "/materials",           label: "Raw Materials",       section: "Masters",        depts: ["admin", "finance"] },
   { key: "/elastics",            label: "Elastic Products",    section: "Masters",        depts: ["admin", "finance"] },
   { key: "/elastic-groups",      label: "Elastic Groups",      section: "Masters",        depts: ["admin"] },

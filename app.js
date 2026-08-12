@@ -88,6 +88,7 @@ const shift    = require("./api/shift.js");
 const employee = require("./api/employee.js");
 const customer = require("./api/customer.js");
 const supplier = require("./api/supplier.js");
+const quote = require("./api/quote.js");
 const material = require("./api/rawMaterial.js");
 const yarnLot  = require("./api/yarnLot.js");
 const stockCount = require("./api/stockCount.js");
@@ -447,6 +448,11 @@ app.use("/api/v2/supplier",    gate('accounts'),
     '/get-suppliers': ['/materials'],
   }),
   supplier);
+// Quotations: costing and a price offered to a customer, so the same
+// accounts gate the purchase orders sit behind.
+app.use("/api/v2/quote",       gate('accounts'),
+  requireFeature('/quotes'),
+  quote);
 app.use("/api/v2/order",       gate('accounts'),
   requireFeature('/orders'),
   requireFeatureReadPaths(['/orders'], {
