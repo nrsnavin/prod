@@ -17,6 +17,7 @@
 // Required kg = Σ (weight_grams × metres) / 1000.
 
 const Elastic       = require("../models/Elastic.js");
+const mongoose      = require("mongoose");
 const RawMaterial   = require("../models/RawMaterial.js");
 const PurchaseOrder = require("../models/PurchaseOrder.js");
 // Required for its side effect: populating `supplier` below needs the
@@ -40,11 +41,49 @@ require("../models/Supplier.js");
 async function onOrderByMaterial(materialIds = []) {
   if (!materialIds.length) return new Map();
 
-  const pos = await PurchaseOrder.find({
-    // A cancelled PO owes nothing, and a completed one has arrived.
-    status: { $nin: ["Cancelled", "Completed"] },
-    "items.rawMaterial": { $in: materialIds },
-  }).select("items").lean();
+  // Matched as BOTH an ObjectId and a string.
+  //
+  // A purchase order line whose `rawMaterial` was stored as a string —
+  // which some rows are, from imports and raw writes that never went
+  // through the schema's casting — is invisible to an $in of ObjectIds.
+  // Nothing errors; the material simply never appears in the result and
+  // the On order column reads blank beside a real shortfall.
+  //
+  // That is the worst possible way for this to fail: a shortfall with
+  // no "on order" next to it looks unbought, and the response is to
+  // raise the purchase order again. The yarn arrives twice and the
+  // money goes out twice — the exact outcome this function exists to
+  // prevent. So both forms are queried, and the result is keyed on the
+  // string either way.
+  const wanted = [];
+  for (const id of materialIds) {
+    if (!id) continue;
+    const asString = String(id);
+    wanted.push(asString);
+    if (mongoose.Types.ObjectId.isValid(asString)) {
+      wanted.push(new mongoose.Types.ObjectId(asString));
+    }
+  }
+  if (!wanted.length) return new Map();
+
+  // Through the raw collection, not the model.
+  //
+  // Mongoose casts a query against a typed path, so the mixed array
+  // above would be turned straight back into ObjectIds and the string
+  // rows lost again. The driver does not cast, which is the entire
+  // point here.
+  const pos = await PurchaseOrder.collection
+    .find(
+      {
+        // A cancelled PO owes nothing, and a completed one has arrived.
+        // $nin also matches a document with no status at all, which is
+        // what the oldest rows look like.
+        status: { $nin: ["Cancelled", "Completed"] },
+        "items.rawMaterial": { $in: wanted },
+      },
+      { projection: { items: 1 } }
+    )
+    .toArray();
 
   const due = new Map();
   for (const po of pos) {
