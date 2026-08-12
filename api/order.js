@@ -28,6 +28,7 @@ const { notify }           = require("../utils/notify.js");
 const Notification         = require("../models/Notification.js");
 const { approveOrderTxn }  = require("../services/orderService.js");
 const WarpingBatch         = require("../models/WarpingBatch.js");
+const DeliveryChallan      = require("../models/DeliveryChallan.js");
 const { plannedLotsByJob, distinctLots, emptyTrail } = require("../services/yarnLotTrail.js");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient.js");
 // ETA forecast engine lives in its own service (Phase 4 god-file split).
@@ -1696,6 +1697,122 @@ router.get(
         byJob,
         lots: distinctLots(allRows),
         sections,
+      },
+    });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  GET /:id/delivery-challans — what has actually left the building
+//
+//  The order detail page could say what was ordered, planned, produced
+//  and packed, and then stopped. Whether any of it had been DESPATCHED
+//  — and against which delivery note — could only be answered by
+//  leaving the order, opening the DC list and searching it by order
+//  number. That is the question customers ring up about.
+//
+//  Matched on the reference AND the number snapshot. A DC carries both
+//  (`order` and `orderNo`), and older rows can have one without the
+//  other; matching on the reference alone would quietly drop them, and
+//  a despatch list that is silently incomplete is worse than none. The
+//  order number is unique, so the number match cannot pull in somebody
+//  else's note.
+//
+//  Cancelled notes are listed but excluded from the despatched totals.
+//  They are part of the history of the order — somebody raised them,
+//  and "why is there a gap in the DC numbers" has to have an answer —
+//  but nothing left the building on them.
+// ══════════════════════════════════════════════════════════════
+router.get(
+  '/:id/delivery-challans',
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler('Invalid order id', 400));
+    }
+    const order = await Order.findById(req.params.id)
+      .select('orderNo elasticOrdered')
+      .populate('elasticOrdered.elastic', 'name')
+      .lean();
+    if (!order) return next(new ErrorHandler('Order not found', 404));
+
+    const match = [{ order: order._id }];
+    if (order.orderNo != null) match.push({ orderNo: order.orderNo });
+
+    const dcs = await DeliveryChallan.find({ $or: match })
+      .select('dcNumber date dispatchDate status type items totalQuantity ' +
+              'totalAmount vehicleNo transporter lrNumber customerName createdAt')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const LIVE = (dc) => dc.status !== 'cancelled';
+
+    // What has gone out, per elastic, so the panel can sit the despatched
+    // quantity next to what was ordered rather than leaving the reader to
+    // add up the notes themselves.
+    const dispatchedByElastic = new Map();
+    for (const dc of dcs) {
+      if (!LIVE(dc)) continue;
+      for (const item of dc.items || []) {
+        if (!item.elastic) continue;
+        const key = String(item.elastic);
+        const row = dispatchedByElastic.get(key) || { quantity: 0, name: item.elasticName || '' };
+        row.quantity += Number(item.quantity) || 0;
+        if (!row.name && item.elasticName) row.name = item.elasticName;
+        dispatchedByElastic.set(key, row);
+      }
+    }
+
+    const lines = (order.elasticOrdered || []).map((l) => {
+      const key = String(l.elastic?._id || l.elastic);
+      const sent = dispatchedByElastic.get(key);
+      const ordered = Number(l.quantity) || 0;
+      const dispatched = sent ? sent.quantity : 0;
+      return {
+        elasticId:   key,
+        elasticName: l.elastic?.name || sent?.name || '',
+        ordered,
+        dispatched,
+        // Negative would mean more went out than was ordered, which
+        // happens and is worth seeing rather than clamping away.
+        pending: Math.round((ordered - dispatched) * 1000) / 1000,
+      };
+    });
+
+    const live = dcs.filter(LIVE);
+
+    res.json({
+      success: true,
+      data: {
+        orderId: String(order._id),
+        orderNo: order.orderNo ?? null,
+        dcs: dcs.map((dc) => ({
+          id:            String(dc._id),
+          dcNumber:      dc.dcNumber,
+          date:          dc.date || dc.createdAt || null,
+          dispatchDate:  dc.dispatchDate || null,
+          status:        dc.status,
+          type:          dc.type,
+          customerName:  dc.customerName || '',
+          totalQuantity: Number(dc.totalQuantity) || 0,
+          totalAmount:   Number(dc.totalAmount) || 0,
+          vehicleNo:     dc.vehicleNo || '',
+          transporter:   dc.transporter || '',
+          lrNumber:      dc.lrNumber || '',
+          items: (dc.items || []).map((i) => ({
+            elasticId:   i.elastic ? String(i.elastic) : null,
+            elasticName: i.elasticName || i.description || '',
+            quantity:    Number(i.quantity) || 0,
+            unit:        i.unit || 'm',
+          })),
+        })),
+        lines,
+        totals: {
+          count:      dcs.length,
+          cancelled:  dcs.length - live.length,
+          quantity:   Math.round(live.reduce((s, d) => s + (Number(d.totalQuantity) || 0), 0) * 1000) / 1000,
+          ordered:    lines.reduce((s, l) => s + l.ordered, 0),
+          dispatched: Math.round(lines.reduce((s, l) => s + l.dispatched, 0) * 1000) / 1000,
+        },
       },
     });
   })
