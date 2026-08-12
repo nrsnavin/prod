@@ -77,19 +77,26 @@ describe('the chain from materials to the price', () => {
     expect(q.totalCost).toBe(round(2.842 + 1.25)); // 4.092
   });
 
-  it('marks the cost UP by the margin', () => {
-    // 4.092 × 1.20 = 4.9104 — not 4.092 / 0.8 = 5.115
-    expect(q.rateBeforeTax).toBe(4.9104);
-    expect(q.rateBeforeTax).not.toBe(round(4.092 / 0.8));
+  it('marks the cost UP by the margin, and quotes it in paise', () => {
+    // 4.092 × 1.20 = 4.9104, quoted as 4.91 — not 4.092 / 0.8 = 5.115.
+    expect(q.rateBeforeTax).toBe(4.91);
   });
 
   it('states the margin in rupees as well as percent', () => {
-    expect(q.marginAmount).toBe(round(4.9104 - 4.092));
+    expect(q.marginAmount).toBe(0.82); // 4.91 − 4.092, to paise
   });
 
-  it('takes GST on the marked-up rate, not on the cost', () => {
-    expect(q.gstAmount).toBe(round(4.9104 * 0.05));
-    expect(q.rateInclTax).toBe(round(4.9104 * 1.05));
+  it('takes GST on the QUOTED rate, not on the unrounded one', () => {
+    expect(q.gstAmount).toBe(0.25);   // 4.91 × 5%
+    expect(q.rateInclTax).toBe(5.16); // and they add up exactly
+    expect(q.rateInclTax).toBe(q.rateBeforeTax + q.gstAmount);
+  });
+
+  it('quotes a rate that a reader can multiply', () => {
+    // The whole point of rounding here: every printed figure is exact at
+    // the precision it is printed to.
+    expect(extend(q.rateBeforeTax, 25_000)).toBe(122750);
+    expect(extend(q.rateInclTax, 25_000)).toBe(129000);
   });
 
   it('keeps the line costs adding up to the material total shown', () => {
@@ -182,7 +189,7 @@ describe('rows the user added beyond the four', () => {
 
 describe('extending a rate over a quantity', () => {
   it('multiplies out to two places, because it is a money total', () => {
-    expect(extend(4.9104, 5000)).toBe(24552);
+    expect(extend(4.91, 5000)).toBe(24550);
   });
 
   it('rounds a fractional total to paise', () => {
@@ -196,9 +203,9 @@ describe('extending a rate over a quantity', () => {
 });
 
 describe('precision', () => {
-  it('carries four places, so a small rate is not flattened', () => {
+  it('carries four places through the COSTING, so a small material is not flattened', () => {
     // At two places 0.4536 would become 0.45 — 1.3% out, which over a
-    // 50,000 m order is real money.
+    // 50,000 m order is real money. Only the final quoted rate rounds.
     const q = priceOneMetre({
       materials: [{ label: 'X', weightGrams: 1.26, ratePerKg: 360 }],
       conversionCost: 0, marginPercent: 0, gstPercent: 0,

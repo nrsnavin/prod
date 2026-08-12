@@ -418,8 +418,10 @@ const QUOTE_COLUMNS = [
   { field: "description", header: "Description of Goods", width: 3.4, align: "left", format: "text" },
   { field: "unit", header: "UOM", width: 0.6, align: "center", format: "text" },
   { field: "qty", header: "Quantity", width: 0.9, align: "right", format: "number" },
-  { field: "rate", header: "Rate", width: 1, align: "right", format: "currency" },
-  { field: "amount", header: "Amount", width: 1.15, align: "right", format: "currency" },
+  // Paise, not whole rupees — see inr2 in templateRenderer. A rate per
+  // metre rounded to the rupee makes the line disagree with its amount.
+  { field: "rate", header: "Rate", width: 1, align: "right", format: "currency2" },
+  { field: "amount", header: "Amount", width: 1.15, align: "right", format: "currency2" },
 ];
 
 function quoteSample() {

@@ -81,30 +81,26 @@ describe('the price the server puts on a quote', () => {
 
     expect(q.materialCost).toBe(2.842);       // Σ grams/1000 × ₹/kg
     expect(q.totalCost).toBe(4.092);          // + conversion 1.25
-    expect(q.rateBeforeTax).toBe(4.9104);     // × 1.20, markup on cost
-    expect(q.gstAmount).toBe(0.2455);
-    expect(q.rateInclTax).toBe(5.1559);
+    expect(q.rateBeforeTax).toBe(4.91);       // × 1.20, quoted in paise
+    expect(q.gstAmount).toBe(0.25);
+    expect(q.rateInclTax).toBe(5.16);
     expect(q.totalWeightGrams).toBe(8.5);
   });
 
   it('extends the rate over the quantity quoted', async () => {
     const q = (await create()).body.quote;
-    expect(q.valueBeforeTax).toBe(24552);     // 4.9104 × 5000
-    expect(q.valueInclTax).toBe(25779.5);     // 5.1559 × 5000
+    expect(q.valueBeforeTax).toBe(24550);     // 4.91 × 5000
+    expect(q.valueInclTax).toBe(25800);       // 5.16 × 5000
   });
 
-  it('extends the STORED rate, so the document reconciles', async () => {
-    // The exact chain gives 5.15592/m and 25,779.60 for 5,000 m. The
-    // stored rate is 5.1559, and 5.1559 x 5000 is 25,779.50.
-    //
-    // The ten paise goes to reconciliation rather than to arithmetic
-    // purity: a customer who multiplies the rate on the quote by the
-    // quantity on the quote must arrive at the value on the quote. A
-    // document that does not add up in the reader's hand gets queried,
-    // whichever figure is closer to the unrounded truth.
+  it('reconciles exactly at the precision it prints', async () => {
+    // Everything a reader can see must multiply out. The rate is quoted
+    // in paise and every figure downstream comes off it, so rate ×
+    // quantity IS the value, with nothing lost between the two.
     const q = (await create()).body.quote;
-    expect(q.valueBeforeTax).toBe(Math.round(q.rateBeforeTax * 5000 * 100) / 100);
-    expect(q.valueInclTax).toBe(Math.round(q.rateInclTax * 5000 * 100) / 100);
+    expect(q.valueBeforeTax).toBe(q.rateBeforeTax * 5000);
+    expect(q.valueInclTax).toBe(q.rateInclTax * 5000);
+    expect(q.rateInclTax).toBe(q.rateBeforeTax + q.gstAmount);
   });
 
   it('ignores a rate the caller tried to set', async () => {
@@ -115,9 +111,9 @@ describe('the price the server puts on a quote', () => {
       materialCost: 999, valueInclTax: 999,
     });
     const q = res.body.quote;
-    expect(q.rateBeforeTax).toBe(4.9104);
+    expect(q.rateBeforeTax).toBe(4.91);
     expect(q.totalCost).toBe(4.092);
-    expect(q.valueInclTax).toBe(25779.5);
+    expect(q.valueInclTax).toBe(25800);
   });
 
   it('marks up on cost rather than taking a margin on the price', async () => {
@@ -256,7 +252,7 @@ describe('repricing a quote', () => {
     const q = (await create()).body.quote;
     const res = await edit(q._id, { materials: body().materials, marginPercent: 30, conversionCost: 1.25, gstPercent: 5, quantityMetres: 5000 });
     expect(res.status).toBe(200);
-    expect(res.body.quote.rateBeforeTax).toBe(5.3196);   // 4.092 × 1.30
+    expect(res.body.quote.rateBeforeTax).toBe(5.32);     // 4.092 × 1.30, in paise
   });
 
   it('needs a reason', async () => {
@@ -281,7 +277,7 @@ describe('repricing a quote', () => {
     const q = (await create()).body.quote;
     const res = await edit(q._id, { customerName: 'New Name Textiles' });
     expect(res.body.quote.customerName).toBe('New Name Textiles');
-    expect(res.body.quote.rateBeforeTax).toBe(4.9104);
+    expect(res.body.quote.rateBeforeTax).toBe(4.91);
   });
 });
 
@@ -290,7 +286,7 @@ describe('pricing without raising a document', () => {
     const res = await request(app).post('/api/v2/quote/price')
       .set('Cookie', cookie()).send(body());
     expect(res.status).toBe(200);
-    expect(res.body.costing.rateBeforeTax).toBe(4.9104);
+    expect(res.body.costing.rateBeforeTax).toBe(4.91);
     expect(await Quote.countDocuments({})).toBe(0);
   });
 });
@@ -340,5 +336,36 @@ describe('finding a quote again', () => {
     expect(res.body.quote.materials[0]).toMatchObject({
       label: 'Warp yarn', weightGrams: 4.2, ratePerKg: 240, cost: 1.008,
     });
+  });
+});
+
+describe('the figures as the quotation prints them', () => {
+  // The demo PDF caught this: the line table formatted the rate with the
+  // purchase order's whole-rupee currency format, so a Rs 5.15 rate
+  // printed as "Rs. 5". A buyer multiplying that by 25,000 m landed
+  // Rs 3,750 away from the amount printed beside it.
+  const { getDocType } = require('../../services/pdf/docTypes');
+
+  it('gives the rate and amount columns a format that keeps paise', () => {
+    const cols = getDocType('quotation').columns;
+    const byField = Object.fromEntries(cols.map((c) => [c.field, c.format]));
+    expect(byField.rate).toBe('currency2');
+    expect(byField.amount).toBe('currency2');
+  });
+
+  it('renders a rate that reads in paise, not whole rupees', async () => {
+    const q = (await create()).body.quote;
+    const { quoteToContext } = require('../../services/pdf/quoteContext');
+    const ctx = quoteToContext(q, {});
+    expect(ctx.fields.rateExclTax).toBe('Rs. 4.91');
+    expect(ctx.fields.rateInclTax).toBe('Rs. 5.16');
+    expect(ctx.fields.gstLabel).toBe('GST @ 5%');
+  });
+
+  it('prints a line whose rate times quantity IS its amount', async () => {
+    const q = (await create()).body.quote;
+    const { quoteToContext } = require('../../services/pdf/quoteContext');
+    const [line] = quoteToContext(q, {}).rows;
+    expect(line.rate * line.qty).toBeCloseTo(line.amount, 2);
   });
 });

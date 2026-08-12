@@ -36,9 +36,24 @@ function num(n) {
   const v = Number(n) || 0;
   return (Math.round(v * 100) / 100).toLocaleString("en-IN");
 }
+// Currency that keeps its paise.
+//
+// `currency` rounds to whole rupees, which suits a purchase order whose
+// line amounts run to thousands. A quotation's line is a RATE PER METRE
+// — around Rs 5 — and rounding that to Rs 5 makes the line contradict
+// its own amount: a buyer multiplying the printed rate by the printed
+// quantity lands nowhere near the printed total. Rates get paise.
+function inr2(n) {
+  const v = Number(n) || 0;
+  return "Rs. " + v.toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
 function fmtCell(value, format) {
   if (value === null || value === undefined || value === "") return "";
   if (format === "currency") return inr(value);
+  if (format === "currency2") return inr2(value);
   if (format === "number") return num(value);
   return String(value);
 }

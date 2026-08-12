@@ -115,11 +115,24 @@ function priceOneMetre({
   const margin = positive(marginPercent);
   const gst    = positive(gstPercent);
 
-  // Markup on cost.
-  const rateBeforeTax = round(totalCost * (1 + margin / 100));
-  const marginAmount  = round(rateBeforeTax - totalCost);
-  const gstAmount     = round(rateBeforeTax * (gst / 100));
-  const rateInclTax   = round(rateBeforeTax + gstAmount);
+  // Markup on cost — and then rounded to PAISE, because this is the
+  // number the customer is quoted.
+  //
+  // The costing above is carried to four places: material costs are
+  // fractions of a rupee and flattening them early loses real money over
+  // a long order. But the RATE is a commitment, printed on a document
+  // somebody will multiply by their quantity. Quote 5.1504 and print
+  // 5.15, and the line disagrees with its own amount by ten rupees on a
+  // 25,000 m order — which gets queried, and rightly.
+  //
+  // So the chain rounds once, here, and everything downstream — GST, the
+  // inclusive rate, the extended values — comes off the rounded figure.
+  // The document then adds up in the reader's hand at the precision it
+  // is printed to.
+  const rateBeforeTax = roundTo(totalCost * (1 + margin / 100), 2);
+  const marginAmount  = roundTo(rateBeforeTax - totalCost, 2);
+  const gstAmount     = roundTo(rateBeforeTax * (gst / 100), 2);
+  const rateInclTax   = roundTo(rateBeforeTax + gstAmount, 2);
 
   // The total weight of one metre. Worth stating on the sheet: it is
   // the figure somebody checks a recipe against, and a quote whose
