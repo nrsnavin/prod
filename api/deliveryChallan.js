@@ -16,6 +16,7 @@ const { applyMovement } = require("../utils/elasticStock");
 const Customer          = require("../models/Customer");
 const { enqueue }       = require("../utils/outbox");
 const { nextNumber }    = require("../utils/sequence");
+const { currentFinancialYear } = require("../utils/financialYear");
 const PdfTemplate       = require("../models/PdfTemplate");
 const { renderTemplatePdf } = require("../services/pdf/templateRenderer");
 const { starterTemplate }   = require("../services/pdf/docTypes");
@@ -27,13 +28,7 @@ const { dcToContext }        = require("../services/pdf/dcContext");
 // dispatch staff also create DCs.
 router.use(isAuthenticated);
 
-function currentFinancialYear() {
-  const now     = new Date();
-  const month   = now.getMonth();
-  const year    = now.getFullYear();
-  const fyStart = month >= 3 ? year : year - 1;
-  return `${String(fyStart).slice(-2)}/${String(fyStart + 1).slice(-2)}`;
-}
+// Shared with the quote router — see utils/financialYear.js.
 
 // Race-free per-(type, financial-year) sequence via an atomic counter,
 // seeded once from the max already in the collection. The old
