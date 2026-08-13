@@ -135,6 +135,13 @@ function readLine(raw, index) {
  * means there is no second arithmetic path to disagree with the first.
  */
 function costingFromBody(body) {
+  // An explicitly EMPTY lines array is somebody asking to quote nothing,
+  // and saying "Product 1 has no name" about a product that was never
+  // there sends them looking for the wrong mistake.
+  if (Array.isArray(body?.lines) && body.lines.length === 0) {
+    return { error: 'A quotation needs at least one product.' };
+  }
+
   const rawLines = Array.isArray(body?.lines) && body.lines.length
     ? body.lines
     : [body];

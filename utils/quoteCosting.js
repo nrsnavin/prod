@@ -196,25 +196,41 @@ function priceQuote({ lines = [], gstPercent = 0 } = {}) {
       gstPercent:     gst,
     });
     const quantityMetres = positive(line?.quantityMetres);
+    const valueBeforeTax = extend(one.rateBeforeTax, quantityMetres);
     return {
       ...one,
       quantityMetres,
-      valueBeforeTax: extend(one.rateBeforeTax, quantityMetres),
-      valueInclTax:   extend(one.rateInclTax,   quantityMetres),
+      valueBeforeTax,
+      // On the VALUE, not the per-metre rate. See the note below.
+      valueInclTax: roundTo(valueBeforeTax * (1 + gst / 100), 2),
     };
   });
 
-  const sum = (pick) => roundTo(priced.reduce((s, l) => s + pick(l), 0), 2);
-  const subTotal   = sum((l) => l.valueBeforeTax);
-  const grandTotal = sum((l) => l.valueInclTax);
+  const subTotal = roundTo(
+    priced.reduce((s, l) => s + l.valueBeforeTax, 0), 2
+  );
+
+  // GST IS CHARGED ON THE TAXABLE VALUE, NOT PER METRE.
+  //
+  // This used to sum the per-metre tax and multiply it out, and that is
+  // wrong on a tax document. A per-metre rate of 2.71 at 5% is 0.1355,
+  // which rounds to 0.14 — and multiplying that by 5,000 metres scales
+  // a half-paisa rounding into Rs 22.50, charging the customer 5.17%
+  // where the law says 5%.
+  //
+  // Rounding a tiny per-unit tax and then extending it amplifies the
+  // rounding by the quantity, which is exactly why a GST invoice
+  // computes tax on the line total rather than the unit price. The
+  // per-metre gstAmount and rateInclTax stay on the line because they
+  // are useful to quote over the phone, but they do not drive anything.
+  const gstAmount  = roundTo(subTotal * (gst / 100), 2);
+  const grandTotal = roundTo(subTotal + gstAmount, 2);
 
   return {
     lines: priced,
     gstPercent: round(gst),
     subTotal,
-    // Derived from the two totals rather than summed separately, so the
-    // three figures on the document always agree with each other.
-    gstAmount: roundTo(grandTotal - subTotal, 2),
+    gstAmount,
     grandTotal,
     totalQuantityMetres: roundTo(
       priced.reduce((s, l) => s + l.quantityMetres, 0), 3

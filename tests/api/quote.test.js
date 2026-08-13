@@ -90,10 +90,11 @@ describe('the price the server puts on a quote', () => {
 
   it('extends the rate over the quantity quoted', async () => {
     const q = (await create()).body.quote;
-    expect(q.lines[0].valueBeforeTax).toBe(24550);  // 4.91 × 5000
-    expect(q.lines[0].valueInclTax).toBe(25800);    // 5.16 × 5000
+    expect(q.lines[0].valueBeforeTax).toBe(24550);   // 4.91 × 5000
     expect(q.subTotal).toBe(24550);
-    expect(q.grandTotal).toBe(25800);
+    // GST on the taxable VALUE: 24,550 × 5% = 1,227.50 exactly.
+    expect(q.gstAmount).toBe(1227.5);
+    expect(q.grandTotal).toBe(25777.5);
   });
 
   it('reconciles exactly at the precision it prints', async () => {
@@ -103,9 +104,18 @@ describe('the price the server puts on a quote', () => {
     const q = (await create()).body.quote;
     const [l] = q.lines;
     expect(l.valueBeforeTax).toBe(l.rateBeforeTax * 5000);
-    expect(l.valueInclTax).toBe(l.rateInclTax * 5000);
     expect(l.rateInclTax).toBe(l.rateBeforeTax + l.gstAmount);
     expect(q.grandTotal).toBe(q.subTotal + q.gstAmount);
+  });
+
+  it('charges exactly the GST rate on the document, not more', async () => {
+    // GST used to be summed PER METRE and multiplied out. A 2.71 rate at
+    // 5% is 0.1355, rounds to 0.14, and over 5,000 m that half-paisa
+    // became Rs 22.50 — 5.17% charged where the law says 5%. Rounding a
+    // tiny per-unit tax and extending it amplifies it by the quantity.
+    const q = (await create()).body.quote;
+    expect(q.gstAmount).toBe(Math.round(q.subTotal * 5) / 100);
+    expect((q.gstAmount / q.subTotal) * 100).toBeCloseTo(5, 6);
   });
 
   it('ignores a rate the caller tried to set', async () => {
@@ -118,7 +128,7 @@ describe('the price the server puts on a quote', () => {
     const q = res.body.quote;
     expect(q.lines[0].rateBeforeTax).toBe(4.91);
     expect(q.lines[0].totalCost).toBe(4.092);
-    expect(q.grandTotal).toBe(25800);
+    expect(q.grandTotal).toBe(25777.5);
   });
 
   it('marks up on cost rather than taking a margin on the price', async () => {
@@ -363,7 +373,7 @@ describe('the figures as the quotation prints them', () => {
     const { quoteToContext } = require('../../services/pdf/quoteContext');
     const ctx = quoteToContext(q, {});
     expect(ctx.fields.subTotal).toBe('Rs. 24,550.00');
-    expect(ctx.fields.grandTotal).toBe('Rs. 25,800.00');
+    expect(ctx.fields.grandTotal).toBe('Rs. 25,777.50');
     expect(ctx.fields.gstLabel).toBe('GST @ 5%');
   });
 
@@ -478,6 +488,8 @@ describe('several products on one quotation', () => {
     expect(q.lines[0].valueBeforeTax).toBe(13550);  // 2.71 × 5000
     expect(q.lines[1].valueBeforeTax).toBe(14700);  // 4.90 × 3000
     expect(q.subTotal).toBe(28250);
+    expect(q.gstAmount).toBe(1412.5);               // 5% of 28,250
+    expect(q.grandTotal).toBe(29662.5);
   });
 
   it('makes the three document totals agree with each other', async () => {
@@ -496,6 +508,11 @@ describe('several products on one quotation', () => {
     for (const l of q.lines) {
       expect(l.rateInclTax).toBe(l.rateBeforeTax + l.gstAmount);
     }
+  });
+
+  it('taxes the total at exactly the rate, across products', async () => {
+    const q = (await createTwo()).body.quote;
+    expect((q.gstAmount / q.subTotal) * 100).toBeCloseTo(5, 6);
   });
 
   it('names the offending product when one is wrong', async () => {
@@ -608,5 +625,70 @@ describe('the customer on a quotation', () => {
     const again = await request(app).get('/api/v2/quote/detail')
       .query({ id: res.body.quote._id }).set('Cookie', cookie());
     expect(again.body.quote.customerName).toBe('Ravi Textiles Pvt Ltd');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+describe('a product quoted as a rate only', () => {
+  // "What would 20mm cost?" is a real question and a normal quotation.
+  const mixed = () => ({
+    customerName: 'Ravi Textiles',
+    gstPercent: 5,
+    lines: [
+      { productName: 'Priced', quantityMetres: 5000, conversionCost: 1.25, marginPercent: 20,
+        materials: [{ label: 'Warp yarn', weightGrams: 4.2, ratePerKg: 240 }] },
+      { productName: 'Rate only', quantityMetres: 0, conversionCost: 1.25, marginPercent: 20,
+        materials: [{ label: 'Warp yarn', weightGrams: 8, ratePerKg: 240 }] },
+    ],
+  });
+
+  const ctxFor = async () => {
+    const res = await request(app).post('/api/v2/quote/create')
+      .set('Cookie', cookie()).send(mixed());
+    const { quoteToContext } = require('../../services/pdf/quoteContext');
+    return quoteToContext(res.body.quote, {});
+  };
+
+  it('still states its rate', async () => {
+    const ctx = await ctxFor();
+    expect(ctx.rows[1].rate).toBe(3.8);
+  });
+
+  it('prints no quantity and no amount, rather than zero', async () => {
+    // Rs 0.00 in the Amount column reads as an offer to supply it free,
+    // which is the opposite of what an absent quantity means.
+    const ctx = await ctxFor();
+    expect(ctx.rows[1].qty).toBeNull();
+    expect(ctx.rows[1].amount).toBeNull();
+  });
+
+  it('leaves the priced product row alone', async () => {
+    const ctx = await ctxFor();
+    expect(ctx.rows[0].qty).toBe(5000);
+    expect(ctx.rows[0].amount).toBe(13550);
+  });
+
+  it('adds nothing to the document total', async () => {
+    const res = await request(app).post('/api/v2/quote/create')
+      .set('Cookie', cookie()).send(mixed());
+    expect(res.body.quote.subTotal).toBe(13550);
+    expect(res.body.quote.totalQuantityMetres).toBe(5000);
+  });
+
+  it('renders, with the blank cells', async () => {
+    const res = await request(app).post('/api/v2/quote/create')
+      .set('Cookie', cookie()).send(mixed());
+    const pdf = await request(app).get(`/api/v2/quote/${res.body.quote._id}/pdf`)
+      .set('Cookie', cookie());
+    expect(pdf.status).toBe(200);
+  }, 30_000);
+});
+
+describe('a quotation with no products at all', () => {
+  it('says so, rather than blaming a product that was never there', async () => {
+    const res = await request(app).post('/api/v2/quote/create')
+      .set('Cookie', cookie()).send({ customerName: 'Ravi Textiles', lines: [] });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/at least one product/i);
   });
 });

@@ -36,14 +36,22 @@ function quoteToContext(quote, branding = {}) {
   // One row per product. The description carries the specification only
   // when there is one, so a line for a plain product does not print a
   // trailing dash.
-  const rows = lines.map((l, i) => ({
-    sno: i + 1,
-    description: [l.productName, l.productSpec].filter(Boolean).join(' — '),
-    unit: 'm',
-    qty: Number(l.quantityMetres) || 0,
-    rate: Number(l.rateBeforeTax) || 0,
-    amount: Number(l.valueBeforeTax) || 0,
-  }));
+  const rows = lines.map((l, i) => {
+    const qty = Number(l.quantityMetres) || 0;
+    return {
+      sno: i + 1,
+      description: [l.productName, l.productSpec].filter(Boolean).join(' — '),
+      unit: 'm',
+      // A product quoted as a rate only — "what would 20mm cost?" — has
+      // no quantity and therefore no amount. Printing 0 and Rs 0.00
+      // against it reads as an offer to supply it free, which is the
+      // opposite of what an absent quantity means. The renderer prints
+      // an empty cell for null, so the rate stands alone.
+      qty:    qty > 0 ? qty : null,
+      rate:   Number(l.rateBeforeTax) || 0,
+      amount: qty > 0 ? Number(l.valueBeforeTax) || 0 : null,
+    };
+  });
 
   const gstPercent = Number(quote.gstPercent) || 0;
   const anyQuantity = lines.some((l) => (Number(l.quantityMetres) || 0) > 0);
