@@ -373,3 +373,122 @@ describe('the elastic recipe picker', () => {
     expect(res.body.warp).toHaveLength(0);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  COUNTING MEMBERS — three rules where there should be one
+//
+//  Three places decide "what is in this group", and they did not agree:
+//
+//    memberCount()      link OR category, name matched EXACTLY
+//    ?withCounts        $group by category — link ignored entirely
+//    rename's updateMany link OR category, name matched EXACTLY
+//
+//  Every material this app writes now carries the group's own spelling,
+//  so the three agree on new data. They disagree on data that predates
+//  the migration, or that an un-updated client wrote — which is exactly
+//  the data the group screen exists to tidy up.
+//
+//  It matters because the count drives what the confirm dialog SAYS
+//  will happen. A group reading "0 materials" offers to delete outright;
+//  the server then archives it instead, because its own rule found
+//  members. The dialog was telling the truth about a different query.
+// ══════════════════════════════════════════════════════════════════
+describe('what counts as being in a group', () => {
+  const countFor = async (name) => {
+    const res = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
+    return res.body.groups.find((g) => g.name === name)?.materialCount;
+  };
+
+  it('counts a member linked by id whose category is spelled differently', async () => {
+    const g = (await createGroup({ name: 'Rubber' })).body.group;
+    await createMaterial({ name: 'Legacy', group: g._id });
+    // A client that has not been updated rewrites the name only.
+    await RawMaterial.updateOne({ name: 'Legacy' }, { $set: { category: 'rubber' } });
+
+    expect(await countFor('Rubber')).toBe(1);
+  });
+
+  it('counts a member that carries the name only, in another case', async () => {
+    await createGroup({ name: 'Rubber' });
+    await RawMaterial.create({ name: 'Old', category: 'rubber', supplier: supplier._id });
+
+    expect(await countFor('Rubber')).toBe(1);
+  });
+
+  it('agrees with the rule that decides archive-vs-delete', async () => {
+    // The dialog says what will happen using the count; the server acts
+    // using its own rule. If they disagree the dialog is wrong.
+    const g = (await createGroup({ name: 'Rubber' })).body.group;
+    await RawMaterial.create({ name: 'Old', category: 'rubber', supplier: supplier._id });
+
+    expect(await countFor('Rubber')).toBe(1);
+    const res = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
+    expect(res.body.archived).toBe(true);
+  });
+
+  it('renames a member that carries the name in another case', async () => {
+    const g = (await createGroup({ name: 'Rubber' })).body.group;
+    await RawMaterial.create({ name: 'Old', category: 'rubber', supplier: supplier._id });
+
+    await request(app).put(`${api}/update`)
+      .set('Cookie', cookie()).send({ id: g._id, name: 'Spandex' });
+
+    const m = await RawMaterial.findOne({ name: 'Old' }).lean();
+    expect(m.category).toBe('Spandex');
+  });
+});
+
+describe('a group whose only members are archived', () => {
+  it('is archived rather than deleted, so the link survives', async () => {
+    // An archived material still names its group. Deleting the group
+    // outright leaves it pointing at nothing, and restoring the material
+    // later brings back a row filed under a group that no longer exists.
+    const g = (await createGroup({ name: 'Retired Yarn' })).body.group;
+    await createMaterial({ name: 'Shelved', group: g._id });
+    await RawMaterial.updateOne({ name: 'Shelved' }, { $set: { archived: true } });
+
+    const res = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
+    expect(res.body.archived).toBe(true);
+    expect(await MaterialGroup.countDocuments()).toBe(1);
+  });
+});
+
+describe('the two counts the settings screen needs', () => {
+  it('shows live members, and reports archived ones separately', async () => {
+    const g = (await createGroup({ name: 'Warp' })).body.group;
+    await createMaterial({ name: 'Live', group: g._id });
+    await createMaterial({ name: 'Shelved', group: g._id });
+    await RawMaterial.updateOne({ name: 'Shelved' }, { $set: { archived: true } });
+
+    const res = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
+    const row = res.body.groups[0];
+    expect(row.materialCount).toBe(1);       // what the table shows
+    expect(row.totalMaterialCount).toBe(2);  // what the delete dialog needs
+  });
+
+  it('lets the dialog predict archive-vs-delete for an archived-only group', async () => {
+    // Reading only the live count, the dialog said "removed outright"
+    // and the server archived it. Same lie, one layer up.
+    const g = (await createGroup({ name: 'Retired' })).body.group;
+    await createMaterial({ name: 'Shelved', group: g._id });
+    await RawMaterial.updateOne({ name: 'Shelved' }, { $set: { archived: true } });
+
+    const list = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
+    const row = list.body.groups[0];
+    expect(row.materialCount).toBe(0);
+    expect(row.totalMaterialCount).toBe(1);
+
+    const del = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
+    // The dialog's prediction (total > 0 → archive) matches what happened.
+    expect(row.totalMaterialCount > 0).toBe(del.body.archived);
+    expect(del.body.message).toMatch(/archived and still filed under it/);
+  });
+
+  it('does not double-count a material that is both linked and named', async () => {
+    const g = (await createGroup({ name: 'Warp' })).body.group;
+    await createMaterial({ name: 'Both', group: g._id });   // link AND category='Warp'
+
+    const res = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
+    expect(res.body.groups[0].materialCount).toBe(1);
+  });
+});

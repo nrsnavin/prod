@@ -73,12 +73,48 @@ async function deriveCode(name) {
   return `${base}_${Date.now().toString(36).toUpperCase()}`;
 }
 
-/** How many live materials point at this group, by link or by name. */
-async function memberCount(group) {
-  return RawMaterial.countDocuments({
-    archived: { $ne: true },
-    $or: [{ group: group._id }, { category: group.name }],
-  });
+// ── ONE definition of "in this group" ────────────────────────────
+//
+// Three places used to decide this and they did not agree: the member
+// count matched the name EXACTLY, the settings screen's counts ignored
+// the link entirely, and the rename matched exactly too. Every material
+// this app writes now carries the group's own spelling, so all three
+// agreed on new data and disagreed on exactly the data the group screen
+// exists to tidy up — rows written before the migration, or by a client
+// that has not been updated.
+//
+// It is not cosmetic: the count drives what the confirm dialog SAYS will
+// happen. A group reading "0 materials" offers to delete outright, and
+// the server then archived it instead, because its own rule found
+// members. The dialog was telling the truth about a different query.
+//
+// Case-insensitive on the name, because "rubber" and "Rubber" are the
+// same group written twice — the split this whole feature exists to end.
+const memberFilter = (group) => ({
+  $or: [
+    { group: group._id },
+    { category: new RegExp(`^${escapeRegex(group.name)}$`, 'i') },
+  ],
+});
+
+/**
+ * Live members, and members of any kind.
+ *
+ * Two numbers because they answer two questions. `live` is what the
+ * screen shows — an archived material is out of the pickers and listing
+ * it would not match what the group's page displays. `total` includes
+ * archived rows and is what decides archive-vs-delete: an archived
+ * material still NAMES its group, so deleting the group outright leaves
+ * it pointing at nothing, and restoring it later brings back a row filed
+ * under a group that no longer exists.
+ */
+async function memberCounts(group) {
+  const filter = memberFilter(group);
+  const [live, total] = await Promise.all([
+    RawMaterial.countDocuments({ ...filter, archived: { $ne: true } }),
+    RawMaterial.countDocuments(filter),
+  ]);
+  return { live, total };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -118,16 +154,48 @@ router.get(
     // One aggregation for every group rather than a count per group —
     // the settings screen lists them all, and a query each is how a
     // page that looks instant on ten rows crawls on eighty.
-    const counts = await RawMaterial.aggregate([
-      { $match: { archived: { $ne: true } } },
-      { $group: { _id: '$category', n: { $sum: 1 } } },
+    //
+    // Bucketed on the PAIR (link, folded name) so the same rule
+    // memberFilter uses can be applied in memory. Each material lands in
+    // exactly one bucket, so a row that is both linked and named cannot
+    // be counted twice.
+    // Archived rows are counted too, in their own bucket. The screen
+    // shows the LIVE figure, but the delete dialog has to know about
+    // archived members or it promises "removed outright" for a group the
+    // server will archive — the same lie, one layer up.
+    const buckets = await RawMaterial.aggregate([
+      {
+        $group: {
+          _id: {
+            group: '$group',
+            cat: { $toLower: '$category' },
+            archived: { $eq: ['$archived', true] },
+          },
+          n: { $sum: 1 },
+        },
+      },
     ]);
-    const byName = new Map(counts.map((c) => [c._id, c.n]));
+
+    const countFor = (g) => {
+      const id = String(g._id);
+      const name = String(g.name).toLowerCase();
+      let live = 0;
+      let total = 0;
+      for (const b of buckets) {
+        if (String(b._id.group) !== id && b._id.cat !== name) continue;
+        total += b.n;
+        if (!b._id.archived) live += b.n;
+      }
+      return { live, total };
+    };
 
     res.json({
       success: true,
       count: groups.length,
-      groups: groups.map((g) => ({ ...g, materialCount: byName.get(g.name) || 0 })),
+      groups: groups.map((g) => {
+        const { live, total } = countFor(g);
+        return { ...g, materialCount: live, totalMaterialCount: total };
+      }),
     });
   })
 );
@@ -217,8 +285,11 @@ router.put(
         // Members first. If this write fails, the group keeps its old
         // name and nothing has drifted — the other order leaves members
         // stranded under a name their group no longer has.
+        // memberFilter against the OLD name — the same rule the counts
+        // and the delete use, so a member cannot be visible to one and
+        // invisible to another.
         const moved = await RawMaterial.updateMany(
-          { $or: [{ group: group._id }, { category: oldName }] },
+          memberFilter({ _id: group._id, name: oldName }),
           { $set: { category: name, group: group._id } }
         );
         renamedCount = moved.modifiedCount || 0;
@@ -271,24 +342,35 @@ router.delete(
     const group = await MaterialGroup.findById(id);
     if (!group) return next(new ErrorHandler('Group not found', 404));
 
-    const members = await memberCount(group);
-    if (members > 0) {
+    const { live, total } = await memberCounts(group);
+    if (total > 0) {
       if (group.archived) {
         return next(new ErrorHandler(
-          `"${group.name}" is already archived and still holds ${members} material(s).`, 409
+          `"${group.name}" is already archived and still holds ${total} material(s).`, 409
         ));
       }
       group.archived   = true;
       group.archivedAt = new Date();
-      stamp(group, ACTION_CODES.MATERIAL_GROUP_ARCHIVED, req, { name: group.name, members });
+      stamp(group, ACTION_CODES.MATERIAL_GROUP_ARCHIVED, req, {
+        name: group.name, members: total, live,
+      });
       await group.save();
+
+      // Worded from `live` when there are any, because that is the
+      // number on the screen the operator is looking at. When every
+      // member is archived the message says so rather than claiming
+      // "0 materials" and then refusing to delete.
+      const noun = (n) => `${n} material${n === 1 ? '' : 's'}`;
       return res.json({
         success: true,
         archived: true,
-        materials: members,
-        message:
-          `"${group.name}" holds ${members} material(s), so it was archived rather than ` +
-          `deleted — it is out of the pickers and every material still reads correctly.`,
+        materials: live,
+        archivedMaterials: total - live,
+        message: live > 0
+          ? `"${group.name}" holds ${noun(live)}, so it was archived rather than ` +
+            `deleted — it is out of the pickers and every material still reads correctly.`
+          : `"${group.name}" was archived rather than deleted: its ${noun(total)} ` +
+            `${total === 1 ? 'is' : 'are'} archived and still filed under it.`,
       });
     }
 
@@ -342,8 +424,8 @@ router.get(
     // and the screen has to show both or it looks like the group lost
     // its contents.
     const materials = await RawMaterial.find({
+      ...memberFilter(group),
       archived: { $ne: true },
-      $or: [{ group: group._id }, { category: group.name }],
     })
       .select('name category group unit stock minStock price avgCost supplier')
       .sort({ name: 1 })
