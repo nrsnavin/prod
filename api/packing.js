@@ -10,6 +10,13 @@ const Packing          = require("../models/Packing");
 const JobOrder         = require("../models/JobOrder");
 const Order            = require("../models/Order");
 const { recomputePacked } = require("../services/orderPending.js");
+const Employee         = require("../models/Employee");
+const Elastic          = require("../models/Elastic");
+const StockMovement    = require("../models/StockMovement");
+const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
+const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
+const { applyMovement } = require("../utils/elasticStock");
+const { requireReason } = require("../utils/auditReason");
 
 /**
  * Mirror a job's packed metres onto its order.
@@ -31,13 +38,50 @@ async function syncOrderPacked(orderId, session) {
   await order.save({ session });
   return order;
 }
-const Employee         = require("../models/Employee");
-const Elastic          = require("../models/Elastic");
-const StockMovement    = require("../models/StockMovement");
-const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
-const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
-const { applyMovement } = require("../utils/elasticStock");
-const { requireReason } = require("../utils/auditReason");
+
+/**
+ * Move a job's packed figure for one elastic by `delta`.
+ *
+ * `packedElastic` is seeded from the job's own elastics when the job is
+ * created, so the row is normally there. Every path here used to guard
+ * on `idx >= 0` and do NOTHING when it wasn't — so a packing against an
+ * elastic with no row raised stock, stamped a fingerprint saying N
+ * metres were packed, and left both the job and the order at zero. The
+ * only visible trace was the audit trail contradicting the numbers.
+ *
+ * Creating the row is the honest repair: the metres exist either way,
+ * and the question of whether the elastic BELONGS on the job is
+ * answered before this is called, not by quietly discarding the figure.
+ *
+ * Floors at zero on the way down. The delete path used to skip the
+ * subtraction entirely when the stored figure was smaller than the
+ * packing being reversed, which left the job MORE wrong than clamping
+ * would have — the whole amount stayed behind instead of part of it.
+ */
+function movePackedElastic(job, elasticId, delta) {
+  if (!job || !delta) return;
+  const key = elasticId.toString();
+  const idx = job.packedElastic.findIndex((e) => e.elastic?.toString() === key);
+  if (idx >= 0) {
+    job.packedElastic[idx].quantity =
+      Math.max(0, (job.packedElastic[idx].quantity || 0) + delta);
+  } else if (delta > 0) {
+    job.packedElastic.push({ elastic: elasticId, quantity: delta });
+  }
+}
+
+/** Metres a single packing record may carry — see create-packing. */
+const PACKING_METER_MAX = 50000;
+
+/**
+ * A job that is finished or abandoned cannot take more packing.
+ *
+ * Recording a box against either one raises elastic stock for goods
+ * that are not being made, and lands it on a job whose figures nobody
+ * looks at again. The stage routes already refuse to move such a job;
+ * this is the same rule at the door that actually moves stock.
+ */
+const CLOSED_JOB_STATUSES = ["completed", "cancelled"];
 
 router.use(isAuthenticated);
 // Per-user feature gate: Packing is a leaf screen. No-op for legacy users
@@ -63,8 +107,12 @@ function packingDetailQuery(query) {
 router.get(
   "/jobs-packing",
   catchAsyncErrors(async (req, res, next) => {
+    // `packing` belongs here and was missing: a job moved to the packing
+    // stage vanished from the screen whose whole job is to record its
+    // boxes. The list ran from weaving to checking and stopped one short
+    // of the stage it is named after.
     const jobs = await JobOrder.find({
-          status: { $in: ["weaving", "finishing", "checking"] },
+          status: { $in: ["weaving", "finishing", "checking", "packing"] },
         })
       .populate("customer", "name")
       .populate("elastics.elastic", "name")
@@ -153,7 +201,6 @@ router.post(
     // Cap at 50000 m — a single packing record well beyond the
     // weaving capacity of any machine in a shift. Without this a
     // typo (999999999) silently lands and corrupts stock + ledger.
-    const PACKING_METER_MAX = 50000;
     if (!meter || isNaN(Number(meter)) || Number(meter) <= 0) {
       return next(new ErrorHandler("meter must be a positive number",    400));
     }
@@ -161,14 +208,32 @@ router.post(
       return next(new ErrorHandler(
         `meter ${meter} exceeds ${PACKING_METER_MAX}m per record`, 400));
     }
-    if (!netWeight   || isNaN(Number(netWeight)))   {
-      return next(new ErrorHandler("netWeight is required",   400));
+    // `!weight || isNaN(weight)` let every NEGATIVE weight through — the
+    // one shape of wrong number a scale actually produces when the tare
+    // is keyed the wrong way round. A box cannot weigh less than nothing.
+    for (const [label, value] of [
+      ["netWeight",   netWeight],
+      ["tareWeight",  tareWeight],
+      ["grossWeight", grossWeight],
+    ]) {
+      const n = Number(value);
+      if (value === undefined || value === null || value === "" || isNaN(n)) {
+        return next(new ErrorHandler(`${label} is required`, 400));
+      }
+      if (n <= 0) {
+        return next(new ErrorHandler(`${label} must be a positive number`, 400));
+      }
     }
-    if (!tareWeight  || isNaN(Number(tareWeight)))  {
-      return next(new ErrorHandler("tareWeight is required",  400));
+    // Gross is net plus the packaging, so it can never be the smaller of
+    // the two. Caught here rather than reconciled exactly: scales round
+    // differently and an exact-sum rule would reject honest boxes.
+    if (Number(grossWeight) < Number(netWeight)) {
+      return next(new ErrorHandler(
+        `grossWeight (${grossWeight}) cannot be less than netWeight (${netWeight})`, 400));
     }
-    if (!grossWeight || isNaN(Number(grossWeight))) {
-      return next(new ErrorHandler("grossWeight is required", 400));
+    if (joints !== undefined && joints !== null && joints !== "" &&
+        (isNaN(Number(joints)) || Number(joints) < 0)) {
+      return next(new ErrorHandler("joints cannot be negative", 400));
     }
     if (!checkedBy) return next(new ErrorHandler("checkedBy is required", 400));
     if (!packedBy)  return next(new ErrorHandler("packedBy is required",  400));
@@ -184,6 +249,27 @@ router.post(
         if (!jobDoc)     throw new ErrorHandler("Job not found",     404);
         if (!elasticDoc) throw new ErrorHandler("Elastic not found", 404);
 
+        if (CLOSED_JOB_STATUSES.includes(jobDoc.status)) {
+          throw new ErrorHandler(
+            `Job #${jobDoc.jobOrderNo} is ${jobDoc.status} — nothing more can be packed against it`,
+            409
+          );
+        }
+
+        // The elastic has to be one the job is making. Without this an
+        // elastic picked off the wrong row raised ITS stock, stamped a
+        // fingerprint against this job, and then hit the `idx >= 0`
+        // guard below and recorded nothing — production credited to a
+        // product the job never ran, with no figure anywhere to show it.
+        const onJob = (jobDoc.elastics || []).some(
+          (e) => e.elastic?.toString() === elastic.toString()
+        );
+        if (!onJob) {
+          throw new ErrorHandler(
+            `${elasticDoc.name} is not on job #${jobDoc.jobOrderNo}`, 400
+          );
+        }
+
         const [packing] = await Packing.create([{
           job, elastic,
           meter:       Number(meter),
@@ -197,12 +283,7 @@ router.post(
           ...(requestId ? { requestId } : {}),
         }], { session });
 
-        const idx = jobDoc.packedElastic.findIndex(
-          (e) => e.elastic.toString() === elastic.toString()
-        );
-        if (idx >= 0) {
-          jobDoc.packedElastic[idx].quantity += Number(meter);
-        }
+        movePackedElastic(jobDoc, elastic, Number(meter));
         jobDoc.packingDetails.push(packing._id);
 
         const actor = actorFromRequest(req);
@@ -303,12 +384,15 @@ router.get(
   "/all",
   isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
-    const { limit = 50, skip = 0 } = req.query;
+    // Clamped: `Number("abc")` is NaN and a negative skip is a Mongo
+    // error, so an unchecked query string turned a listing into a 500.
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const skip  = Math.max(Number(req.query.skip)  || 0,  0);
 
     const packings = await packingDetailQuery(Packing.find())
       .sort({ createdAt: -1 })
-      .limit(Number(limit))
-      .skip(Number(skip));
+      .limit(limit)
+      .skip(skip);
 
     const total = await Packing.countDocuments();
 
@@ -352,16 +436,18 @@ router.put(
         const oldMeter = Number(packing.meter || 0);
         const newMeter = meter != null ? Number(meter) : oldMeter;
         if (!Number.isFinite(newMeter) || newMeter <= 0) throw new ErrorHandler("Meter must be > 0", 400);
+        // The same ceiling the create path enforces. It was on one door
+        // only, so a typo refused at 999999999 on the way in was accepted
+        // by editing the record afterwards to exactly that.
+        if (newMeter > PACKING_METER_MAX) {
+          throw new ErrorHandler(
+            `meter ${newMeter} exceeds ${PACKING_METER_MAX}m per record`, 400);
+        }
         const delta = newMeter - oldMeter;
 
         if (delta !== 0) {
           const job = await JobOrder.findById(packing.job).session(session);
-          if (job) {
-            const idx = job.packedElastic.findIndex(
-              (e) => e.elastic.toString() === packing.elastic.toString()
-            );
-            if (idx >= 0) job.packedElastic[idx].quantity = Math.max(0, (job.packedElastic[idx].quantity || 0) + delta);
-          }
+          movePackedElastic(job, packing.elastic, delta);
 
           if (delta > 0) {
             await applyMovement(session, {
@@ -422,12 +508,12 @@ router.delete(
 
         const job = await JobOrder.findById(packing.job).session(session);
         if (job) {
-          const idx = job.packedElastic.findIndex(
-            (e) => e.elastic.toString() === packing.elastic.toString()
-          );
-          if (idx >= 0 && job.packedElastic[idx].quantity >= packing.meter) {
-            job.packedElastic[idx].quantity -= packing.meter;
-          }
+          // Clamped, not skipped. The old guard refused to subtract at
+          // all when the stored figure was below the packing being
+          // reversed — so a job showing 40 m against a 100 m record kept
+          // all 40 instead of dropping to 0, and the deletion made the
+          // number further from truth than leaving it alone would have.
+          movePackedElastic(job, packing.elastic, -Number(packing.meter));
           job.packingDetails = job.packingDetails.filter(
             (id) => id.toString() !== packing._id.toString()
           );

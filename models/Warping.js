@@ -63,6 +63,21 @@ const WarpingSchema = new mongoose.Schema(
     completedDate: {
       type: Date,
     },
+
+    // 🔒 HOW MANY BATCHES HAVE BEEN RAISED AGAINST THIS WARPING
+    //
+    // Kept for its own sake, but it also does a job: raising a batch
+    // increments it inside the same transaction as the beam-clash check,
+    // which gives two simultaneous batch creations a single document to
+    // collide on. Without that they are write-skew — each reads the
+    // other's beams as free, neither writes to anything the other
+    // touched, and both land. Two batches on one beam means the yarn is
+    // issued twice for it and the trail shows two lots inside a single
+    // beam, which is the exact thing lot tracking exists to rule out.
+    batchSeq: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );
