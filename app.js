@@ -90,6 +90,7 @@ const customer = require("./api/customer.js");
 const supplier = require("./api/supplier.js");
 const quote = require("./api/quote.js");
 const material = require("./api/rawMaterial.js");
+const materialGroup = require("./api/materialGroup.js");
 const yarnLot  = require("./api/yarnLot.js");
 const stockCount = require("./api/stockCount.js");
 const elastic  = require("./api/elastic.js");
@@ -474,6 +475,23 @@ app.use("/api/v2/materials",   gate('production', 'accounts'),
     '/materialForNewElastic':  ['/elastics'],
   }),
   material);
+// Material groups are part of Raw Materials, not a nav item of their
+// own, so they sit behind the SAME feature key rather than a new one.
+// That is deliberate: canAccess() reads an account's explicit
+// `features` list before it reaches the admin shortcut, so a brand-new
+// key ships invisible to every existing account until a migration
+// grants it — which is exactly how /quotes shipped and had to be
+// rescued by 20260812000001. Reusing /materials means the day this
+// deploys, everyone who can see materials can see their groups.
+// Writing one is admin-gated inside the router.
+//
+// The elastic form reads this list to build its recipe pickers, so
+// /elastics may read it too — the same allowance
+// /materialForNewElastic already has.
+app.use("/api/v2/material-group", gate('production', 'accounts'),
+  requireFeature('/materials'),
+  requireFeatureRead('/materials', '/elastics', '/warping', '/purchase-orders'),
+  materialGroup);
 // Dye lots are a materials concept — same gate, so anyone who can see
 // stock can see how it breaks down by lot.
 app.use("/api/v2/yarn-lots",   gate('production', 'accounts'),

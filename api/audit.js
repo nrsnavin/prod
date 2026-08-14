@@ -18,6 +18,7 @@ const PurchaseOrder   = require("../models/PurchaseOrder");
 const Quote           = require("../models/Quote");
 const StockCount      = require("../models/StockCount");
 const DeliveryChallan = require("../models/DeliveryChallan");
+const MaterialGroup   = require("../models/MaterialGroup");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 
@@ -56,16 +57,19 @@ router.get(
     // neither collection was listed here, so the record existed and was
     // invisible. An audit trail that omits a whole document type is worse
     // than none — it reads as complete.
-    const [orders, jobs, pos, dcs, quotes, counts] = await Promise.all([
+    const [orders, jobs, pos, dcs, quotes, counts, groups] = await Promise.all([
       recentFrom(Order,           "Order",           "orderNo",    limit),
       recentFrom(JobOrder,        "JobOrder",        "jobOrderNo", limit),
       recentFrom(PurchaseOrder,   "PurchaseOrder",   "poNo",       limit),
       recentFrom(DeliveryChallan, "DeliveryChallan", "dcNumber",   limit),
       recentFrom(Quote,           "Quote",           "quoteNo",    limit),
       recentFrom(StockCount,      "StockCount",      "countNo",    limit),
+      // Groups have no document number — `code` is their stable handle,
+      // and it is what a reader recognises ("WARP_YARN renamed").
+      recentFrom(MaterialGroup,   "MaterialGroup",   "code",       limit),
     ]);
 
-    const entries = [...orders, ...jobs, ...pos, ...dcs, ...quotes, ...counts]
+    const entries = [...orders, ...jobs, ...pos, ...dcs, ...quotes, ...counts, ...groups]
       .filter((e) => e.at)
       .sort((a, b) => new Date(b.at) - new Date(a.at))
       .slice(0, limit);

@@ -83,6 +83,11 @@ const ACTION_CODES = Object.freeze({
   DC_DELIVERED:             'DC_DELIVERED',
   DC_CANCELLED:             'DC_CANCELLED',
   DC_DELETED:               'DC_DELETED',
+
+  MATERIAL_GROUP_CREATED:   'MATERIAL_GROUP_CREATED',
+  MATERIAL_GROUP_UPDATED:   'MATERIAL_GROUP_UPDATED',
+  MATERIAL_GROUP_ARCHIVED:  'MATERIAL_GROUP_ARCHIVED',
+  MATERIAL_GROUP_DELETED:   'MATERIAL_GROUP_DELETED',
 });
 
 const ACTION_LABELS = Object.freeze({
@@ -121,6 +126,10 @@ const ACTION_LABELS = Object.freeze({
   PO_UPDATED:               'Purchase Order Edited',
   QUOTE_CREATED:            'Quotation Raised',
   QUOTE_UPDATED:            'Quotation Edited',
+  MATERIAL_GROUP_CREATED:   'Material Group Created',
+  MATERIAL_GROUP_UPDATED:   'Material Group Edited',
+  MATERIAL_GROUP_ARCHIVED:  'Material Group Archived',
+  MATERIAL_GROUP_DELETED:   'Material Group Deleted',
   PO_DELETED:               'Purchase Order Deleted',
   PO_STOCK_INWARD:          'Stock Received Against PO',
   ELASTIC_STOCK_ADJUST:     'Elastic Stock Adjusted',

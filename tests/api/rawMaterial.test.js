@@ -20,6 +20,21 @@ jest.mock("../../middleware/auth.js", () => {
 });
 
 jest.mock("../../models/RawMaterial");
+// Creating or editing a material now settles its group and its category
+// name against each other, which is a lookup. This suite has no
+// connection, so an unmocked query here hangs the request until the test
+// times out. Default: no group matches the name — which is the case a
+// database that has not been migrated yet is in, and the one where the
+// route must still behave exactly as it always did.
+jest.mock("../../models/MaterialGroup", () => ({
+  findById: jest.fn(() => ({
+    select: () => ({ lean: () => Promise.resolve(null) }),
+  })),
+  findOne: jest.fn(() => ({
+    collation: () => ({ select: () => ({ lean: () => Promise.resolve(null) }) }),
+  })),
+  find: jest.fn(() => ({ select: () => ({ lean: () => Promise.resolve([]) }) })),
+}));
 jest.mock("../../models/PurchaseOrder");
 jest.mock("../../models/MaterialInward");
 jest.mock("../../models/MaterialOut.cjs");
@@ -143,7 +158,13 @@ describe("GET /api/v2/materials/get-raw-materials", () => {
 
     await request(app).get("/api/v2/materials/get-raw-materials?category=warp");
 
-    expect(RawMaterial.find).toHaveBeenCalledWith(expect.objectContaining({ category: "warp" }));
+    // Matched case-INSENSITIVELY now, not by equality. A chip labelled
+    // "Rubber" has to find the rows a client wrote as "rubber" — that
+    // split is the whole reason material groups exist, and an exact
+    // match would preserve it forever.
+    expect(RawMaterial.find).toHaveBeenCalledWith(
+      expect.objectContaining({ category: /^warp$/i })
+    );
   });
 
   it("adds name regex filter when search is provided", async () => {

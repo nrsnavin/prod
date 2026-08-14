@@ -4,6 +4,7 @@ const express           = require("express");
 const router            = express.Router();
 const mongoose          = require("mongoose");
 const RawMaterial       = require("../models/RawMaterial");
+const MaterialGroup     = require("../models/MaterialGroup");
 const PurchaseOrder     = require("../models/PurchaseOrder");
 const MaterialInward    = require("../models/MaterialInward");
 const MaterialOutward   = require("../models/MaterialOut.cjs");
@@ -25,6 +26,56 @@ const {
 } = require("../utils/inventoryAlerts");
 const { enqueue } = require("../utils/outbox");
 
+/**
+ * Settle the group and the category name against each other.
+ *
+ * A caller may send either — the web form sends a group id, older
+ * clients and the mobile app send a category string — and whichever
+ * arrives, both fields are written. That is the invariant the whole
+ * feature rests on: `category` is the group's name, denormalised, and
+ * every existing reader (MRP, forecast, stock-count scope, the mobile
+ * chips) still reads only that.
+ *
+ * A category naming no group is NOT rejected. Groups are a tidy-up of
+ * data that has been free text for years, and refusing an unrecognised
+ * string here would break every client that has not been updated yet.
+ * It is stored with a null link, and the settings screen shows it as
+ * ungrouped so somebody can file it.
+ *
+ * @returns {{ error: string } | { group: ObjectId|null, category: string }}
+ */
+async function resolveGroup({ group, category }) {
+  if (group !== undefined && group !== null && group !== "") {
+    if (!mongoose.Types.ObjectId.isValid(group)) {
+      return { error: "group must be a valid id" };
+    }
+    const doc = await MaterialGroup.findById(group).select("name archived").lean();
+    if (!doc) return { error: "That material group does not exist" };
+    if (doc.archived) {
+      return { error: `"${doc.name}" is archived — restore it before filing materials under it.` };
+    }
+    // The group wins over any category string sent alongside it. They
+    // can only disagree because a client sent a stale name, and the id
+    // is the one that was chosen from a list.
+    return { group: doc._id, category: doc.name };
+  }
+
+  const name = String(category ?? "").trim();
+  if (!name) return { error: "A category or group is required" };
+
+  const match = await MaterialGroup.findOne({ name, archived: { $ne: true } })
+    .collation({ locale: "en", strength: 2 })
+    .select("name")
+    .lean();
+
+  // Matched case-insensitively but stored under the GROUP's spelling,
+  // so "warp" and "Warp" from two different clients both land in one
+  // group rather than creating the split this feature exists to end.
+  return match
+    ? { group: match._id, category: match.name }
+    : { group: null, category: name };
+}
+
 // ══════════════════════════════════════════════════════════════
 //  1.  CREATE RAW MATERIAL
 //      POST /materials/create-raw-material
@@ -32,17 +83,36 @@ const { enqueue } = require("../utils/outbox");
 router.post(
   "/create-raw-material",
   catchAsyncErrors(async (req, res, next) => {
-    const { name, category, stock, minStock, supplier, price } = req.body;
+    const { name, category, group, stock, minStock, supplier, price, unit } = req.body;
 
-    if (!name || !category || !supplier) {
-      return next(new ErrorHandler("name, category and supplier are required", 400));
+    if (!name || !supplier) {
+      return next(new ErrorHandler("name and supplier are required", 400));
+    }
+
+    const resolved = await resolveGroup({ group, category });
+    if (resolved.error) return next(new ErrorHandler(resolved.error, 400));
+
+    // The group's defaults fill blanks at CREATE only, and are copied
+    // onto the material rather than read through. A material's own
+    // figures have to keep working when the group's change — otherwise
+    // editing a group silently restates the minimum stock of every
+    // material in it, which is not what editing a default means.
+    let defaults = { unit: "", minStock: 0 };
+    if (resolved.group) {
+      const g = await MaterialGroup.findById(resolved.group)
+        .select("defaultUnit defaultMinStock").lean();
+      defaults = { unit: g?.defaultUnit || "", minStock: Number(g?.defaultMinStock) || 0 };
     }
 
     const material = await RawMaterial.create({
       name,
-      category,
+      category: resolved.category,
+      group:    resolved.group,
+      unit:     String(unit ?? "").trim() || defaults.unit || "kg",
       stock:    stock    || 0,
-      minStock: minStock || 0,
+      minStock: minStock !== undefined && minStock !== null && minStock !== ""
+        ? minStock
+        : defaults.minStock,
       supplier,
       price:    price    || 0,
     });
@@ -59,7 +129,7 @@ router.post(
 router.get(
   "/get-raw-materials",
   catchAsyncErrors(async (req, res, next) => {
-    const { search, category, lowStock } = req.query;
+    const { search, category, group, lowStock } = req.query;
 
     const filter = {};
     // Archived materials are out of the pickers by default — that is
@@ -67,12 +137,27 @@ router.get(
     // `false`, because rows written before the field existed have no
     // value and must read as active.
     if (req.query.includeArchived !== "true") filter.archived = { $ne: true };
-    if (category)            filter.category = category;
+
+    // Filter by group id (what the web now sends) or by category name
+    // (what mobile and every older client send). The name match is
+    // case-INSENSITIVE: a chip labelled "Rubber" must find the rows a
+    // client wrote as "rubber", which is the split this whole feature
+    // exists to end and which an exact match would preserve forever.
+    if (group && mongoose.Types.ObjectId.isValid(group)) {
+      const g = await MaterialGroup.findById(group).select("name").lean();
+      filter.$or = g
+        ? [{ group: g._id }, { category: new RegExp(`^${escapeRegex(g.name)}$`, "i") }]
+        : [{ group }];
+    } else if (category) {
+      filter.category = new RegExp(`^${escapeRegex(String(category))}$`, "i");
+    }
+
     if (search)              filter.name = { $regex: escapeRegex(search), $options: "i" };
     if (lowStock === "true") filter.$expr = { $lte: ["$stock", "$minStock"] };
 
     const materials = await RawMaterial.find(filter)
       .populate("supplier", "name")
+      .populate("group", "name colour kind")
       .select("-stockMovements")
       .sort({ createdAt: -1 });
 
@@ -347,7 +432,7 @@ router.put(
     // let a caller overwrite the audit ledgers (stockMovements,
     // priceHistory) or totalConsumption wholesale — build an explicit
     // update instead. The append-only priceHistory is managed below.
-    const ALLOWED = ["name", "category", "supplier", "price", "minStock", "stock"];
+    const ALLOWED = ["name", "supplier", "price", "minStock", "stock", "unit"];
     const update = {};
     for (const f of ALLOWED) {
       if (req.body[f] !== undefined) update[f] = req.body[f];
@@ -356,6 +441,22 @@ router.put(
 
     const existing = await RawMaterial.findById(_id);
     if (!existing) return next(new ErrorHandler("Raw material not found", 404));
+
+    // `category` and `group` are settled together, never separately.
+    // Whitelisting `category` as a plain field — which is what this did
+    // before groups existed — would let an edit move a material's
+    // category name while leaving its group link pointing at the old
+    // one, which is the exact drift the denormalised name is supposed
+    // to be safe from.
+    if (req.body.category !== undefined || req.body.group !== undefined) {
+      const resolved = await resolveGroup({
+        group:    req.body.group,
+        category: req.body.category ?? existing.category,
+      });
+      if (resolved.error) return next(new ErrorHandler(resolved.error, 400));
+      update.category = resolved.category;
+      update.group    = resolved.group;
+    }
 
     // Snapshot for the inventory-alert fire-and-forget below.
     const _alertSnap = {
@@ -1057,14 +1158,91 @@ router.get(
 // ══════════════════════════════════════════════════════════════
 //  11. MATERIAL FOR NEW ELASTIC  (legacy)
 // ══════════════════════════════════════════════════════════════
+//  Four buckets, matched CASE-INSENSITIVELY and by group link as well
+//  as by name.
+//
+//  This used to be four find({ category: "warp" }) queries matching the
+//  literal string — note "Rubber" capitalised and the other three not.
+//  Two consequences, both silent:
+//
+//    • Editing a group's name case in the master emptied the matching
+//      picker. No error, no empty-state message — the elastic form just
+//      offered no warp yarns, and the recipe went in blank.
+//    • The mobile app has always offered a "Chemicals" category the web
+//      never had. Those materials matched none of the four and were
+//      invisible to this endpoint entirely.
+//
+//  The buckets themselves stay hardcoded on purpose: an elastic has
+//  exactly four composition slots, and they are a property of the cloth
+//  rather than of the group list. What is no longer hardcoded is which
+//  materials fall into each — that comes from the groups, so renaming
+//  one in Settings moves its materials here too.
+const RECIPE_BUCKETS = Object.freeze({
+  warp:     ['warp'],
+  weft:     ['weft'],
+  covering: ['covering'],
+  // Named "rubber" in the response for the elastic form's warp-spandex
+  // slot; "spandex" accepted too, because that is what the floor calls
+  // it and a mill that renamed the group should not lose the picker.
+  rubber:   ['rubber', 'spandex'],
+});
+
 router.get(
   "/materialForNewElastic",
   catchAsyncErrors(async (req, res, next) => {
+    const groups = await MaterialGroup.find({ archived: { $ne: true } })
+      .select("_id name")
+      .lean();
+
+    // A group belongs to a bucket when its name CONTAINS the keyword,
+    // folded to lowercase — so "Warp", "warp yarn" and "Warp Spandex"
+    // all reach the warp picker, and a rename that keeps the word
+    // keeps working.
+    const bucketFor = (name) => {
+      const n = String(name || "").toLowerCase();
+      for (const [bucket, keywords] of Object.entries(RECIPE_BUCKETS)) {
+        if (keywords.some((k) => n.includes(k))) return bucket;
+      }
+      return null;
+    };
+
+    const idsByBucket = { warp: [], weft: [], covering: [], rubber: [] };
+    const namesByBucket = { warp: [], weft: [], covering: [], rubber: [] };
+    for (const g of groups) {
+      const bucket = bucketFor(g.name);
+      if (!bucket) continue;
+      idsByBucket[bucket].push(g._id);
+      namesByBucket[bucket].push(g.name);
+    }
+
+    // Matched by group link OR by category name, and the name match is
+    // a case-insensitive regex rather than an equality — a material
+    // that predates the migration carries only the string.
+    const query = (bucket) => {
+      const names = namesByBucket[bucket];
+      const ids   = idsByBucket[bucket];
+      const or = [];
+      if (ids.length)   or.push({ group: { $in: ids } });
+      if (names.length) {
+        or.push({
+          category: { $in: names.map((n) => new RegExp(`^${escapeRegex(n)}$`, "i")) },
+        });
+      }
+      // No group carries this keyword — fall back to the literal the
+      // endpoint always used, so a database with no groups seeded yet
+      // behaves exactly as it did before.
+      if (or.length === 0) {
+        or.push({
+          category: {
+            $in: RECIPE_BUCKETS[bucket].map((k) => new RegExp(`^${escapeRegex(k)}$`, "i")),
+          },
+        });
+      }
+      return RawMaterial.find({ archived: { $ne: true }, $or: or }).sort({ name: 1 });
+    };
+
     const [warp, rubber, weft, covering] = await Promise.all([
-      RawMaterial.find({ category: "warp" }).sort({ name: 1 }),
-      RawMaterial.find({ category: "Rubber" }).sort({ name: 1 }),
-      RawMaterial.find({ category: "weft" }).sort({ name: 1 }),
-      RawMaterial.find({ category: "covering" }).sort({ name: 1 }),
+      query("warp"), query("rubber"), query("weft"), query("covering"),
     ]);
     res.status(200).json({ warp, weft, rubber, covering });
   })

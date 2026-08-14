@@ -73,7 +73,39 @@ const StockMovementSchema = new mongoose.Schema(
 const RawMaterialSchema = new mongoose.Schema(
   {
     name:     { type: String, required: true },
+
+    // ── The group, and its name ────────────────────────────────────
+    // `category` is the group's NAME, denormalised onto the material.
+    // It stays required and stays authoritative for every reader that
+    // already had it — the MRP sheet, the forecast, stock-count scope,
+    // the mobile chips, the elastic recipe pickers. None of them had to
+    // change when groups arrived, which is the whole reason the two
+    // fields coexist rather than one replacing the other.
+    //
+    // `group` is the link. It is what a rename moves, what the pickers
+    // are built from, and what a report groups by when it wants the
+    // group's colour or kind. Renaming a group rewrites `category` on
+    // every member in the same operation (api/materialGroup.js), so the
+    // two cannot drift.
+    //
+    // Optional, because a material can exist before anyone has tidied
+    // it into a group — rows predating this field have a category and
+    // no link, and must keep working.
     category: { type: String, required: true },
+    group: {
+      type: mongoose.Types.ObjectId,
+      ref: 'MaterialGroup',
+      default: null,
+      index: true,
+    },
+
+    // ── Unit of measure ────────────────────────────────────────────
+    // api/rawMaterial.js has been reading `m.unit || ""` since long
+    // before this field existed, so every unit it returned was the
+    // empty string. Defaulted to kg because that is what every yarn and
+    // every price in this system is already denominated in — `price` is
+    // documented as per kg, and materialValuation costs against it.
+    unit: { type: String, default: 'kg', trim: true },
 
     supplier: {
       type: mongoose.Types.ObjectId,
