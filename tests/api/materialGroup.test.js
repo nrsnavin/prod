@@ -224,6 +224,46 @@ describe('renaming a group', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+//  The chip colour. Three screens on the phone used to hold a hardcoded
+//  switch each — one of them case-sensitive — so a group the mill added
+//  was grey everywhere and renaming "Rubber" to "rubber" lost its
+//  colour on the add-material form only.
+// ══════════════════════════════════════════════════════════════════
+describe('a group colour', () => {
+  it('round-trips to the clients that draw the chips', async () => {
+    const g = (await createGroup({ name: 'Warp', colour: '#3B82F6' })).body.group;
+    expect(g.colour).toBe('#3B82F6');
+
+    const list = await request(app).get(api).set('Cookie', cookie());
+    expect(list.body.groups[0].colour).toBe('#3B82F6');
+  });
+
+  it('is empty until somebody picks one', async () => {
+    // Both clients fall back to the colours they have always drawn, so
+    // a group with no colour looks the way it did yesterday rather than
+    // going grey.
+    const g = (await createGroup({ name: 'Warp' })).body.group;
+    expect(g.colour).toBe('');
+  });
+
+  it('is cleared by sending an empty string', async () => {
+    const g = (await createGroup({ name: 'Warp', colour: '#3B82F6' })).body.group;
+    const res = await request(app).put(`${api}/update`)
+      .set('Cookie', cookie()).send({ id: g._id, colour: '' });
+    expect(res.body.group.colour).toBe('');
+  });
+
+  it('stores nonsense rather than refusing it, because both clients ignore it', async () => {
+    // Deliberate. The phone parses the hex and falls back when it
+    // cannot; the browser hands it to CSS, which drops an invalid
+    // colour. Refusing here would mean a validation rule to keep in
+    // step with two renderers for no gain.
+    const g = (await createGroup({ name: 'Warp', colour: 'not a colour' })).body.group;
+    expect(g.colour).toBe('not a colour');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 describe('deleting a group', () => {
   it('deletes one nothing has ever used', async () => {
     const g = (await createGroup({ name: 'Typo' })).body.group;
