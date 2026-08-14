@@ -34,6 +34,9 @@ const Elastic = require('../models/Elastic');
  *   overs: Array<{ elastic: string, name: string, noOfHook: number, excess: number }>,
  *   fits: boolean,
  *   summary: string,
+ *   checked: number,
+ *   unchecked: number,
+ *   reason: '' | 'no-machine-hooks' | 'elastics-not-found',
  * }>}
  */
 async function checkHookFit(machine, elasticIds) {
@@ -49,7 +52,20 @@ async function checkHookFit(machine, elasticIds) {
     // No hooks recorded on the machine is missing information, not a
     // machine with no hooks. Refusing — or confirming — on the strength
     // of a zero would be inventing a fact.
-    return { machineHooks, overs: [], fits: true, summary: '' };
+    //
+    // But `fits: true` alone made a check that could not run look
+    // exactly like one that passed, byte for byte. Silence reads as
+    // approval, so the reason comes back with it and the caller can
+    // say "could not check" rather than "fine".
+    return {
+      machineHooks,
+      overs: [],
+      fits: true,
+      summary: '',
+      checked: 0,
+      unchecked: ids.length,
+      reason: machineHooks <= 0 && ids.length > 0 ? 'no-machine-hooks' : '',
+    };
   }
 
   const elastics = await Elastic.find({ _id: { $in: ids } })
@@ -67,6 +83,12 @@ async function checkHookFit(machine, elasticIds) {
     // Worst fit first — it is the one that decides the answer.
     .sort((a, b) => b.excess - a.excess);
 
+  // An id that resolves to nothing — a deleted elastic, a stale head
+  // map — is not a fit and not a misfit. It is unexamined, and saying
+  // so is the difference between "this machine can run the job" and
+  // "this machine can run the part of the job I could read".
+  const unchecked = ids.length - elastics.length;
+
   return {
     machineHooks,
     overs,
@@ -74,6 +96,9 @@ async function checkHookFit(machine, elasticIds) {
     summary: overs
       .map((o) => `${o.name || o.elastic} needs ${o.noOfHook}`)
       .join(', '),
+    checked: elastics.length,
+    unchecked,
+    reason: unchecked > 0 ? 'elastics-not-found' : '',
   };
 }
 
