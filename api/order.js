@@ -18,6 +18,11 @@ const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
 const { requireReason } = require("../utils/auditReason.js");
+const {
+  readOrderLines,
+  assertElasticsExist,
+  assertCustomerExists,
+} = require("../utils/orderLines");
 const { assertVersion } = require("../utils/versioning.js");
 const { applyMovement } = require("../utils/elasticStock.js");
 const { appendStockMovement } = require("../utils/stockLedger.js");
@@ -277,15 +282,28 @@ router.post(
       const { date, po, customer, supplyDate, description, elasticOrdered } =
         req.body;
 
-      const rawMaterialRequired = await computeRawMaterialRequired(elasticOrdered);
+      // Validated before anything is written. This route used to read
+      // the body straight into Order.create, so a missing array was a
+      // 500 and an empty one was a 201 for an order with no lines.
+      // See utils/orderLines.js for what each rule is protecting.
+      const parsed = readOrderLines(elasticOrdered);
+      if (parsed.error) return next(new ErrorHandler(parsed.error, 400));
 
-      const producedElastic = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
-      const packedElastic   = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
-      const pendingElastic  = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: e.quantity }));
+      const customerError = await assertCustomerExists(customer, Customer);
+      if (customerError) return next(new ErrorHandler(customerError, 400));
+
+      const elasticError = await assertElasticsExist(parsed.lines, Elastic);
+      if (elasticError) return next(new ErrorHandler(elasticError, 400));
+
+      const rawMaterialRequired = await computeRawMaterialRequired(parsed.lines);
+
+      const producedElastic = parsed.lines.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+      const packedElastic   = parsed.lines.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+      const pendingElastic  = parsed.lines.map((e) => ({ elastic: e.elastic, quantity: e.quantity }));
 
       const order = await Order.create({
         date, po, customer, supplyDate, description,
-        elasticOrdered, producedElastic, packedElastic,
+        elasticOrdered: parsed.lines, producedElastic, packedElastic,
         pendingElastic, rawMaterialRequired, status: "Open",
       });
 
@@ -1114,8 +1132,11 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const {
       orderId,
-      po, supplyDate, description, customer, elasticOrdered,
+      po, supplyDate, description, customer,
     } = req.body;
+    // `let`, because the validated + normalised lines replace the raw
+    // ones below rather than being carried alongside them.
+    let elasticOrdered = req.body.elasticOrdered;
     if (!orderId) return next(new ErrorHandler("orderId is required", 400));
     const auditReason = requireReason(req);
     if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
@@ -1154,14 +1175,57 @@ router.post(
         }
 
         if (Array.isArray(elasticOrdered) && elasticOrdered.length > 0) {
+          // The same rules the create path enforces. A rule applied on
+          // one and not the other is not a rule — an order that could
+          // not be CREATED with a duplicated line could be edited into
+          // one.
+          const parsed = readOrderLines(elasticOrdered);
+          if (parsed.error) throw new ErrorHandler(parsed.error, 400);
+          const elasticError = await assertElasticsExist(parsed.lines, Elastic);
+          if (elasticError) throw new ErrorHandler(elasticError, 400);
+          elasticOrdered = parsed.lines;
+
           previousValues.elasticOrdered = order.elasticOrdered.map((e) => ({
             elastic:  e.elastic.toString(),
             quantity: e.quantity,
+            // The rate belongs in the history too. Recording only the
+            // quantity made a wiped price invisible in the audit trail
+            // as well as on the order.
+            rate:     e.rate ?? 0,
           }));
 
           const rawMaterialRequired = await computeRawMaterialRequired(elasticOrdered);
 
-          order.elasticOrdered      = elasticOrdered;
+          // ── Keep the price that was agreed ────────────────────────
+          //
+          // This route owns QUANTITIES. The selling rate is owned by
+          // PUT /pnl/order/:orderId/rates, which says so in its own
+          // header — "Deliberately NOT part of /order/update-order".
+          //
+          // But assigning the incoming array wholesale let the route
+          // silently destroy the field it does not manage: the web edit
+          // sends { elastic, quantity } and nothing else, so `rate` fell
+          // to its schema default of 0 on every line. Changing one
+          // quantity unpriced the whole order, and the P&L — whose
+          // revenue is exactly this field — then reported it as unpriced
+          // with nothing anywhere saying why.
+          //
+          // So each line keeps the rate its elastic already had, unless
+          // the caller states one. An explicit 0 is honoured rather than
+          // overwritten: 0 is this system's own signal for "not priced
+          // yet", and carrying the old rate over it would make unpricing
+          // a line impossible — the same bug from the other side.
+          const rateByElastic = new Map(
+            (order.elasticOrdered || []).map((e) => [String(e.elastic), Number(e.rate) || 0])
+          );
+          const withRates = elasticOrdered.map((line) => ({
+            ...line,
+            rate: line?.rate !== undefined && line?.rate !== null && line?.rate !== ''
+              ? Number(line.rate) || 0
+              : rateByElastic.get(String(line.elastic)) ?? 0,
+          }));
+
+          order.elasticOrdered      = withRates;
           order.pendingElastic      = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: e.quantity }));
           order.producedElastic     = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
           order.packedElastic       = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
