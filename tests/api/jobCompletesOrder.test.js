@@ -203,3 +203,73 @@ describe('an order that is no longer completable', () => {
     expect(await reservedNow()).toBe(0);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  AN ORDER IS FINISHED WHEN ITS WORK IS FINISHED
+//
+//  /order/complete checked only that the order was InProgress. So an
+//  operator could close an order while a job was still on a machine —
+//  releasing the reserved stock for goods that were still being made,
+//  and freezing the order at Completed, which is terminal.
+//
+//  The job cascade already had this right: it closes the order only
+//  when every job is done. The direct route did not, so the same
+//  question had two answers depending on which button was pressed.
+// ══════════════════════════════════════════════════════════════════
+describe('completing an order directly', () => {
+  const complete = (order) =>
+    request(app).post('/api/v2/order/complete')
+      .set('Cookie', cookie()).send({ orderId: order._id });
+
+  it('is refused while a job is still running', async () => {
+    const { order } = await orderInProgress();   // its job is at packing
+    const res = await complete(order);
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/still|not finished|unfinished/i);
+  });
+
+  it('names the jobs that are holding it open', async () => {
+    const { order } = await orderInProgress();
+    const res = await complete(order);
+    expect(res.body.message).toMatch(/packing/);
+  });
+
+  it('leaves the reserved stock alone when it refuses', async () => {
+    // The refusal must not half-run: releasing stock and then failing
+    // to close the order would hand the same units out twice.
+    const { order } = await orderInProgress();
+    await complete(order);
+
+    expect(await reservedNow()).toBe(1000);
+    expect((await Order.findById(order._id).lean()).status).toBe('InProgress');
+  });
+
+  it('goes through once every job is completed', async () => {
+    const { order, job } = await orderInProgress();
+    await JobOrder.updateOne({ _id: job._id }, { $set: { status: 'completed' } });
+
+    const res = await complete(order);
+    expect(res.status).toBe(200);
+    expect(await reservedNow()).toBe(0);
+  });
+
+  it('counts a cancelled job as finished, because it will never produce', async () => {
+    const { order, job } = await orderInProgress();
+    await JobOrder.updateOne({ _id: job._id }, { $set: { status: 'cancelled' } });
+
+    expect((await complete(order)).status).toBe(200);
+  });
+
+  it('allows an order that never needed a job at all', async () => {
+    // Fulfilled from stock. Vacuously true, and refusing it would trap
+    // the order at InProgress with no way out.
+    const order = await Order.create({
+      customer: customer._id, po: 'PO-9',
+      date: new Date(), supplyDate: new Date(), status: 'InProgress',
+      elasticOrdered: [{ elastic: elastic._id, quantity: 100, rate: 10 }],
+      reservations: [{ elastic: elastic._id, quantity: 100 }],
+    });
+    expect((await complete(order)).status).toBe(200);
+  });
+});

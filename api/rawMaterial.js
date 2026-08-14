@@ -1076,6 +1076,20 @@ router.get(
     // the lead time rather than by an arbitrary look-ahead.
     const horizonDays = Math.min(Math.max(Number(req.query.horizonDays) || 14, 1), 120);
 
+    // Return the materials that DON'T need ordering too.
+    //
+    // The buying list is the point of this endpoint, so by default it
+    // returns only what breaches its reorder point. But that made the
+    // whole model invisible whenever nothing did — and with no lead
+    // times set, which is where every mill starts, almost nothing does.
+    // The page then showed an empty state, which reads as "the system
+    // has nothing to say" rather than "everything is comfortable, and
+    // here is why".
+    //
+    // Off by default so the buying list stays a buying list.
+    const includeHealthy = req.query.includeHealthy === '1'
+      || req.query.includeHealthy === 'true';
+
     const now   = new Date();
     const since = new Date(now.getTime() - lookbackDays * DAY_MS);
 
@@ -1207,15 +1221,21 @@ router.get(
         now,
       });
 
-      if (!pos.shouldOrder || pos.suggestedQty <= 0) continue;
+      const needsOrder = pos.shouldOrder && pos.suggestedQty > 0;
+      if (!needsOrder && !includeHealthy) continue;
 
-      // A line nobody can act on is noise on a buying list. Counted and
-      // reported so it is visible as an absence rather than a silence.
-      if (!m.supplier || !m.supplier._id) { skippedNoSupplier += 1; continue; }
+      // A line nobody can act on is noise on a BUYING list — but it is
+      // still a material whose position somebody may want to inspect,
+      // so it is only dropped when the buying list is what was asked
+      // for.
+      if (!m.supplier || !m.supplier._id) {
+        if (needsOrder) skippedNoSupplier += 1;
+        if (!includeHealthy) continue;
+      }
 
       const orderQty = applyPurchaseRules(pos.suggestedQty, {
-        minOrderQty: m.supplier.minOrderQty,
-        packSize:    m.supplier.packSize,
+        minOrderQty: m.supplier?.minOrderQty,
+        packSize:    m.supplier?.packSize,
       });
 
       flagged.push({
@@ -1262,18 +1282,29 @@ router.get(
         suggestedQty: orderQty,
         rawSuggestedQty: pos.suggestedQty,
         estimatedCost: Math.round(orderQty * (Number(m.price) || 0)),
-        supplier: {
-          _id: String(m.supplier._id),
-          name: m.supplier.name,
-          leadTimeDays: Number(m.supplier.leadTimeDays) || 0,
-        },
+        // Says which of these is a line to act on, as its own field
+        // rather than something a reader has to infer from a quantity.
+        needsOrder,
+        supplier: m.supplier?._id
+          ? {
+              _id: String(m.supplier._id),
+              name: m.supplier.name,
+              leadTimeDays: Number(m.supplier.leadTimeDays) || 0,
+            }
+          : null,
       });
     }
+
+    // Everything below — the ordering, the per-supplier grouping, the
+    // totals — is about the BUYING LIST, so it reads only the lines
+    // that need ordering. A healthy material rides along for inspection
+    // and must not appear in a draft PO or an estimated spend.
+    const toBuy = flagged.filter((f) => f.needsOrder && f.supplier);
 
     // Late first — an order that cannot arrive in time is a different
     // and more urgent thing than one merely below its reorder point.
     // Then by how few days of cover are left.
-    flagged.sort((a, b) => {
+    toBuy.sort((a, b) => {
       if (a.alreadyLate !== b.alreadyLate) return a.alreadyLate ? -1 : 1;
       if (a.severity !== b.severity) return a.severity === "critical" ? -1 : 1;
       const ac = a.daysOfCover ?? -1;   // no demand at all sorts LAST,
@@ -1284,7 +1315,7 @@ router.get(
 
     // One PO per vendor.
     const bySupplierMap = new Map();
-    for (const f of flagged) {
+    for (const f of toBuy) {
       const key = f.supplier._id;
       if (!bySupplierMap.has(key)) {
         bySupplierMap.set(key, { supplier: f.supplier, lines: [], estimatedCost: 0 });
@@ -1303,11 +1334,13 @@ router.get(
     ).length;
 
     const totals = {
-      flagged: flagged.length,
-      critical: flagged.filter((f) => f.severity === "critical").length,
-      late: flagged.filter((f) => f.alreadyLate).length,
+      flagged: toBuy.length,
+      critical: toBuy.filter((f) => f.severity === "critical").length,
+      late: toBuy.filter((f) => f.alreadyLate).length,
       suppliers: bySupplier.length,
-      estimatedCost: flagged.reduce((s, f) => s + f.estimatedCost, 0),
+      estimatedCost: toBuy.reduce((s, f) => s + f.estimatedCost, 0),
+      // Only meaningful when the healthy ones were asked for.
+      reviewed: includeHealthy ? flagged.length : undefined,
     };
 
     const warnings = [];
@@ -1331,9 +1364,9 @@ router.get(
     // the prose and nothing else.
     let aiSummary = null, aiGenerated = false;
     const claude = anthropic();
-    if (claude && flagged.length > 0) {
+    if (claude && toBuy.length > 0) {
       try {
-        const facts = flagged.slice(0, 8).map((f) =>
+        const facts = toBuy.slice(0, 8).map((f) =>
           `${f.name}: net ${f.netStock} ${f.unit} (on hand ${f.onHand}, on order ${f.onOrder}, ` +
           `committed ${f.committed}), uses ${f.dailyDemand}/day, lead time ${f.leadTimeDays}d, ` +
           `reorder point ${f.reorderPoint}, ${f.daysOfCover ?? "?"} days cover` +
@@ -1359,7 +1392,11 @@ router.get(
     res.json({
       success: true,
       horizonDays, lookbackDays, coverDays, serviceLevel,
-      totals, materials: flagged, bySupplier, skippedNoSupplier,
+      totals,
+      // Everything that was assessed — the buying list when
+      // includeHealthy is off, every material when it is on.
+      materials: flagged,
+      bySupplier, skippedNoSupplier,
       // The model rests on lead time and it defaults to zero. A mill
       // that has set none gets a reorder point of just its manual
       // minimum and no "order by" date — worth saying out loud rather

@@ -1007,6 +1007,48 @@ router.post(
           throw new ErrorHandler("Only InProgress orders can be completed", 400);
         }
 
+        // ── An order is finished when its WORK is finished ──────────
+        //
+        // This checked only the order's own status, so an operator
+        // could close an order while a job was still on a machine —
+        // releasing the reserved stock for goods that were still being
+        // made, and freezing the order at Completed, which is terminal.
+        //
+        // The job cascade in api/job.js already had this right: it
+        // closes the order only when every job is done. The same
+        // question had two answers depending on which button was
+        // pressed, which is the shape of every fault in this codebase
+        // worth finding.
+        //
+        // A CANCELLED job counts as finished: it will never produce
+        // anything, and refusing on it would leave the order with no
+        // way to close. An order with no jobs at all passes too — it
+        // was fulfilled from stock, and trapping it at InProgress would
+        // be a rule with no escape.
+        const openJobs = await Job.find({
+          order: order._id,
+          status: { $nin: ["completed", "cancelled"] },
+        }).select("jobOrderNo status").session(session).lean();
+
+        if (openJobs.length > 0) {
+          const named = openJobs
+            .map((j) => `J-${j.jobOrderNo ?? "?"} (${j.status})`)
+            .join(", ");
+          const err = new ErrorHandler(
+            `This order still has ${openJobs.length} unfinished job` +
+            `${openJobs.length === 1 ? "" : "s"} — ${named}. ` +
+            `Complete or cancel ${openJobs.length === 1 ? "it" : "them"} first.`,
+            409
+          );
+          err.code = "ORDER_HAS_OPEN_JOBS";
+          err.details = {
+            jobs: openJobs.map((j) => ({
+              id: String(j._id), jobOrderNo: j.jobOrderNo ?? null, status: j.status,
+            })),
+          };
+          throw err;
+        }
+
         const actor = actorFromRequest(req);
         const released = await _releaseAllReservations(
           session,

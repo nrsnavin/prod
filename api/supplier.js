@@ -18,6 +18,11 @@ const router         = express.Router();
 
 const Supplier       = require("../models/Supplier");
 const PurchaseOrder  = require("../models/PurchaseOrder");
+// For validating what a PO was raised FOR — see /create-po. Required at
+// module load, not lazily inside the route: a missing import there
+// throws at request time, on the one path that writes a purchase order.
+const Order          = require("../models/Order");
+const JobOrder       = require("../models/JobOrder");
 const MaterialInward = require("../models/MaterialInward.js");
 const RawMaterial    = require("../models/RawMaterial");   // ← added for stock update
 
@@ -134,7 +139,7 @@ router.post(
   "/create-po",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { supplier, items, expectedDate, notes } = req.body;
+      const { supplier, items, expectedDate, notes, forOrder, forJob } = req.body;
       if (!supplier)
         return next(new ErrorHandler("Supplier is required", 400));
       if (!Array.isArray(items) || items.length === 0)
@@ -154,6 +159,31 @@ router.post(
         }
       }
 
+      // ── What this PO was raised for ──────────────────────────────
+      //
+      // Accepted here because "Raise PO" on an order or a job now takes
+      // the buyer to THIS form with the lines filled in, rather than
+      // creating the PO behind their back. Without these the trip
+      // through the form would silently drop the linkage, and
+      // PurchaseOrder's own schema says why that matters: "it makes the
+      // purchase answerable — 'why did we buy this?' has an answer
+      // months later".
+      //
+      // Both optional: a routine replenishment PO is for nobody in
+      // particular, and that is a normal thing for a PO to be.
+      for (const [field, value, Model] of [
+        ["forOrder", forOrder, Order],
+        ["forJob",   forJob,   JobOrder],
+      ]) {
+        if (value === undefined || value === null || value === "") continue;
+        if (!mongoose.Types.ObjectId.isValid(value)) {
+          return next(new ErrorHandler(`${field} must be a valid id`, 400));
+        }
+        if (!(await Model.exists({ _id: value }))) {
+          return next(new ErrorHandler(`That ${field === "forOrder" ? "order" : "job"} does not exist`, 400));
+        }
+      }
+
       const nextPoNo = await nextPoNumber();
 
       const parsedDate = expectedDate ? new Date(expectedDate) : undefined;
@@ -169,6 +199,8 @@ router.post(
         notes:        typeof notes === "string" ? notes.trim() : "",
         poNo:   nextPoNo,
         status: "Open",
+        ...(forOrder ? { forOrder } : {}),
+        ...(forJob   ? { forJob   } : {}),
       });
 
       const populated = await PurchaseOrder.findById(po._id)
@@ -438,6 +470,31 @@ router.post(
       const source = await PurchaseOrder.findById(req.body.id);
       if (!source) return next(new ErrorHandler("Source PO not found", 404));
 
+      // ── What this PO was raised for ──────────────────────────────
+      //
+      // Accepted here because "Raise PO" on an order or a job now takes
+      // the buyer to THIS form with the lines filled in, rather than
+      // creating the PO behind their back. Without these the trip
+      // through the form would silently drop the linkage, and
+      // PurchaseOrder's own schema says why that matters: "it makes the
+      // purchase answerable — 'why did we buy this?' has an answer
+      // months later".
+      //
+      // Both optional: a routine replenishment PO is for nobody in
+      // particular, and that is a normal thing for a PO to be.
+      for (const [field, value, Model] of [
+        ["forOrder", forOrder, Order],
+        ["forJob",   forJob,   JobOrder],
+      ]) {
+        if (value === undefined || value === null || value === "") continue;
+        if (!mongoose.Types.ObjectId.isValid(value)) {
+          return next(new ErrorHandler(`${field} must be a valid id`, 400));
+        }
+        if (!(await Model.exists({ _id: value }))) {
+          return next(new ErrorHandler(`That ${field === "forOrder" ? "order" : "job"} does not exist`, 400));
+        }
+      }
+
       const nextPoNo = await nextPoNumber();
 
       const cloned = await PurchaseOrder.create({
@@ -450,6 +507,8 @@ router.post(
         })),
         poNo:   nextPoNo,
         status: "Open",
+        ...(forOrder ? { forOrder } : {}),
+        ...(forJob   ? { forJob   } : {}),
       });
 
       const populated = await PurchaseOrder.findById(cloned._id)

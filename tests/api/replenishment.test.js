@@ -526,3 +526,78 @@ describe('setting a supplier lead time through the API', () => {
     expect((await lineFor('Warp 40s')).leadTimeDays).toBe(30);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  SEEING THE MODEL WHEN NOTHING NEEDS BUYING
+//
+//  The buying list is the point of this endpoint, so by default it
+//  returns only what breaches its reorder point. That made the whole
+//  model invisible whenever nothing did — and with no lead times set,
+//  which is where every mill starts, almost nothing does. The page
+//  showed an empty state, which reads as "the system has nothing to
+//  say" rather than "everything is comfortable, and here is why".
+// ══════════════════════════════════════════════════════════════════
+describe('inspecting a material that is comfortable', () => {
+  it('is left off the buying list', async () => {
+    const m = await material({ stock: 100000 });
+    await steadyDraws(m, 10, 30);
+    expect(await lineFor('Warp 40s')).toBeUndefined();
+  });
+
+  it('comes back when the healthy ones are asked for', async () => {
+    const m = await material({ stock: 100000 });
+    await steadyDraws(m, 10, 30);
+
+    const line = await lineFor('Warp 40s', '?includeHealthy=1');
+    expect(line).toBeDefined();
+    expect(line.needsOrder).toBe(false);
+  });
+
+  it('carries every term of the working, so it can be inspected', async () => {
+    const m = await material({ stock: 100000 });
+    await steadyDraws(m, 10, 30);
+    const line = await lineFor('Warp 40s', '?includeHealthy=1');
+
+    for (const k of ['dailyDemand', 'leadTimeDays', 'safetyStock', 'reorderPoint', 'netStock']) {
+      expect(line[k]).toBeDefined();
+    }
+  });
+
+  it('does not put a comfortable material on a draft PO', async () => {
+    // It rides along for inspection. Appearing in bySupplier would put
+    // it in a purchase order somebody is about to send.
+    const healthy = await material({ name: 'Plenty', stock: 100000 });
+    await steadyDraws(healthy, 10, 30);
+    const short = await material({ name: 'Short', stock: 10 });
+    await steadyDraws(short, 10, 30);
+
+    const res = await forecast('?includeHealthy=1');
+    const onPos = res.body.bySupplier.flatMap((g) => g.lines.map((l) => l.name));
+    expect(onPos).toContain('Short');
+    expect(onPos).not.toContain('Plenty');
+  });
+
+  it('does not count it in the totals or the spend', async () => {
+    const healthy = await material({ name: 'Plenty', stock: 100000 });
+    await steadyDraws(healthy, 10, 30);
+    const short = await material({ name: 'Short', stock: 10 });
+    await steadyDraws(short, 10, 30);
+
+    const res = await forecast('?includeHealthy=1');
+    expect(res.body.totals.flagged).toBe(1);
+    expect(res.body.totals.reviewed).toBe(2);
+    expect(res.body.materials).toHaveLength(2);
+  });
+
+  it('shows a material with no supplier, which the buying list drops', async () => {
+    // It cannot be put on a PO, but its position is still a fact
+    // somebody may want to see.
+    await RawMaterial.create({
+      name: 'Orphan', category: 'warp', stock: 10, minStock: 500, price: 100,
+      supplier: null,
+    });
+    const line = await lineFor('Orphan', '?includeHealthy=1');
+    expect(line).toBeDefined();
+    expect(line.supplier).toBeNull();
+  });
+});
