@@ -51,6 +51,7 @@ const {
 // those writes used to ask where the order actually was — which is how
 // cancelling a job on a CANCELLED order set it back to Approved.
 const { applyOrderStatus } = require('../domain/orderStatus');
+const { releaseAllReservations } = require('../services/orderReservations');
 const { isProductionLocked } = require('../utils/productionLock');
 const { outsourcingBlockers, outsourcingDerived } = require('../utils/outsourcingRecord');
 const {
@@ -1033,6 +1034,9 @@ router.post(
     job.fingerprints.push(stageFp);
 
     let completionFp = null;
+    // Set when the completion transaction below has already saved the
+    // job, so the ordinary save at the end does not repeat it.
+    let jobSavedInTxn = false;
     if (nextStatus === 'completed') {
       const siblingJobs = await JobOrder.find({ order: job.order, _id: { $ne: job._id } }).select('status');
       const allDone = siblingJobs.every(j => ['completed', 'cancelled'].includes(j.status));
@@ -1051,29 +1055,73 @@ router.post(
       job.fingerprints.push(completionFp);
 
       if (allDone) {
-        const order = await Order.findById(job.order);
-        // A cancelled or deleted order is not completed by its jobs
-        // finishing — that used to resurrect it.
-        if (order && applyOrderStatus(order, 'Completed', req.user?._id)) {
-          stampFingerprint(order, ACTION_CODES.ORDER_COMPLETED, {
-            actor,
-            meta: {
-              previousStatus:  'InProgress',
-              newStatus:       'Completed',
-              triggeredByJob:  job._id.toString(),
-              triggerJobNo:    job.jobOrderNo,
-              relatedHash:     completionFp.hash,
-              relatedShortId:  completionFp.shortId,
-            },
+        // ── Closing the order gives its reserved stock back ─────────
+        //
+        // This cascade used to flip the status and nothing else, while
+        // POST /order/complete released every remaining reservation
+        // first. Two doors into one state, and only one of them tidied
+        // up — so an order finished by its last job kept holding
+        // `Elastic.reservedStock` forever. Completed is terminal, so
+        // /order/complete could never be run on it afterwards to
+        // recover: every later order simply saw less available than
+        // there was, permanently, with nothing on any screen to say so.
+        //
+        // In a transaction because it now moves stock: the release, the
+        // order's status and the job's own status have to land together
+        // or not at all. Releasing stock and then failing to record the
+        // completion would hand the same units out twice.
+        const session = await mongoose.startSession();
+        try {
+          await session.withTransaction(async () => {
+            const order = await Order.findById(job.order).session(session);
+            // A cancelled or deleted order is not completed by its jobs
+            // finishing — that used to resurrect it. Its reservations
+            // were released by the cancel and must not go back twice;
+            // releaseAllReservations empties the rows as it goes, so a
+            // second pass finds nothing, but the status guard stops it
+            // being reached at all.
+            if (order && applyOrderStatus(order, 'Completed', req.user?._id)) {
+              const releasedRes = await releaseAllReservations(
+                session, order, actor, 'order completed by its last job'
+              );
+              stampFingerprint(order, ACTION_CODES.ORDER_COMPLETED, {
+                actor,
+                meta: {
+                  previousStatus:  'InProgress',
+                  newStatus:       'Completed',
+                  triggeredByJob:  job._id.toString(),
+                  triggerJobNo:    job.jobOrderNo,
+                  releasedReservations: releasedRes.length,
+                  relatedHash:     completionFp.hash,
+                  relatedShortId:  completionFp.shortId,
+                },
+              });
+              await order.save({ session });
+
+              // Saved inside the same transaction as the release. The
+              // job's own status is what made this happen, and a
+              // release that committed without it would leave the order
+              // closed against a job still reading as packing.
+              stampStage(job, nextStatus, req.user?._id);
+              job.status = nextStatus;
+              await job.save({ session });
+              jobSavedInTxn = true;
+            }
           });
-          await order.save();
+        } finally {
+          session.endSession();
         }
       }
     }
 
-    stampStage(job, nextStatus, req.user?._id);
-    job.status = nextStatus;
-    await job.save();
+    // Already written inside the completion transaction above, when the
+    // order closed with it. Saving again here would bump the document a
+    // second time for one transition.
+    if (!jobSavedInTxn) {
+      stampStage(job, nextStatus, req.user?._id);
+      job.status = nextStatus;
+      await job.save();
+    }
 
     res.json({
       success: true,

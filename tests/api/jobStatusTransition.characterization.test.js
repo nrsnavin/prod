@@ -22,12 +22,17 @@ const express  = require('express');
 const bodyParser = require('body-parser');
 const request  = require('supertest');
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// Replica set, not standalone. Closing an order now releases its
+// reserved elastic stock, and that has to land atomically with the
+// status flips — so the completion cascade runs in a transaction, the
+// way every other stock-moving route in this codebase does. A
+// standalone mongod cannot start one.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 let app, mongo, JobOrder, Order, Machine;
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(mongo.getUri());
   JobOrder = require('../../models/JobOrder');
   Order    = require('../../models/Order');
@@ -40,7 +45,7 @@ beforeAll(async () => {
   app.use((err, _req, res, _next) => {
     res.status(err.statusCode || 500).json({ success: false, message: err.message });
   });
-}, 60_000);
+}, 120_000);
 
 afterAll(async () => {
   if (mongo) { await mongoose.disconnect(); await mongo.stop(); }

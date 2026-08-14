@@ -25,6 +25,7 @@ const {
 } = require("../utils/orderLines");
 const { assertVersion } = require("../utils/versioning.js");
 const { applyMovement } = require("../utils/elasticStock.js");
+const { releaseAllReservations } = require("../services/orderReservations");
 const { appendStockMovement } = require("../utils/stockLedger.js");
 const { receiveAtCost } = require("../utils/materialValuation.js");
 const { estimateOrderEta } = require("../utils/orderEta.js");
@@ -71,41 +72,15 @@ async function computeRawMaterialRequired(elasticOrdered) {
 //  order. Fingerprints (STOCK_RELEASED) appended to the order so
 //  the timeline shows the release event.
 // ════════════════════════════════════════════════════════════════
+// Delegates to services/orderReservations.js.
+//
+// This used to BE the implementation, and it was the only one — so the
+// other door into Completed (the last job finishing, which cascades
+// through applyOrderStatus in api/job.js) released nothing at all, and
+// the reserved stock stayed held for a finished order forever. Moving
+// it to a service was the point: one implementation, both callers.
 async function _releaseAllReservations(session, order, actor, context) {
-  if (!order.reservations || order.reservations.length === 0) return [];
-  const released = [];
-
-  for (const r of order.reservations) {
-    const qty = Number(r.quantity || 0);
-    if (qty <= 0) continue;
-
-    // applyMovement lowers reservedStock and records the resulting
-    // balance on the row. Doing it here as well would release twice.
-    await applyMovement(session, {
-      elasticId: r.elastic,
-      type:      "RESERVATION_RELEASE",
-      quantity:  +qty,
-      refType:   "Order",
-      refId:     order._id,
-      reason:    `${context} (order ${order.orderNo ?? order._id})`,
-      by:        actor?.id,
-    });
-
-    const fp = buildFingerprint(ACTION_CODES.STOCK_RELEASED, {
-      entityId: order._id,
-      actor,
-      meta: {
-        elasticId: r.elastic.toString(),
-        quantity:  qty,
-        context,
-      },
-    });
-    order.fingerprints.push(fp);
-    released.push({ elastic: r.elastic, quantity: qty, fingerprint: fp });
-  }
-
-  order.reservations = [];
-  return released;
+  return releaseAllReservations(session, order, actor, context);
 }
 
 
