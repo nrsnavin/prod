@@ -142,6 +142,27 @@ router.post(
       message: "If an account exists for that email, a reset link has been sent.",
     };
 
+    // The same guard, for the same reason, as /request-otp above: a
+    // server with no mailer cannot send anyone a reset link either, and
+    // `sendMail` returns `{ skipped: true }` rather than throwing, so
+    // this route promised a link it had not sent. Checked before the
+    // account lookup and answered identically for every address, so it
+    // depends only on this server's configuration and gives nothing
+    // away about which accounts exist.
+    if (!mailerConfigured()) {
+      console.error(
+        "[forgot-password] refused: SMTP is not configured on this server " +
+        "(set SMTP_HOST, SMTP_USER, SMTP_PASS in config/.env)"
+      );
+      const err = new ErrorHandler(
+        "Password reset emails cannot be sent — this server has no email configured. " +
+        "Ask your administrator to set up SMTP.",
+        503
+      );
+      err.code = "MAILER_NOT_CONFIGURED";
+      return next(err);
+    }
+
     // Case-insensitive match: accounts created through the legacy
     // /sign-up path may be stored with mixed-case emails, and an exact
     // match on the lowercased input would silently never find them.
@@ -160,12 +181,19 @@ router.post(
     const resetUrl = `${base}/reset-password?token=${rawToken}`;
 
     try {
-      await sendPasswordResetEmail({
+      const out = await sendPasswordResetEmail({
         to: user.email,
         name: user.name,
         resetUrl,
         ttlMinutes: RESET_TTL_MINUTES,
       });
+      // A skip is not a send — see /request-otp. Leaving a live reset
+      // token on an account for a link that was never delivered is the
+      // worst of both: nobody can use it, and it is still a valid
+      // credential sitting in the database for its full lifetime.
+      if (out?.skipped) {
+        throw new Error(`mail skipped (${out.reason || "unknown"})`);
+      }
     } catch (err) {
       // Roll back the token so a transient mail outage doesn't leave a
       // live reset token stranded on the account, then still return
