@@ -6,18 +6,38 @@
 //    and invalidates the token so it can't be replayed
 //  - expired / wrong / already-used tokens are rejected
 //
-// SMTP is left unconfigured, so the mailer degrades to a no-op — the
-// token is read straight off the User document instead of an inbox.
+// SMTP is STUBBED, not left unconfigured.
+//
+// This file used to run with no SMTP settings, on the basis that "the
+// mailer degrades to a no-op". It did — returning { skipped: true }
+// rather than throwing — and that no-op was the bug behind "the email
+// never arrives": /forgot-password treated a skip as a send, promised a
+// reset link it had not sent, and left a live reset token on the
+// account for its whole lifetime. The route now refuses with 503 when
+// it has no mailer, so a suite that leans on the no-op would be
+// asserting the defect.
+//
+// Everything below — the hashed token, the expiry, single use, replay
+// rejection — is unchanged. It just needs a mail server that accepts
+// the message, so it gets a fake one that sends nothing. See
+// tests/api/otpDelivery.test.js for the delivery behaviour itself.
 
 process.env.JWT_SECRET_KEY = process.env.JWT_SECRET_KEY || 'test-secret';
 process.env.NODE_ENV = 'test';
-// Ensure no stray SMTP env leaks a real send from CI.
-delete process.env.SMTP_HOST;
+process.env.SMTP_HOST = 'smtp.test.local';
+process.env.SMTP_USER = 'no-reply@test.local';
+process.env.SMTP_PASS = 'stub';
 
 const request = require('supertest');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+
+// Accepts everything and sends nothing — no real message can escape CI.
+jest.spyOn(nodemailer, 'createTransport').mockReturnValue({
+  sendMail: async () => ({ messageId: '<stub@test.local>' }),
+});
 
 let mongo, app, User;
 
@@ -28,6 +48,7 @@ beforeAll(async () => {
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   User = require('../../models/User.js');
+  require('../../utils/mailer.js').resetTransport();
 }, 60_000);
 
 afterAll(async () => {

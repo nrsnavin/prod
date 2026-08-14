@@ -188,6 +188,70 @@ describe('when the mail server rejects the message', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+//  THE OTHER DOOR
+//
+//  /forgot-password had the identical shape: same generic reply, same
+//  swallowed failure, same `{ skipped: true }` read as a send. Fixing
+//  one and leaving the other is how a rule becomes half a rule — and
+//  this is the door somebody reaches for precisely when the first one
+//  has not worked.
+//
+//  It matters twice over here, because a reset token is a credential.
+//  Skipping the send left a live one on the account for its full
+//  lifetime, for a link that was never delivered to anyone.
+// ══════════════════════════════════════════════════════════════════
+describe('asking for a password reset with no mailer on the server', () => {
+  const forgot = (email) =>
+    request(app).post('/api/v2/user/forgot-password').send({ email });
+
+  it('says so instead of claiming a link was sent', async () => {
+    withoutSmtp();
+    const res = await forgot('otp-admin@t.co');
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('MAILER_NOT_CONFIGURED');
+  });
+
+  it('answers the same for an address with no account', async () => {
+    withoutSmtp();
+    const real   = await forgot('otp-admin@t.co');
+    const madeUp = await forgot('nobody-at-all@t.co');
+
+    expect(real.status).toBe(madeUp.status);
+    expect(real.body.message).toBe(madeUp.body.message);
+  });
+
+  it('leaves no live reset token behind', async () => {
+    withoutSmtp();
+    await forgot('otp-admin@t.co');
+
+    const u = await User.findOne({ email: 'otp-admin@t.co' })
+      .select('+resetPasswordToken +resetPasswordExpire').lean();
+    expect(u.resetPasswordToken).toBeFalsy();
+  });
+
+  it('clears the token when the mail server rejects the message', async () => {
+    withSmtp({ fails: true });
+    await forgot('otp-admin@t.co');
+
+    const u = await User.findOne({ email: 'otp-admin@t.co' })
+      .select('+resetPasswordToken').lean();
+    expect(u.resetPasswordToken).toBeFalsy();
+  });
+
+  it('still works on a server that can send', async () => {
+    withSmtp();
+    const res = await forgot('otp-admin@t.co');
+
+    expect(res.status).toBe(200);
+    expect(res.body.message).toMatch(/has been sent/i);
+    const u = await User.findOne({ email: 'otp-admin@t.co' })
+      .select('+resetPasswordToken').lean();
+    expect(u.resetPasswordToken).toBeTruthy();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 //  THE DIAGNOSTIC
 // ══════════════════════════════════════════════════════════════════
 describe('GET /health/mailer', () => {
