@@ -34,6 +34,46 @@ router.use(isAuthenticated);
 router.use(requireFeature('/warping', '/covering'));
 router.use(requireFeatureRead('/warping', '/covering'));
 
+/**
+ * Validate a caller-supplied `elasticOrdered` array against the job.
+ *
+ * Every line has to name an elastic the job is actually making, at a
+ * quantity that is a real positive number, and no elastic may appear
+ * twice — a keyed-by-elastic array with two rows for one elastic has
+ * two answers to every question anyone asks of it, and which one is
+ * read depends on whether the reader happened to use `find` or a sum.
+ */
+function assertJobElastics(raw, job) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new ErrorHandler("elasticOrdered must be a non-empty array", 400);
+  }
+  const onJob = new Set(
+    (job.elastics || []).map((e) => String(e.elastic)).filter(Boolean)
+  );
+  const seen = new Set();
+
+  return raw.map((line, i) => {
+    const at = `Line ${i + 1}`;
+    const id = line?.elastic;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      throw new ErrorHandler(`${at}: a valid elastic is required`, 400);
+    }
+    if (!onJob.has(String(id))) {
+      throw new ErrorHandler(`${at}: that elastic is not on this job`, 400);
+    }
+    if (seen.has(String(id))) {
+      throw new ErrorHandler(`${at}: this elastic is already on the warping`, 400);
+    }
+    seen.add(String(id));
+
+    const quantity = Number(line?.quantity);
+    if (!Number.isFinite(quantity) || quantity < 0) {
+      throw new ErrorHandler(`${at}: quantity must be zero or more`, 400);
+    }
+    return { elastic: id, quantity };
+  });
+}
+
 router.post("/create", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   const { jobId, elasticOrdered } = req.body;
   if (!jobId) return next(new ErrorHandler("Job ID is required", 400));
@@ -58,9 +98,19 @@ router.post("/create", isAdmin('admin', 'production'), catchAsyncErrors(async (r
           "Job already has a warping linked", 409
         );
       }
+      // `elasticOrdered || peek.elastics` took the caller's array whole
+      // and unexamined — elastics the job is not making, negative
+      // quantities, the same elastic listed twice. /warpingPlan/create
+      // is careful about exactly this, dropping any beam elastic that is
+      // not on the job "since it would be a claim nobody could act on";
+      // the same claim on the warping itself went straight through.
+      const lines = elasticOrdered === undefined || elasticOrdered === null
+        ? peek.elastics
+        : assertJobElastics(elasticOrdered, peek);
+
       const [created] = await Warping.create([{
         job:            jobId,
-        elasticOrdered: elasticOrdered || peek.elastics,
+        elasticOrdered: lines,
       }], { session });
       warping = created;
 
@@ -114,12 +164,27 @@ router.post("/create", isAdmin('admin', 'production'), catchAsyncErrors(async (r
   res.status(201).json({ success: true, warping, autoPlan });
 }));
 
+// api/covering.js's /list carries a comment saying it "mirrors
+// api/warping.js so the two sibling list endpoints behave the same".
+// It did not: covering validated the status and returned 400 on a bad
+// one, while this took any string at all and answered with an empty
+// list and a total of 0 — indistinguishable, to the caller, from a
+// filter that simply matched nothing. The claimed parity is now true.
+const WARPING_STATUSES = ["open", "in_progress", "completed", "cancelled"];
+
 router.get("/list", catchAsyncErrors(async (req, res, next) => {
-  const { status = "open", search = "", page = 1, limit = 20 } = req.query;
-  const skip = (Number(page) - 1) * Number(limit);
+  const { status = "open", search = "" } = req.query;
+  const page  = Math.max(Number(req.query.page)  || 1,  1);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 200);
+  const skip  = (page - 1) * limit;
 
   const filter = {};
-  if (status && status !== "all") filter.status = status;
+  if (status && status !== "all") {
+    if (!WARPING_STATUSES.includes(status)) {
+      return next(new ErrorHandler(`Invalid status: ${status}`, 400));
+    }
+    filter.status = status;
+  }
 
   if (search) {
     const num = parseInt(search, 10);
@@ -128,7 +193,7 @@ router.get("/list", catchAsyncErrors(async (req, res, next) => {
       if (!jobs.length) {
         return res.json({
           success: true, data: [],
-          pagination: { total: 0, page: Number(page), limit: Number(limit), hasMore: false },
+          pagination: { total: 0, page, limit, hasMore: false },
         });
       }
       filter.job = { $in: jobs.map((j) => j._id) };
@@ -142,20 +207,20 @@ router.get("/list", catchAsyncErrors(async (req, res, next) => {
       .populate("warpingPlan", "_id noOfBeams")
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(Number(limit)),
+      .limit(limit),
     Warping.countDocuments(filter),
   ]);
 
   res.json({
     success: true, data: warpings,
-    pagination: {
-      total, page: Number(page), limit: Number(limit),
-      hasMore: skip + warpings.length < total,
-    },
+    pagination: { total, page, limit, hasMore: skip + warpings.length < total },
   });
 }));
 
 router.get("/detail/:id", catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next(new ErrorHandler("Invalid warping id", 400));
+  }
   const warping = await Warping.findById(req.params.id)
     .populate({ path: "job", select: "jobOrderNo status date" })
     .populate({
@@ -356,12 +421,85 @@ router.post("/complete", isAdmin('admin', 'production'), catchAsyncErrors(async 
   }
 }));
 
+// ─────────────────────────────────────────────────────────────────────────
+// PATCH /warping/cancel/:id
+//
+// This had no guard of any kind. Its sibling in api/covering.js refuses
+// to cancel a COMPLETED covering, for the obvious reason: the beams are
+// built and the job has already advanced past preparatory on the
+// strength of it. Cancelling here left the job weaving — or finished —
+// behind a warping that says it never happened, and nothing in the
+// system could tell you when that had been done or by whom.
+//
+// Two doors into the same decision, one of them checked. Now both are.
+// ─────────────────────────────────────────────────────────────────────────
 router.patch("/cancel/:id", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
-  const warping = await Warping.findById(req.params.id);
-  if (!warping) return next(new ErrorHandler("Warping not found", 404));
-  warping.status = "cancelled";
-  await warping.save();
-  res.json({ success: true, warping });
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return next(new ErrorHandler("Invalid warping id", 400));
+  }
+  const remarks = String(req.body?.remarks || "").trim();
+
+  const session = await mongoose.startSession();
+  try {
+    let warping;
+    await session.withTransaction(async () => {
+      warping = await Warping.findById(req.params.id).session(session);
+      if (!warping) throw new ErrorHandler("Warping not found", 404);
+
+      if (warping.status === "completed") {
+        throw new ErrorHandler("Completed warping cannot be cancelled", 400);
+      }
+      if (warping.status === "cancelled") {
+        throw new ErrorHandler("Warping is already cancelled", 400);
+      }
+
+      // Yarn that has been issued is physically off the rack. Cancelling
+      // the warping around it leaves the lot ledger carrying draws for
+      // beams nobody is building, and no later action ever puts them
+      // back — /batch/:id/cancel is the only thing that credits a lot,
+      // and it cannot run on a batch whose warping is gone. So the
+      // batches come first, and this says which ones.
+      const live = await WarpingBatch.find({
+        warping: warping._id,
+        status: { $in: ["issued", "completed"] },
+      }).select("batchNo status").session(session).lean();
+
+      if (live.length > 0) {
+        const err = new ErrorHandler(
+          `Yarn has already been issued on ${live.map((b) => b.batchNo).join(", ")}. ` +
+          `Cancel ${live.length === 1 ? "that batch" : "those batches"} first — ` +
+          `that is what puts the yarn back on the rack.`,
+          409
+        );
+        err.code = "WARPING_HAS_ISSUED_BATCHES";
+        err.details = { batches: live.map((b) => ({ batchNo: b.batchNo, status: b.status })) };
+        throw err;
+      }
+
+      const previous = warping.status;
+      warping.status = "cancelled";
+      await warping.save({ session });
+
+      const job = await JobOrder.findById(warping.job).session(session);
+      if (job) {
+        job.fingerprints.push(buildFingerprint(ACTION_CODES.WARPING_CANCELLED, {
+          entityId: warping.job,
+          actor:    actorFromRequest(req),
+          meta: {
+            warpingId: warping._id.toString(),
+            previousStatus: previous,
+            remarks: remarks || undefined,
+          },
+        }));
+        await job.save({ session });
+      }
+    });
+    res.json({ success: true, warping });
+  } catch (err) {
+    return next(err);
+  } finally {
+    session.endSession();
+  }
 }));
 
 router.get("/warpingPlan", catchAsyncErrors(async (req, res, next) => {
@@ -449,9 +587,24 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
   if (!warpingId)     return next(new ErrorHandler("warpingId is required", 400));
   if (!beams?.length) return next(new ErrorHandler("At least one beam is required", 400));
 
+  if (!mongoose.Types.ObjectId.isValid(warpingId)) {
+    return next(new ErrorHandler("Invalid warpingId", 400));
+  }
   const warping = await Warping.findById(warpingId);
   if (!warping)            return next(new ErrorHandler("Warping not found", 404));
   if (warping.warpingPlan) return next(new ErrorHandler("Warping plan already exists", 400));
+  // Editing and deleting a plan are both refused unless the warping is
+  // still open — because a plan is the sheet the machine is set up from,
+  // and changing it under a run in progress changes what the operator is
+  // building halfway through. Creating one was not gated at all, so the
+  // same sheet could be written for the first time against a warping
+  // already finished, describing beams that were built from something
+  // else. All three doors now ask the same question.
+  if (warping.status !== "open") {
+    return next(new ErrorHandler(
+      `A plan can only be created while warping is open (current: "${warping.status}").`, 400
+    ));
+  }
 
   let resolvedBeams;
   try {
@@ -480,13 +633,26 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
     tapeNo: tapeOf(b.tapeNo),
   }));
 
-  const plan = await WarpingPlan.create({
-    warping:   warping._id,
-    job:       warping.job,
-    noOfBeams: beams.length,
-    beams:     resolvedBeams,
-    remarks:   remarks || "",
-  });
+  let plan;
+  try {
+    plan = await WarpingPlan.create({
+      warping:   warping._id,
+      job:       warping.job,
+      noOfBeams: resolvedBeams.length,
+      beams:     resolvedBeams,
+      remarks:   remarks || "",
+    });
+  } catch (err) {
+    // `WarpingPlan.warping` is unique, so a second create for the same
+    // warping is refused by the index rather than landing a duplicate —
+    // but it surfaced as an unhandled E11000 and a 500. Two operators
+    // programming the same warping at once is an ordinary race, and it
+    // deserves the same answer as the check above.
+    if (err?.code === 11000) {
+      return next(new ErrorHandler("Warping plan already exists", 409));
+    }
+    return next(err);
+  }
 
   warping.warpingPlan = plan._id;
   await warping.save();
@@ -574,6 +740,30 @@ router.delete("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErro
     return next(new ErrorHandler(`Plan can only be deleted while warping is open (current: "${warping.status}").`, 400));
   }
 
+  // Batches are raised against the plan's beam numbers, and the
+  // completion gate in services/warpingIssueReadiness.js counts the
+  // lots the PLAN committed to. With no plan there are no committed
+  // lots, so `lotsPlanned` is 0 and the gate returns ready — deleting
+  // the plan silently switched off the rule that yarn must have been
+  // issued before a warping can be completed, and left the batches
+  // pointing at beam numbers nothing defines any more.
+  const batches = await WarpingBatch.find({
+    warping: plan.warping,
+    status: { $ne: "cancelled" },
+  }).select("batchNo status").lean();
+
+  if (batches.length > 0) {
+    const err = new ErrorHandler(
+      `${batches.map((b) => b.batchNo).join(", ")} ${batches.length === 1 ? "is" : "are"} ` +
+      `raised against this plan's beams. Cancel ${batches.length === 1 ? "it" : "them"} ` +
+      `before deleting the plan.`,
+      409
+    );
+    err.code = "PLAN_HAS_BATCHES";
+    err.details = { batches: batches.map((b) => ({ batchNo: b.batchNo, status: b.status })) };
+    return next(err);
+  }
+
   const job = await JobOrder.findById(plan.job);
   if (job) {
     stampFingerprint(job, ACTION_CODES.WARPING_PLAN_DELETED, {
@@ -612,8 +802,27 @@ function _packBeams(items, capacity) {
   // Largest yarns first.
   const sorted = [...items].sort((a, b) => b.ends - a.ends);
   for (const item of sorted) {
+    // First fit: an open beam with room for the whole yarn.
     const whole = beams.find((b) => b.capacityLeft >= item.ends);
     if (whole) { place(whole, item, item.ends); continue; }
+
+    // No open beam holds it, but a FRESH one would. Open one and keep
+    // the yarn intact.
+    //
+    // This branch is the fix. The split loop below used to run for
+    // every yarn that missed the first-fit search, and its
+    // `beams.find(x => x.capacityLeft > 0)` grabbed the first beam with
+    // ANY room at all — so at capacity 600, yarns of 500 and 400 came
+    // out as beam 1 = [500, 100] and beam 2 = [300]: the same two beams,
+    // but the second yarn cut in half and an extra changeover on the
+    // floor for nothing. Worse, the response's own `assumptions` told
+    // the planner "a yarn only splits across beams when it exceeds one
+    // beam's capacity" — which was exactly what the code did not do.
+    if (item.ends <= C) { place(newBeam(), item, item.ends); continue; }
+
+    // Genuinely bigger than a beam, so it has to be split. Fill the
+    // partly-used beams first — that space is otherwise wasted, and the
+    // yarn is being cut regardless.
     let remaining = item.ends;
     while (remaining > 0) {
       const b = beams.find((x) => x.capacityLeft > 0) || newBeam();
@@ -978,47 +1187,33 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
     return next(err);
   }
 
-  // A beam already covered by a live batch must not be claimed again.
-  // Two batches on one beam means the yarn is issued twice for it, and
-  // the trail then shows two lots inside a single beam — precisely the
-  // thing lot tracking exists to rule out. A cancelled batch drew
-  // nothing in the end, so it releases its beams.
-  if (beams.length) {
-    const live = await WarpingBatch.find({
-      warping: warping._id,
-      status: { $ne: "cancelled" },
-    }).select("batchNo beamNos").lean();
-    const taken = new Map();
-    for (const b of live) {
-      for (const n of b.beamNos || []) taken.set(Number(n), b.batchNo);
-    }
-    const clash = beams.filter((n) => taken.has(n));
-    if (clash.length) {
-      return next(new ErrorHandler(
-        `Beam ${clash.join(", ")} is already on batch ` +
-        `${[...new Set(clash.map((n) => taken.get(n)))].join(", ")}`,
-        409
-      ));
-    }
-  }
-
   // The programme already named a lot for some sections. Drawing a
   // different one leaves the sheet the warper actually followed and the
   // trail telling different stories, and the sheet is the one that was
   // acted on. Sections programmed without a lot constrain nothing.
+  //
+  // Every allocation for the material is checked, not just the first.
+  // `parsed.find(...)` returned one line per material, so a batch that
+  // drew two lots of the same yarn — which parseAllocations permits,
+  // since it only forbids the same LOT twice — was compared against
+  // whichever happened to be listed first. Naming the programmed lot in
+  // one line let any second lot of that yarn through unexamined, which
+  // is the exact substitution the check exists to catch.
   const mismatch = [];
   for (const beam of plan.beams || []) {
     if (!beams.includes(Number(beam.beamNo))) continue;
     for (const sec of beam.sections || []) {
       if (!sec.yarnLot) continue;
-      const line = parsed.find(
+      const forMaterial = parsed.filter(
         (a) => String(a.rawMaterial) === String(sec.warpYarn)
       );
-      if (line && String(line.yarnLot) !== String(sec.yarnLot)) {
-        mismatch.push(
-          `beam ${beam.beamNo} is programmed to run off lot ${sec.lotNo || sec.yarnLot}, ` +
-          `not ${line.lotNo}`
-        );
+      for (const line of forMaterial) {
+        if (String(line.yarnLot) !== String(sec.yarnLot)) {
+          mismatch.push(
+            `beam ${beam.beamNo} is programmed to run off lot ${sec.lotNo || sec.yarnLot}, ` +
+            `not ${line.lotNo}`
+          );
+        }
       }
     }
   }
@@ -1067,17 +1262,71 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
     );
   });
 
-  const batch = await WarpingBatch.create({
-    batchNo: `WB-${String(seq).padStart(4, "0")}`,
-    warping: warping._id,
-    job: warping.job,
-    beamNos: beams,
-    elastics: forElastics,
-    allocations: parsed,
-    machine: machine || undefined,
-    remarks: remarks ? String(remarks).trim() : "",
-    createdBy: req.user?._id,
-  });
+  // ── Claim the beams, then write the batch ───────────────────────
+  //
+  // A beam already covered by a live batch must not be claimed again.
+  // Two batches on one beam means the yarn is issued twice for it, and
+  // the trail then shows two lots inside a single beam — precisely the
+  // thing lot tracking exists to rule out. A cancelled batch drew
+  // nothing in the end, so it releases its beams.
+  //
+  // The check used to run on its own, well before the create, with
+  // nothing joining the two. Two operators claiming beam 3 at the same
+  // moment each read it as free and each wrote a batch — the check
+  // passed twice on the same truth and the rule it enforces never bit.
+  //
+  // A transaction alone does not close that: neither writer touches a
+  // document the other wrote, so there is no conflict to detect. The
+  // `$inc` on the warping gives them one — both transactions now write
+  // the same document, so the second is aborted and retried by the
+  // driver, and its re-read sees the first batch's beams.
+  const session = await mongoose.startSession();
+  let batch;
+  try {
+    await session.withTransaction(async () => {
+      if (beams.length) {
+        const live = await WarpingBatch.find({
+          warping: warping._id,
+          status: { $ne: "cancelled" },
+        }).select("batchNo beamNos").session(session).lean();
+        const taken = new Map();
+        for (const b of live) {
+          for (const n of b.beamNos || []) taken.set(Number(n), b.batchNo);
+        }
+        const clash = beams.filter((n) => taken.has(n));
+        if (clash.length) {
+          throw new ErrorHandler(
+            `Beam ${clash.join(", ")} is already on batch ` +
+            `${[...new Set(clash.map((n) => taken.get(n)))].join(", ")}`,
+            409
+          );
+        }
+      }
+
+      await Warping.updateOne(
+        { _id: warping._id },
+        { $inc: { batchSeq: 1 } },
+        { session }
+      );
+
+      const [created] = await WarpingBatch.create([{
+        batchNo: `WB-${String(seq).padStart(4, "0")}`,
+        warping: warping._id,
+        job: warping.job,
+        beamNos: beams,
+        elastics: forElastics,
+        allocations: parsed,
+        machine: machine || undefined,
+        remarks: remarks ? String(remarks).trim() : "",
+        createdBy: req.user?._id,
+      }], { session });
+      batch = created;
+    });
+  } catch (err) {
+    return next(err);
+  } finally {
+    session.endSession();
+  }
 
   res.status(201).json({ success: true, batch });
 }));

@@ -47,8 +47,14 @@ const ACTION_CODES = Object.freeze({
   // Sub-stage / per-action events recorded on the parent JobOrder
   WARPING_STARTED:          'WARPING_STARTED',
   WARPING_COMPLETED:        'WARPING_COMPLETED',
+  // Cancelling a preparatory stage is the transition that STOPS a job
+  // reaching weaving, so it is the one someone comes asking about. Both
+  // cancel routes wrote nothing to the trail — the job simply sat in
+  // preparatory with no record of why.
+  WARPING_CANCELLED:        'WARPING_CANCELLED',
   COVERING_STARTED:         'COVERING_STARTED',
   COVERING_COMPLETED:       'COVERING_COMPLETED',
+  COVERING_CANCELLED:       'COVERING_CANCELLED',
   COVERING_BEAM_ENTRY:      'COVERING_BEAM_ENTRY',
   SHIFT_PRODUCTION_ENTERED:   'SHIFT_PRODUCTION_ENTERED',
   SHIFT_PRODUCTION_VERIFIED:  'SHIFT_PRODUCTION_VERIFIED',
@@ -107,8 +113,10 @@ const ACTION_LABELS = Object.freeze({
   JOB_MACHINE_CHANGED:      'Machine Changed',
   WARPING_STARTED:          'Warping Started',
   WARPING_COMPLETED:        'Warping Completed',
+  WARPING_CANCELLED:        'Warping Cancelled',
   COVERING_STARTED:         'Covering Started',
   COVERING_COMPLETED:       'Covering Completed',
+  COVERING_CANCELLED:       'Covering Cancelled',
   COVERING_BEAM_ENTRY:      'Covering Beam Entry',
   SHIFT_PRODUCTION_ENTERED:   'Shift Production Entered',
   SHIFT_PRODUCTION_VERIFIED:  'Shift Production Verified',
