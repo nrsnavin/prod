@@ -10,7 +10,10 @@ const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 const { DEPARTMENTS, roleForDepartment, isDepartment } = require("../utils/roles");
 const { FEATURES, featuresForDepartment, sanitizeFeatures } = require("../utils/features");
-const { sendPasswordResetEmail, sendLoginOtpEmail } = require("../utils/mailer");
+const {
+  sendPasswordResetEmail, sendLoginOtpEmail,
+  isConfigured: mailerConfigured,
+} = require("../utils/mailer");
 const { escapeRegex } = require("../utils/escapeRegex");
 var jwt = require('jsonwebtoken');
 
@@ -249,6 +252,35 @@ router.post(
       message: "If an account exists for that email, a sign-in code has been sent.",
     };
 
+    // ── A server with no mailer cannot send anyone a code ───────────
+    //
+    // Checked BEFORE the account lookup, and answered identically for
+    // every address. That is what makes it safe: the reply depends only
+    // on this server's configuration, never on whether the account
+    // exists, so it is no kind of enumeration oracle.
+    //
+    // It used to fall through to the generic success. `sendMail`
+    // returns `{ skipped: true }` rather than throwing when SMTP is
+    // unset — a deliberate kindness for the password-reset route on a
+    // half-provisioned box — so the `catch` below never fired, the code
+    // was left sitting in the database, and the caller was told a code
+    // had been sent. Since email OTP is the PRIMARY sign-in and the UI
+    // links to nothing else, the entire login screen silently did
+    // nothing, and said "check your email" while doing it.
+    if (!mailerConfigured()) {
+      console.error(
+        "[request-otp] refused: SMTP is not configured on this server " +
+        "(set SMTP_HOST, SMTP_USER, SMTP_PASS in config/.env)"
+      );
+      const err = new ErrorHandler(
+        "Sign-in codes cannot be sent — this server has no email configured. " +
+        "Ask your administrator to set up SMTP.",
+        503
+      );
+      err.code = "MAILER_NOT_CONFIGURED";
+      return next(err);
+    }
+
     const user = await User.findOne({
       email: { $regex: `^${escapeRegex(email)}$`, $options: "i" },
     });
@@ -260,15 +292,27 @@ router.post(
     await user.save({ validateBeforeSave: false });
 
     try {
-      await sendLoginOtpEmail({
+      const out = await sendLoginOtpEmail({
         to: user.email,
         name: user.name,
         code,
         ttlMinutes: OTP_TTL_MINUTES,
       });
+      // A skip is not a send. The guard above makes this near
+      // unreachable, but treating "we did nothing" as success is the
+      // bug this route had, and it should not be able to come back by a
+      // side door — e.g. config removed between the check and the send.
+      if (out?.skipped) {
+        throw new Error(`mail skipped (${out.reason || "unknown"})`);
+      }
     } catch (err) {
       user.clearLoginOtp();
       await user.save({ validateBeforeSave: false });
+      // Stays generic to the caller: a failure raised only for
+      // addresses that HAVE an account would say which addresses have
+      // one. utils/mailer.js records the reason for
+      // GET /api/v2/health/mailer, which is admin-gated and where an
+      // administrator can actually read it.
       console.error("[request-otp] mail send failed:", err.message);
     }
 

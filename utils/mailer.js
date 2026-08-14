@@ -26,8 +26,52 @@ const nodemailer = require("nodemailer");
 
 let _transport = null;
 
+// The last send failure, kept in memory so an admin can find out WHY
+// mail is not arriving without reading the server log.
+//
+// Every caller of this module swallows failures on purpose — the
+// password-reset and OTP routes must answer identically whether or not
+// an account exists, or they become an account-enumeration oracle. The
+// cost of that was total silence: an unconfigured or misconfigured
+// mailer looked exactly like a working one from every angle a person
+// can see, including from the login screen of the only sign-in method
+// the UI offers.
+let _lastError = null;
+
 function isConfigured() {
   return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+}
+
+/** Mask a login for display — enough to recognise, not enough to reuse. */
+function _maskUser(u) {
+  if (!u) return null;
+  const [name, domain] = String(u).split("@");
+  if (!domain) return `${name.slice(0, 2)}***`;
+  return `${name.slice(0, 2)}***@${domain}`;
+}
+
+/**
+ * What ops needs to answer "why is no mail arriving?".
+ *
+ * Deliberately free of the password. `configured:false` means the
+ * process has no SMTP settings at all — nothing has ever been
+ * attempted, and no amount of retrying will help.
+ */
+function status() {
+  return {
+    configured: isConfigured(),
+    host:       process.env.SMTP_HOST || null,
+    port:       Number(process.env.SMTP_PORT) || (isConfigured() ? 465 : null),
+    secure:     (Number(process.env.SMTP_PORT) || 465) === 465,
+    user:       _maskUser(process.env.SMTP_USER),
+    from:       process.env.SMTP_FROM || _maskUser(process.env.SMTP_USER),
+    lastError:  _lastError,
+  };
+}
+
+/** Drop the cached transport so a re-read of the env takes effect. */
+function resetTransport() {
+  _transport = null;
 }
 
 function transport() {
@@ -56,11 +100,29 @@ function fromAddress() {
 async function sendMail({ to, subject, text, html }) {
   const t = transport();
   if (!t) {
-    console.warn(`[mailer] SMTP not configured — skipping email to ${to} ("${subject}")`);
-    return { skipped: true };
+    // The subject is NOT logged. A sign-in code is the first thing in
+    // the OTP subject line, so this used to print live one-time codes
+    // into the server log in plaintext — on exactly the deployments
+    // where nobody was receiving them, and therefore where people would
+    // go looking through the log.
+    console.warn(`[mailer] SMTP not configured — skipping email to ${to}`);
+    _lastError = {
+      at: new Date().toISOString(),
+      reason: "SMTP not configured (SMTP_HOST / SMTP_USER / SMTP_PASS unset)",
+    };
+    return { skipped: true, reason: "not-configured" };
   }
-  const info = await t.sendMail({ from: fromAddress(), to, subject, text, html });
-  return { skipped: false, messageId: info.messageId };
+  try {
+    const info = await t.sendMail({ from: fromAddress(), to, subject, text, html });
+    _lastError = null;
+    return { skipped: false, messageId: info.messageId };
+  } catch (err) {
+    // Recorded before rethrowing. Callers swallow this to protect the
+    // anti-enumeration contract, so this record is the only place the
+    // reason survives.
+    _lastError = { at: new Date().toISOString(), reason: err.message };
+    throw err;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -148,4 +210,7 @@ async function sendLoginOtpEmail({ to, name, code, ttlMinutes }) {
   return sendMail({ to, subject, text, html });
 }
 
-module.exports = { sendMail, sendPasswordResetEmail, sendLoginOtpEmail, isConfigured };
+module.exports = {
+  sendMail, sendPasswordResetEmail, sendLoginOtpEmail,
+  isConfigured, status, resetTransport,
+};
