@@ -107,6 +107,13 @@ const RawMaterialSchema = new mongoose.Schema(
     // documented as per kg, and materialValuation costs against it.
     unit: { type: String, default: 'kg', trim: true },
 
+    // Per-material override of the supplier's lead time. A dyed yarn
+    // from the same supplier as a greige one takes longer, and the
+    // difference belongs to the material rather than to the vendor.
+    // Null (not 0) means "use the supplier's" — 0 is a real answer
+    // meaning same-day, and the two must not read alike.
+    leadTimeDays: { type: Number, default: null, min: 0 },
+
     supplier: {
       type: mongoose.Types.ObjectId,
       ref: "Supplier",
