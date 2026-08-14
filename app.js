@@ -273,6 +273,60 @@ app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), (req, res) =>
   });
 });
 
+// ── Why is no email arriving? ────────────────────────────────────
+//
+// Email OTP is the primary sign-in, and every route that sends mail
+// swallows failures on purpose: /request-otp and /forgot-password must
+// answer identically whether or not an account exists, or they become
+// an account-enumeration oracle. The cost was that a broken mailer was
+// invisible from every angle a person can see — the login screen said
+// "a code has been sent" on a server that had never been given an SMTP
+// host.
+//
+// This says which of the three it is:
+//   configured:false            → no SMTP settings on this box at all
+//   configured:true, lastError  → settings present, the server rejected us
+//   configured:true, no error   → we handed it to the SMTP server; if it
+//                                 did not arrive, look at spam / the
+//                                 provider's own log
+//
+// Admin-gated and password-free, like /health/build. `?test=you@co` also
+// sends a real message, which is the only way to be sure end to end.
+app.get(
+  "/api/v2/health/mailer",
+  isAuthenticated,
+  isAdmin("admin"),
+  async (req, res) => {
+    const mailer = require("./utils/mailer.js");
+    const out = { status: "ok", mailer: mailer.status() };
+
+    const to = typeof req.query.test === "string" ? req.query.test.trim() : "";
+    if (to) {
+      if (!mailer.isConfigured()) {
+        out.test = { sent: false, reason: "SMTP is not configured on this server" };
+      } else {
+        try {
+          const r = await mailer.sendMail({
+            to,
+            subject: "Balu Elastics ERP — mail test",
+            text: "This is a test message. If you are reading it, sign-in codes will arrive too.",
+          });
+          out.test = r.skipped
+            ? { sent: false, reason: r.reason || "skipped" }
+            : { sent: true, messageId: r.messageId || null };
+        } catch (err) {
+          out.test = { sent: false, reason: err.message };
+        }
+      }
+      // Re-read: a test send is the most likely thing to have just
+      // changed lastError.
+      out.mailer = mailer.status();
+    }
+
+    res.json(out);
+  }
+);
+
 // Which database is serving THIS session.
 //
 // Per-user routing (db/tenants.js) is invisible from the outside by

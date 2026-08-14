@@ -1,17 +1,41 @@
 'use strict';
 // Email-OTP login flow (/user/request-otp + /user/verify-otp).
-// SMTP is unconfigured so the mailer no-ops; the code is read straight
-// off the User document (raw code isn't stored — we re-stamp a known
-// code's hash where the test needs to verify).
+//
+// SMTP is STUBBED here rather than left unconfigured.
+//
+// This file used to run with no SMTP settings at all, on the basis that
+// "the mailer no-ops" — which it did, returning { skipped: true }
+// instead of throwing. That no-op was the bug behind "the OTP never
+// arrives": /request-otp treated a skip as a send and told the caller a
+// code was on its way, on a server that had never been given a mail
+// host. The route now refuses with 503 when it has no mailer, so a
+// suite that leans on the no-op would be asserting the defect.
+//
+// The mechanics below — hashing, expiry, the attempt counter, the
+// session shape — are what this file is actually about, and they are
+// unchanged. It just needs a mail server that accepts the message, so
+// it gets a fake one. See tests/api/otpDelivery.test.js for the
+// delivery behaviour itself.
+//
+// The code is read straight off the User document (the raw code isn't
+// stored — we re-stamp a known code's hash where a test needs to verify).
 
 process.env.JWT_SECRET_KEY = process.env.JWT_SECRET_KEY || 'test-secret';
 process.env.NODE_ENV = 'test';
-delete process.env.SMTP_HOST;
+process.env.SMTP_HOST = 'smtp.test.local';
+process.env.SMTP_USER = 'no-reply@test.local';
+process.env.SMTP_PASS = 'stub';
 
 const request = require('supertest');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+
+// Accepts everything and sends nothing.
+jest.spyOn(nodemailer, 'createTransport').mockReturnValue({
+  sendMail: async () => ({ messageId: '<stub@test.local>' }),
+});
 
 let mongo, app, User;
 
@@ -22,6 +46,7 @@ beforeAll(async () => {
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   User = require('../../models/User.js');
+  require('../../utils/mailer.js').resetTransport();
 }, 60_000);
 
 afterAll(async () => {
