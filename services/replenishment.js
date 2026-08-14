@@ -12,7 +12,7 @@
 //  actually needs:
 //
 //      demand during the wait    D_L  = d̄ × L
-//      safety stock              SS   = z × σ_d × √L
+//      safety stock              SS   = z × √( L·σ_d² + d̄²·σ_L² )
 //      reorder point             ROP  = D_L + SS
 //      net stock                 NET  = onHand + onOrder − committed
 //      order when                NET  < ROP
@@ -27,6 +27,22 @@
 //  the standard deviation of that sum grows with √L, not L. Using L
 //  would demand roughly √L times too much safety stock — on a 16-day
 //  lead time, four times too much yarn sitting on the floor.
+//
+//  ── Why the lead time's OWN variability is in there ──────────────
+//  A supplier averaging 14 days ±1 and one averaging 14 days ±10 need
+//  completely different cover, and a formula that knows only the
+//  average treats them identically. The σ_L term is usually the bigger
+//  of the two for a mill: yarn demand is fairly steady, and delivery
+//  dates are not.
+//
+//  σ_L comes from services/leadTimeLearning.js, which measures it from
+//  goods receipts against their purchase orders. It was simply not
+//  available before — which is why the first version of this file had
+//  only the σ_d term, and why adding it is the single biggest
+//  improvement learning brings.
+//
+//  With σ_L = 0 the expression collapses to exactly z·σ_d·√L, so a
+//  mill with no delivery history behaves precisely as it did before.
 //
 //  ── What this deliberately is NOT ────────────────────────────────
 //  There is no learned model here. The inputs a mill has — a few
@@ -121,6 +137,10 @@ function demandPattern({ active, days }, drawCount) {
  * @param {number} input.coverDays    how long an order should last
  * @param {number} input.serviceLevel
  * @param {{mean:number, sd:number}} input.demand
+ * @param {number} input.leadTimeSd  observed spread of the lead time,
+ *                                   in days; 0 when unknown, which
+ *                                   reproduces the fixed-lead-time
+ *                                   formula exactly.
  */
 function position({
   onHand = 0,
@@ -128,6 +148,7 @@ function position({
   committed = 0,
   minStock = 0,
   leadTimeDays = 0,
+  leadTimeSd = 0,
   coverDays = 30,
   serviceLevel = DEFAULT_SERVICE_LEVEL,
   demand,
@@ -138,8 +159,17 @@ function position({
   const L   = Math.max(0, num(leadTimeDays));
   const z   = zFor(serviceLevel);
 
+  const sdL = Math.max(0, num(leadTimeSd));
+
   const demandDuringLead = d * L;
-  const safetyStock      = z * sd * Math.sqrt(L);
+
+  // z × √( L·σ_d² + d̄²·σ_L² ) — the two sources of surprise, added as
+  // variances because that is how independent variances combine.
+  //   first term  : demand varies over a fixed wait
+  //   second term : the wait itself varies, at the average demand rate
+  const varianceFromDemand   = L * sd * sd;
+  const varianceFromLeadTime = d * d * sdL * sdL;
+  const safetyStock = z * Math.sqrt(varianceFromDemand + varianceFromLeadTime);
 
   // The manual floor is a FLOOR, not an alternative. Somebody set it
   // for a reason the statistics cannot see — a dye lot that must not be
@@ -184,8 +214,15 @@ function position({
     dailyDemand: r2(d),
     demandSd: r2(sd),
     leadTimeDays: L,
+    leadTimeSd: r2(sdL),
     demandDuringLead: r2(demandDuringLead),
     safetyStock: r2(safetyStock),
+    // Split out so a buyer can see WHICH uncertainty is driving the
+    // cover — steady demand behind an erratic supplier looks very
+    // different from erratic demand behind a reliable one, and the
+    // fix for each is a different conversation.
+    safetyFromDemand: r2(z * Math.sqrt(varianceFromDemand)),
+    safetyFromLeadTime: r2(z * Math.sqrt(varianceFromLeadTime)),
     minStock: r2(num(minStock)),
     reorderPoint: r2(reorderPoint),
     serviceLevel,

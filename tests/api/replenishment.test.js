@@ -376,3 +376,153 @@ describe('what the buyer is told about the demand itself', () => {
     }
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  LEARNING THE LEAD TIME FROM DELIVERIES
+//
+//  The estimate is not trained and stored — it IS the data, read back
+//  on every request. So a delivery receipted this morning is in the
+//  next forecast, with no job to run and nothing to retrain.
+// ══════════════════════════════════════════════════════════════════
+describe('lead time learned from goods receipts', () => {
+  let MaterialInward;
+  beforeAll(() => { MaterialInward = require('../../models/MaterialInward'); });
+
+  /** A PO raised `orderedDaysAgo` back, received `leadDays` later. */
+  const delivered = async (m, orderedDaysAgo, leadDays, i) => {
+    const po = await PurchaseOrder.create({
+      supplier: supplier._id, poNo: 1000 + i, status: 'Completed',
+      date: daysAgo(orderedDaysAgo),
+      items: [{ rawMaterial: m._id, quantity: 100, receivedQuantity: 100, price: 250 }],
+    });
+    await MaterialInward.create({
+      rawMaterial: m._id, purchaseOrder: po._id, quantity: 100,
+      inwardDate: daysAgo(orderedDaysAgo - leadDays),
+    });
+  };
+
+  it('uses the measured figure when nobody has typed one', async () => {
+    await Supplier.updateOne({ _id: supplier._id }, { $set: { leadTimeDays: 0 } });
+    const m = await material({ stock: 100 });
+    await steadyDraws(m, 20, 60);
+    // Six deliveries, consistently about 21 days.
+    for (const [i, l] of [20, 21, 22, 21, 20, 22].entries()) {
+      await delivered(m, 300 - i * 20, l, i);
+    }
+
+    const line = await lineFor('Warp 40s');
+    expect(line.leadTimeSource).toBe('observed-material');
+    expect(line.leadTimeDays).toBe(21);
+    expect(line.leadTimeObserved.deliveries).toBe(6);
+    expect(line.leadTimeObserved.confidence).toBe('medium');
+  });
+
+  it('lets a typed figure win, but still reports what the deliveries say', async () => {
+    const m = await material({ stock: 100, leadTimeDays: 7 });
+    await steadyDraws(m, 20, 60);
+    for (const [i, l] of [20, 21, 22, 21, 20, 22].entries()) {
+      await delivered(m, 300 - i * 20, l, i);
+    }
+
+    const line = await lineFor('Warp 40s');
+    expect(line.leadTimeDays).toBe(7);
+    expect(line.leadTimeSource).toBe('material');
+    expect(line.leadTimeObserved.median).toBe(21);
+    // Somebody typed 7; the deliveries say 21. Surfaced, not corrected.
+    expect(line.leadTimeDisagrees).toBe(true);
+  });
+
+  it('will not act on one or two deliveries', async () => {
+    await Supplier.updateOne({ _id: supplier._id }, { $set: { leadTimeDays: 0 } });
+    // A manual floor, so the line still appears with a zero lead time —
+    // otherwise there is nothing to order and nothing to inspect.
+    const m = await material({ stock: 10, minStock: 100 });
+    await steadyDraws(m, 20, 60);
+    await delivered(m, 100, 30, 0);
+    await delivered(m, 80, 30, 1);
+
+    const line = await lineFor('Warp 40s');
+    expect(line.leadTimeSource).toBe('none');
+    expect(line.leadTimeDays).toBe(0);
+  });
+
+  it('charges more safety stock for an erratic supplier than a reliable one', async () => {
+    // Same average, same demand — the ONLY difference is how much the
+    // delivery date moves around. A model that knows only the average
+    // treats these identically, which is the point of measuring it.
+    await Supplier.updateOne({ _id: supplier._id }, { $set: { leadTimeDays: 0 } });
+    const steadySup = await material({ name: 'From reliable', stock: 100 });
+    await steadyDraws(steadySup, 20, 60);
+    for (const [i, l] of [21, 21, 21, 21, 21, 21].entries()) {
+      await delivered(steadySup, 300 - i * 20, l, i);
+    }
+
+    const erratic = await material({ name: 'From erratic', stock: 100 });
+    await steadyDraws(erratic, 20, 60);
+    for (const [i, l] of [7, 35, 21, 5, 38, 21].entries()) {
+      await delivered(erratic, 300 - i * 20, l, 100 + i);
+    }
+
+    const a = await lineFor('From reliable');
+    const b = await lineFor('From erratic');
+    expect(a.leadTimeDays).toBe(21);
+    expect(b.leadTimeDays).toBe(21);
+    expect(b.safetyStock).toBeGreaterThan(a.safetyStock);
+    // And it says WHICH uncertainty is driving it.
+    expect(b.safetyFromLeadTime).toBeGreaterThan(a.safetyFromLeadTime);
+  });
+
+  it('improves the moment a new delivery is receipted, with nothing to retrain', async () => {
+    await Supplier.updateOne({ _id: supplier._id }, { $set: { leadTimeDays: 0 } });
+    const m = await material({ stock: 100 });
+    await steadyDraws(m, 20, 60);
+    for (const [i, l] of [20, 21, 22].entries()) await delivered(m, 300 - i * 20, l, i);
+
+    expect((await lineFor('Warp 40s')).leadTimeObserved.confidence).toBe('low');
+
+    for (const [i, l] of [21, 20, 22, 21].entries()) await delivered(m, 200 - i * 20, l, 50 + i);
+
+    const after = await lineFor('Warp 40s');
+    expect(after.leadTimeObserved.deliveries).toBe(7);
+    expect(after.leadTimeObserved.confidence).toBe('medium');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  The terms have to be settable, or the model's most important input
+//  is one nobody can reach. A form field the server discards renders,
+//  accepts typing, and submits nothing — the same silent no-op as the
+//  quotation reprice that answered 200 and changed the price not at all.
+// ══════════════════════════════════════════════════════════════════
+describe('setting a supplier lead time through the API', () => {
+  it('stores it on create', async () => {
+    const res = await request(app).post('/api/v2/supplier/create-supplier')
+      .set('Cookie', cookie())
+      .send({ name: 'New Mill', phoneNumber: '9000000009', leadTimeDays: 21, packSize: 25 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.supplier.leadTimeDays).toBe(21);
+    expect(res.body.supplier.packSize).toBe(25);
+  });
+
+  it('stores it on edit', async () => {
+    const res = await request(app).put('/api/v2/supplier/edit-supplier')
+      .set('Cookie', cookie())
+      .send({ _id: supplier._id, leadTimeDays: 30, minOrderQty: 100 });
+
+    expect(res.status).toBe(200);
+    const s = await Supplier.findById(supplier._id).lean();
+    expect(s.leadTimeDays).toBe(30);
+    expect(s.minOrderQty).toBe(100);
+  });
+
+  it('reaches the forecast', async () => {
+    await request(app).put('/api/v2/supplier/edit-supplier')
+      .set('Cookie', cookie())
+      .send({ _id: supplier._id, leadTimeDays: 30 });
+
+    const m = await material({ stock: 100 });
+    await steadyDraws(m, 20, 60);
+    expect((await lineFor('Warp 40s')).leadTimeDays).toBe(30);
+  });
+});

@@ -93,7 +93,10 @@ function deriveStatus(items) {
 router.post(
   "/create-supplier",
   catchAsyncErrors(async (req, res, next) => {
-    const { name, phoneNumber, email, address, gstin } = req.body || {};
+    const {
+      name, phoneNumber, email, address, gstin,
+      leadTimeDays, minOrderQty, packSize,
+    } = req.body || {};
     if (!name || !String(name).trim()) {
       return next(new ErrorHandler("name is required", 400));
     }
@@ -108,6 +111,12 @@ router.post(
         email:       email       ? String(email).trim()       : undefined,
         address:     address     ? String(address).trim()     : undefined,
         gstin:       gstin       ? String(gstin).trim()       : undefined,
+        // 0 is meaningful — it means "no terms recorded", which is what
+        // the forecast falls back on. So these are read as numbers
+        // rather than gated on truthiness.
+        leadTimeDays: Math.max(0, Number(leadTimeDays) || 0),
+        minOrderQty:  Math.max(0, Number(minOrderQty)  || 0),
+        packSize:     Math.max(0, Number(packSize)     || 0),
       });
       res.status(201).json({ success: true, supplier });
     } catch (error) {
@@ -839,6 +848,10 @@ router.get(
 // caller inject arbitrary/internal fields.
 const SUPPLIER_FIELDS = [
   "name", "gstin", "phoneNumber", "email", "address", "contactPerson", "isActive",
+  // Replenishment terms. Whitelisted here or the form renders three
+  // fields that submit nothing — the reorder point's most important
+  // input, silently unsettable.
+  "leadTimeDays", "minOrderQty", "packSize",
 ];
 router.put(
   "/edit-supplier",

@@ -34,6 +34,12 @@ const {
   DEFAULT_SERVICE_LEVEL,
 } = require("../services/replenishment");
 
+const {
+  observationsFrom,
+  buildIndex,
+  resolveLeadTime,
+} = require("../services/leadTimeLearning");
+
 const DAY_MS = 86_400_000;
 
 /**
@@ -1073,7 +1079,12 @@ router.get(
     const now   = new Date();
     const since = new Date(now.getTime() - lookbackDays * DAY_MS);
 
-    const [materials, draws, openOrders, openPos] = await Promise.all([
+    // Learning window: a year of deliveries. Long enough for a
+    // seasonal pattern, short enough that a supplier's behaviour from
+    // two mills ago is not still setting today's safety stock.
+    const learnSince = new Date(now.getTime() - 365 * DAY_MS);
+
+    const [materials, draws, openOrders, openPos, receipts, historicPos] = await Promise.all([
       // Archived materials are retired — out of every picker, and out of
       // the buying list too.
       RawMaterial.find({ archived: { $ne: true } })
@@ -1099,7 +1110,27 @@ router.get(
       PurchaseOrder.find({ status: { $in: ["Open", "Partial"] } })
         .select("items")
         .lean(),
+
+      // ── The ground truth the lead time is LEARNED from ────────
+      // A goods receipt names the PO it came against, so
+      // inwardDate − po.date is an observed lead time for that
+      // supplier and material. Every delivery adds one; there is no
+      // training step and no model file, because the estimate IS the
+      // data, recomputed on read.
+      MaterialInward.find({
+        purchaseOrder: { $ne: null },
+        inwardDate: { $gte: learnSince },
+      }).select("purchaseOrder rawMaterial inwardDate createdAt").lean(),
+
+      PurchaseOrder.find({ date: { $gte: new Date(learnSince.getTime() - 400 * DAY_MS) } })
+        .select("date supplier")
+        .lean(),
     ]);
+
+    // ── What the deliveries say ───────────────────────────────
+    const poById = new Map(historicPos.map((p) => [String(p._id), p]));
+    const observations = observationsFrom(receipts, poById, { now, windowDays: 365 });
+    const learned = buildIndex(observations);
 
     // ── Demand series, per material ───────────────────────────
     const drawsById = new Map();
@@ -1146,17 +1177,30 @@ router.get(
       const materialDraws = drawsById.get(id) || [];
       const demand = dailyDemand(materialDraws, lookbackDays, now);
 
-      // The material's own lead time wins; null means "use the
-      // supplier's", and 0 is a real answer meaning same-day.
-      const leadTimeDays =
-        m.leadTimeDays != null ? Number(m.leadTimeDays) : Number(m.supplier?.leadTimeDays) || 0;
+      // A typed figure wins over a learned one — somebody may know
+      // something the history cannot. The learned figure is reported
+      // alongside either way, so a manual entry the deliveries
+      // contradict is visible rather than silently obeyed.
+      const supplierId = m.supplier?._id ? String(m.supplier._id) : null;
+      const lead = resolveLeadTime({
+        materialLeadTime: m.leadTimeDays,
+        supplierLeadTime: m.supplier?.leadTimeDays,
+        observed: {
+          material: learned.material.get(`${supplierId || '-'}:${id}`) || null,
+          supplier: supplierId ? learned.supplier.get(supplierId) || null : null,
+        },
+      });
 
       const pos = position({
         onHand:    Number(m.stock) || 0,
         onOrder:   onOrderById.get(id) || 0,
         committed: committedById.get(id) || 0,
         minStock:  Number(m.minStock) || 0,
-        leadTimeDays,
+        leadTimeDays: lead.days,
+        // Measured spread of the delivery time. Zero when there is no
+        // history, which collapses the safety-stock formula back to
+        // the fixed-lead-time one exactly.
+        leadTimeSd: lead.sd,
         coverDays,
         serviceLevel,
         demand,
@@ -1181,6 +1225,25 @@ router.get(
         unit: m.unit || "kg",
         price: Number(m.price) || 0,
         ...pos,
+
+        // Where the lead time came from, and what the deliveries say.
+        // A buyer who cannot see this cannot tell a measured 14 days
+        // from a typed one, and the two deserve different trust.
+        leadTimeSource: lead.source,
+        leadTimeObserved: lead.learned
+          ? {
+              median: lead.learned.median,
+              sd: lead.learned.sd,
+              deliveries: lead.learned.n,
+              confidence: lead.learned.confidence,
+              fastest: lead.learned.min,
+              slowest: lead.learned.max,
+            }
+          : null,
+        // True when a typed lead time and the measured one are five or
+        // more days apart. Not corrected automatically — surfaced, so
+        // somebody decides.
+        leadTimeDisagrees: lead.disagrees,
 
         // What the demand looks like, so a buyer can weigh the figure.
         // An intermittent yarn's safety stock is dominated by its zero
