@@ -23,9 +23,14 @@ const { starterTemplate }   = require("../services/pdf/docTypes");
 const { getPdfBranding }     = require("../services/documentSettings");
 const { dcToContext }        = require("../services/pdf/dcContext");
 
-// Every DC route requires a logged-in user. isAdmin gating is left
-// per-route at the admin app's call sites' discretion — accounts /
-// dispatch staff also create DCs.
+// The whole router is already behind `gate('accounts')` where it is
+// mounted in app.js — i.e. isAuthenticated + isAdmin('admin',
+// 'accounts') — so every route below is admin-or-accounts already, and
+// no per-route role check here can narrow that further for any role
+// that can reach it. This line is belt-and-braces on the authentication
+// half; the `isAdmin("admin", "accounts")` on /update is likewise
+// redundant with the mount and kept only so the route reads honestly on
+// its own.
 router.use(isAuthenticated);
 
 // Shared with the quote router — see utils/financialYear.js.
@@ -48,6 +53,123 @@ async function nextSeq(type, financialYear) {
 function buildDcNumber(type, financialYear, sequence) {
   const prefix = type === "elastic" ? "E" : "M";
   return `${prefix}-${financialYear}-${String(sequence).padStart(4, "0")}`;
+}
+
+const DC_STATUSES = ["draft", "dispatched", "delivered", "cancelled"];
+
+/**
+ * Where a challan may go from where it is.
+ *
+ * `/update-status` accepted ANY status from ANY status, refusing only a
+ * move to the one it was already in. Two of the transitions that opened
+ * up are not merely untidy:
+ *
+ *   cancelled → dispatched   Cancelling reverses the DC_OUT and puts
+ *                            the goods back on the shelf. Nothing
+ *                            re-applies them on the way out again, so
+ *                            the challan read "dispatched" while the
+ *                            warehouse counted the goods as in stock.
+ *                            Issued on paper, present in the ledger.
+ *
+ *   delivered → cancelled    Returns goods the customer has taken
+ *                            delivery of and signed for. `/update`
+ *                            already refuses to touch a delivered
+ *                            challan for exactly that reason — "the
+ *                            customer holds it as their receipt" — so
+ *                            the same document was protected at one
+ *                            door and not the other.
+ *
+ * Delivered and cancelled are terminal. Both are corrected by raising a
+ * fresh challan, which is what `/update` already tells people to do.
+ * This is the machine the web has always drawn; it simply was not the
+ * one the server enforced.
+ */
+const DC_TRANSITIONS = Object.freeze({
+  draft:      ["dispatched", "cancelled"],
+  dispatched: ["delivered", "cancelled"],
+  delivered:  [],
+  cancelled:  [],
+});
+
+/**
+ * Normalise and check the lines on a challan.
+ *
+ * Shared by `/create` and `/update`, because each of them was enforcing
+ * what the other missed:
+ *
+ *   /create  refused an elastic line with no elastic id — and spelled
+ *            out why at length — but accepted a quantity of any sign.
+ *   /update  refused a quantity that was not positive, but built its
+ *            items with `elastic: item.elastic || undefined` and so
+ *            reopened the exact hole /create documents closing.
+ *
+ * So a challan that could not be CUT with a nameless line could be
+ * edited into one, and a quantity that could not be edited to −5 could
+ * be created that way. One function, both doors.
+ */
+function readDcItems(raw, type) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new ErrorHandler("At least one item is required", 400);
+  }
+
+  return raw.map((item, i) => {
+    // An elastic line must IDENTIFY its elastic, not merely name it.
+    //
+    // Everything downstream keys on the id: _applyDcItems skips a line
+    // without one, so no stock moves and no reservation is settled, and
+    // the order's delivered figure sums by it, so the despatch never
+    // appears against the order. A name-only line printed a challan,
+    // the goods went out of the gate, and as far as the system was
+    // concerned nothing had happened — the worst of the three possible
+    // outcomes, and the one we had.
+    //
+    // Machine parts are free text by nature and are not checked.
+    if (type === "elastic") {
+      if (!item?.elastic) {
+        const shown = item?.elasticName || item?.description || "";
+        throw new ErrorHandler(
+          `Line ${i + 1}${shown ? ` ("${shown}")` : ""} does not say which ` +
+          `elastic it is. Pick the product rather than typing its name — a line ` +
+          `without it moves no stock and never reaches the order.`,
+          400
+        );
+      }
+      if (!mongoose.Types.ObjectId.isValid(item.elastic)) {
+        throw new ErrorHandler(`Line ${i + 1}: that is not a valid elastic`, 400);
+      }
+    }
+
+    const quantity = Number(item?.quantity);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new ErrorHandler(
+        `Line ${i + 1}: quantity must be a positive number`, 400
+      );
+    }
+
+    // A negative rate makes a negative amount, which flows into
+    // totalAmount and out onto the printed challan. Zero is ordinary —
+    // plenty of challans carry no prices at all.
+    const rate = item?.rate === undefined || item?.rate === null || item?.rate === ""
+      ? 0
+      : Number(item.rate);
+    if (!Number.isFinite(rate) || rate < 0) {
+      throw new ErrorHandler(`Line ${i + 1}: rate cannot be negative`, 400);
+    }
+
+    return {
+      elastic:     item.elastic || undefined,
+      elasticName: item.elasticName || "",
+      description: item.description || "",
+      unit:        item.unit || "m",
+      quantity,
+      rate,
+      amount:      quantity * rate,
+      // Populated by _applyDcItems. Zeroed here on every path: a stale
+      // split would make the NEXT reversal put back the wrong figure.
+      consumedFromReservation: 0,
+      consumedFromStock:       0,
+    };
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -311,7 +433,10 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const {
       type,
-      orderId, orderNo,
+      // `orderNo` is deliberately NOT read from the body — it is looked
+      // up from `orderId` below, so the challan cannot carry a number
+      // that disagrees with the order it points at.
+      orderId,
       customerName, customerPhone, customerGstin, customerAddress,
       dispatchDate,
       vehicleNo, driverName, transporter, lrNumber,
@@ -339,48 +464,32 @@ router.post(
     if (!customerName?.trim()) {
       return next(new ErrorHandler("customerName is required", 400));
     }
-    if (!items.length) {
-      return next(new ErrorHandler("At least one item is required", 400));
+    let processedItems;
+    try {
+      processedItems = readDcItems(items, type);
+    } catch (err) {
+      return next(err);
     }
-
-    // An elastic line must IDENTIFY its elastic, not merely name it.
-    //
-    // Everything downstream keys on the id: _applyDcItems skips a line
-    // without one, so no stock moves and no reservation is settled, and
-    // the order's delivered figure sums by it, so the despatch never
-    // appears against the order. A name-only line was accepted by this
-    // route and then quietly ignored by both — the challan printed, the
-    // goods went out of the gate, and as far as the system was concerned
-    // nothing had happened. That is the worst of the three possible
-    // outcomes, and it is the one we had.
-    //
-    // Machine parts are free text by nature and are not checked.
-    if (type === "elastic") {
-      const nameless = items.findIndex((item) => !item?.elastic);
-      if (nameless !== -1) {
-        const shown =
-          items[nameless]?.elasticName || items[nameless]?.description || "";
-        return next(new ErrorHandler(
-          `Line ${nameless + 1}${shown ? ` ("${shown}")` : ""} does not say which ` +
-          `elastic it is. Pick the product rather than typing its name — a line ` +
-          `without it moves no stock and never reaches the order.`,
-          400
-        ));
-      }
-    }
-
-    const processedItems = items.map((item) => ({
-      ...item,
-      quantity: Number(item.quantity) || 0,
-      rate:     Number(item.rate)     || 0,
-      amount:   (Number(item.quantity) || 0) * (Number(item.rate) || 0),
-      // Default both split fields to zero; the create transaction
-      // populates them when the parent order has reservations.
-      consumedFromReservation: 0,
-      consumedFromStock:       0,
-    }));
     const totalQuantity = processedItems.reduce((s, i) => s + i.quantity, 0);
     const totalAmount   = processedItems.reduce((s, i) => s + i.amount,   0);
+
+    // The order number is READ off the order, not taken on trust.
+    //
+    // `orderNo` came straight from the request body while `order` was
+    // the id, so the two could disagree — and they are the same fact.
+    // /list searches on the snapshot, so a mistyped number made the
+    // challan unfindable by the order it was actually cut against.
+    let linkedOrder = null;
+    if (orderId) {
+      if (!mongoose.Types.ObjectId.isValid(orderId)) {
+        return next(new ErrorHandler("Invalid order id", 400));
+      }
+      linkedOrder = await Order.findById(orderId).select("orderNo").lean();
+      if (!linkedOrder) {
+        return next(new ErrorHandler("Order not found", 404));
+      }
+    }
+    const resolvedOrderNo = linkedOrder ? linkedOrder.orderNo : undefined;
 
     const financialYear = currentFinancialYear();
     const sequence      = await nextSeq(type, financialYear);
@@ -397,7 +506,7 @@ router.post(
           sequence,
           ...(requestId ? { requestId } : {}),
           order:           orderId   || undefined,
-          orderNo:         orderNo   || undefined,
+          orderNo:         resolvedOrderNo,
           customerName:    customerName.trim(),
           customerPhone:   customerPhone   || "",
           customerGstin:   customerGstin   || "",
@@ -508,20 +617,10 @@ router.put(
     }
 
     const changingItems = Array.isArray(items);
-    if (changingItems) {
-      if (items.length === 0) {
-        return next(new ErrorHandler(
-          "A challan needs at least one line — cancel it instead", 400
-        ));
-      }
-      for (const [i, item] of items.entries()) {
-        const q = Number(item?.quantity);
-        if (!Number.isFinite(q) || q <= 0) {
-          return next(new ErrorHandler(
-            `items[${i}].quantity must be a positive number`, 400
-          ));
-        }
-      }
+    if (changingItems && items.length === 0) {
+      return next(new ErrorHandler(
+        "A challan needs at least one line — cancel it instead", 400
+      ));
     }
 
     const session = await mongoose.startSession();
@@ -556,6 +655,14 @@ router.put(
         };
 
         if (changingItems) {
+          // Validated against the challan's OWN type, before anything
+          // moves. This used to build the lines inline with
+          // `elastic: item.elastic || undefined`, which reopened the
+          // exact hole /create closes: an elastic line with no id moves
+          // no stock and never reaches the order, so an edit could turn
+          // a working challan into one the system does not see.
+          const nextItems = readDcItems(items, dc.type);
+
           // 1. Put back everything this challan took. Same reversal the
           //    cancel path uses, so the two cannot disagree.
           for (const item of dc.items || []) {
@@ -565,19 +672,7 @@ router.put(
           }
 
           // 2. Replace the lines.
-          dc.items = items.map((item) => ({
-            elastic:     item.elastic || undefined,
-            elasticName: item.elasticName || "",
-            description: item.description || "",
-            unit:        item.unit || "m",
-            quantity:    Number(item.quantity) || 0,
-            rate:        Number(item.rate) || 0,
-            amount:      (Number(item.quantity) || 0) * (Number(item.rate) || 0),
-            // Recomputed by the re-application below; a stale split
-            // would make the NEXT reversal put back the wrong figure.
-            consumedFromReservation: 0,
-            consumedFromStock:       0,
-          }));
+          dc.items = nextItems;
           dc.totalQuantity = dc.items.reduce((s, i) => s + i.quantity, 0);
           dc.totalAmount   = dc.items.reduce((s, i) => s + i.amount,   0);
 
@@ -634,12 +729,25 @@ router.put(
 
 router.get(
   "/list",
-  catchAsyncErrors(async (req, res) => {
-    const { type, status, search = "", page = 1, limit = 20 } = req.query;
+  catchAsyncErrors(async (req, res, next) => {
+    const { type, status, search = "" } = req.query;
 
+    // Validated rather than passed through. An unknown status matched
+    // nothing and answered with an empty list, which reads to the caller
+    // exactly like a filter that legitimately found no challans.
     const filter = {};
-    if (type)   filter.type   = type;
-    if (status) filter.status = status;
+    if (type) {
+      if (!["elastic", "machine_part"].includes(type)) {
+        return next(new ErrorHandler(`Invalid type: ${type}`, 400));
+      }
+      filter.type = type;
+    }
+    if (status) {
+      if (!DC_STATUSES.includes(status)) {
+        return next(new ErrorHandler(`Invalid status: ${status}`, 400));
+      }
+      filter.status = status;
+    }
     if (search.trim()) {
       const or = [
         { dcNumber:     { $regex: escapeRegex(search), $options: "i" } },
@@ -652,8 +760,11 @@ router.get(
       filter.$or = or;
     }
 
-    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 200);
-    const skip  = (Number(page) - 1) * safeLimit;
+    // `limit` was clamped and `page` was not, so `page=0` produced a
+    // negative skip — which Mongo rejects outright.
+    const safePage  = Math.max(Number(req.query.page) || 1, 1);
+    const safeLimit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 200);
+    const skip  = (safePage - 1) * safeLimit;
     const [dcs, total] = await Promise.all([
       DeliveryChallan.find(filter)
         .sort({ createdAt: -1 })
@@ -663,7 +774,7 @@ router.get(
       DeliveryChallan.countDocuments(filter),
     ]);
 
-    res.json({ success: true, dcs, total, page: Number(page) });
+    res.json({ success: true, dcs, total, page: safePage });
   })
 );
 
@@ -728,8 +839,7 @@ router.patch(
   "/update-status",
   catchAsyncErrors(async (req, res, next) => {
     const { id, status } = req.body;
-    const valid = ["draft", "dispatched", "delivered", "cancelled"];
-    if (!valid.includes(status)) {
+    if (!DC_STATUSES.includes(status)) {
       return next(new ErrorHandler("Invalid status", 400));
     }
 
@@ -749,6 +859,21 @@ router.patch(
         const previousStatus = dc.status;
         if (previousStatus === status) {
           throw new ErrorHandler(`DC is already ${status}`, 400);
+        }
+
+        const allowed = DC_TRANSITIONS[previousStatus] || [];
+        if (!allowed.includes(status)) {
+          const err = new ErrorHandler(
+            allowed.length === 0
+              ? `DC ${dc.dcNumber} is ${previousStatus} and cannot change again. ` +
+                `Raise a fresh challan for a correction.`
+              : `A ${previousStatus} challan can only become ` +
+                `${allowed.join(" or ")} — not ${status}.`,
+            409
+          );
+          err.code = "DC_BAD_TRANSITION";
+          err.details = { from: previousStatus, to: status, allowed };
+          throw err;
         }
 
         dc.status = status;
@@ -863,14 +988,38 @@ router.get(
     const days = Math.min(Math.max(Number(req.query.days) || 90, 7), 365);
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
+    // A DRAFT challan has not been dispatched.
+    //
+    // The filter excluded only cancelled ones, so every draft counted —
+    // with `dispatchDate` defaulting to the moment it was keyed, which
+    // is not a despatch date at all. Paperwork sitting in a drawer was
+    // scoring in the delivery statistic, and scoring on-time.
     const dcs = await DeliveryChallan.find({
       order: { $ne: null },
-      status: { $ne: "cancelled" },
+      status: { $in: ["dispatched", "delivered"] },
       dispatchDate: { $gte: since },
     })
       .populate("order", "orderNo supplyDate")
       .select("dcNumber orderNo customerName dispatchDate order")
       .lean();
+
+    // Lateness is counted in DAYS, so both ends are taken to the start
+    // of their day first.
+    //
+    // The old line ceil'd a millisecond difference. `supplyDate` is
+    // stored as a midnight timestamp and `dispatchDate` is the moment
+    // the challan was cut, so a lorry that left at nine in the morning
+    // on the promised date came out at ceil(0.4) = 1 day late. Every
+    // same-day despatch — the ones that hit the date exactly — was
+    // counted as a miss, which made the figure systematically worse
+    // than the truth and worst for the customers served most promptly.
+    const startOfDay = (d) => {
+      const x = new Date(d);
+      x.setHours(0, 0, 0, 0);
+      return x;
+    };
+    const dayDiff = (a, b) =>
+      Math.round((startOfDay(a) - startOfDay(b)) / (24 * 60 * 60 * 1000));
 
     let onTime = 0;
     const late = [];
@@ -880,7 +1029,7 @@ router.get(
       if (!due) continue;
       considered += 1;
       const dispatched = new Date(dc.dispatchDate);
-      const lateDays = Math.ceil((dispatched - due) / (24 * 60 * 60 * 1000));
+      const lateDays = dayDiff(dispatched, due);
       if (lateDays <= 0) onTime += 1;
       else
         late.push({
