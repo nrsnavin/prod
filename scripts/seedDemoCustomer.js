@@ -188,15 +188,28 @@ async function seedRawMaterials() {
     ...overrides,
   });
 
-  // Use create-one-by-one to surface schema errors clearly.
+  // Categories the app actually uses.
+  //
+  // This used to invent "spandex", "polyester" and "cotton" — three
+  // names that appeared in no picker, no filter chip and no recipe
+  // query anywhere in the system. Harmless while `category` was
+  // unvalidated free text; not harmless once material groups exist,
+  // because the migration reads the DISTINCT categories in the database
+  // and faithfully creates a group for each. Seeding a demo customer
+  // put three phantom groups in the Groups screen that nobody added and
+  // nothing on the shop floor recognises.
+  //
+  // The demo materials are a warp yarn, a weft yarn and a rubber, so
+  // they are filed as such — which also puts them in the elastic recipe
+  // pickers, where the seeded elastics below expect to find them.
   const spandex = await RawMaterial.create(baseRow({
-    category: "spandex", name: "Spandex 40D",        price: 380,
+    category: "Rubber", name: "Spandex 40D",        price: 380,
   }));
   const polyester = await RawMaterial.create(baseRow({
-    category: "polyester", name: "Polyester 75/72",  price: 195,
+    category: "weft", name: "Polyester 75/72",  price: 195,
   }));
   const cotton = await RawMaterial.create(baseRow({
-    category: "cotton",  name: "Cotton 30s",          price: 240,
+    category: "warp",  name: "Cotton 30s",          price: 240,
   }));
   return { spandex, polyester, cotton };
 }

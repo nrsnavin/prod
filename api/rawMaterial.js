@@ -25,6 +25,16 @@ const {
   maybeFirePoReceivedForCritical,
 } = require("../utils/inventoryAlerts");
 const { enqueue } = require("../utils/outbox");
+const {
+  dailyDemand,
+  demandPattern,
+  position,
+  applyPurchaseRules,
+  SERVICE_LEVELS,
+  DEFAULT_SERVICE_LEVEL,
+} = require("../services/replenishment");
+
+const DAY_MS = 86_400_000;
 
 /**
  * Settle the group and the category name against each other.
@@ -1012,44 +1022,119 @@ router.get(
 );
 
 // ══════════════════════════════════════════════════════════════
-//  GET /materials/replenishment-forecast?horizonDays=14&lookbackDays=30
+//  GET /materials/replenishment-forecast
+//      ?lookbackDays=60 &coverDays=30 &serviceLevel=95
 //
-//  Forecast-driven replenishment. Combines:
-//    • on-hand stock
-//    • committed demand — Open orders' rawMaterialRequired (deducts on
-//      approval), i.e. near-term consumption already in the pipeline
-//    • a run-rate from historical ORDER_APPROVAL outward movements
-//  …to project each material's stock over the horizon and flag those
-//  that dip below their safety floor. Each flag carries a suggestedQty
-//  and its default supplier, grouped by supplier so the admin can draft
-//  one PO per vendor. Deterministic; an optional Claude summary explains
-//  the "why now". Nothing is ordered automatically.
+//  WHAT TO BUY, AND THE LAST DAY IT CAN LEAVE.
+//
+//  The reorder-point model — see services/replenishment.js for the
+//  arithmetic and the reasoning. This route's job is to gather the four
+//  inputs honestly, which is where the previous version went wrong:
+//
+//  1. COMMITTED DEMAND WAS ALWAYS ZERO. It read `rm.quantity` off
+//     Order.rawMaterialRequired, whose field is `requiredWeight`. The
+//     endpoint advertised the Open-order pipeline as one of its three
+//     inputs and that input contributed nothing, ever.
+//
+//  2. STOCK ON ORDER WAS IGNORED. A raised, unreceived PO is stock that
+//     is coming; nothing looked at purchase orders, so the same
+//     shortfall was recommended again every time the page was opened.
+//
+//  3. HALF THE CONSUMPTION WAS INVISIBLE. The run-rate counted
+//     ORDER_APPROVAL draws only. Yarn issued against a job during the
+//     run (JOB_CONSUMPTION) moved the rate not at all.
+//
+//  4. ARCHIVED MATERIALS WERE STILL RECOMMENDED. `find({})`, no filter.
+//
+//  5. THERE WAS NO LEAD TIME ANYWHERE, so "order this" never meant
+//     "order this BY a date" — which is the only actionable output a
+//     replenishment report has.
+//
+//  Deterministic throughout. The optional Claude summary explains the
+//  ranking in words; it does not choose a number and cannot change one.
 // ══════════════════════════════════════════════════════════════
 router.get(
   "/replenishment-forecast",
   catchAsyncErrors(async (req, res) => {
-    const horizonDays  = Math.min(Math.max(Number(req.query.horizonDays)  || 14, 1), 120);
-    const lookbackDays = Math.min(Math.max(Number(req.query.lookbackDays) || 30, 7), 180);
-    const now   = new Date();
-    const since = new Date(now.getTime() - lookbackDays * 86_400_000);
+    // A longer default window than the old 30 days: safety stock is
+    // driven by the spread of daily demand, and a month of a mill's
+    // draws is too few days to estimate a spread from.
+    const lookbackDays = Math.min(Math.max(Number(req.query.lookbackDays) || 60, 7), 365);
+    const coverDays    = Math.min(Math.max(Number(req.query.coverDays)    || 30, 1), 180);
+    const serviceLevel = SERVICE_LEVELS[Number(req.query.serviceLevel)]
+      ? Number(req.query.serviceLevel)
+      : DEFAULT_SERVICE_LEVEL;
 
-    const [materials, consumptionAgg, openOrders] = await Promise.all([
-      RawMaterial.find({}).select("-stockMovements").populate("supplier", "name").lean(),
-      MaterialOutward.aggregate([
-        { $match: { type: "ORDER_APPROVAL", reversed: { $ne: true }, createdAt: { $gte: since } } },
-        { $group: { _id: "$rawMaterial", used: { $sum: "$quantity" } } },
-      ]),
+    // Kept so existing callers (and the web page) do not break; it no
+    // longer drives the decision, because the reorder point is set by
+    // the lead time rather than by an arbitrary look-ahead.
+    const horizonDays = Math.min(Math.max(Number(req.query.horizonDays) || 14, 1), 120);
+
+    const now   = new Date();
+    const since = new Date(now.getTime() - lookbackDays * DAY_MS);
+
+    const [materials, draws, openOrders, openPos] = await Promise.all([
+      // Archived materials are retired — out of every picker, and out of
+      // the buying list too.
+      RawMaterial.find({ archived: { $ne: true } })
+        .select("-stockMovements")
+        .populate("supplier", "name leadTimeDays minOrderQty packSize")
+        .lean(),
+
+      // BOTH ways yarn leaves stock. STOCK_ADJUST is excluded on
+      // purpose: a write-off or a count correction is not demand, and
+      // treating it as such would have the system buy yarn to replace
+      // stock that was never consumed.
+      MaterialOutward.find({
+        type: { $in: ["ORDER_APPROVAL", "JOB_CONSUMPTION"] },
+        reversed: { $ne: true },
+        createdAt: { $gte: since },
+      }).select("rawMaterial quantity createdAt outwardDate").lean(),
+
+      // Not yet approved, so not yet drawn — this is demand still to
+      // come out of stock.
       Order.find({ status: "Open" }).select("rawMaterialRequired").lean(),
+
+      // Raised and not fully received: stock that is on its way.
+      PurchaseOrder.find({ status: { $in: ["Open", "Partial"] } })
+        .select("items")
+        .lean(),
     ]);
 
-    // Run-rate per material (units/day) over the lookback window.
-    const usedById = new Map(consumptionAgg.map((r) => [String(r._id), r.used]));
-    // Committed demand from the Open-order pipeline.
+    // ── Demand series, per material ───────────────────────────
+    const drawsById = new Map();
+    for (const d of draws) {
+      const id = String(d.rawMaterial);
+      if (!drawsById.has(id)) drawsById.set(id, []);
+      drawsById.get(id).push({
+        at: d.outwardDate || d.createdAt,
+        quantity: Number(d.quantity) || 0,
+      });
+    }
+
+    // ── Committed: `requiredWeight`, which is what the field is called
     const committedById = new Map();
     for (const o of openOrders) {
       for (const rm of o.rawMaterialRequired || []) {
+        if (!rm?.rawMaterial) continue;
         const id = String(rm.rawMaterial);
-        committedById.set(id, (committedById.get(id) || 0) + (Number(rm.quantity) || 0));
+        committedById.set(id, (committedById.get(id) || 0) + (Number(rm.requiredWeight) || 0));
+      }
+    }
+
+    // ── On order: raised minus received, never negative ───────
+    const onOrderById = new Map();
+    for (const po of openPos) {
+      for (const it of po.items || []) {
+        if (!it?.rawMaterial) continue;
+        const id = String(it.rawMaterial);
+        // An over-receipt (allowed, within tolerance) must not become a
+        // negative inbound that inflates the shortfall.
+        const outstanding = Math.max(
+          0,
+          (Number(it.quantity) || 0) - (Number(it.receivedQuantity) || 0)
+        );
+        onOrderById.set(id, (onOrderById.get(id) || 0) + outstanding);
       }
     }
 
@@ -1057,79 +1142,140 @@ router.get(
     let skippedNoSupplier = 0;
 
     for (const m of materials) {
-      const id        = String(m._id);
-      const onHand    = Number(m.stock) || 0;
-      const minStock  = Number(m.minStock) || 0;
-      const runRate   = (usedById.get(id) || 0) / lookbackDays;                 // units/day
-      const committed = committedById.get(id) || 0;
-      const projConsumption = committed + runRate * horizonDays;
-      const projStock = onHand - projConsumption;
+      const id = String(m._id);
+      const materialDraws = drawsById.get(id) || [];
+      const demand = dailyDemand(materialDraws, lookbackDays, now);
 
-      // Only surface materials that dip to/below their safety floor within
-      // the horizon (or have nonzero demand and no floor set).
-      const willBreach = projStock < Math.max(minStock, 0) && projConsumption > 0;
-      if (!willBreach) continue;
+      // The material's own lead time wins; null means "use the
+      // supplier's", and 0 is a real answer meaning same-day.
+      const leadTimeDays =
+        m.leadTimeDays != null ? Number(m.leadTimeDays) : Number(m.supplier?.leadTimeDays) || 0;
 
+      const pos = position({
+        onHand:    Number(m.stock) || 0,
+        onOrder:   onOrderById.get(id) || 0,
+        committed: committedById.get(id) || 0,
+        minStock:  Number(m.minStock) || 0,
+        leadTimeDays,
+        coverDays,
+        serviceLevel,
+        demand,
+        now,
+      });
+
+      if (!pos.shouldOrder || pos.suggestedQty <= 0) continue;
+
+      // A line nobody can act on is noise on a buying list. Counted and
+      // reported so it is visible as an absence rather than a silence.
       if (!m.supplier || !m.supplier._id) { skippedNoSupplier += 1; continue; }
 
-      // Days until on-hand (net of committed) runs out at the run-rate.
-      const daysToStockout = runRate > 0 ? Math.max(0, (onHand - committed) / runRate) : null;
-      const stockoutDate = daysToStockout != null && daysToStockout <= 365
-        ? new Date(now.getTime() + daysToStockout * 86_400_000) : null;
-
-      // Refill to cover projected consumption + the safety floor.
-      const suggestedQty = Math.ceil(Math.max(0, projConsumption + minStock - onHand));
-      if (suggestedQty <= 0) continue;
+      const orderQty = applyPurchaseRules(pos.suggestedQty, {
+        minOrderQty: m.supplier.minOrderQty,
+        packSize:    m.supplier.packSize,
+      });
 
       flagged.push({
-        _id: id, name: m.name, category: m.category, unit: m.unit || "",
+        _id: id,
+        name: m.name,
+        category: m.category,
+        unit: m.unit || "kg",
         price: Number(m.price) || 0,
-        onHand, minStock,
-        runRatePerDay: Math.round(runRate * 100) / 100,
-        committedDemand: Math.round(committed),
-        projectedConsumption: Math.round(projConsumption),
-        projectedStock: Math.round(projStock),
-        daysToStockout: daysToStockout != null ? Math.round(daysToStockout) : null,
-        projectedStockoutDate: stockoutDate ? stockoutDate.toISOString().slice(0, 10) : null,
-        suggestedQty,
-        estimatedCost: Math.round(suggestedQty * (Number(m.price) || 0)),
-        severity: projStock < 0 ? "critical" : "warn",
-        supplier: { _id: String(m.supplier._id), name: m.supplier.name },
+        ...pos,
+
+        // What the demand looks like, so a buyer can weigh the figure.
+        // An intermittent yarn's safety stock is dominated by its zero
+        // days and the suggestion reads high; saying so is better than
+        // quietly switching formula behind their back.
+        demandPattern: demandPattern(demand, materialDraws.length),
+        drawsInWindow: materialDraws.length,
+
+        // Legacy names, so the existing web page keeps rendering.
+        onHand: pos.onHand,
+        runRatePerDay: pos.dailyDemand,
+        committedDemand: pos.committed,
+        projectedStock: pos.netStock,
+        daysToStockout: pos.daysOfCover != null ? Math.round(pos.daysOfCover) : null,
+
+        suggestedQty: orderQty,
+        rawSuggestedQty: pos.suggestedQty,
+        estimatedCost: Math.round(orderQty * (Number(m.price) || 0)),
+        supplier: {
+          _id: String(m.supplier._id),
+          name: m.supplier.name,
+          leadTimeDays: Number(m.supplier.leadTimeDays) || 0,
+        },
       });
     }
 
-    // Worst first: stockout soonest, then biggest shortfall.
+    // Late first — an order that cannot arrive in time is a different
+    // and more urgent thing than one merely below its reorder point.
+    // Then by how few days of cover are left.
     flagged.sort((a, b) => {
+      if (a.alreadyLate !== b.alreadyLate) return a.alreadyLate ? -1 : 1;
       if (a.severity !== b.severity) return a.severity === "critical" ? -1 : 1;
-      return (a.daysToStockout ?? 1e9) - (b.daysToStockout ?? 1e9);
+      const ac = a.daysOfCover ?? -1;   // no demand at all sorts LAST,
+      const bc = b.daysOfCover ?? -1;   // but a certain stockout does not
+      if (ac < 0 || bc < 0) return ac < 0 ? 1 : -1;
+      return ac - bc;
     });
 
-    // Group by supplier so the UI can draft one PO per vendor.
+    // One PO per vendor.
     const bySupplierMap = new Map();
     for (const f of flagged) {
       const key = f.supplier._id;
-      if (!bySupplierMap.has(key)) bySupplierMap.set(key, { supplier: f.supplier, lines: [], estimatedCost: 0 });
+      if (!bySupplierMap.has(key)) {
+        bySupplierMap.set(key, { supplier: f.supplier, lines: [], estimatedCost: 0 });
+      }
       const g = bySupplierMap.get(key);
       g.lines.push(f);
       g.estimatedCost += f.estimatedCost;
     }
     const bySupplier = [...bySupplierMap.values()];
 
+    // Lead time is the input the whole model rests on, and it defaults
+    // to zero. A mill that has set none gets the old behaviour and no
+    // explanation of why nothing is ever flagged early — so say it.
+    const noLeadTime = materials.filter(
+      (m) => !(m.leadTimeDays ?? m.supplier?.leadTimeDays)
+    ).length;
+
     const totals = {
       flagged: flagged.length,
       critical: flagged.filter((f) => f.severity === "critical").length,
+      late: flagged.filter((f) => f.alreadyLate).length,
       suppliers: bySupplier.length,
       estimatedCost: flagged.reduce((s, f) => s + f.estimatedCost, 0),
     };
 
-    // Optional Claude "why now" narrative.
+    const warnings = [];
+    if (noLeadTime > 0) {
+      warnings.push(
+        `${noLeadTime} material(s) have no lead time set, on themselves or their supplier. ` +
+        `Their reorder point is the manual minimum stock only, and no "order by" date can ` +
+        `be worked out — set a lead time on the supplier to get one.`
+      );
+    }
+    if (skippedNoSupplier > 0) {
+      warnings.push(
+        `${skippedNoSupplier} material(s) need reordering but have no supplier, so they ` +
+        `cannot be put on a purchase order.`
+      );
+    }
+
+    // ── The narrative ─────────────────────────────────────────
+    // Explains the ranking; it does not decide it. Every number above
+    // is already fixed by the time this runs, and a failure here loses
+    // the prose and nothing else.
     let aiSummary = null, aiGenerated = false;
     const claude = anthropic();
     if (claude && flagged.length > 0) {
       try {
         const facts = flagged.slice(0, 8).map((f) =>
-          `${f.name}: on-hand ${f.onHand}, run-rate ${f.runRatePerDay}/day, committed ${f.committedDemand}, ` +
-          `projected ${f.projectedStock} by day ${horizonDays}${f.projectedStockoutDate ? `, stockout ~${f.projectedStockoutDate}` : ""} → order ${f.suggestedQty}`
+          `${f.name}: net ${f.netStock} ${f.unit} (on hand ${f.onHand}, on order ${f.onOrder}, ` +
+          `committed ${f.committed}), uses ${f.dailyDemand}/day, lead time ${f.leadTimeDays}d, ` +
+          `reorder point ${f.reorderPoint}, ${f.daysOfCover ?? "?"} days cover` +
+          `${f.orderByDate ? `, order by ${f.orderByDate}` : ""}` +
+          `${f.alreadyLate ? " (ALREADY LATE)" : ""} → buy ${f.suggestedQty}`
         ).join("\n");
         const msg = await claude.messages.create({
           model: TEXT_MODEL,
@@ -1148,8 +1294,14 @@ router.get(
     }
 
     res.json({
-      success: true, horizonDays, lookbackDays,
+      success: true,
+      horizonDays, lookbackDays, coverDays, serviceLevel,
       totals, materials: flagged, bySupplier, skippedNoSupplier,
+      // The model rests on lead time and it defaults to zero. A mill
+      // that has set none gets a reorder point of just its manual
+      // minimum and no "order by" date — worth saying out loud rather
+      // than letting the page look quietly empty.
+      warnings,
       aiSummary, aiGenerated,
     });
   })
