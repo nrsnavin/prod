@@ -46,18 +46,57 @@ const EPS             = 1e-6;
 
 const _fmt = (d) => (d instanceof Date && !isNaN(d) ? d.toISOString().slice(0, 10) : null);
 
-// ── Gather pending order lines within the horizon ──────────────────
-async function _gatherLines(now) {
+/**
+ * Midnight on the day of `d`.
+ *
+ * Everything in this planner is counted in WORKING DAYS, and the clock
+ * has to start on a day boundary for that to mean anything. It did not:
+ * `planDate` was `new Date()`, so a plan generated at half past two
+ * produced finish dates at half past two, while `supplyDate` is stored
+ * at midnight. A line that finished exactly ON its due date therefore
+ * compared as `finish > dueDate` and was booked one working day late.
+ *
+ * That is not merely a misreport. W_LATE is 10 against a changeover's 1,
+ * so lateness dominates the objective — a phantom day on every line
+ * that lands on its date pushes the optimiser into genuinely different,
+ * worse assignments while it chases the phantom.
+ */
+const _startOfDay = (d) => {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+};
+
+// ── Gather pending order lines, due within the horizon ─────────────
+//
+// `horizonDays` was accepted by the route, echoed back in the response
+// and stored on the accepted plan — and never used. This function took
+// a `now` it also ignored, under a comment claiming it gathered lines
+// "within the horizon". Every horizon produced an identical plan, so
+// the selector on the screen was a control wired to nothing.
+//
+// Overdue lines are always in: they are the most urgent work there is,
+// and a horizon that dropped them would plan around the problem. Lines
+// with no due date are also in — undated work is real work and can fill
+// any gap; the horizon is a statement about deadlines, not about which
+// work exists.
+async function _gatherLines(now, horizonDays) {
   const orders = await Order.find({ status: { $in: ["Approved", "InProgress"] } })
     .populate("customer", "name")
     .lean();
 
-  // Collect the elastic ids we need specs for (hooks → machine compat).
+  const horizonEnd = C.addWorkingDays(_startOfDay(now), horizonDays);
+
   const lines = [];
+  let beyondHorizon = 0;
   for (const o of orders) {
     for (const pe of o.pendingElastic || []) {
       const qty = Number(pe.quantity) || 0;
       if (qty <= 0 || !pe.elastic) continue;
+
+      const dueDate = o.supplyDate ? _startOfDay(new Date(o.supplyDate)) : null;
+      if (dueDate && dueDate > horizonEnd) { beyondHorizon += 1; continue; }
+
       lines.push({
         id:        `${o._id}:${pe.elastic}`,
         orderId:   o._id.toString(),
@@ -65,11 +104,52 @@ async function _gatherLines(now) {
         customer:  o.customer?.name || "—",
         elasticId: pe.elastic.toString(),
         qtyMeters: qty,
-        dueDate:   o.supplyDate ? new Date(o.supplyDate) : null,
+        dueDate,
       });
     }
   }
-  return lines;
+  return { lines, beyondHorizon, horizonEnd };
+}
+
+// ── What each machine is already busy with ─────────────────────────
+//
+// Every machine's cursor started at zero, i.e. the plan assumed a plant
+// standing completely idle. It never is: jobs are on the looms when the
+// plan is drawn, and their remaining metres have to come off before
+// anything proposed here can start. Ignoring them made every projected
+// finish optimistic by however long the current run has left, and since
+// lateness drives the objective, the plan was confidently scheduling
+// into time that was already spoken for.
+async function _machineBacklog(machineIds, rateFor) {
+  const JobOrder = require("../models/JobOrder");
+  const jobs = await JobOrder.find({
+    machine: { $in: machineIds },
+    status: { $in: ["weaving", "finishing", "checking", "packing"] },
+  }).select("machine elastics producedElastic").lean();
+
+  const backlog = new Map();       // machineId → committed working days
+  for (const j of jobs) {
+    const machineId = String(j.machine);
+    const producedBy = new Map(
+      (j.producedElastic || [])
+        .filter((p) => p?.elastic)
+        .map((p) => [String(p.elastic), Number(p.quantity) || 0])
+    );
+
+    let days = 0;
+    for (const e of j.elastics || []) {
+      if (!e?.elastic) continue;
+      const elasticId = String(e.elastic);
+      const remaining =
+        (Number(e.quantity) || 0) - (producedBy.get(elasticId) || 0);
+      if (remaining <= 0) continue;
+      const mpd = rateFor(elasticId, machineId);
+      if (!(mpd > 0)) continue;
+      days += Math.ceil(remaining / mpd);
+    }
+    backlog.set(machineId, (backlog.get(machineId) || 0) + days);
+  }
+  return backlog;
 }
 
 // ── Candidate machines (anything not down for maintenance) ─────────
@@ -100,8 +180,22 @@ function _compatible(machine, elasticHooks) {
   return true; // unknown hook data → don't exclude
 }
 
+/** A machine's cold-start rate: heads × per-head-day × loom efficiency. */
+const _coldStart = (heads) =>
+  C.COLDSTART_METERS_PER_HEAD_DAY * (heads > 0 ? heads : 1) * C.LOOM_EFFICIENCY;
+
 // ── Rate (meters/machine-day) for an (elastic, machine) pair ───────
-async function _rateForPair(elasticId, machine, plantRate) {
+//
+// `avgHeads` is the mean head count across the candidate machines, and
+// it is what makes the plant fallback usable. The plant rate is metres
+// per MACHINE-day averaged over the whole plant, so handing it back
+// unscaled gave a 12-head loom and a 4-head loom exactly the same
+// throughput — while the posterior branch directly above correctly gave
+// them 2400 and 800. The fallback is reached precisely when a pair has
+// no history, i.e. when a new product is being planned, so the planner
+// was at its most wrong about the biggest machines exactly when it had
+// least evidence, and would under-load them.
+async function _rateForPair(elasticId, machine, plantRate, avgHeads) {
   const post = await getPairRate(elasticId, machine.id);
   if (post && post.metersPerHeadPerShift > 0) {
     return {
@@ -109,11 +203,10 @@ async function _rateForPair(elasticId, machine, plantRate) {
       source: "posterior",
     };
   }
-  if (plantRate && plantRate > 0) return { mpd: plantRate, source: "plant" };
-  return {
-    mpd: C.COLDSTART_METERS_PER_HEAD_DAY * machine.heads * C.LOOM_EFFICIENCY,
-    source: "coldstart",
-  };
+  if (plantRate && plantRate > 0 && avgHeads > 0) {
+    return { mpd: plantRate * (machine.heads / avgHeads), source: "plant" };
+  }
+  return { mpd: _coldStart(machine.heads), source: "coldstart" };
 }
 
 // Memoized (60s): same 30-day scan as the ETA engine's plant rate —
@@ -140,7 +233,13 @@ const _loadPlantRate = memoizeAsync(async function (now) {
 // runs its lines in due-date order; changeovers and finish dates are
 // walked along that order.
 function _evaluate(assignmentMap, ctx) {
-  const { linesById, machinesById, rate, planDate } = ctx;
+  const { linesById, machinesById, rate, backlog } = ctx;
+  // Floored here, not only at the caller. This is the pure core and the
+  // place the finish-vs-due comparison actually happens, so it is where
+  // the day granularity has to be guaranteed — a caller that forgets
+  // reintroduces a phantom late day on every line that lands on its
+  // date, and the objective is dominated by lateness.
+  const planDate = _startOfDay(ctx.planDate);
   const perMachine = new Map();
   for (const [lineId, machineId] of assignmentMap) {
     if (!perMachine.has(machineId)) perMachine.set(machineId, []);
@@ -159,19 +258,29 @@ function _evaluate(assignmentMap, ctx) {
       const db = b.dueDate ? b.dueDate.getTime() : Infinity;
       return da - db || b.qtyMeters - a.qtyMeters;
     });
-    let cursor = 0;
+    // Starts where the machine actually becomes free, not at zero.
+    let cursor = backlog?.get(machineId) || 0;
     let last = machine.currentElasticId;
     let seq = 0;
     for (const line of list) {
-      const r = rate.get(`${line.elasticId}|${machineId}`) || { mpd: 1, source: "coldstart" };
+      // A missing rate used to fall back to `{ mpd: 1 }` — one metre per
+      // machine-day, which turns a 5,000 m line into 5,000 working days
+      // — and labelled it "coldstart", which is a real source with a
+      // real formula. The number was absurd and the label said it was
+      // fine. Use the actual cold-start rate and say so.
+      const r = rate.get(`${line.elasticId}|${machineId}`)
+        || { mpd: _coldStart(machine.heads), source: "coldstart" };
       const isChangeover = !!last && last !== line.elasticId;
       if (isChangeover) { changeovers += 1; cursor += CHANGEOVER_DAYS; }
       const weavingDays = Math.max(1, Math.ceil(line.qtyMeters / r.mpd));
       const startWorkingDay = cursor;
       cursor += weavingDays;
       const finish = C.addWorkingDays(planDate, cursor);
-      const late = line.dueDate ? finish > line.dueDate : false;
-      const lateWorkingDays = late ? C.workingDaysBetween(line.dueDate, finish) : 0;
+      // Both ends at day granularity. A due date is a DAY, not an
+      // instant: delivering on it is on time.
+      const due = line.dueDate ? _startOfDay(line.dueDate) : null;
+      const late = due ? finish > due : false;
+      const lateWorkingDays = late ? C.workingDaysBetween(due, finish) : 0;
       totalLate += lateWorkingDays;
       results.push({
         lineId: line.id, machineId, sequence: seq,
@@ -196,7 +305,12 @@ function _evaluate(assignmentMap, ctx) {
 
 // ── Greedy seed: earliest due date first, finish-/changeover-aware ─
 function _greedy(lines, machines, ctx) {
-  const state = new Map(machines.map((m) => [m.id, { cursor: 0, last: m.currentElasticId }]));
+  // Seeded from the work already on each loom, exactly as _evaluate is,
+  // or the seed would propose starts the evaluator then disagrees with.
+  const state = new Map(machines.map((m) => [
+    m.id,
+    { cursor: ctx.backlog?.get(m.id) || 0, last: m.currentElasticId },
+  ]));
   const assignmentMap = new Map();
   const unplaceable = [];
 
@@ -206,8 +320,11 @@ function _greedy(lines, machines, ctx) {
     return da - db || b.qtyMeters - a.qtyMeters;
   });
 
+  const planDate = _startOfDay(ctx.planDate);
+
   for (const line of sorted) {
     let best = null, bestCost = Infinity;
+    const due = line.dueDate ? _startOfDay(line.dueDate) : null;
     for (const m of machines) {
       if (!_compatible(m, line.hooks)) continue;
       const r = ctx.rate.get(`${line.elasticId}|${m.id}`);
@@ -216,9 +333,9 @@ function _greedy(lines, machines, ctx) {
       const co = !!st.last && st.last !== line.elasticId;
       const wd = Math.max(1, Math.ceil(line.qtyMeters / r.mpd));
       const cursorAfter = st.cursor + (co ? CHANGEOVER_DAYS : 0) + wd;
-      const finish = C.addWorkingDays(ctx.planDate, cursorAfter);
-      const lateDays = line.dueDate && finish > line.dueDate
-        ? C.workingDaysBetween(line.dueDate, finish) : 0;
+      const finish = C.addWorkingDays(planDate, cursorAfter);
+      const lateDays = due && finish > due
+        ? C.workingDaysBetween(due, finish) : 0;
       const cost = lateDays * W_LATE + (co ? W_CHANGE : 0) + cursorAfter * W_BAL_SMALL;
       if (cost < bestCost) { bestCost = cost; best = m; }
     }
@@ -268,15 +385,22 @@ router.get(
   "/suggest-plan",
   isAdmin("admin"),
   catchAsyncErrors(async (req, res) => {
-    const now = new Date();
+    // Day granularity throughout: the model counts working days, and a
+    // clock reading half past two turns "finishes on the due date" into
+    // "one day late" on every line. See _startOfDay.
+    const now = _startOfDay(new Date());
     const horizonDays = Math.min(Math.max(Number(req.query.horizonDays) || 7, 1), 60);
 
-    const [rawLines, machineDocs, plantRate] = await Promise.all([
-      _gatherLines(now),
+    const [gathered, machineDocs, plantRate] = await Promise.all([
+      _gatherLines(now, horizonDays),
       Machine.find().lean(),
       _loadPlantRate(now),
     ]);
+    const { lines: rawLines, beyondHorizon, horizonEnd } = gathered;
     const machines = _gatherMachines(machineDocs);
+    const avgHeads = machines.length
+      ? machines.reduce((s, m) => s + m.heads, 0) / machines.length
+      : 0;
 
     // Hydrate elastic names + hook counts for the lines we have.
     const elasticIds = [...new Set(rawLines.map((l) => l.elasticId))];
@@ -294,14 +418,26 @@ router.get(
       elasticIds.flatMap((eid) =>
         machines.map(async (m) => {
           if (!_compatible(m, elasticById.get(eid)?.noOfHook || 0)) return;
-          rate.set(`${eid}|${m.id}`, await _rateForPair(eid, m, plantRate));
+          rate.set(`${eid}|${m.id}`, await _rateForPair(eid, m, plantRate, avgHeads));
         })
       )
     );
 
     const linesById = new Map(lines.map((l) => [l.id, l]));
     const machinesById = new Map(machines.map((m) => [m.id, m]));
-    const ctx = { linesById, machinesById, rate, planDate: now };
+
+    // How long each loom stays busy with what is already on it. Falls
+    // back to the machine's cold-start rate for an elastic the rate map
+    // has no entry for (an in-flight job may run an elastic that is not
+    // on any pending line, so it was never priced above).
+    const backlog = await _machineBacklog(
+      machines.map((m) => m.id),
+      (elasticId, machineId) =>
+        rate.get(`${elasticId}|${machineId}`)?.mpd
+        ?? _coldStart(machinesById.get(machineId)?.heads || 0)
+    );
+
+    const ctx = { linesById, machinesById, rate, planDate: now, backlog };
 
     const { assignmentMap, unplaceable } = _greedy(lines, machines, ctx);
     const evalResult = _localSearch(assignmentMap, lines, machines, ctx);
@@ -342,6 +478,10 @@ router.get(
       lines: lines.length,
       placed,
       unplaceable: unplaceable.length,
+      // Said out loud, because `lines` now counts only what the horizon
+      // admits. A number that quietly shrank when the selector moved
+      // would look like work disappearing.
+      beyondHorizon,
       onTime: placed - late,
       late,
       totalLateDays: Math.round(evalResult.totalLate),
@@ -349,10 +489,23 @@ router.get(
       machinesUsed: usedMachineIds.size,
     };
 
+    // What each loom owes before any of this can start — the figure the
+    // whole plan now sits on top of, so it should be legible rather than
+    // buried in the start days.
+    const committed = machines
+      .filter((m) => (backlog.get(m.id) || 0) > 0)
+      .map((m) => ({
+        machineId: m.id, machineID: m.ID,
+        committedWorkingDays: backlog.get(m.id),
+        freeFrom: _fmt(C.addWorkingDays(now, backlog.get(m.id))),
+      }));
+
     const assumptions = [
-      "Rates use the Bayesian per-(elastic, machine) posterior where available, then the plant average, then a cold-start estimate.",
+      "Rates use the Bayesian per-(elastic, machine) posterior where available, then the plant average scaled to the machine's head count, then a cold-start estimate.",
       `${C.SHIFTS_PER_DAY} shifts/day; Sundays off. One elastic per machine at a time, all heads dedicated.`,
       `A changeover to a different elastic adds ~${CHANGEOVER_DAYS} day of setup.`,
+      `Only order lines due on or before ${_fmt(horizonEnd)} are planned; overdue and undated lines are always included.`,
+      "Each machine starts from the work already on it — proposed runs are queued behind the current job, not on top of it.",
       "Accepting records the plan as the day's plan of record — it does not create jobs or move machines.",
     ];
 
@@ -387,7 +540,9 @@ router.get(
       success: true,
       generatedAt: now.toISOString(),
       horizonDays,
+      horizonEnd: _fmt(horizonEnd),
       objective,
+      committed,
       machines: machinePlans,
       unplaceable: unplaceable.map((l) => ({
         orderId: l.orderId, orderNo: l.orderNo, customer: l.customer,
@@ -437,19 +592,36 @@ router.post(
       }
     }
 
-    // Supersede any prior accepted plan so "latest" is unambiguous.
-    await ProductionPlan.updateMany({ status: "accepted" }, { $set: { status: "superseded" } });
-
     const actor = req.user?.name || req.user?.username || "admin";
-    const plan = await ProductionPlan.create({
-      horizonDays: Number(horizonDays) || 7,
-      generatedAt: generatedAt ? new Date(generatedAt) : new Date(),
-      acceptedBy: actor,
-      objective: objective || {},
-      assignments,
-      assumptions: Array.isArray(assumptions) ? assumptions : [],
-      status: "accepted",
-    });
+
+    // Supersede-then-create, as one unit. Apart, two admins accepting at
+    // the same moment each superseded what they could see and each
+    // created a plan, leaving TWO accepted rows — and "the plan of
+    // record" then meant whichever /latest happened to sort first. The
+    // point of superseding is that exactly one plan is current.
+    const session = await mongoose.startSession();
+    let plan;
+    try {
+      await session.withTransaction(async () => {
+        await ProductionPlan.updateMany(
+          { status: "accepted" },
+          { $set: { status: "superseded" } },
+          { session }
+        );
+        const [created] = await ProductionPlan.create([{
+          horizonDays: Number(horizonDays) || 7,
+          generatedAt: generatedAt ? new Date(generatedAt) : new Date(),
+          acceptedBy: actor,
+          objective: objective || {},
+          assignments,
+          assumptions: Array.isArray(assumptions) ? assumptions : [],
+          status: "accepted",
+        }], { session });
+        plan = created;
+      });
+    } finally {
+      session.endSession();
+    }
 
     res.json({ success: true, planId: plan._id, acceptedAt: plan.acceptedAt });
   })
