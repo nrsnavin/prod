@@ -40,6 +40,22 @@ const PayrollSettingsSchema = new mongoose.Schema(
     overtimeMultiplier:   { type: Number, default: 1.25, min: 0 },
     overtimeGraceMinutes: { type: Number, default: 120,  min: 0 },
 
+    // The most overtime ONE attendance record can be paid for.
+    //
+    // Base pay is capped at the shift length, so a worked duration
+    // longer than the shift costs nothing there — but the overtime
+    // derived from the SAME figure had no ceiling at all. A clock-in
+    // with no clock-out until someone notices days later produced a
+    // worked duration of days, and payroll paid every minute past the
+    // shift as overtime at 1.25×: one forgotten clock-out turned a
+    // ₹1,200 day into ₹9,250. Nothing errored and the payslip read as a
+    // legitimate overtime line.
+    //
+    // 4 hours by default — long enough for any real overtime on a 12h
+    // shift, short enough that a missing clock-out is a rounding error
+    // rather than a month's wages. Set 0 to disable the cap.
+    maxOvertimeMinutesPerShift: { type: Number, default: 240, min: 0 },
+
     // ── Statutory deductions (default OFF — 0% deducts nothing) ─
     // PF: pfPercent of the wage, capped at pfWageCeiling (0 = no cap).
     // ESI: esiPercent of the wage, only when wage ≤ esiWageCeiling

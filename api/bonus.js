@@ -117,8 +117,6 @@ async function computeEmployeeBonus(emp, cfg, win) {
   const shifts = await ShiftDetail.find({
     employee: emp._id, date: { $gte: win.start, $lte: win.end },
   }).select("shift date").lean();
-  const hoursWorked = shifts.reduce((sum, s) => sum + shiftHours(s.shift), 0);
-  const estimatedEarnings = (emp.hourlyRate || 0) * hoursWorked;
 
   // ── Attendance ────────────────────────────────────────────────
   // Count days the employee ACTUALLY turned up, from the attendance
@@ -145,6 +143,23 @@ async function computeEmployeeBonus(emp, cfg, win) {
     attendanceDays = new Set(shifts.map(s => dayKey(s.date))).size;
     attendanceSource = 'scheduled_shifts';
   }
+
+  // The estimate falls back on ATTENDED shifts, not scheduled ones.
+  //
+  // The attendance count above was deliberately moved off ShiftDetail —
+  // "a scheduled shift is not proof of attendance… someone marked absent
+  // every single day still scored 100%". The earnings estimate sitting
+  // beside it kept counting scheduled shifts, so the very employee that
+  // fix was written for still got a full-year earnings base whenever no
+  // payroll existed for the window. Same evidence, same source.
+  const attendedShifts = marks.length > 0
+    ? marks.filter((m) =>
+        ['present', 'late', 'half_day'].includes(m.status) || m.isApprovedLeave === true)
+    : shifts;                       // legacy windows with no register at all
+  const hoursWorked = attendedShifts.reduce(
+    (sum, s) => sum + shiftHours(s.shift), 0
+  );
+  const estimatedEarnings = (emp.hourlyRate || 0) * hoursWorked;
 
   const basedOn = salaryReceived > 0 ? "salary_received" : "estimated";
   const base    = salaryReceived > 0 ? salaryReceived : estimatedEarnings;
