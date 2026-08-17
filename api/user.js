@@ -260,9 +260,11 @@ router.post(
 //  (e.g. SMTP outage) — nothing in the UI links to it.
 //
 //  POST /user/request-otp  { email }
-//  Same anti-enumeration contract as forgot-password: identical generic
-//  200 whether or not the email matches an account, mail failures
-//  swallowed. Both routes sit behind loginLimiter in app.js.
+//  Answers 404 USER_NOT_FOUND for an address with no account — see the
+//  note in the handler for what that trades away and why. A mail-send
+//  FAILURE is still swallowed: that one is about not saying more than
+//  we mean to about a real account, and is unrelated. Rate-limited by
+//  loginLimiter at the app.js mount.
 // ══════════════════════════════════════════════════════════════
 const OTP_TTL_MINUTES = 10;
 const OTP_MAX_ATTEMPTS = 5;
@@ -275,9 +277,25 @@ router.post(
       return next(new ErrorHandler("Email is required", 400));
     }
 
-    const generic = {
+    // ── Telling the caller an address has no account ────────────────
+    //
+    // This route used to answer identically whether or not the email
+    // matched, so that it could not be used to discover which addresses
+    // have accounts. That protection is deliberately given up here, on
+    // the owner's instruction: this is an internal ERP for one factory's
+    // staff, the sign-in screen is the only way in, and "nothing
+    // happened and I don't know why" is the failure people actually hit.
+    //
+    // What it costs, stated plainly so it is not rediscovered as a
+    // surprise: anyone who can reach the login page can now test whether
+    // a given address is a user of this system, one address at a time.
+    // The loginLimiter (20 attempts per IP per 15 minutes) caps the rate
+    // but does not remove the capability. /forgot-password still answers
+    // generically — though once this route talks, that secrecy protects
+    // nothing, so it is a loose end rather than a defence.
+    const sent = {
       success: true,
-      message: "If an account exists for that email, a sign-in code has been sent.",
+      message: "A sign-in code has been sent to your email.",
     };
 
     // ── A server with no mailer cannot send anyone a code ───────────
@@ -313,7 +331,13 @@ router.post(
       email: { $regex: `^${escapeRegex(email)}$`, $options: "i" },
     });
     if (!user) {
-      return res.status(200).json(generic);
+      const err = new ErrorHandler(
+        `No account found for ${email}. Check the address, or ask an ` +
+        `administrator to create your login.`,
+        404
+      );
+      err.code = "USER_NOT_FOUND";
+      return next(err);
     }
 
     const code = user.createLoginOtp();
@@ -336,15 +360,28 @@ router.post(
     } catch (err) {
       user.clearLoginOtp();
       await user.save({ validateBeforeSave: false });
-      // Stays generic to the caller: a failure raised only for
-      // addresses that HAVE an account would say which addresses have
-      // one. utils/mailer.js records the reason for
-      // GET /api/v2/health/mailer, which is admin-gated and where an
-      // administrator can actually read it.
       console.error("[request-otp] mail send failed:", err.message);
+
+      // Said out loud now. This was swallowed for one reason only: a
+      // failure raised solely for addresses that HAVE an account would
+      // have told an attacker which addresses have one. The route above
+      // now says that outright, so the silence bought nothing and cost
+      // the user the one thing they needed to know — that the code is
+      // not coming and waiting will not help.
+      //
+      // The REASON stays server-side: it is SMTP detail an operator
+      // needs and a person signing in cannot act on. It goes to
+      // GET /api/v2/health/mailer, which is admin-gated.
+      const mailErr = new ErrorHandler(
+        "Your code could not be sent — the mail server rejected it. " +
+        "Ask your administrator to check the email setup, or sign in with your password.",
+        502
+      );
+      mailErr.code = "MAIL_SEND_FAILED";
+      return next(mailErr);
     }
 
-    return res.status(200).json(generic);
+    return res.status(200).json(sent);
   })
 );
 
