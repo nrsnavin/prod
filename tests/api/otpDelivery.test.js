@@ -7,26 +7,34 @@
 //  unlisted fallback. So when a code does not arrive, nobody can get
 //  in.
 //
-//  /request-otp answered 200 "a sign-in code has been sent" in three
-//  quite different situations:
+//  /request-otp answered 200 "a sign-in code has been sent" in four
+//  quite different situations. Every one of them now has its own
+//  answer, and each is pinned below:
 //
-//    1. the address has no account        — deliberate, and correct
-//    2. the mail went out                 — correct
-//    3. this server has no SMTP at all    — a lie
+//    1. the mail went out               200  — true
+//    2. the address has no account      404  USER_NOT_FOUND
+//    3. this server has no SMTP at all  503  MAILER_NOT_CONFIGURED
+//    4. the mail server rejected it     502  MAIL_SEND_FAILED
 //
-//  Three is a lie because `sendMail` returns `{ skipped: true }`
-//  instead of throwing when SMTP is unset — a deliberate kindness so a
-//  half-provisioned box does not 500 the password-reset route. The OTP
-//  route's `catch` therefore never fired: the code was generated,
-//  saved, and left sitting in the database, and the caller was told to
-//  go and look in an inbox.
+//  Three was the original bug: `sendMail` returns `{ skipped: true }`
+//  rather than throwing when SMTP is unset — a deliberate kindness so a
+//  half-provisioned box does not 500 the password-reset route — so the
+//  route's `catch` never fired. The code was generated, saved, and left
+//  sitting in the database while the caller was told to go and look in
+//  an inbox.
 //
-//  The reason 1 and 2 must be indistinguishable is anti-enumeration:
-//  a different answer for a real address tells an attacker which
-//  addresses are real. Three carries no such information — a server
-//  with no mailer cannot send to ANY address — so it can be reported
-//  honestly, as long as it is reported before the account is looked up
-//  and identically for every address.
+//  Two and four used to be folded into the same generic 200 to prevent
+//  account enumeration: a different answer for a real address tells an
+//  attacker which addresses are real. That protection is deliberately
+//  given up — this is an internal ERP for one factory's staff, and
+//  silence at the only door in was costing more than the secrecy was
+//  worth. What it costs is pinned in the tests below rather than left
+//  to be rediscovered.
+//
+//  Three remains different in kind: a server with no mailer cannot send
+//  to ANY address, so it is reported before the account is looked up
+//  and identically for every address — it says nothing about accounts
+//  even now.
 // ══════════════════════════════════════════════════════════════════
 
 process.env.JWT_SECRET_KEY = process.env.JWT_SECRET_KEY || 'test-secret';
@@ -146,24 +154,62 @@ describe('asking for a sign-in code on a working server', () => {
     expect(u.otpCode).toBeTruthy();
   });
 
-  it('still gives nothing away about an address with no account', async () => {
+  // ── A deliberate change of contract ────────────────────────────
+  //
+  // This route used to answer identically for a real and an unknown
+  // address, so it could not be used to discover which addresses have
+  // accounts. That is given up on the owner's instruction: this is an
+  // internal ERP for one factory's staff, and "nothing happened and I
+  // don't know why" is the failure people actually hit at the door.
+  //
+  // The cost, pinned here so it is not rediscovered as a surprise:
+  // anyone who can reach the login page can test addresses one at a
+  // time, rate-limited but not prevented.
+  it('says outright when an address has no account', async () => {
     withSmtp();
-    const real   = await ask('otp-admin@t.co');
-    const madeUp = await ask('nobody-at-all@t.co');
+    const res = await ask('nobody-at-all@t.co');
 
-    expect(real.status).toBe(madeUp.status);
-    expect(real.body.message).toBe(madeUp.body.message);
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('USER_NOT_FOUND');
+    expect(res.body.message).toMatch(/no account found/i);
+  });
+
+  it('names the address it could not find, so a typo is obvious', async () => {
+    withSmtp();
+    const res = await ask('navni@balu.com');   // transposed
+    expect(res.body.message).toContain('navni@balu.com');
+  });
+
+  it('points at who can fix it', async () => {
+    withSmtp();
+    const res = await ask('nobody-at-all@t.co');
+    expect(res.body.message).toMatch(/administrator/i);
   });
 });
 
 describe('when the mail server rejects the message', () => {
-  it('keeps the reply generic — a failure only for real addresses would name them', async () => {
+  it('tells the caller the code is not coming', async () => {
+    // Swallowed until now, for one reason only: a failure raised solely
+    // for addresses that HAVE an account would have said which ones do.
+    // The route says that outright now, so the silence bought nothing
+    // and cost the user the one thing they needed — that waiting will
+    // not help.
     withSmtp({ fails: true });
-    const real   = await ask('otp-admin@t.co');
-    const madeUp = await ask('nobody-at-all@t.co');
+    const res = await ask('otp-admin@t.co');
 
-    expect(real.status).toBe(200);
-    expect(real.body.message).toBe(madeUp.body.message);
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('MAIL_SEND_FAILED');
+  });
+
+  it('keeps the SMTP reason out of it', async () => {
+    // "535 authentication failed" is operator detail. The person
+    // signing in cannot act on it, and it describes the server rather
+    // than their account.
+    withSmtp({ fails: true });
+    const res = await ask('otp-admin@t.co');
+
+    expect(res.body.message).not.toMatch(/535|authentication failed/i);
+    expect(res.body.message).toMatch(/administrator|password/i);
   });
 
   it('clears the code, because nobody can receive it', async () => {
@@ -175,8 +221,8 @@ describe('when the mail server rejects the message', () => {
   });
 
   it('records the reason where an administrator can read it', async () => {
-    // The caller is told nothing, on purpose. That silence is what made
-    // a broken mailer invisible, so the reason has to survive somewhere.
+    // The caller gets "could not be sent"; the SMTP reason itself stays
+    // here, where an operator can act on it.
     withSmtp({ fails: true });
     await ask('otp-admin@t.co');
 

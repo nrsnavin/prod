@@ -72,10 +72,15 @@ async function stampOtp(user, code = '123456', { expireMs = 10 * 60_000, attempt
 }
 
 describe('POST /user/request-otp', () => {
-  test('generic 200 for unknown email (no enumeration)', async () => {
+  // Was: an identical generic 200 for an unknown email, so the route
+  // could not be used to enumerate accounts. Given up deliberately —
+  // see tests/api/otpDelivery.test.js for what that trades away. A
+  // person at the login screen now learns that the address is wrong
+  // instead of waiting for a code that was never going to come.
+  test('404s for an email with no account', async () => {
     const res = await request(app).post('/api/v2/user/request-otp').send({ email: 'ghost@t.co' });
-    expect(res.status).toBe(200);
-    expect(res.body.message).toMatch(/if an account exists/i);
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('USER_NOT_FOUND');
   });
 
   test('stamps a hashed 6-digit code + expiry + zeroed attempts for a real user', async () => {
