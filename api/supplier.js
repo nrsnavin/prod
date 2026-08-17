@@ -596,6 +596,34 @@ router.post(
         );
       }
 
+      // ── One row per material ──────────────────────────────────────
+      //
+      // The excess check below compares `poItem.receivedQuantity + this
+      // row` against what was ordered — and `receivedQuantity` is read
+      // from the PO as loaded, so it is the SAME figure for every row in
+      // the submission. Two rows for one material therefore each measured
+      // themselves against an untouched balance: 60 + 60 against a PO for
+      // 100 saw two harmless 60s, demanded no reason, recorded no excess,
+      // and credited 120. Measured against a 10% tolerance the delivery
+      // was 20% over and the guard never fired.
+      //
+      // Refused rather than merged, so the operator says which line is
+      // right instead of the server quietly reshaping their submission —
+      // the same call parseAllocations makes for duplicate yarn lots.
+      const seenMaterial = new Set();
+      for (const inItem of activeItems) {
+        const key = String(inItem.rawMaterial);
+        if (seenMaterial.has(key)) {
+          return next(new ErrorHandler(
+            `Material ${key} appears on more than one line of this inward — ` +
+            `combine them into a single line so the quantity can be checked ` +
+            `against the order.`,
+            400
+          ));
+        }
+        seenMaterial.add(key);
+      }
+
       // ── VALIDATION PASS (before any writes) ───────────────────────
       // Excess per line, carried into the write pass so the arithmetic
       // is done once and the inward row records what was actually over.

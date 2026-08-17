@@ -19,7 +19,26 @@ const ShiftDetail     = require('../models/ShiftDetail');
 const { shiftHours } = require('../utils/shiftHours');
 
 const r2 = (n) => Math.round(n * 100) / 100;
-const dayKey = (d, sh) => `${new Date(d).toISOString().slice(0, 10)}|${sh}`;
+
+/**
+ * A date as the factory sees it, not as UTC sees it.
+ *
+ * `toISOString().slice(0,10)` was used for every date key and every
+ * payslip line label. Attendance and ShiftDetail dates are written at
+ * LOCAL midnight, so on a server east of Greenwich — the factory runs
+ * on IST — that conversion lands on the previous calendar day: a shift
+ * worked on the 1st is labelled the last day of the previous month, and
+ * the streak calculation groups by a day that is off by one. It is
+ * invisible on a UTC box, which is why it survived.
+ */
+const ymd = (d) => {
+  const x = new Date(d);
+  const m = String(x.getMonth() + 1).padStart(2, '0');
+  const day = String(x.getDate()).padStart(2, '0');
+  return `${x.getFullYear()}-${m}-${day}`;
+};
+
+const dayKey = (d, sh) => `${ymd(d)}|${sh}`;
 
 // Resolve a shift's actual worked minutes for actual-hours pay. Priority:
 //   1. live timer (clockInAt → clockOutAt)  — server-stamped, authoritative
@@ -65,6 +84,7 @@ async function computePayroll(empId, year, month) {
     streakBonusPer7Shifts:  s.streakBonusPer7Shifts  ?? 100,
     overtimeMultiplier:     s.overtimeMultiplier     ?? 1.25,
     overtimeGraceMinutes:   s.overtimeGraceMinutes   ?? 120,
+    maxOvertimeMinutesPerShift: s.maxOvertimeMinutesPerShift ?? 240,
     pfPercent:      s.pfPercent      ?? 0,
     pfWageCeiling:  s.pfWageCeiling  ?? 0,
     esiPercent:     s.esiPercent     ?? 0,
@@ -97,7 +117,7 @@ async function computePayroll(empId, year, month) {
   for (const rec of records) {
     const sh      = shiftHours(rec.shift);
     const fullPay = hourlyRate * sh;
-    const dateStr = new Date(rec.date).toISOString().slice(0, 10);
+    const dateStr = ymd(rec.date);
 
     if (rec.isApprovedLeave === true) {
       approvedLeaveShifts++;
@@ -183,13 +203,34 @@ async function computePayroll(empId, year, month) {
 
     // Overtime — minutes beyond the shift, past the grace window, paid at
     // rate × multiplier. Tracked separately from base shift earnings.
-    const otMins = Math.max(0, otSourceMinutes - settings.overtimeGraceMinutes);
+    //
+    // ── And CAPPED, which it was not ──────────────────────────────────
+    // Base pay above takes `Math.min(worked, capMinutes)`, so a worked
+    // duration longer than the shift costs nothing there. The overtime
+    // derived from the very same figure had no ceiling: a clock-in with
+    // no clock-out until somebody noticed days later gave `worked` in
+    // days, and every minute past the shift was paid at 1.25×. Measured:
+    // one forgotten clock-out turned a ₹1,200 day into ₹9,250 of net
+    // pay, and it read on the payslip as an ordinary overtime line.
+    //
+    // A cap is the honest treatment because the input is not overtime,
+    // it is a missing clock-out — but silently dropping it would hide a
+    // data problem somebody needs to fix, so the label says it was
+    // capped and by how much.
+    const rawOtMins = Math.max(0, otSourceMinutes - settings.overtimeGraceMinutes);
+    const maxOt     = settings.maxOvertimeMinutesPerShift;
+    const otMins    = maxOt > 0 ? Math.min(rawOtMins, maxOt) : rawOtMins;
+    const wasCapped = otMins < rawOtMins;
+
     if (otMins > 0 && hourlyRate > 0) {
       const otPay = (otMins / 60) * hourlyRate * settings.overtimeMultiplier;
       totalOvertimeMinutes += otMins;
       overtimeEarnings     += otPay;
       lineItems.push({
-        label:  `Overtime ${otMins}m ×${settings.overtimeMultiplier} (${rec.shift} ${dateStr})`,
+        label: wasCapped
+          ? `Overtime ${otMins}m ×${settings.overtimeMultiplier} (${rec.shift} ${dateStr})` +
+            ` — capped from ${Math.round(rawOtMins)}m; check the clock-out`
+          : `Overtime ${otMins}m ×${settings.overtimeMultiplier} (${rec.shift} ${dateStr})`,
         amount: otPay,
         type:   'earning',
       });
@@ -222,7 +263,7 @@ async function computePayroll(empId, year, month) {
     totalShifts++;
     const fullPay = hourlyRate * shiftHours(sd.shift);
     lineItems.push({
-      label:  `Absent — no attendance for scheduled ${sd.shift} (${new Date(sd.date).toISOString().slice(0, 10)})`,
+      label:  `Absent — no attendance for scheduled ${sd.shift} (${ymd(sd.date)})`,
       amount: -fullPay,
       type:   'deduction',
     });
@@ -295,7 +336,7 @@ async function computePayroll(empId, year, month) {
   const presentDates = new Set(
     records
       .filter(r => ['present','late','half_day'].includes(r.status) || r.isApprovedLeave)
-      .map(r => new Date(r.date).toISOString().slice(0,10))
+      .map(r => ymd(r.date))
   );
   const sortedDates = [...presentDates].sort();
   let cur = 0, best = 0, streakSetsPaid = 0, prevD = null;
