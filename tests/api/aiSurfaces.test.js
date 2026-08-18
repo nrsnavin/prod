@@ -294,3 +294,95 @@ describe('the shift-sheet OCR settles against what the operator saved', () => {
     expect(await AiSuggestion.countDocuments({})).toBe(0);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  4. THE STORAGE DEFAULT THAT LOOKED LIKE A HUMAN CORRECTION
+// ══════════════════════════════════════════════════════════════════
+describe('a blank timer is not a correction', () => {
+  test('an entry submitted with no timer does not read as the operator fixing it', async () => {
+    // /bulk-enter-production defaults a missing timer to '00:00:00'
+    // before writing it. Recording THAT as what the operator saved
+    // compares the storage default against the OCR's null and calls it
+    // an edit — on every row where the timer cell was blank, which is
+    // most of them on a quiet shift.
+    //
+    // The effect is the worst kind: the weakest-field report names the
+    // timer column as the OCR's biggest problem, an afternoon goes into
+    // improving a prompt that was never wrong, and the figure is just as
+    // plausible either way.
+    const date = new Date(); date.setHours(0, 0, 0, 0); date.setDate(date.getDate() - 40);
+    const plan = await ShiftPlan.create({ date, shift: 'DAY' });
+    const sd = await ShiftDetail.create({
+      employee: employee._id, date, shift: 'DAY', status: 'open',
+      machine: machine._id, shiftPlan: plan._id,
+    });
+
+    const id = await ledger.record({
+      surface: 'shift-sheet-ocr', model: 'm', promptVersion: 'v1',
+      refType: 'ShiftPlan', refId: plan._id,
+      // The sheet's timer cell was blank and the OCR correctly read null.
+      proposed: { rows: { [sd._id]: { production: 1200, timer: null, remarks: '' } } },
+    });
+
+    await request(app)
+      .post('/api/v2/shift/bulk-enter-production')
+      .set('Cookie', cookieFor(admin))
+      .send({ aiSuggestionId: String(id), entries: [{ id: String(sd._id), production: 1200 }] });
+
+    const row = await AiSuggestion.findById(id).lean();
+    expect(row.editedFields).toEqual([]);
+    expect(row.outcome).toBe('accepted');
+
+    // The ShiftDetail still stores the default — this is about what the
+    // LEDGER was told, not about changing how the shift is saved.
+    const saved = await ShiftDetail.findById(sd._id).lean();
+    expect(saved.submittedTimer).toBe('00:00:00');
+  });
+
+  test('a timer the operator actually typed is still compared', async () => {
+    const date = new Date(); date.setHours(0, 0, 0, 0); date.setDate(date.getDate() - 41);
+    const plan = await ShiftPlan.create({ date, shift: 'DAY' });
+    const sd = await ShiftDetail.create({
+      employee: employee._id, date, shift: 'DAY', status: 'open',
+      machine: machine._id, shiftPlan: plan._id,
+    });
+
+    const id = await ledger.record({
+      surface: 'shift-sheet-ocr', model: 'm', promptVersion: 'v1',
+      proposed: { rows: { [sd._id]: { production: 1200, timer: '7:45:00', remarks: '' } } },
+    });
+
+    await request(app)
+      .post('/api/v2/shift/bulk-enter-production')
+      .set('Cookie', cookieFor(admin))
+      .send({ aiSuggestionId: String(id), entries: [
+        { id: String(sd._id), production: 1200, timer: '6:10:00' },
+      ] });
+
+    const row = await AiSuggestion.findById(id).lean();
+    expect(row.editedFields).toEqual(['rows[].timer']);
+  });
+
+  test("a suggestion from another surface cannot be settled by this route", async () => {
+    const date = new Date(); date.setHours(0, 0, 0, 0); date.setDate(date.getDate() - 42);
+    const plan = await ShiftPlan.create({ date, shift: 'DAY' });
+    const sd = await ShiftDetail.create({
+      employee: employee._id, date, shift: 'DAY', status: 'open',
+      machine: machine._id, shiftPlan: plan._id,
+    });
+
+    const qcId = await ledger.record({
+      surface: 'qc-vision', model: 'v', promptVersion: 'v1',
+      proposed: { overallResult: 'pass' },
+    });
+
+    const res = await request(app)
+      .post('/api/v2/shift/bulk-enter-production')
+      .set('Cookie', cookieFor(admin))
+      .send({ aiSuggestionId: String(qcId), entries: [{ id: String(sd._id), production: 900 }] });
+
+    // The shift still saves — the ledger is never allowed to block it.
+    expect(res.body.saved).toBe(1);
+    expect((await AiSuggestion.findById(qcId).lean()).outcome).toBe('proposed');
+  });
+});

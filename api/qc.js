@@ -111,6 +111,20 @@ router.post(
       return res.json({ success: true, available: false, message: "AI vision is not configured (no API key)." });
     }
     if (!draft.ok) {
+      // The model answered with something the parser could not read.
+      // This used to return a polite message and record nothing, so a
+      // vision model that had started replying in prose instead of JSON
+      // looked — from every angle a person can see — exactly like a
+      // feature nobody was using.
+      await ledger.record({
+        surface: "qc-vision",
+        model: VISION_MODEL,
+        promptVersion: promptVersion("qc-vision"),
+        refType: "Elastic",
+        refId: mongoose.Types.ObjectId.isValid(elasticId) ? elasticId : undefined,
+        latencyMs: Date.now() - startedAt,
+        error: "reply could not be parsed as JSON",
+      });
       return res.json({ success: true, available: true, ok: false, message: "Couldn't read the image confidently — fill the check manually." });
     }
 
@@ -280,6 +294,7 @@ router.post(
     // flipped one `pass` is an edit, whatever it believes.
     if (aiSuggestionId) {
       await ledger.settle(aiSuggestionId, {
+        expectSurface: "qc-vision",
         accepted: {
           overallResult,
           defectCode: record.defectCode,

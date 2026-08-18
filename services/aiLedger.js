@@ -59,6 +59,11 @@ function trim(value, depth = 0) {
   if (typeof value === 'object') {
     // Buffers and binary never belong in the ledger.
     if (Buffer.isBuffer(value)) return `[buffer ${value.length}b]`;
+    // A Date is an object with no enumerable keys, so the generic
+    // branch below turned one into {} — present, plausible, and empty.
+    // Nothing would have looked wrong; the value would simply not be
+    // there, and the field would read as unchanged for ever after.
+    if (value instanceof Date) return value.toISOString();
     const out = {};
     const entries = Object.entries(value);
     for (const [k, v] of entries.slice(0, MAX_KEYS)) {
@@ -174,18 +179,68 @@ async function record({
 }
 
 /**
+ * Merge a later decision over an earlier one.
+ *
+ * Objects merge key by key; arrays and scalars are replaced whole. That
+ * asymmetry is deliberate: a keyed map of rows is a set of independent
+ * decisions that accumulate, while an array of QC results is one answer
+ * that was either revised or not.
+ */
+function deepMerge(base, next) {
+  if (base == null) return next;
+  if (next == null) return base;
+  if (typeof base !== 'object' || typeof next !== 'object') return next;
+  if (Array.isArray(base) || Array.isArray(next)) return next;
+
+  const out = { ...base };
+  for (const [k, v] of Object.entries(next)) out[k] = deepMerge(base[k], v);
+  return out;
+}
+
+/**
  * Close a suggestion out once a human has decided.
  *
  * `accepted` is what was actually saved. The outcome is derived rather
  * than asserted by the caller — a route that believes it applied the
  * suggestion unchanged, but changed a field, should be recorded as an
  * edit regardless of what it believes.
+ *
+ * ── Three things this refuses to do ──────────────────────────────
+ *
+ *  1. Settle a row whose model call FAILED. diffFields returns nothing
+ *     the moment either side is null, and a failed row has no proposal —
+ *     so settling one produced zero edits and therefore 'accepted',
+ *     recording an errored call as a suggestion taken unchanged. It
+ *     raised acceptRate exactly where it should have been lowest, and
+ *     the resulting figure looked no different from an honest one.
+ *
+ *  2. Settle on an id belonging to another surface. The id arrives in a
+ *     request body, so it is whatever the client says it is; a stale or
+ *     copy-pasted one would write one surface's answer onto another's
+ *     row and quietly corrupt both numbers. Callers pass
+ *     `expectSurface` and a mismatch is ignored.
+ *
+ *  3. Treat a second decision as a replacement. Two hundred rows is
+ *     more than one sitting: an operator who applies half now and half
+ *     after lunch sends two batches against one reading. Replacing
+ *     would throw away the morning's corrections. Later passes merge.
  */
-async function settle(id, { accepted, decidedBy, rejected = false, outcome, ignoreMissing = false } = {}) {
+async function settle(id, {
+  accepted, decidedBy, rejected = false, outcome,
+  ignoreMissing = false, expectSurface,
+} = {}) {
   if (!id) return null;
   try {
     const row = await AiSuggestion.findById(id);
     if (!row) return null;
+
+    if (expectSurface && row.surface !== expectSurface) {
+      console.warn(`[aiLedger] settle refused: ${id} is ${row.surface}, not ${expectSurface}`);
+      return null;
+    }
+    // Nothing was ever proposed, so there is nothing a human can have
+    // agreed with.
+    if (row.outcome === 'failed') return null;
 
     if (outcome) {
       // Explicit outcome, for surfaces where there is nothing to diff.
@@ -197,13 +252,18 @@ async function settle(id, { accepted, decidedBy, rejected = false, outcome, igno
     } else if (rejected) {
       row.outcome = 'rejected';
     } else {
-      const trimmed = trim(accepted);
+      // A settle carrying nothing is not a decision. Letting it through
+      // would score an empty payload as perfect agreement.
+      if (accepted == null) return null;
+
+      const merged = deepMerge(row.accepted, trim(accepted));
       const edits = [...new Set(
-        diffFields(row.proposed, trimmed, '', { ignoreMissing }).map(collapsePath)
+        diffFields(row.proposed, merged, '', { ignoreMissing }).map(collapsePath)
       )];
-      row.accepted     = trimmed;
+      row.accepted     = merged;
       row.editedFields = edits;
       row.outcome      = edits.length > 0 ? 'edited' : 'accepted';
+      row.markModified('accepted');
     }
     row.decidedBy = decidedBy;
     row.decidedAt = new Date();
@@ -293,4 +353,7 @@ async function weakFields({ surface, days = 30, limit = 10 } = {}) {
   ]);
 }
 
-module.exports = { record, settle, stats, weakFields, trim, diffFields, collapsePath };
+module.exports = {
+  record, settle, stats, weakFields,
+  trim, diffFields, collapsePath, deepMerge,
+};

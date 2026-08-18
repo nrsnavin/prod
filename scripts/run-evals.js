@@ -46,7 +46,10 @@ const flag = (name, fallback = null) => {
 };
 const only        = flag('surface');
 const saveBaseline= Boolean(flag('save-baseline'));
-const tolerance   = Number(flag('tolerance', 2)) || 2;
+// Not `Number(...) || 2` — that turns `--tolerance 0`, the strictest
+// gate somebody can ask for, into the default 2 without saying so.
+const rawTolerance = Number(flag('tolerance', 2));
+const tolerance    = Number.isFinite(rawTolerance) && rawTolerance >= 0 ? rawTolerance : 2;
 
 const log = (...a) => console.log(...a);
 const bar = (n = 66) => log('─'.repeat(n));

@@ -327,7 +327,20 @@ router.post('/bulk-enter-production', async (req, res) => {
       });
 
       saved.push({ id, production: prodNum, status: 'pending_verification' });
-      settledRows[id] = { production: prodNum, timer, remarks: feedback };
+
+      // What the OPERATOR supplied, not what gets stored. `timer`
+      // above defaults to '00:00:00' so the ShiftDetail always has a
+      // value; recording that default as the human's answer compares it
+      // against the OCR's null and calls it a correction — on every row
+      // where the timer cell was blank, which on a quiet shift is most
+      // of them. The weakest-field report would then name the timer
+      // column as this model's biggest problem when nobody had
+      // disagreed with it once.
+      settledRows[id] = {
+        production: prodNum,
+        timer: entry.timer ?? null,
+        remarks: feedback,
+      };
     }
 
     // If these figures came from an OCR'd sheet, close that suggestion
@@ -339,6 +352,7 @@ router.post('/bulk-enter-production', async (req, res) => {
     // a third of sheets" comes from.
     if (aiSuggestionId) {
       await ledger.settle(aiSuggestionId, {
+        expectSurface: 'shift-sheet-ocr',
         accepted: { rows: settledRows },
         decidedBy: req.user?._id,
         ignoreMissing: true,

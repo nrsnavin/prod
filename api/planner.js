@@ -653,6 +653,7 @@ router.post(
     // roll back an accepted plan of record.
     if (aiSuggestionId) {
       await ledger.settle(aiSuggestionId, {
+        expectSurface: "planner-rationale",
         outcome: "accepted",
         decidedBy: req.user?._id,
       });
