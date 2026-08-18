@@ -273,6 +273,68 @@ app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), (req, res) =>
   });
 });
 
+// ── Is the AI working, and how well? ─────────────────────────────
+//
+// Nine AI surfaces ran in production with no way to answer that. The
+// planner catches its own model failure into a console.warn, so a
+// rationale that broke a month ago is indistinguishable from one that
+// works — the same silence that hid the mail outage below.
+//
+// This reports three things that were previously unknowable:
+//   configured   → is there an API key at all
+//   models       → which strings are in use, and which are unpinned
+//                  aliases that can move without a deploy
+//   surfaces     → per-surface accept / edit / reject rates from the
+//                  suggestion ledger, plus the fields humans correct
+//                  most often
+//
+// Admin-gated and key-free, like /health/mailer. `?days=` widens the
+// window; `?fields=1` adds the weakest fields, which is the actionable
+// half.
+app.get(
+  "/api/v2/health/ai",
+  isAuthenticated,
+  isAdmin("admin"),
+  async (req, res) => {
+    const { anthropic, TEXT_MODEL, VISION_MODEL, isPinned } = require("./utils/anthropicClient.js");
+    const { PROMPTS } = require("./utils/aiPrompts.js");
+    const ledger = require("./services/aiLedger.js");
+
+    // A nonsense window falls back to the default rather than clamping
+    // to one day: `?days=-5` clamped to 1 returns a near-empty report
+    // that reads as "the AI did nothing this month", which is a worse
+    // answer than the one the caller meant to ask for.
+    const rawDays = Number(req.query.days);
+    const days = Number.isFinite(rawDays) && rawDays > 0
+      ? Math.min(rawDays, 365)
+      : 30;
+    const out = {
+      status: "ok",
+      configured: Boolean(anthropic()),
+      windowDays: days,
+      models: {
+        text:   { id: TEXT_MODEL,   pinned: isPinned(TEXT_MODEL) },
+        vision: { id: VISION_MODEL, pinned: isPinned(VISION_MODEL) },
+      },
+      prompts: Object.fromEntries(
+        Object.entries(PROMPTS).map(([k, v]) => [k, v.version])
+      ),
+    };
+
+    try {
+      out.surfaces = await ledger.stats({ days });
+      if (req.query.fields) out.weakestFields = await ledger.weakFields({ days });
+    } catch (err) {
+      // The ledger is telemetry: a broken query must not make the
+      // health endpoint itself unavailable.
+      out.status = "degraded";
+      out.ledgerError = err.message;
+    }
+
+    res.json(out);
+  }
+);
+
 // ── Why is no email arriving? ────────────────────────────────────
 //
 // Email OTP is the primary sign-in, and every route that sends mail

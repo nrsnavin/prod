@@ -20,7 +20,27 @@ function timerToSeconds(t) {
   return h*3600 + m*60 + s;
 }
 
-function toISODate(d)    { return new Date(d).toISOString().split('T')[0]; }
+/**
+ * The date as the FACTORY sees it, not as UTC sees it.
+ *
+ * This used `toISOString().split('T')[0]`, while every date reaching it
+ * is written at LOCAL midnight (see normDate in api/shift.js and
+ * parseDateParam below, which both call setHours). East of Greenwich
+ * that conversion lands on the previous calendar day, so a row in the
+ * production view carried `date: "2026-08-19"` next to
+ * `dateLabel: "20 Aug 2026"` and `dayOfWeek: "Thu"` — three fields
+ * describing one day, one of them a day behind the other two.
+ *
+ * It is invisible on a UTC box, which is why it survived: CI never sees
+ * it and the factory sees nothing else. Same root cause as the payslip
+ * dates fixed in services/payrollService.js.
+ */
+function toISODate(d) {
+  const x = new Date(d);
+  const m   = String(x.getMonth() + 1).padStart(2, '0');
+  const day = String(x.getDate()).padStart(2, '0');
+  return `${x.getFullYear()}-${m}-${day}`;
+}
 function toDateLabel(d)  {
   return new Date(d).toLocaleDateString('en-IN',
     { day:'2-digit', month:'short', year:'numeric' });
@@ -45,9 +65,22 @@ function stdDev(arr) {
   return Math.sqrt(variance);
 }
 
-/** Coefficient of Variation → 0-100 consistency score (100=perfectly consistent) */
+/**
+ * Coefficient of Variation → 0-100 consistency score (100=perfectly
+ * consistent), or null when there is nothing to be consistent ABOUT.
+ *
+ * This returned 100 for a single data point, so a worker's first-ever
+ * shift scored perfect consistency — earning "Steady Hands" (70+),
+ * "Clockwork" (90+) and 30 XP for a variance measured across one
+ * number. Consistency over one observation is not high, it is
+ * undefined, and the two are worth telling apart on a board the floor
+ * can see.
+ *
+ * Callers treat null as "not enough data yet" — see calcXP and
+ * calcAchievements, which now skip rather than award.
+ */
 function consistencyScore(arr) {
-  if (arr.length < 2) return 100;
+  if (arr.length < 2) return null;
   const mean = arr.reduce((a,b)=>a+b,0)/arr.length;
   if (mean === 0) return 0;
   const cv = (stdDev(arr) / mean) * 100;
@@ -127,8 +160,11 @@ function calcXP(emp, overallAvg, rank) {
   xp += emp.streak * 3;
   if (emp.streak > 1) notes.push(`${emp.streak}-day streak × 3 = ${emp.streak*3} XP`);
 
-  // Consistency bonus: 0-30 XP based on score
-  const conBonus = Math.round(emp.consistencyScore * 0.30);
+  // Consistency bonus: 0-30 XP based on score. Skipped entirely when
+  // the score is null — one shift has no variance to reward.
+  const conBonus = emp.consistencyScore == null
+    ? 0
+    : Math.round(emp.consistencyScore * 0.30);
   xp += conBonus;
   if (conBonus) notes.push(`Consistency score ${emp.consistencyScore} → ${conBonus} XP`);
 
@@ -171,8 +207,13 @@ function calcAchievements(emp, overallAvg, allEmployees) {
   if (emp.streak >= 7)       earned.push({ id:'unstoppable',   label:'Unstoppable',      icon:'💥', desc:'7+ shift winning streak' });
   if (emp.streak >= 14)      earned.push({ id:'machine_mode',  label:'Machine Mode',     icon:'🤖', desc:'14-shift legendary streak' });
 
-  if (emp.consistencyScore >= 70) earned.push({ id:'steady_hands', label:'Steady Hands',  icon:'🎯', desc:'Consistent output (score 70+)' });
-  if (emp.consistencyScore >= 90) earned.push({ id:'clockwork',    label:'Clockwork',     icon:'⏱️', desc:'Near-perfect consistency (90+)' });
+  // `== null` guards both: a single-shift worker has no consistency
+  // score, and awarding one for an undefined variance devalues the
+  // badge for everyone who earned it over a month.
+  if (emp.consistencyScore != null && emp.consistencyScore >= 70)
+    earned.push({ id:'steady_hands', label:'Steady Hands',  icon:'🎯', desc:'Consistent output (score 70+)' });
+  if (emp.consistencyScore != null && emp.consistencyScore >= 90)
+    earned.push({ id:'clockwork',    label:'Clockwork',     icon:'⏱️', desc:'Near-perfect consistency (90+)' });
 
   if (emp.improvement >= 20) earned.push({ id:'rising_star',   label:'Rising Star',      icon:'📈', desc:'20%+ output improvement' });
   if (emp.improvement >= 50) earned.push({ id:'rocket',        label:'Rocket',           icon:'🚀', desc:'50%+ output improvement' });

@@ -22,6 +22,8 @@ const MachineModel = require("../models/Machine");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { isAuthenticated } = require("../middleware/auth");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
+const { promptVersion } = require("../utils/aiPrompts");
+const ledger = require("../services/aiLedger");
 
 // ── Tool implementations (read-only Mongo queries) ─────────────────
 const TOOLS = {
@@ -183,6 +185,22 @@ router.post(
     const tools = TOOL_SCHEMAS.filter((t) => allowedTools.has(t.name));
 
     const toolsUsed = [];
+    // One ledger row per QUESTION, not per hop. A tool-calling answer is
+    // three or four model calls the user never sees as separate things,
+    // and costing them separately would make the token figure unreadable
+    // against the thing being measured — "what does an answer cost".
+    const startedAt = Date.now();
+    const usage = { input_tokens: 0, output_tokens: 0 };
+    const logAnswer = (reply, err) => ledger.record({
+      surface: "assistant-answer",
+      model: TEXT_MODEL,
+      promptVersion: promptVersion("assistant-answer"),
+      proposed: err ? undefined : { reply, toolsUsed: [...new Set(toolsUsed)] },
+      latencyMs: Date.now() - startedAt,
+      usage,
+      error: err,
+    });
+
     try {
       for (let hop = 0; hop < 6; hop++) {
         const resp = await claude.messages.create({
@@ -191,6 +209,9 @@ router.post(
           // features simply gets a tool-less assistant.
           ...(tools.length ? { tools } : {}),
         });
+
+        usage.input_tokens  += resp.usage?.input_tokens  || 0;
+        usage.output_tokens += resp.usage?.output_tokens || 0;
 
         if (resp.stop_reason === "tool_use") {
           messages.push({ role: "assistant", content: resp.content });
@@ -218,11 +239,16 @@ router.post(
         }
 
         const reply = (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+        await logAnswer(reply);
         return res.json({ success: true, reply, toolsUsed: [...new Set(toolsUsed)] });
       }
+      // Six hops and no answer. Recorded as a failure because that is
+      // what it is from the asker's side, however calmly it reads.
+      await logAnswer(null, "hop limit reached without an answer");
       return res.json({ success: true, reply: "I looked into that but couldn't finish — try narrowing the question.", toolsUsed: [...new Set(toolsUsed)] });
     } catch (err) {
       console.error("[assistant/chat]", err.message);
+      await logAnswer(null, err.message);
       return res.status(502).json({ success: false, message: err.message });
     }
   })

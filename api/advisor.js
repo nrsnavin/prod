@@ -4,6 +4,8 @@ const express = require('express');
 const router  = express.Router();
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
+const { promptVersion } = require('../utils/aiPrompts');
+const ledger = require('../services/aiLedger');
 
 // Claude Haiku is plenty for a 3-sentence summary:
 //   - latency ~1s for a few-token response
@@ -63,6 +65,7 @@ router.post(
       });
     }
 
+    const startedAt = Date.now();
     try {
       const message = await claude.messages.create({
         model: MODEL,
@@ -90,6 +93,19 @@ router.post(
         .join('')
         .trim();
 
+      // No settle for this surface: a briefing is read and closed, and
+      // nothing the admin does afterwards is attributable to it. What
+      // the ledger gives here is the operational half — latency, token
+      // spend and the failure rate — which nothing recorded before.
+      await ledger.record({
+        surface: 'advisor-briefing',
+        model:   MODEL,
+        promptVersion: promptVersion('advisor-briefing'),
+        proposed: { summary, cards: cards.length },
+        latencyMs: Date.now() - startedAt,
+        usage: message.usage,
+      });
+
       return res.json({
         success: true,
         summary,
@@ -99,6 +115,13 @@ router.post(
       });
     } catch (err) {
       console.error('[advisor/briefing] Claude error:', err.message);
+      await ledger.record({
+        surface: 'advisor-briefing',
+        model:   MODEL,
+        promptVersion: promptVersion('advisor-briefing'),
+        latencyMs: Date.now() - startedAt,
+        error: err.message,
+      });
       return res.status(502).json({
         success: false,
         reason:  'ANTHROPIC_CALL_FAILED',
