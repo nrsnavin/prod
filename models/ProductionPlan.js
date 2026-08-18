@@ -55,6 +55,31 @@ const ProductionPlanSchema = new mongoose.Schema(
     assignments:  { type: [AssignmentSchema], default: [] },
     assumptions:  { type: [String], default: [] },
     status: { type: String, enum: ["accepted", "superseded"], default: "accepted" },
+
+    // ── Did a human change it before accepting? ──────────────────
+    //
+    // The planner proposes and an admin decides, and until now the only
+    // thing kept was the decision. If they moved two lines first, that
+    // disagreement — the most informative thing that happens on this
+    // screen — was discarded the moment the plan was saved.
+    //
+    // `edited` records that it happened; the two term sets record what
+    // it cost, measured the same way, so "we overrode the planner and
+    // it worked out / it did not" is a question with an answer months
+    // later. The weights learned from it live in PlannerWeights.
+    edited: { type: Boolean, default: false },
+    /** Objective terms of what the planner offered. */
+    proposedTerms: {
+      late:       { type: Number },
+      changeover: { type: Number },
+      balance:    { type: Number },
+    },
+    /** Objective terms of what was actually accepted. */
+    objectiveTerms: {
+      late:       { type: Number },
+      changeover: { type: Number },
+      balance:    { type: Number },
+    },
   },
   { timestamps: true }
 );
