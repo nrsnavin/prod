@@ -64,6 +64,11 @@ const FEATURES = [
   { key: "/advisor",             label: "AI Advisor",          section: "AI",             depts: ["admin", "finance"] },
   { key: "/assistant",           label: "Ask Jarvis",          section: "AI",             depts: "all" },
 
+  // Admin only, matching the server gate on GET /health/ai: the report
+  // names the models, the prompt versions and the token spend, which is
+  // operator detail rather than floor information.
+  { key: "/ai-health",           label: "AI Health",           section: "Administration", depts: ["admin"] },
+
   { key: "/users",               label: "Users",               section: "Administration", depts: ["admin"] },
   { key: "/data-io",             label: "Data Import/Export",  section: "Administration", depts: ["admin"] },
   { key: "/settings",            label: "Settings",            section: "Administration", depts: "all" },
