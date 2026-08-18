@@ -50,71 +50,14 @@ const FDR = 0.10;
 /** Above this share of shared checks, two findings are confounded. */
 const CONFOUND_OVERLAP = 0.6;
 
-// ── Statistics, written out ──────────────────────────────────────
-
-/**
- * Complementary error function, Abramowitz & Stegun 7.1.26.
- *
- * Needed for the chi-square p-value at one degree of freedom, where
- * p = erfc(sqrt(x/2)). Accurate to ~1e-7, which is several orders more
- * than a decision about whether to pull a lot requires.
- */
-function erfc(x) {
-  const z = Math.abs(x);
-  const t = 1 / (1 + z / 2);
-  const r = t * Math.exp(
-    -z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 +
-    t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 +
-    t * (-0.82215223 + t * 0.17087277)))))))));
-  return x >= 0 ? r : 2 - r;
-}
-
-/**
- * 2×2 chi-square with Yates' continuity correction.
- *
- * "This factor value" against "everything else", failed against passed.
- * Yates matters here and is not ceremony: these tables routinely carry
- * cells in single figures, where the uncorrected statistic is
- * optimistic and would hand out significance the data does not support.
- */
-function chiSquare2x2(a, b, c, d) {
-  // a = this value & failed, b = this value & passed
-  // c = other values & failed, d = other values & passed
-  const n = a + b + c + d;
-  if (n === 0) return { chi2: 0, p: 1 };
-
-  const rowA = a + b, rowB = c + d;
-  const colA = a + c, colB = b + d;
-  if (rowA === 0 || rowB === 0 || colA === 0 || colB === 0) return { chi2: 0, p: 1 };
-
-  const num = Math.abs(a * d - b * c) - n / 2;
-  // The correction can push a tiny association below zero; that is a
-  // statistic of zero, not a negative one.
-  const chi2 = num <= 0 ? 0 : (n * num * num) / (rowA * rowB * colA * colB);
-  return { chi2, p: erfc(Math.sqrt(chi2 / 2)) };
-}
-
-/**
- * Benjamini–Hochberg: which of these p-values survive at the given FDR.
- *
- * Chosen over Bonferroni deliberately. Bonferroni across sixty
- * candidates is so severe that a genuinely bad lot would have to fail
- * nearly everything before it was named, and a report that never names
- * anything gets switched off. BH controls the share of findings that
- * are false rather than the chance of any false finding at all, which
- * is the right trade when the output is "go and look at this".
- */
-function benjaminiHochberg(pValues, fdr = FDR) {
-  const indexed = pValues.map((p, i) => ({ p, i })).sort((x, y) => x.p - y.p);
-  const m = indexed.length;
-  let cutoff = -1;
-  for (let k = 0; k < m; k++) {
-    if (indexed[k].p <= ((k + 1) / m) * fdr) cutoff = k;
-  }
-  const pass = new Array(m).fill(false);
-  for (let k = 0; k <= cutoff; k++) pass[indexed[k].i] = true;
-  return pass;
-}
+// ── Statistics ───────────────────────────────────────────────────
+//
+// The tests, the correction and the reasoning behind choosing them live
+// in utils/stats.js, which the machine-health report shares. They were
+// written here first and moved once there were two callers: duplicating
+// them was how the multiple-comparison correction would eventually end
+// up applied in one report and quietly forgotten in the other.
+const { erfc, chiSquare2x2, benjaminiHochberg } = require('../utils/stats');
 
 // ── Assembling the observations ──────────────────────────────────
 

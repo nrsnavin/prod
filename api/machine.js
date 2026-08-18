@@ -18,6 +18,7 @@ const { notify }       = require("../utils/notify");
 const { actorFromRequest } = require("../utils/fingerprint");
 const { checkHookFit, hookFitError } = require("../utils/machineFit");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
+const machineHealth = require("../services/machineHealth");
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS
@@ -913,7 +914,12 @@ router.get(
     const d28 = new Date(now.getTime() - 28 * 86_400_000);
     const d30 = new Date(now.getTime() - 30 * 86_400_000);
 
-    const [prodAgg, issueAgg, machines] = await Promise.all([
+    // Output drift comes from services/machineHealth.js, which divides
+    // every shift by what the (elastic, machine) posterior expects for
+    // that pair. This route used to sum raw productionMeters, so a loom
+    // moved onto a slower product showed a 50% "output drop" and lost
+    // up to 35 points of health score for doing what it was told.
+    const [prodAgg, issueAgg, machines, drift] = await Promise.all([
       ShiftDetail.aggregate([
         { $match: { status: "closed", date: { $gte: d28 } } },
         { $group: {
@@ -934,6 +940,7 @@ router.get(
         } },
       ]),
       Machine.find().select("ID status serviceLogs manufacturer NoOfHead").lean(),
+      machineHealth.driftByMachine({ recentDays: 7, baselineDays: 21, now }),
     ]);
 
     const prodBy  = new Map(prodAgg.map((r) => [String(r._id), r]));
@@ -944,11 +951,13 @@ router.get(
       const p  = prodBy.get(id) || {};
       const iss = issueBy.get(id) || { count: 0, open: 0, critical: 0 };
 
+      // Raw metres, kept for context on screen — they are what somebody
+      // sees on the floor — but NOT what the penalty is computed from.
       const recentAvg = p.recentCount ? p.recentSum / p.recentCount : null;
       const baseAvg   = p.baseCount   ? p.baseSum   / p.baseCount   : null;
-      const dropPct = baseAvg && recentAvg != null && baseAvg > 0
-        ? Math.max(0, Math.round(((baseAvg - recentAvg) / baseAvg) * 100))
-        : 0;
+
+      const d = drift.get(id) || { dropPct: 0, recentPctOfExpected: null, baselinePctOfExpected: null };
+      const dropPct = d.dropPct;
 
       // Service recency from the most recent log carrying a next date.
       const logs = (m.serviceLogs || []).filter((l) => l.nextServiceDate)
@@ -961,12 +970,16 @@ router.get(
       const reasons = [];
       let score = 100;
 
-      if (dropPct >= 12 && p.recentCount) {
+      if (dropPct >= 12 && d.recentShifts > 0) {
         const pen = Math.min(35, Math.round(dropPct * 0.7));
         score -= pen;
         reasons.push({ severity: dropPct >= 30 ? "high" : "medium",
           label: `Output down ${dropPct}%`,
-          detail: `Recent avg ${Math.round(recentAvg)} m/shift vs ${Math.round(baseAvg)} m baseline.` });
+          // Percent of what this machine's own products normally make,
+          // not metres: over a period where the product changed, a
+          // metre figure compares two different things.
+          detail: `Running at ${d.recentPctOfExpected}% of expected, against ` +
+                  `${d.baselinePctOfExpected}% over the previous three weeks.` });
       }
       if (iss.count > 0) {
         const pen = Math.min(40, iss.count * 8 + iss.critical * 5);
@@ -1001,6 +1014,9 @@ router.get(
         openIssues: iss.open,
         recentAvg: recentAvg != null ? Math.round(recentAvg) : null,
         baselineAvg: baseAvg != null ? Math.round(baseAvg) : null,
+        // The figures the drop is actually computed from.
+        recentPctOfExpected: d.recentPctOfExpected,
+        baselinePctOfExpected: d.baselinePctOfExpected,
         nextServiceDate: nextService,
         reasons,
       };

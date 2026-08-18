@@ -18,6 +18,15 @@ const MaterialOutward = require("../models/MaterialOut.cjs");
 const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
 const { requireReason } = require("../utils/auditReason.js");
+const multer   = require("multer");
+const poIntake = require("../services/inboundPoIntake.js");
+
+// A photographed PO is a phone camera image; 12 MB covers a multi-page
+// scan without letting somebody upload a video of one.
+const poUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024 },
+});
 const {
   readOrderLines,
   assertElasticsExist,
@@ -2161,5 +2170,48 @@ router._etaHelpers = {
   _computeRunningEtaForOrder,
   _loadPlantMetersPerMachineDay,
 };
+
+// ══════════════════════════════════════════════════════════════════
+//  POST /intake-po — draft an order from a customer's purchase order
+//
+//  Stage → verify → apply, exactly as the shift sheet and QC vision do.
+//  This route CREATES NOTHING. It reads the document, matches what it
+//  names against the customer and elastic masters, and returns a draft
+//  with candidates and confidence for every line. The existing create
+//  route is what writes, driven by somebody who has looked at it.
+//
+//  Gating is at the mount — gate('accounts') plus requireFeature
+//  ('/orders') — so this route carries no guard of its own.
+// ══════════════════════════════════════════════════════════════════
+router.post(
+  "/intake-po",
+  poUpload.single("file"),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!req.file) {
+      return next(new ErrorHandler('No file uploaded (field name must be "file").', 400));
+    }
+
+    let out;
+    try {
+      out = await poIntake.draftFromDocument(req.file.buffer, req.file.mimetype, {
+        userId: req.user?._id,
+      });
+    } catch (err) {
+      if (err.code === "UNSUPPORTED_TYPE") return next(new ErrorHandler(err.message, 400));
+      // A model that is down is a 502, not a 500: nothing here is
+      // broken, the upstream did not answer.
+      return res.status(502).json({ success: false, reason: "INTAKE_FAILED", message: err.message });
+    }
+
+    if (!out.available) {
+      return res.json({
+        success: true, available: false,
+        message: "Document intake is not configured (no API key).",
+      });
+    }
+
+    res.json({ success: true, ...out });
+  })
+);
 
 module.exports = router;
