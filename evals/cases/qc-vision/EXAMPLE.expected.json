@@ -1,0 +1,12 @@
+{
+  "_comment": "A shape reference, not a case. Files starting with EXAMPLE are skipped by the runner. A real case is this file plus the photo it describes, sharing a name.",
+  "overallResult": "fail",
+  "defectCode": "weave-fault",
+  "spec": {
+    "name": "20mm knitted elastic",
+    "parameters": [
+      { "parameter": "Width (mm)", "expected": "20" },
+      { "parameter": "Elongation (%)", "expected": "160" }
+    ]
+  }
+}

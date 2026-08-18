@@ -127,3 +127,16 @@ dist
 # Local secrets — provision via real env vars / a secret store, never commit
 .env
 config/.env
+
+# Eval golden-set INPUTS — real scanned shift sheets and QC photos of
+# real product. Ignored by default so production data does not reach the
+# repo by accident; the .expected.json answer keys stay tracked, since
+# they are the part that took human effort and are useless without the
+# inputs. `git add -f` if a particular case is safe to share.
+evals/cases/**/*.pdf
+evals/cases/**/*.jpg
+evals/cases/**/*.jpeg
+evals/cases/**/*.png
+evals/cases/**/*.webp
+evals/cases/**/*.gif
+evals/baseline.json

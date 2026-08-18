@@ -30,6 +30,9 @@ const multer = require("multer");
 const { buildShiftSheetPdf, shortCode } = require("../utils/shiftSheetPdf");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
+const { VISION_MODEL } = require("../utils/anthropicClient");
+const { promptVersion } = require("../utils/aiPrompts");
+const ledger = require("../services/aiLedger");
 const { totalMeters } = require("../utils/shiftFigures");
 
 // Scanned 200-machine sheets run ~19 pages; allow up to 25 MB in memory.
@@ -257,7 +260,7 @@ router.get(
 // ────────────────────────────────────────────────────────────────
 router.post('/bulk-enter-production', async (req, res) => {
   try {
-    const { entries } = req.body;
+    const { entries, aiSuggestionId } = req.body;
 
     if (!Array.isArray(entries) || entries.length === 0) {
       return res.status(400).json({ success: false, message: 'entries must be a non-empty array.' });
@@ -283,6 +286,7 @@ router.post('/bulk-enter-production', async (req, res) => {
 
     const saved   = [];
     const skipped = [];
+    const settledRows = {};
 
     for (const entry of entries) {
       const { id, production, timer = '00:00:00', feedback = '' } = entry;
@@ -292,6 +296,24 @@ router.post('/bulk-enter-production', async (req, res) => {
 
       if (!sd) { skipped.push({ id, reason: 'ShiftDetail not found' }); continue; }
       if (sd.status === 'closed') { skipped.push({ id, reason: 'Already closed' }); continue; }
+
+      // A finalised plan is frozen for payroll and reporting.
+      //
+      // assertPlanNotFinalized sits below under a comment saying it is
+      // "used by every route that would change a locked shift's
+      // numbers" — and this route, which writes production figures in
+      // batches of up to 200, never called it. The single-entry path,
+      // the correction path and the delete path all did, so the lock
+      // held everywhere except the highest-volume door into the same
+      // field. Skipped rather than thrown so one locked shift in a
+      // batch does not reject the other 199.
+      if (sd.shiftPlan) {
+        const plan = await ShiftPlan.findById(sd.shiftPlan).select('finalized').lean();
+        if (plan?.finalized) {
+          skipped.push({ id, reason: 'Shift is finalised — an admin must reopen it first' });
+          continue;
+        }
+      }
 
       await ShiftDetail.findByIdAndUpdate(id, {
         $set: {
@@ -305,6 +327,36 @@ router.post('/bulk-enter-production', async (req, res) => {
       });
 
       saved.push({ id, production: prodNum, status: 'pending_verification' });
+
+      // What the OPERATOR supplied, not what gets stored. `timer`
+      // above defaults to '00:00:00' so the ShiftDetail always has a
+      // value; recording that default as the human's answer compares it
+      // against the OCR's null and calls it a correction — on every row
+      // where the timer cell was blank, which on a quiet shift is most
+      // of them. The weakest-field report would then name the timer
+      // column as this model's biggest problem when nobody had
+      // disagreed with it once.
+      settledRows[id] = {
+        production: prodNum,
+        timer: entry.timer ?? null,
+        remarks: feedback,
+      };
+    }
+
+    // If these figures came from an OCR'd sheet, close that suggestion
+    // out against what was actually saved. `ignoreMissing` matters here:
+    // a row the OCR read but this batch never submitted is undecided,
+    // not disagreed with, and counting it either way would be a lie
+    // about the reading. Rows the operator DID submit are compared
+    // field by field, which is where "the timer column needs fixing on
+    // a third of sheets" comes from.
+    if (aiSuggestionId) {
+      await ledger.settle(aiSuggestionId, {
+        expectSurface: 'shift-sheet-ocr',
+        accepted: { rows: settledRows },
+        decidedBy: req.user?._id,
+        ignoreMissing: true,
+      });
     }
 
     return res.json({
@@ -1236,6 +1288,7 @@ router.post(
     }
 
     let ocr;
+    const ocrStartedAt = Date.now();
     try {
       ocr = await extractShiftRows(req.file.buffer);
     } catch (err) {
@@ -1243,6 +1296,18 @@ router.post(
         return res.status(503).json({ success: false, reason: "ANTHROPIC_KEY_MISSING", message: err.message });
       }
       console.error("[ingest-sheet] OCR error:", err.message);
+      // A failed read is a data point about the surface too — a model
+      // that fails one upload in five is not "working", and without
+      // this row nothing outside the server log would ever say so.
+      await ledger.record({
+        surface: "shift-sheet-ocr",
+        model: VISION_MODEL,
+        promptVersion: promptVersion("shift-sheet-ocr"),
+        refType: "ShiftPlan",
+        refId: shiftPlanId,
+        latencyMs: Date.now() - ocrStartedAt,
+        error: err.message,
+      });
       return res.status(502).json({ success: false, reason: "OCR_FAILED", message: err.message });
     }
 
@@ -1295,12 +1360,33 @@ router.post(
       }
     }
 
+    // What the OCR read, keyed by the ShiftDetail it was matched to, so
+    // that /bulk-enter-production can settle the row against what the
+    // operator actually saved. Keying by id rather than position is what
+    // makes the comparison survive the operator reordering, skipping or
+    // part-filling the verification screen.
+    const aiSuggestionId = await ledger.record({
+      surface: "shift-sheet-ocr",
+      model: ocr.model,
+      promptVersion: promptVersion("shift-sheet-ocr"),
+      refType: "ShiftPlan",
+      refId: shiftPlanId,
+      proposed: {
+        rows: Object.fromEntries(matched.map((m) => [
+          m.shiftDetailId,
+          { production: m.production, timer: m.timer, remarks: m.remarks },
+        ])),
+      },
+      latencyMs: Date.now() - ocrStartedAt,
+    });
+
     return res.json({
       success: true,
       shiftPlanId,
       model: ocr.model,
       pages: ocr.pages,
       batches: ocr.batches,
+      aiSuggestionId: aiSuggestionId ? String(aiSuggestionId) : null,
       summary: {
         planRows: (sp.plan || []).length,
         matched: matched.length,

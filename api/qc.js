@@ -12,6 +12,7 @@
 
 const express = require("express");
 const multer  = require("multer");
+const mongoose = require("mongoose");
 const router = express.Router();
 
 const QcRecord = require("../models/QcRecord");
@@ -21,6 +22,9 @@ const Elastic  = require("../models/Elastic");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
 const { classifyDefect } = require("../utils/qcVision");
+const { VISION_MODEL } = require("../utils/anthropicClient");
+const { promptVersion } = require("../utils/aiPrompts");
+const ledger = require("../services/aiLedger");
 
 // Cap uploads so the base64 photo stored on the QcRecord stays well under
 // MongoDB's 16 MB per-document limit (base64 inflates the file ~1.33×).
@@ -88,21 +92,68 @@ router.post(
     }
 
     let draft;
+    const startedAt = Date.now();
     try {
       draft = await classifyDefect(req.file.buffer, req.file.mimetype, spec);
     } catch (err) {
+      await ledger.record({
+        surface: "qc-vision",
+        model: VISION_MODEL,
+        promptVersion: promptVersion("qc-vision"),
+        refType: "Elastic",
+        refId: mongoose.Types.ObjectId.isValid(elasticId) ? elasticId : undefined,
+        latencyMs: Date.now() - startedAt,
+        error: err.message || String(err),
+      });
       return next(new ErrorHandler(err.message || "Vision analysis failed", 400));
     }
     if (!draft.available) {
       return res.json({ success: true, available: false, message: "AI vision is not configured (no API key)." });
     }
     if (!draft.ok) {
+      // The model answered with something the parser could not read.
+      // This used to return a polite message and record nothing, so a
+      // vision model that had started replying in prose instead of JSON
+      // looked — from every angle a person can see — exactly like a
+      // feature nobody was using.
+      await ledger.record({
+        surface: "qc-vision",
+        model: VISION_MODEL,
+        promptVersion: promptVersion("qc-vision"),
+        refType: "Elastic",
+        refId: mongoose.Types.ObjectId.isValid(elasticId) ? elasticId : undefined,
+        latencyMs: Date.now() - startedAt,
+        error: "reply could not be parsed as JSON",
+      });
       return res.json({ success: true, available: true, ok: false, message: "Couldn't read the image confidently — fill the check manually." });
     }
 
+    // Record what vision said BEFORE the inspector sees it. The id goes
+    // back with the draft so POST /create can record what they actually
+    // saved — the gap between the two is the only measurement of this
+    // surface that exists, and until now it was thrown away on every
+    // check: the corrected value was kept and the correction was not.
+    const aiSuggestionId = await ledger.record({
+      surface: "qc-vision",
+      model: VISION_MODEL,
+      promptVersion: promptVersion("qc-vision"),
+      refType: "Elastic",
+      refId: mongoose.Types.ObjectId.isValid(elasticId) ? elasticId : undefined,
+      proposed: {
+        overallResult: draft.overallResult,
+        defectCode: draft.defectCode,
+        rejectedMeters: draft.rejectedMetersHint,
+        results: draft.results,
+      },
+      latencyMs: Date.now() - startedAt,
+    });
+
     // Echo the image back as a data URL so the client can attach it on save.
     const image = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
-    res.json({ success: true, available: true, ok: true, draft, image, spec });
+    res.json({
+      success: true, available: true, ok: true, draft, image, spec,
+      aiSuggestionId: aiSuggestionId ? String(aiSuggestionId) : null,
+    });
   })
 );
 
@@ -197,6 +248,7 @@ router.post(
       notes = "",
       image = "",
       aiAssisted = false,
+      aiSuggestionId = null,
     } = req.body;
 
     if (!jobId) return next(new ErrorHandler("jobId is required", 400));
@@ -235,6 +287,23 @@ router.post(
       image: safeImage,
       aiAssisted: Boolean(aiAssisted),
     });
+
+    // What the inspector settled on, against what vision proposed. The
+    // outcome is DERIVED from the two payloads, not asserted by the
+    // client: a UI that believes it applied the draft unchanged but
+    // flipped one `pass` is an edit, whatever it believes.
+    if (aiSuggestionId) {
+      await ledger.settle(aiSuggestionId, {
+        expectSurface: "qc-vision",
+        accepted: {
+          overallResult,
+          defectCode: record.defectCode,
+          rejectedMeters: record.rejectedMeters,
+          results: cleanResults,
+        },
+        decidedBy: req.user?._id,
+      });
+    }
 
     res.status(201).json({ success: true, record, jobOrderNo: job.jobOrderNo });
   })

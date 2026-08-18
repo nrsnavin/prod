@@ -614,7 +614,10 @@ router.get('/analytics', async (req, res) => {
     const totalProduction  = details.reduce((s,d)=>s+(d.productionMeters||0),0);
     const activeMachines   = new Set(details.map(d=>d.machine?._id?.toString()||d.machine?.toString()).filter(Boolean));
     const activeEmployees  = new Set(details.map(d=>d.employee?._id?.toString()||d.employee?.toString()).filter(Boolean));
-    const machScores       = machineList.map(m=>m.consistencyScore);
+    // Machines with a single shift have no consistency score (null, not
+    // 100 — see consistencyScore). Averaging them in would poison the
+    // factory figure with NaN; counting them as 100 would flatter it.
+    const machScores       = machineList.map(m=>m.consistencyScore).filter((s)=>s!=null);
     const factoryConsist   = machScores.length ? Math.round(machScores.reduce((a,b)=>a+b,0)/machScores.length) : 0;
     const avgEffScore      = machineList.length
       ? Math.round(machineList.reduce((s,m)=>s+m.efficiencyPerHead,0)/machineList.length) : 0;

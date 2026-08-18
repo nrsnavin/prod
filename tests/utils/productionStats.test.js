@@ -46,11 +46,27 @@ describe("dispersion stats", () => {
 
   test("consistencyScore: identical values → 100, high spread → low", () => {
     expect(consistencyScore([100, 100, 100])).toBe(100);
-    expect(consistencyScore([100])).toBe(100);       // too few
     expect(consistencyScore([0, 0])).toBe(0);        // mean 0
     const noisy = consistencyScore([10, 200, 5, 300]);
     expect(noisy).toBeGreaterThanOrEqual(0);
     expect(noisy).toBeLessThan(50);
+  });
+
+  // ── Contract change, recorded rather than quietly rewritten ──────
+  //
+  // This line previously read `expect(consistencyScore([100])).toBe(100)`
+  // with the comment "too few", locking in the behaviour it was naming
+  // as wrong: stdDev returns 0 for a single sample, so cv came out 0 and
+  // a worker on their FIRST EVER SHIFT scored a perfect 100 —
+  // out-consistenting everybody who had held steady for a month, and
+  // collecting 30 XP plus the Steady Hands and Clockwork badges for it.
+  //
+  // One data point has no variance to measure. The function now says so
+  // (null), and calcXP/calcAchievements skip rather than award.
+  test("consistencyScore: one shift has no consistency to score", () => {
+    expect(consistencyScore([100])).toBeNull();
+    expect(consistencyScore([])).toBeNull();
+    expect(consistencyScore([100, 100])).toBe(100);   // two is enough
   });
 
   test("trendSlope: rising series positive, falling negative, flat/short zero", () => {

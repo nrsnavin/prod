@@ -32,6 +32,8 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { getPairRate, toMetersPerMachineDay } = require("../utils/etaPosterior");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
+const { promptVersion, systemPrompt } = require("../utils/aiPrompts");
+const ledger = require("../services/aiLedger");
 const C = require("../utils/etaConfig");
 
 // Tunables for the objective. Lateness dominates; changeovers and load
@@ -510,9 +512,19 @@ router.get(
     ];
 
     // Optional Claude rationale (narrative only).
-    let aiRationale = null, aiGenerated = false;
+    //
+    // Every call — success OR failure — lands in the AI ledger. The
+    // failure path used to be a console.warn and nothing else, which
+    // meant a rationale that had been broken for a fortnight looked
+    // exactly like a rationale nobody had asked for. The id comes back
+    // in the response so POST /accept can close the row out: acceptance
+    // here means "the plan this rationale explained was adopted", not
+    // "the prose was correct" — the honest reading of the one signal a
+    // narrative surface can actually give.
+    let aiRationale = null, aiGenerated = false, aiSuggestionId = null;
     const claude = anthropic();
     if (claude && placed > 0) {
+      const startedAt = Date.now();
       try {
         const facts = machinePlans.slice(0, 8).map((mp) =>
           `Machine ${mp.machineID}: ${mp.rows.map((r) => `${r.elasticName} (${Math.round(r.qtyMeters)} m${r.late ? `, LATE by ${r.lateWorkingDays}d` : ""})`).join(" → ")}`
@@ -520,19 +532,30 @@ router.get(
         const msg = await claude.messages.create({
           model: TEXT_MODEL,
           max_tokens: 400,
-          system:
-            "You are a production planner for an elastic (narrow-fabric) plant. Given a proposed " +
-            "machine schedule, explain the plan's logic in 2-3 short bullet lines starting with '- ': " +
-            "why this sequencing, which orders are at risk, and one thing the admin should watch. " +
-            "Plain text, no preamble, reference the machines/elastics in the data.",
+          system: systemPrompt("planner-rationale"),
           messages: [{ role: "user", content:
             `Proposed plan (${objective.placed} lines on ${objective.machinesUsed} machines, ` +
             `${objective.late} late, ${objective.changeovers} changeovers):\n${facts}\n\nExplain the plan.` }],
         });
         aiRationale = (msg.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
         aiGenerated = true;
+        aiSuggestionId = await ledger.record({
+          surface: "planner-rationale",
+          model: TEXT_MODEL,
+          promptVersion: promptVersion("planner-rationale"),
+          proposed: { rationale: aiRationale, objective },
+          latencyMs: Date.now() - startedAt,
+          usage: msg.usage,
+        });
       } catch (err) {
         console.warn("[planner/suggest-plan] AI failed:", err?.message);
+        await ledger.record({
+          surface: "planner-rationale",
+          model: TEXT_MODEL,
+          promptVersion: promptVersion("planner-rationale"),
+          latencyMs: Date.now() - startedAt,
+          error: err?.message || String(err),
+        });
       }
     }
 
@@ -550,6 +573,8 @@ router.get(
         reason: "No compatible machine (hook count) with a known rate.",
       })),
       assumptions, aiRationale, aiGenerated,
+      // Hand back to POST /accept so the outcome can be recorded.
+      aiSuggestionId: aiSuggestionId ? String(aiSuggestionId) : null,
     });
   })
 );
@@ -561,7 +586,7 @@ router.post(
   "/accept",
   isAdmin("admin"),
   catchAsyncErrors(async (req, res) => {
-    const { generatedAt, horizonDays, objective, machines, assumptions } = req.body || {};
+    const { generatedAt, horizonDays, objective, machines, assumptions, aiSuggestionId } = req.body || {};
     if (!Array.isArray(machines)) {
       return res.status(400).json({ success: false, message: "machines[] is required" });
     }
@@ -621,6 +646,17 @@ router.post(
       });
     } finally {
       session.endSession();
+    }
+
+    // Close out the rationale row, if the client carried the id back.
+    // Outside the transaction on purpose: a ledger failure must never
+    // roll back an accepted plan of record.
+    if (aiSuggestionId) {
+      await ledger.settle(aiSuggestionId, {
+        expectSurface: "planner-rationale",
+        outcome: "accepted",
+        decidedBy: req.user?._id,
+      });
     }
 
     res.json({ success: true, planId: plan._id, acceptedAt: plan.acceptedAt });

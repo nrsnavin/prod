@@ -1,0 +1,8 @@
+{
+  "_comment": "A shape reference, not a case. Files starting with EXAMPLE are skipped by the runner. See ../../README.md — a real case is this file plus the scan it describes, sharing a name.",
+  "rows": {
+    "SD-8F3A2C": { "production": 1240, "timer": "7:45:00", "remarks": "warp break 20m" },
+    "SD-9B1E77": { "production": 980, "timer": "6:10:00" },
+    "SD-4C0D19": { "production": null, "timer": null, "remarks": "" }
+  }
+}
