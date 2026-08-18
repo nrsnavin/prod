@@ -75,6 +75,12 @@ const PROMPTS = Object.freeze({
       'Plain text, no preamble.',
   },
 
+  'inbound-po-ocr': {
+    version: 'v1.0',
+    notes: "Vision extract of a CUSTOMER's purchase order. Prompt lives in utils/inboundPoOcr.js.",
+    system: null,
+  },
+
   'assistant-answer': {
     version: 'v1.0',
     notes: 'Read-only tool-calling agent over whitelisted queries.',

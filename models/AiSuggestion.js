@@ -48,6 +48,11 @@ const AI_SURFACES = Object.freeze([
   // given was computed by services/defectRootCause.js and can be
   // reproduced by hand from four collections.
   'defect-root-cause',
+  // A customer's purchase order read from a photo or PDF. Unlike the
+  // shift sheet this reads SOMEBODY ELSE'S document — no known layout,
+  // no code to key against — so the ledger is the only way its accuracy
+  // will ever be known.
+  'inbound-po-ocr',
 ]);
 
 /** How a suggestion ended up. */

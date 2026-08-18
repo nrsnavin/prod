@@ -20,6 +20,7 @@ const Employee   = require('../models/Employee');
 const ShiftDetail= require('../models/ShiftDetail');
 const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
 const { maybeFireAttendanceCrashed } = require('../utils/attendanceAlerts');
+const attendanceForecast = require('../services/attendanceForecast');
 
 router.use(isAuthenticated);
 
@@ -692,6 +693,51 @@ router.get('/repeatedly-unmarked', isAdmin('admin', 'accounts'), async (req, res
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── GET /forecast — how many people will actually be here ──────────
+//
+//  The planner respects what each loom is busy with and ignores
+//  staffing entirely. This is the other constraint: expected heads per
+//  (weekday, shift) from the register's own base rates.
+//
+//  Carries NO NAMES, by construction — see services/attendanceForecast.js
+//  for why that is a design rule rather than an omission.
+router.get('/forecast', isAdmin('admin', 'accounts', 'production'), async (req, res) => {
+  try {
+    const days = Number(req.query.days);
+    const out = await attendanceForecast.forecast({
+      days: Number.isFinite(days) && days > 0 ? Math.min(days, 1095) : undefined,
+    });
+    res.json({ success: true, ...out });
+  } catch (err) {
+    console.error('[attendance/forecast]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ── GET /forecast/:empId — one person's own pattern ────────────────
+//
+//  selfOrAdmin, matching /employee/:empId and /monthly/:empId above: a
+//  worker may see their own record, an admin may see anyone's, and
+//  nobody else can enumerate the workforce by reliability. The plant
+//  forecast above is the one people plan from; this exists so a
+//  supervisor can check a number WITH somebody.
+router.get('/forecast/:empId', selfOrAdmin, async (req, res) => {
+  try {
+    const { empId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(empId)) {
+      return res.status(400).json({ success: false, message: 'A valid employee id is required' });
+    }
+    const out = await attendanceForecast.forEmployee(empId);
+    if (!out) {
+      return res.json({ success: true, employeeId: empId, slots: [], note: 'No attendance recorded yet.' });
+    }
+    res.json({ success: true, ...out });
+  } catch (err) {
+    console.error('[attendance/forecast/:empId]', err);
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
