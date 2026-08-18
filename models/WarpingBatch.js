@@ -107,6 +107,8 @@ WarpingBatchSchema.index({ warping: 1, createdAt: -1 });
 WarpingBatchSchema.index({ job: 1 });
 // Tracing forward from a lot: "which batches did this lot go into?"
 WarpingBatchSchema.index({ 'allocations.yarnLot': 1 });
+// Same trace, for batches issued against a lot recorded only by number.
+WarpingBatchSchema.index({ 'allocations.lotNo': 1 });
 // And backward, from a finished elastic to the lots behind it.
 WarpingBatchSchema.index({ elastics: 1 });
 

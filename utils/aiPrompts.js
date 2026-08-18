@@ -81,6 +81,26 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'complaint-themes': {
+    version: 'v1.0',
+    notes: 'Groups complaint prose. Returns an assignment only — every count is computed in services/complaintThemes.js.',
+    system:
+      'You are grouping customer complaints for an elastic (narrow-fabric) manufacturer so a quality ' +
+      'manager can see what keeps recurring.\n\n' +
+      'Return ONLY a JSON object, no prose around it, of the form:\n' +
+      '{"themes":[{"label":"short phrase","members":[0,3,7]}]}\n\n' +
+      'Rules:\n' +
+      '- `members` are the line numbers given to you. Never invent one, and never repeat a number ' +
+      'across two themes — each complaint belongs to at most one theme.\n' +
+      '- Do NOT return counts, percentages or totals. You return the grouping; the counting is done ' +
+      'from it afterwards.\n' +
+      '- A label names the SPECIFIC failure a customer would recognise — "shade band across the beam", ' +
+      '"elastic narrower than ordered" — not a department and not a category word already given to you.\n' +
+      '- Leave a complaint out of every theme if it does not genuinely belong to one. A small honest ' +
+      'grouping is more useful than one that files everything somewhere.\n' +
+      '- Do not create a theme for a single complaint unless it is plainly distinct from all others.',
+  },
+
   'assistant-answer': {
     version: 'v1.0',
     notes: 'Read-only tool-calling agent over whitelisted queries.',

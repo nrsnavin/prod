@@ -53,6 +53,13 @@ const AI_SURFACES = Object.freeze([
   // no code to key against — so the ledger is the only way its accuracy
   // will ever be known.
   'inbound-po-ocr',
+  // Grouping complaint prose into recurring themes. The odd one out in
+  // this list: it proposes no value a human then accepts or edits, so it
+  // is never settled and its rows stay 'proposed' for ever. It is here
+  // for the cost, latency and failure telemetry, which is the part that
+  // applies to every surface — and because a clustering pass that stops
+  // returning usable JSON should show up somewhere other than a log.
+  'complaint-themes',
 ]);
 
 /** How a suggestion ended up. */

@@ -678,6 +678,15 @@ app.use("/api/v2/sample",      gate('accounts', 'production'),
   require("./api/sample.js"));
 // QC is a leaf, but the Jobs screen reads QC results, so /jobs passes too.
 app.use("/api/v2/qc",          gate('production'), requireFeature('/qc', '/jobs'), requireFeatureRead('/qc', '/jobs'), require("./api/qc.js"));
+// Complaints carry the blast-radius trace, which names other customers
+// and the jobs still on the floor carrying the same lot. Finance is in
+// the gate because the people who field the customer's call are the ones
+// who need it; production is in it because they are the ones who can act
+// on the containable half.
+app.use("/api/v2/complaint",   gate('production', 'accounts'),
+  requireFeature('/complaints'),
+  requireFeatureRead('/complaints'),
+  require("./api/complaint.js"));
 app.use("/api/v2/payroll",     gate('accounts', 'production'), payroll);
 app.use("/api/v2/leave",       gate('accounts', 'production'), leave);
 app.use("/api/v2/bonus",       gate('accounts', 'production'), bonus);

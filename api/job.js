@@ -495,12 +495,22 @@ router.get(
     const page  = Math.max(1, parseInt(req.query.page)  || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
     const skip  = (page - 1) * limit;
-    const { status, search } = req.query;
+    const { status, search, customer } = req.query;
     const filter = {};
     if (status && status !== 'all') {
       if (!JOB_STATUSES.includes(status))
         return next(new ErrorHandler(`Invalid status "${status}"`, 400));
       filter.status = status;
+    }
+    // Narrow to one customer's jobs. Added for the complaint form, which
+    // has to pick the job a specific customer received — `search` only
+    // matches a job number, and filtering the page client-side would
+    // silently hide every job outside the newest twenty.
+    if (customer) {
+      if (!mongoose.Types.ObjectId.isValid(customer)) {
+        return next(new ErrorHandler('Invalid customer id', 400));
+      }
+      filter.customer = customer;
     }
     if (search) {
       const n = Number(search);
