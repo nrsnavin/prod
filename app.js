@@ -295,6 +295,16 @@ app.get(
   "/api/v2/health/ai",
   isAuthenticated,
   isAdmin("admin"),
+  // The /ai-health key is revocable on the Users screen, so it has to
+  // MEAN something here. Without this the tickbox hides the page from
+  // the sidebar and changes nothing about who can read the report —
+  // a permission that is only cosmetic is worse than no permission,
+  // because somebody will believe they have withdrawn access.
+  //
+  // tests/api/featureReadGate.test.js scans for exactly this and
+  // caught its absence.
+  requireFeature("/ai-health"),
+  requireFeatureRead("/ai-health"),
   async (req, res) => {
     const { anthropic, TEXT_MODEL, VISION_MODEL, isPinned } = require("./utils/anthropicClient.js");
     const { PROMPTS } = require("./utils/aiPrompts.js");

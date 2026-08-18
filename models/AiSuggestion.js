@@ -43,6 +43,11 @@ const AI_SURFACES = Object.freeze([
   'planner-rationale',
   'advisor-briefing',
   'assistant-answer',
+  // Narrative over the defect attribution. Like the planner rationale,
+  // the model writes prose and never a figure — every number it is
+  // given was computed by services/defectRootCause.js and can be
+  // reproduced by hand from four collections.
+  'defect-root-cause',
 ]);
 
 /** How a suggestion ended up. */
