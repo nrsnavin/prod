@@ -36,6 +36,11 @@ const FEATURES = [
   { key: "/covering",            label: "Covering",            section: "Production",     depts: ["admin", "production"] },
   { key: "/packing",             label: "Packing",             section: "Production",     depts: ["admin", "packing"] },
   { key: "/qc",                  label: "Quality Control",     section: "Production",     depts: ["admin", "packing"] },
+  // Customer complaints and the lot trail behind them. Production sees
+  // it as well as admin: the containment half of the report — which jobs
+  // still on the floor carry the same lot — is only actionable by the
+  // people who can stop them.
+  { key: "/complaints",          label: "Complaints",          section: "Production",     depts: ["admin", "packing", "production"] },
   { key: "/shift-plans",         label: "Shift Plans",         section: "Production",     depts: ["admin", "production"] },
   { key: "/shift-verification",  label: "Shift Verification",  section: "Production",     depts: ["admin", "production"] },
   { key: "/production",          label: "Production View",     section: "Production",     depts: ["admin", "production"] },

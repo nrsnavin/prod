@@ -84,4 +84,15 @@ const WarpingPlanSchema = new mongoose.Schema(
 // own. See services/yarnLotTrail.js.
 WarpingPlanSchema.index({ job: 1 });
 
+// The other direction: "which jobs were programmed to run this lot?" —
+// the blast-radius trace behind a complaint, which starts from a lot and
+// asks who else is exposed. Without this it scans every plan ever
+// written, on a query run precisely when somebody is in a hurry.
+// See services/complaintTrace.js.
+WarpingPlanSchema.index({ "beams.sections.yarnLot": 1 });
+// Programmes written before lots were documents carry only the number.
+// The trace queries both, because a lot missed here is a customer not
+// called. See services/complaintTrace.js.
+WarpingPlanSchema.index({ "beams.sections.lotNo": 1 });
+
 module.exports = mongoose.model("WarpingPlan", WarpingPlanSchema);

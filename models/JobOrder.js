@@ -154,5 +154,8 @@ JobOrderSchema.plugin(AutoIncrement, { inc_field: "jobOrderNo" });
 // then an in-memory sort — see the note on OrderSchema's indexes for why
 // that fails outright rather than merely slowly.
 JobOrderSchema.index({ "elastics.elastic": 1, date: -1 });
+// One customer's jobs, newest first — the complaint form's job picker,
+// and the exposure lookup behind the blast-radius trace.
+JobOrderSchema.index({ customer: 1, createdAt: -1 });
 
 module.exports = mongoose.model("JobOrder", JobOrderSchema);
