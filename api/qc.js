@@ -25,6 +25,7 @@ const { classifyDefect } = require("../utils/qcVision");
 const { VISION_MODEL } = require("../utils/anthropicClient");
 const { promptVersion } = require("../utils/aiPrompts");
 const ledger = require("../services/aiLedger");
+const rootCause = require("../services/defectRootCause");
 
 // Cap uploads so the base64 photo stored on the QcRecord stays well under
 // MongoDB's 16 MB per-document limit (base64 inflates the file ~1.33×).
@@ -154,6 +155,38 @@ router.post(
       success: true, available: true, ok: true, draft, image, spec,
       aiSuggestionId: aiSuggestionId ? String(aiSuggestionId) : null,
     });
+  })
+);
+
+// ── Root cause: the lot trail, pointed backwards ───────────────────
+//
+//  YarnLot → WarpingBatch → job → elastic was built to answer "where
+//  did this lot go". Run the other way it answers "what is causing this
+//  defect", which is what it was worth building for.
+//
+//  Read-only, and every figure is a group-by and a chi-square that can
+//  be reproduced by hand. Claude writes the closing sentence and
+//  computes nothing — the output of this route names a lot, a machine
+//  or a person, and that is not a thing to hand to a model.
+//
+//  ?days=90  ?elasticId=  ?narrative=1
+//  Gating is at the mount in app.js — gate('production') plus
+//  requireFeature('/qc', '/jobs') — so this route carries no guard of
+//  its own. A second one here would be redundant at best, and this
+//  router does not even import isAdmin.
+router.get(
+  "/root-cause",
+  catchAsyncErrors(async (req, res) => {
+    const days = Number(req.query.days);
+    const opts = {
+      days: Number.isFinite(days) && days > 0 ? Math.min(days, 1095) : 90,
+      elasticId: mongoose.Types.ObjectId.isValid(req.query.elasticId)
+        ? req.query.elasticId : undefined,
+    };
+    const out = req.query.narrative
+      ? await rootCause.analyseWithNarrative(opts)
+      : await rootCause.analyse(opts);
+    res.json({ success: true, ...out });
   })
 );
 

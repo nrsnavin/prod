@@ -32,6 +32,7 @@ const { escapeRegex }   = require('../utils/escapeRegex');
 const Quote    = require('../models/Quote');
 const Customer = require('../models/Customer');
 const { priceQuote } = require('../utils/quoteCosting');
+const winLoss = require('../services/quoteWinLoss');
 const { currentFinancialYear }  = require('../utils/financialYear');
 const { nextNumber }            = require('../utils/sequence');
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
@@ -489,6 +490,50 @@ router.post(
     const costing = costingFromBody(req.body);
     if (costing.error) return next(new ErrorHandler(costing.error, 400));
     res.json({ success: true, costing: costingFields(costing) });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  GET /win-loss — what your own quotes say about your pricing
+//
+//  Read-only, and deliberately nowhere near the write paths above. It
+//  reports what happened to prices you already named; it does not
+//  price anything, and no route consults it to decide a figure. That
+//  separation is the whole safety property: a model that has seen forty
+//  quotes has no business overriding somebody who has seen the customer.
+//
+//  ?days=      window, default all history
+//  ?customerId / ?productName   narrow the picture
+// ─────────────────────────────────────────────────────────────
+router.get(
+  '/win-loss',
+  gate,
+  catchAsyncErrors(async (req, res) => {
+    const days = Number(req.query.days);
+    const out = await winLoss.analyse({
+      days: Number.isFinite(days) && days > 0 ? Math.min(days, 3650) : undefined,
+      customerId: mongoose.Types.ObjectId.isValid(req.query.customerId)
+        ? req.query.customerId : undefined,
+      productName: req.query.productName ? String(req.query.productName).slice(0, 120) : undefined,
+    });
+    res.json({ success: true, ...out });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  GET /win-loss/for-quote — the same picture beside one live quote
+// ─────────────────────────────────────────────────────────────
+router.get(
+  '/win-loss/for-quote',
+  gate,
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.query;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler('A valid quote id is required', 400));
+    }
+    const out = await winLoss.forQuote(id);
+    if (!out) return next(new ErrorHandler('Quote not found', 404));
+    res.json({ success: true, ...out });
   })
 );
 
