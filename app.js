@@ -253,10 +253,41 @@ function _readCommitSha() {
 }
 const _BOOT_AT  = new Date();
 const _BOOT_SHA = _readCommitSha();
+
+// ── Which migrations have not been run on THIS database? ─────────
+//
+// `prestart` runs migrate-mongo, but deploy/jarvis.service starts the
+// app with `ExecStart=/usr/bin/node index.js` — npm is never involved,
+// so prestart never fires and migrations only ever run when somebody
+// remembers to run them. Nothing anywhere reported that they hadn't.
+//
+// The cost of that silence is specific and has now been paid four
+// times: every one of these migrations grants a feature key, and an
+// ungranted key means a finished page is invisible to every configured
+// account, with no error to explain the absence. "The new screen isn't
+// there" and "the migration hasn't run" look identical from the
+// outside, and only one of them is a code problem.
+//
+// So the deploy probe answers it. Best-effort and never throws — a
+// health endpoint that dies with the thing it monitors is the least
+// useful kind.
+async function _pendingMigrations() {
+  try {
+    const dir = path2.join(__dirname, "migrations");
+    const onDisk = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).sort();
+    const applied = await require("mongoose").connection
+      .collection("changelog").find({}, { projection: { fileName: 1 } }).toArray();
+    const done = new Set(applied.map((r) => r.fileName));
+    return { pending: onDisk.filter((f) => !done.has(f)), error: null };
+  } catch (err) {
+    return { pending: null, error: err?.message || String(err) };
+  }
+}
 // Detailed build info (commit SHA, Node version, route inventory) is a
 // fingerprinting aid for attackers, so it's admin-gated. Ops still gets
 // it with an admin session.
-app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), (req, res) => {
+app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), async (req, res) => {
+  const migrations = await _pendingMigrations();
   res.json({
     status:        "ok",
     commitSha:     _BOOT_SHA,
@@ -264,6 +295,14 @@ app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), (req, res) =>
     uptimeSeconds: Math.round(process.uptime()),
     node:          process.version,
     env:           process.env.NODE_ENV || "development",
+    // Code that has landed but whose database changes have not. A
+    // non-empty list here is the answer to "why is the new page
+    // missing?" — run `npm run migrate`.
+    migrations: {
+      pending:      migrations.pending,
+      pendingCount: migrations.pending ? migrations.pending.length : null,
+      error:        migrations.error,
+    },
     routes: {
       "/api/v2/order/estimate-completion":    true,
       "/api/v2/order/:id/running-eta":        true,
