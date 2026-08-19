@@ -19,6 +19,8 @@ const { actorFromRequest } = require("../utils/fingerprint");
 const { checkHookFit, hookFitError } = require("../utils/machineFit");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const machineHealth = require("../services/machineHealth");
+const serviceAnomaly = require("../services/serviceAnomaly");
+const ServiceAnomalyFeedback = require("../models/ServiceAnomalyFeedback");
 
 // ─────────────────────────────────────────────────────────────
 //  HELPERS
@@ -1322,6 +1324,156 @@ router.get(
       ? `Likely cause: ${bits.join(", ")}.\nRecommended action: inspect the machine, clear open issues and bring service up to date.\nUrgency: ${serviceOverdue || dropPct >= 30 ? "high" : "medium"}.`
       : "Likely cause: no adverse signals.\nRecommended action: continue normal operation.\nUrgency: low.";
     return res.json({ success: true, machineID: machine.ID, aiGenerated: false, advice, facts });
+  })
+);
+
+
+// ─────────────────────────────────────────────────────────────
+//  SERVICE ANALYTICS
+//
+//  Three questions the machine screens ask:
+//    what are we spending, on what, and which patterns deserve a look.
+//
+//  The detector is deliberately not called "fraud detection" anywhere a
+//  user can see. It finds patterns; a person decides what they mean.
+//  See services/serviceAnomaly.js for why that distinction shapes the
+//  whole design rather than being a caveat on the end.
+//
+//  No isAdmin here: this router is gated where it is mounted, and a
+//  redundant guard inside it once took the whole app down at require
+//  time because the helper was not imported.
+// ─────────────────────────────────────────────────────────────
+
+const WINDOW_MAX = 1095;   // three years; past that the sheet is history
+
+const readWindow = (req) =>
+  Math.min(WINDOW_MAX, Math.max(30, Number(req.query.days) || 365));
+
+router.get(
+  "/service-analytics",
+  catchAsyncErrors(async (req, res) => {
+    const days = readWindow(req);
+    // One history read would be nicer, but these are independent
+    // questions and the sheet is small enough that clarity wins.
+    const [spend, anomalies, costliest] = await Promise.all([
+      serviceAnomaly.spending(days),
+      serviceAnomaly.analyse(days),
+      serviceAnomaly.costliestMachines(days),
+    ]);
+
+    res.json({ success: true, days, spend, anomalies, costliest });
+  })
+);
+
+router.get(
+  "/service-analytics/:id",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler("Invalid machine id", 400));
+    }
+    const days = readWindow(req);
+    const spend = await serviceAnomaly.spending(days, req.params.id);
+    res.json({ success: true, days, spend });
+  })
+);
+
+/**
+ * What one machine actually produced, month by month.
+ *
+ * Beside the spending chart this is the only comparison that matters:
+ * a loom that costs a lot to keep running is a problem only if it is
+ * not also producing a lot.
+ *
+ * Unverified shifts are EXCLUDED. Their figures are the operator's own
+ * and are corrected at verification, so including them would draw a
+ * production line that quietly rewrites itself days later.
+ */
+router.get(
+  "/production-series/:id",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler("Invalid machine id", 400));
+    }
+    const days = readWindow(req);
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const shifts = await ShiftDetail.find({
+      machine: req.params.id,
+      date: { $gte: since },
+      status: "closed",
+    })
+      .select("date shift timer productionMeters production")
+      .lean();
+
+    // Every month in the window, including the empty ones — a chart
+    // drawn only from months that had output closes the gaps and makes
+    // three idle months look like three busy ones.
+    const buckets = new Map(
+      serviceAnomaly.monthsBetween(since, new Date()).map((m) => [
+        m, { month: m, meters: 0, shifts: 0, runtimeMinutes: 0 },
+      ])
+    );
+
+    for (const shift of shifts) {
+      const bucket = buckets.get(serviceAnomaly.monthKey(shift.date));
+      if (!bucket) continue;
+      const { timer, meters } = shiftFigures(shift);
+      bucket.meters += Number(meters) || 0;
+      bucket.runtimeMinutes += clockToMinutes(timer);
+      bucket.shifts += 1;
+    }
+
+    const series = [...buckets.values()].map((b) => ({
+      month: b.month,
+      meters: Math.round(b.meters),
+      shifts: b.shifts,
+      runtimeHours: Math.round(b.runtimeMinutes / 6) / 10,
+    }));
+
+    res.json({
+      success: true,
+      days,
+      series,
+      totalMeters: series.reduce((s, b) => s + b.meters, 0),
+      totalShifts: series.reduce((s, b) => s + b.shifts, 0),
+    });
+  })
+);
+
+/**
+ * "I have looked at this and it is fine."
+ *
+ * The finding stops being raised for a while — see
+ * models/ServiceAnomalyFeedback.js for why a dismissal expires rather
+ * than holding forever.
+ */
+router.post(
+  "/service-analytics/dismiss",
+  catchAsyncErrors(async (req, res, next) => {
+    const { kind, subject, reason } = req.body || {};
+    if (!kind || !subject) {
+      return next(new ErrorHandler("kind and subject are required", 400));
+    }
+    if (String(reason || "").trim().length < 5) {
+      // A dismissal with no reason is indistinguishable from somebody
+      // clearing their screen, and it is the only record of why a
+      // pattern was judged harmless.
+      return next(new ErrorHandler(
+        "Say why this is not a problem — it is the only record of the judgement.",
+        400
+      ));
+    }
+
+    const feedback = await ServiceAnomalyFeedback.create({
+      kind: String(kind).trim(),
+      subject: String(subject).trim(),
+      reason: String(reason).trim(),
+      dismissedBy: req.user?._id,
+    });
+
+    res.status(201).json({ success: true, dismissal: {
+      kind: feedback.kind, subject: feedback.subject, expiresAt: feedback.expiresAt,
+    } });
   })
 );
 
