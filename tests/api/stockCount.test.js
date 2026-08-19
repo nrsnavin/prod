@@ -205,7 +205,26 @@ describe('entering counted quantities', () => {
     const m = await makeMaterial();
     const { body } = await open();
     const res = await enter(body.count._id, [{ rawMaterial: String(m._id), countedQty: -5 }]);
-    expect(res.body.errors[0].error).toMatch(/zero or more/i);
+
+    // The only line sent was rejected, so the request failed. Reported
+    // as a 200 it looked exactly like a save that worked.
+    expect(res.status).toBe(400);
+    expect(res.body.details.errors[0].error).toMatch(/zero or more/i);
+  });
+
+  it('still saves the good lines when only some are bad', async () => {
+    // A partial failure must not throw away work that is already
+    // stored — those entries really were saved.
+    const m = await makeMaterial();
+    const { body } = await open();
+    const res = await enter(body.count._id, [
+      { rawMaterial: String(m._id), countedQty: 98 },
+      { rawMaterial: String(new mongoose.Types.ObjectId()), countedQty: 5 },
+    ]);
+
+    expect(res.status).toBe(200);
+    expect(res.body.applied).toHaveLength(1);
+    expect(res.body.errors).toHaveLength(1);
   });
 });
 
@@ -410,6 +429,151 @@ describe('posting a count', () => {
     expect(res.body.count.postedSummary).toMatchObject({ linesVaried: 0, netValue: 0 });
     expect(await MaterialOutward.countDocuments({ rawMaterial: m._id })).toBe(0);
     expect((await RawMaterial.findById(m._id).lean()).stock).toBe(100);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  TWO SHEETS OVER THE SAME RACK
+//
+//  Posting applies an increment, which is right: production carries on
+//  while a count is open and setting stock to the counted figure would
+//  reverse a shift's work.
+//
+//  But that assumes the only thing moving stock between freeze and post
+//  is production. Two sheets over the same rack break it badly — both
+//  snapshot 100, one person walks the rack and finds 90, both record
+//  90, and both post −10. The rack holds 90 and the system says 80.
+//  Stock destroyed silently, by the feature whose whole purpose is to
+//  make stock match reality.
+//
+//  A count adjustment is not production. It is another correction of
+//  the SAME discrepancy, and the second sheet must not apply it again.
+// ══════════════════════════════════════════════════════════════════
+describe('two counts open over the same material', () => {
+  /** Two sheets over one material, both counted to `counted`. */
+  async function twoSheets(material, counted) {
+    const a = (await open({ label: 'sheet A' })).body.count;
+    const b = (await open({ label: 'sheet B' })).body.count;
+    await enter(a._id, [{ rawMaterial: String(material._id), countedQty: counted }]);
+    await enter(b._id, [{ rawMaterial: String(material._id), countedQty: counted }]);
+    return { a, b };
+  }
+
+  it('does not apply the same discrepancy twice', async () => {
+    const m = await makeMaterial({ stock: 100 });
+    const { a, b } = await twoSheets(m, 90);
+
+    await post(a._id);
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(90);
+
+    await post(b._id);
+    // The rack holds 90. It must still say 90.
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(90);
+  });
+
+  it('records that the second sheet applied nothing', async () => {
+    const m = await makeMaterial({ stock: 100 });
+    const { a, b } = await twoSheets(m, 90);
+    await post(a._id);
+    const res = await post(b._id);
+
+    const line = res.body.count.lines.find((l) => l.rawMaterial === String(m._id));
+    expect(line.appliedDelta).toBe(0);
+    // The sheet still says what it found — only the correction is
+    // neutralised, not the observation.
+    expect(line.countedQty).toBe(90);
+    expect(line.variance).toBe(-10);
+  });
+
+  it('says on the line why nothing was applied', async () => {
+    // "variance −10, applied 0" with no explanation leaves a reader
+    // guessing between neutralised, floored at zero, and not applied.
+    const m = await makeMaterial({ stock: 100 });
+    const { a, b } = await twoSheets(m, 90);
+    await post(a._id);
+    const res = await post(b._id);
+
+    const line = res.body.count.lines.find((l) => l.rawMaterial === String(m._id));
+    expect(line.correctedElsewhere).toBe(-10);
+  });
+
+  it('reports nothing corrected elsewhere on an ordinary count', async () => {
+    const m = await makeMaterial({ stock: 100 });
+    const c = (await open()).body.count;
+    await enter(c._id, [{ rawMaterial: String(m._id), countedQty: 90 }]);
+    const res = await post(c._id);
+
+    const line = res.body.count.lines.find((l) => l.rawMaterial === String(m._id));
+    expect(line.correctedElsewhere).toBe(0);
+    expect(line.appliedDelta).toBe(-10);
+  });
+
+  it('writes no second ledger row for it', async () => {
+    const m = await makeMaterial({ stock: 100 });
+    const { a, b } = await twoSheets(m, 90);
+    await post(a._id);
+    await post(b._id);
+
+    // One correction happened, so there is one outward row.
+    const out = await MaterialOutward.find({ rawMaterial: m._id }).lean();
+    expect(out).toHaveLength(1);
+  });
+
+  it('still applies the part nobody has corrected yet', async () => {
+    // Sheet A found 95, sheet B walked the rack later and found 90.
+    // A corrects −5; B's remaining −5 is real and must land.
+    const m = await makeMaterial({ stock: 100 });
+    const a = (await open({ label: 'A' })).body.count;
+    const b = (await open({ label: 'B' })).body.count;
+    await enter(a._id, [{ rawMaterial: String(m._id), countedQty: 95 }]);
+    await enter(b._id, [{ rawMaterial: String(m._id), countedQty: 90 }]);
+
+    await post(a._id);
+    await post(b._id);
+
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(90);
+  });
+
+  it('does not mistake production for another count', async () => {
+    // The behaviour that must NOT regress: one sheet, and stock moving
+    // underneath it because a shift consumed yarn. That movement is
+    // real and the increment still applies on top of it.
+    const m = await makeMaterial({ stock: 100 });
+    const c = (await open()).body.count;
+    await enter(c._id, [{ rawMaterial: String(m._id), countedQty: 90 }]);
+
+    await RawMaterial.updateOne({ _id: m._id }, { $set: { stock: 80 } });
+    await post(c._id);
+
+    // 80 on hand, 10 was missing at the freeze → 70.
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(70);
+  });
+
+  it('ignores a count that posted before this one was opened', async () => {
+    // Already reflected in our own systemQty — subtracting it as well
+    // would be the same double-count in the other direction.
+    const m = await makeMaterial({ stock: 100 });
+    const first = (await open({ label: 'earlier' })).body.count;
+    await enter(first._id, [{ rawMaterial: String(m._id), countedQty: 90 }]);
+    await post(first._id);
+
+    // Opened AFTER, so it snapshots 90.
+    const later = (await open({ label: 'later' })).body.count;
+    await enter(later._id, [{ rawMaterial: String(m._id), countedQty: 85 }]);
+    await post(later._id);
+
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(85);
+  });
+
+  it('is unaffected by a cancelled sheet', async () => {
+    // Cancelled counts apply nothing, so they correct nothing.
+    const m = await makeMaterial({ stock: 100 });
+    const { a, b } = await twoSheets(m, 90);
+    await request(app).post(`/api/v2/stock-counts/${a._id}/cancel`)
+      .set('Cookie', adminCookie()).send({ reason: 'miscounted' });
+
+    await post(b._id);
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(90);
   });
 });
 

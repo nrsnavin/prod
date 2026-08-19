@@ -105,6 +105,7 @@ function summarise(count) {
       countedAt:    l.countedAt || null,
       stockAtPost:  l.stockAtPost,
       appliedDelta: l.appliedDelta,
+      correctedElsewhere: Number(l.correctedElsewhere) || 0,
       // Only knowable once posted; before that the live figure is not
       // part of the sheet's claim.
       movedSinceFreeze:
@@ -147,6 +148,61 @@ const shape = (count) => ({
   postedSummary: count.status === 'posted' ? count.postedSummary : null,
   ...summarise(count),
 });
+
+/**
+ * What OTHER stock counts have already applied to these materials since
+ * a given moment.
+ *
+ * ── The bug this exists for ──────────────────────────────────────
+ * Posting applies `countedQty − systemQty` as an increment, which is
+ * right and deliberate: production carries on while a count is open,
+ * and setting stock to the counted figure would reverse a shift's work.
+ *
+ * But it assumes the only thing moving stock between freeze and post is
+ * ordinary production. Two sheets opened over the same rack break that
+ * assumption badly. Both snapshot 100, one person walks the rack and
+ * finds 90, both sheets record 90 — and both post −10. The rack holds
+ * 90 and the system ends up saying 80. Stock is destroyed silently, by
+ * a feature whose entire purpose is to make stock match reality.
+ *
+ * A count adjustment is not production. It is another correction of the
+ * SAME discrepancy, and it must not be counted twice. So the delta
+ * another count already applied is subtracted from ours, leaving only
+ * the part nobody has corrected yet.
+ *
+ * @returns {Promise<Map<string, number>>} materialId → delta already applied
+ */
+async function adjustmentsSince(countId, frozenAt, materialIds, session) {
+  if (!materialIds.length) return new Map();
+
+  const rows = await StockCount.aggregate([
+    {
+      $match: {
+        _id:      { $ne: countId },
+        status:   'posted',
+        // Only what landed AFTER our snapshot was taken. Anything
+        // earlier is already reflected in our systemQty.
+        postedAt: { $gt: frozenAt },
+        'lines.rawMaterial': { $in: materialIds },
+      },
+    },
+    { $unwind: '$lines' },
+    {
+      $match: {
+        'lines.rawMaterial': { $in: materialIds },
+        'lines.appliedDelta': { $nin: [null, 0] },
+      },
+    },
+    {
+      $group: {
+        _id: '$lines.rawMaterial',
+        applied: { $sum: '$lines.appliedDelta' },
+      },
+    },
+  ]).session(session ?? null);
+
+  return new Map(rows.map((r) => [String(r._id), Number(r.applied) || 0]));
+}
 
 // ══════════════════════════════════════════════════════════════════
 //  OPEN A COUNT
@@ -426,6 +482,26 @@ router.patch(
 
     await count.save();
 
+    // Nothing landed and everything was rejected: that is a failed
+    // request, not a successful one with notes attached. Reported as
+    // 200 it looks identical to a save that worked — and now that the
+    // web app updates the sheet optimistically, the typed number would
+    // appear and then silently revert with nothing said.
+    //
+    // A PARTIAL failure stays 200: those entries really were saved, and
+    // failing the request would throw away work that is already stored.
+    if (applied.length === 0 && errors.length > 0) {
+      const err = new ErrorHandler(
+        errors.length === 1
+          ? `That line could not be saved: ${errors[0].error}.`
+          : `None of the ${errors.length} lines could be saved.`,
+        400
+      );
+      err.code = 'NO_LINES_APPLIED';
+      err.details = { errors };
+      return next(err);
+    }
+
     res.json({
       success: true,
       status: count.status,
@@ -522,6 +598,17 @@ router.post(
           throw new ErrorHandler(`Count #${count.countNo} was cancelled`, 409);
         }
 
+        // What other counts have already corrected on these materials
+        // since our snapshot. One query for the whole sheet.
+        const alreadyApplied = await adjustmentsSince(
+          count._id,
+          count.frozenAt,
+          count.lines
+            .filter((l) => l.countedQty !== null && l.countedQty !== undefined)
+            .map((l) => l.rawMaterial),
+          session
+        );
+
         const summary = {
           linesCounted: 0, linesVaried: 0,
           gainQuantity: 0, lossQuantity: 0,
@@ -533,7 +620,14 @@ router.post(
           if (line.countedQty === null || line.countedQty === undefined) continue;
           summary.linesCounted += 1;
 
-          const variance = r4(Number(line.countedQty) - (Number(line.systemQty) || 0));
+          const rawVariance = r4(Number(line.countedQty) - (Number(line.systemQty) || 0));
+
+          // Another sheet may have corrected part or all of this same
+          // discrepancy already. Only the remainder is ours to apply —
+          // see adjustmentsSince() for why this is not production.
+          const corrected = alreadyApplied.get(String(line.rawMaterial)) || 0;
+          const variance  = r4(rawVariance - corrected);
+          line.correctedElsewhere = corrected;
 
           const material = await RawMaterial.findById(line.rawMaterial).session(session);
           if (!material) {

@@ -86,6 +86,13 @@ const StockCountLineSchema = new mongoose.Schema(
     // The increment actually applied. Can be less than the variance
     // when stock floors at zero.
     appliedDelta: { type: Number, default: null },
+
+    // How much of this line's discrepancy another count had already
+    // corrected before this one posted. Recorded so a line showing a
+    // variance of −10 and an applied delta of 0 can say WHY, rather
+    // than leaving a reader to guess whether it was neutralised, or
+    // floored at zero stock, or simply not applied.
+    correctedElsewhere: { type: Number, default: 0 },
   },
   { _id: true }
 );
