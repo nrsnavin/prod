@@ -252,10 +252,11 @@ describe('service & spare bills', () => {
     const b = await machineWithLog({ ID: 'M-02' });
 
     const res = await uploadBill({ machineId: a.machine._id, logId: b.logId });
-    expect(res.status).toBe(404);
-    // Names the machine it looked in, so "the log exists, I can see it"
-    // and "it is not on THIS machine" stop being the same message.
-    expect(res.body.message).toMatch(/Machine M-01 has no service log/);
+    // 409, not 404: both machines exist and both ids resolve. Nothing
+    // is missing — the two ids disagree, and the message says which
+    // machine the log is actually on.
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/is on machine M-02, not on machine M-01/);
   });
 
   test('never lists another machine’s bills', async () => {
@@ -298,60 +299,76 @@ describe('GET /machine/get-machine-detail — bill rollup', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
-//  WHEN THE BILL WILL NOT ATTACH, SAY WHICH ID WAS WRONG
+//  THE LOG SAYS WHICH MACHINE, NOT THE CLIENT
 //
-//  "Machine not found" was the answer to four different mistakes: an
-//  id that is not an id, the service log's id sent in the machineId
-//  field, a machine somebody deleted, and a log that belongs to some
-//  other machine. Same four words for all of them, on a phone, in a
-//  mill, with no log to read.
+//  Reported twice as "no machine has id …" while uploading a bill from
+//  a page that was, at that moment, showing the machine. Both halves
+//  were true: the machine id the browser was holding resolved to
+//  nothing, and the machine and its service log were fine.
 //
-//  That is not a cosmetic complaint. It is why a report of this
-//  failure could not be reproduced from the message alone: the message
-//  carried none of the information needed to tell the causes apart.
-//  These pin that each one now names itself.
+//  Resolving from `machineId` made every upload depend on the client
+//  holding a current machine id — which a tab open since this morning,
+//  a bookmark, or a cached list does not. A service log's _id is
+//  unique and a log belongs to exactly one machine, so the log is the
+//  better key and the client's opinion stops mattering.
+//
+//  What `machineId` is still good for is catching a client that is
+//  confused rather than stale: if it names a DIFFERENT machine that
+//  really exists, the upload is refused. If it names nothing, the log
+//  has already answered the question.
 // ══════════════════════════════════════════════════════════════════
-describe('POST /machine/service-bill — what it says when the ids are wrong', () => {
-  test('a machineId that is not an id says so, rather than "not found"', async () => {
-    // Sending the machine's CODE (M-01) instead of its database id is
-    // the obvious mistake, and 404 "not found" actively misleads: the
-    // machine exists.
-    const { logId } = await machineWithLog();
+describe('POST /machine/service-bill — resolving which machine', () => {
+  test('files the bill even when the machineId is stale', async () => {
+    // THE REPORTED FAILURE. The page has been open a while and is
+    // holding an id that no longer resolves; the machine and the log
+    // it is showing are both perfectly fine.
+    const { machine, logId } = await machineWithLog();
+
+    const res = await uploadBill({
+      machineId: new mongoose.Types.ObjectId(), logId, fields: { amount: 500 },
+    });
+
+    expect(res.status).toBe(201);
+    // Filed against the machine that actually owns the log.
+    expect(String(res.body.bill.machine)).toBe(String(machine._id));
+  });
+
+  test('files the bill when the machineId is not an id at all', async () => {
+    // Sending the machine's CODE instead of its database id used to be
+    // a 400. The log knows the answer, so it is not an error.
+    const { machine, logId } = await machineWithLog();
 
     const res = await uploadBill({ machineId: 'M-01', logId });
 
-    expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/machineId "M-01" is not an id/);
-    expect(res.body.message).toMatch(/not its code/);
+    expect(res.status).toBe(201);
+    expect(String(res.body.bill.machine)).toBe(String(machine._id));
   });
 
-  test('names the id when no machine has it', async () => {
-    const { logId } = await machineWithLog();
-    const ghost = new mongoose.Types.ObjectId();
-
-    const res = await uploadBill({ machineId: ghost, logId });
-
-    expect(res.status).toBe(404);
-    // The id itself, so the failing request can be matched to a record.
-    expect(res.body.message).toContain(String(ghost));
-    expect(res.body.message).toMatch(/deleted|wrong id/i);
-  });
-
-  test('spots the service log’s own id sent as the machineId', async () => {
-    // The one mix-up this call shape invites: two ids, adjacent fields,
-    // both ObjectIds, and swapping them looks exactly like a deleted
-    // machine unless somebody goes looking.
-    const { logId } = await machineWithLog();
+  test('files the bill when the log id is sent as the machineId too', async () => {
+    // Two ObjectIds in adjacent fields; swapping them is the mistake
+    // this call shape invites, and it is now unambiguous.
+    const { machine, logId } = await machineWithLog();
 
     const res = await uploadBill({ machineId: logId, logId });
 
-    expect(res.status).toBe(404);
-    expect(res.body.message).toMatch(/that is a service log's id/);
-    expect(res.body.message).toMatch(/on machine M-01/);
-    expect(res.body.message).toMatch(/Send the machine's id as machineId/);
+    expect(res.status).toBe(201);
+    expect(String(res.body.bill.machine)).toBe(String(machine._id));
   });
 
-  test('says how many logs the machine has when the log id misses', async () => {
+  test('still refuses when the machineId names a REAL, different machine', async () => {
+    // Stale is one thing; confused is another. Both ids resolve and
+    // they disagree, so filing it either way puts the paperwork
+    // somewhere nobody will look for it.
+    const a = await machineWithLog();
+    const b = await machineWithLog({ ID: 'M-02' });
+
+    const res = await uploadBill({ machineId: a.machine._id, logId: b.logId });
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/is on machine M-02, not on machine M-01/);
+  });
+
+  test('says the log is missing, naming the machine, when the machine is known', async () => {
     const { machine } = await machineWithLog();
 
     const res = await uploadBill({
@@ -363,12 +380,30 @@ describe('POST /machine/service-bill — what it says when the ids are wrong', (
     expect(res.body.message).toMatch(/1 log\(s\)/);
   });
 
+  test('says so plainly when nothing owns the log', async () => {
+    const res = await uploadBill({
+      machineId: new mongoose.Types.ObjectId(),
+      logId: new mongoose.Types.ObjectId(),
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.body.message).toMatch(/No service log has id/);
+    expect(res.body.message).toMatch(/reload/i);
+  });
+
+  test('rejects a serviceLogId that is not an id', async () => {
+    const { machine } = await machineWithLog();
+
+    const res = await uploadBill({ machineId: machine._id, logId: 'log-1' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/serviceLogId "log-1" is not an id/);
+  });
+
   test('accepts the bill when the file is sent before the fields', async () => {
-    // The browser's FormData appends the file first, and multer parses
-    // the stream in order — so with the wrong parser the metadata is
-    // not on req.body yet when the handler runs, and every upload from
-    // the web client fails on an id that was sent correctly. This is
-    // the shape that actually goes over the wire.
+    // The browser's FormData appends the file first and multer parses
+    // the stream in order, so this is the shape that actually goes
+    // over the wire from the web client.
     const { machine, logId } = await machineWithLog();
 
     const res = await request(app).post('/api/v2/machine/service-bill')

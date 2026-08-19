@@ -902,59 +902,84 @@ router.post(
 //  DELETE /machine/service-bill/:id
 // ─────────────────────────────────────────────────────────────
 
+// ══════════════════════════════════════════════════════════════════
+//  THE LOG SAYS WHICH MACHINE, NOT THE CLIENT
+//
+//  This used to start from `machineId` and look the log up inside that
+//  machine. Every bill upload therefore depended on the client holding
+//  a correct machine id, and a screen that has been open a while — or
+//  reached from a stale link, a bookmark, a cached list — does not.
+//  When it was wrong the answer was "machine not found", which sounds
+//  like the machine is missing when the machine is sitting right there
+//  on the page.
+//
+//  A service log's `_id` is a unique ObjectId, and a log belongs to
+//  exactly one machine. So the log is the better key: ask which
+//  machine owns THIS log and the client's opinion stops mattering.
+//
+//  `machineId` is still read, and still checked, but only where it can
+//  catch something the log cannot:
+//
+//    • it names a machine that EXISTS and is a DIFFERENT one — the
+//      client is genuinely confused about which machine it is looking
+//      at, and filing the bill would put it somewhere nobody expects.
+//      Still refused.
+//
+//    • it names nothing at all — stale, deleted, or simply wrong. The
+//      log already told us the answer, so this is noted in the log
+//      file and the upload goes through. This is the case that used to
+//      fail, and there was never anything wrong with the request.
+// ══════════════════════════════════════════════════════════════════
 /** Resolves the machine + service log a bill is being filed against. */
 async function findServiceLog(machineId, serviceLogId) {
-  // ── Say WHICH id was rejected ───────────────────────────────────
-  //  "Machine not found" on its own is a dead end: the person holding
-  //  the phone cannot tell whether the app sent the wrong id, sent the
-  //  service log's id by mistake, or is pointed at a machine somebody
-  //  deleted. All three produce the same four words.
-  //
-  //  A well-formed ObjectId that matches nothing is the interesting
-  //  case — it means the CLIENT is sending something plausible and
-  //  wrong, which is exactly the bug that cannot be found from a toast
-  //  saying "Machine not found".
-  if (!mongoose.isValidObjectId(machineId)) {
+  if (!mongoose.isValidObjectId(serviceLogId)) {
     throw new ErrorHandler(
-      `machineId "${machineId}" is not an id. The bill is attached to a ` +
-      `machine's database id, not its code.`,
+      `serviceLogId "${serviceLogId}" is not an id. The bill attaches to a ` +
+      `service log's database id.`,
       400
     );
   }
-  if (!mongoose.isValidObjectId(serviceLogId)) {
-    throw new ErrorHandler(
-      `serviceLogId "${serviceLogId}" is not an id.`, 400
-    );
-  }
 
-  const machine = await Machine.findById(machineId);
+  const machine = await Machine.findOne({ 'serviceLogs._id': serviceLogId });
   if (!machine) {
-    // Is it the service log's own id, sent in the wrong field? That is
-    // the mistake this shape of call invites, and naming it saves
-    // somebody an afternoon.
-    const mixedUp = await Machine.findOne({ 'serviceLogs._id': machineId })
-      .select('ID')
-      .lean();
+    // Nothing owns this log. Say which of the two plausible reasons it
+    // is, rather than leaving somebody to guess from four words.
+    const claimed = mongoose.isValidObjectId(machineId)
+      ? await Machine.findById(machineId).select('ID serviceLogs').lean()
+      : null;
     throw new ErrorHandler(
-      mixedUp
-        ? `No machine has id ${machineId} — that is a service log's id, ` +
-          `on machine ${mixedUp.ID}. Send the machine's id as machineId.`
-        : `No machine has id ${machineId}. It may have been deleted, or ` +
-          `the app may be sending the wrong id.`,
+      claimed
+        ? `Machine ${claimed.ID} has no service log ${serviceLogId}. It has ` +
+          `${(claimed.serviceLogs || []).length} log(s) — the log may have ` +
+          `been removed, or the page may be out of date.`
+        : `No service log has id ${serviceLogId}. It may have been removed, ` +
+          `or the page may be out of date — reload and try again.`,
       404
     );
   }
 
-  const log = machine.serviceLogs.id(serviceLogId);
-  if (!log) {
-    throw new ErrorHandler(
-      `Machine ${machine.ID} has no service log ${serviceLogId}. It has ` +
-      `${machine.serviceLogs.length} log(s).`,
-      404
+  // Both ids resolve and they disagree: that is a confused client, not
+  // a stale one, and guessing which it meant would file the paperwork
+  // against the wrong machine.
+  if (mongoose.isValidObjectId(machineId) && String(machine._id) !== String(machineId)) {
+    const other = await Machine.findById(machineId).select('ID').lean();
+    if (other) {
+      throw new ErrorHandler(
+        `Service log ${serviceLogId} is on machine ${machine.ID}, not on ` +
+        `machine ${other.ID}.`,
+        409
+      );
+    }
+    // It resolves to nothing — the id the page was holding is stale.
+    // The log already identified the machine, so this is a note, not a
+    // failure.
+    console.warn(
+      `[machine/service-bill] stale machineId ${machineId} from client; ` +
+      `resolved log ${serviceLogId} to machine ${machine.ID} (${machine._id})`
     );
   }
 
-  return { machine, log };
+  return { machine, log: machine.serviceLogs.id(serviceLogId) };
 }
 
 router.post(

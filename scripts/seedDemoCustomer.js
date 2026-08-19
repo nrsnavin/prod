@@ -79,8 +79,53 @@ const daysAgo  = (n) => new Date(today.getTime() - n * 86_400_000);
 const daysAhead = (n) => new Date(today.getTime() + n * 86_400_000);
 
 // ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+//  WHICH DATABASE AM I ABOUT TO DELETE FROM
+//
+//  This script deletes before it writes. Every delete is scoped to the
+//  demo prefix, but "scoped" is only as good as the prefix, and the
+//  URI comes from an environment variable that whatever shell you are
+//  standing in may already have set to the live database.
+//
+//  A machine that vanished from under an open page is what sent
+//  somebody looking here, and this is the only code in the repo that
+//  can remove a Machine at all. So the script now says out loud which
+//  database it is about to touch and refuses one that looks live
+//  unless you say the name back to it.
+// ─────────────────────────────────────────────────────────────────
+const LIVE_HINTS = [/prod/i, /live/i, /mongodb\+srv:/i, /atlas/i];
+
+function dbNameOf(uri) {
+  // Everything after the last "/" and before any "?" — good enough for
+  // both mongodb:// and mongodb+srv:// forms.
+  const withoutQuery = String(uri).split("?")[0];
+  return withoutQuery.slice(withoutQuery.lastIndexOf("/") + 1) || "(default)";
+}
+
+function assertSafeTarget(uri) {
+  const name = dbNameOf(uri);
+  const looksLive = LIVE_HINTS.some((re) => re.test(uri));
+  const confirmed = process.env.DEMO_SEED_CONFIRM === name;
+
+  log("target database:", name);
+  if (!looksLive || confirmed) return name;
+
+  log("");
+  log("REFUSING TO RUN.");
+  log(`  "${uri.replace(/\/\/[^@]*@/, "//<credentials>@")}" looks like a live database.`);
+  log("  This script DELETES demo-prefixed machines, elastics, materials,");
+  log("  employees, users, shifts and orders before it reseeds them.");
+  log("");
+  log(`  If that is really what you want, re-run with:`);
+  log(`      DEMO_SEED_CONFIRM=${name} node scripts/seedDemoCustomer.js`);
+  log("");
+  throw new Error(`refusing to seed demo data into "${name}"`);
+}
+
 async function main() {
-  log("connecting to", MONGO_URI);
+  assertSafeTarget(MONGO_URI);
+
+  log("connecting to", MONGO_URI.replace(/\/\/[^@]*@/, "//<credentials>@"));
   await mongoose.connect(MONGO_URI);
 
   await wipePreviousSeed();
@@ -138,15 +183,37 @@ async function wipePreviousSeed() {
   // even if its parent Customer doc was already gone.
   await CustomerUser.deleteMany({ email: DEMO_EMAIL });
 
-  // Demo-tagged catalog + ops state — same prefix.
-  await ShiftDetail.deleteMany({ description: new RegExp(`^${DEMO_PREFIX}`) });
-  await ShiftPlan.deleteMany({});      // small, demo-owned
-  await Machine.deleteMany({ ID:        new RegExp(`^${DEMO_PREFIX}`) });
-  await Elastic.deleteMany({ name:      new RegExp(`^${DEMO_PREFIX}`) });
-  await RawMaterial.deleteMany({ name:  new RegExp(`^${DEMO_PREFIX}`) });
-  await Employee.deleteMany({ name:     new RegExp(`^${DEMO_PREFIX}`) });
-  await User.deleteMany({ name:         new RegExp(`^${DEMO_PREFIX}`) });
-  await EtaRatePosterior.deleteMany({}); // posteriors are global; safe to rebuild
+  const demoRe = new RegExp(`^${DEMO_PREFIX}`);
+
+  // ── Two of these used to take everything ───────────────────────
+  //  `ShiftPlan.deleteMany({})` was commented "small, demo-owned".
+  //  It is neither: shift plans are a module of this app, entered by
+  //  hand, and that line destroyed EVERY ONE in whatever database the
+  //  script was pointed at. `EtaRatePosterior.deleteMany({})` was
+  //  argued as "safe to rebuild", which is true only if you are
+  //  willing to throw away every pair's learning, on every machine,
+  //  to reseed two demo looms.
+  //
+  //  Both are now scoped the way every other line here already was.
+  //  The demo shifts name their plan, and the posteriors are keyed by
+  //  machine, so both sets are identifiable without a marker of their
+  //  own — the ids just have to be collected BEFORE the documents
+  //  that point at them are deleted.
+  const demoPlanIds = await ShiftDetail.distinct("shiftPlan", { description: demoRe });
+  const demoMachineIds = await Machine.distinct("_id", { ID: demoRe });
+
+  await ShiftDetail.deleteMany({ description: demoRe });
+  const planIds = demoPlanIds.filter(Boolean);
+  if (planIds.length) await ShiftPlan.deleteMany({ _id: { $in: planIds } });
+  if (demoMachineIds.length) {
+    await EtaRatePosterior.deleteMany({ machine: { $in: demoMachineIds } });
+  }
+
+  await Machine.deleteMany({ ID:        demoRe });
+  await Elastic.deleteMany({ name:      demoRe });
+  await RawMaterial.deleteMany({ name:  demoRe });
+  await Employee.deleteMany({ name:     demoRe });
+  await User.deleteMany({ name:         demoRe });
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -567,8 +634,15 @@ function mulberry32(a) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-main().catch(async (err) => {
-  console.error("[demo-seed] failed:", err);
-  try { await mongoose.disconnect(); } catch (_) {}
-  process.exitCode = 1;
-});
+// Only when run as a command. Requiring this file — which the tests
+// for the wipe and the live-database guard do — must not connect to
+// anything or delete anything.
+if (require.main === module) {
+  main().catch(async (err) => {
+    console.error("[demo-seed] failed:", err);
+    try { await mongoose.disconnect(); } catch (_) {}
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { assertSafeTarget, dbNameOf, wipePreviousSeed, DEMO_PREFIX };
