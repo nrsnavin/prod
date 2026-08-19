@@ -61,7 +61,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   for (const db of ['primary_db', 'sandbox_db']) {
-    for (const coll of ['samplerequests', 'customers', 'doc_counters']) {
+    for (const coll of ['samplerequests', 'customers', 'doc_counters',
+                         'machines', 'machineservicebills']) {
       await raw(db, coll).deleteMany({});
     }
   }
@@ -318,5 +319,115 @@ describe('the model proxy', () => {
     const User = require('../../models/User.js');
     expect(User.__baseModel).toBeUndefined(); // not wrapped at all
     expect(tenants.PINNED_TO_PRIMARY.has('User')).toBe(true);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  A FILE UPLOAD IS STILL THE SAME REQUEST
+//
+//  Routing is carried in an AsyncLocalStorage store, set once in
+//  setUserContext and read by every model at call time. A JSON route
+//  runs its handler synchronously inside that store and is fine.
+//
+//  A multipart route does not. multer consumes the request stream and
+//  calls next() from a STREAM EVENT — and the socket that emits it was
+//  created when the connection was accepted, long before any
+//  request-scoped context existed. If the store does not survive that
+//  hop, every model in the handler silently resolves to the PRIMARY
+//  database.
+//
+//  Which is the worst shape this bug has: a sandbox user's uploads
+//  land in production, and the only visible symptom is that the record
+//  they are attaching to "does not exist" — because the handler is
+//  looking for a sandbox row in the live database.
+// ══════════════════════════════════════════════════════════════════
+const PDF = Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n', 'utf8');
+
+describe('a multipart upload stays in the requester\'s database', () => {
+  const Machine = () => require('../../models/Machine.js');
+
+  /** A machine + service log created BY the given user, so both land
+   *  in whichever database that user is routed to. */
+  let seq = 0;
+  async function machineWithLog(as) {
+    // A unique ID per case: Machine.ID is uniquely indexed, and a
+    // duplicate makes create-machine fail in a way that reads exactly
+    // like a routing failure two calls later.
+    const created = await request(app).post('/api/v2/machine/create-machine')
+      .set('Cookie', cookie(as))
+      .send({ ID: `LOOM-9${seq++}`, manufacturer: 'Comez', NoOfHead: 8, NoOfHooks: 24 });
+    const machineId = created.body?.machine?._id || created.body?._id;
+
+    const log = await request(app).post('/api/v2/machine/add-service-log')
+      .set('Cookie', cookie(as))
+      .send({ machineId: String(machineId), type: 'Corrective', description: 'Belt' });
+    return { machineId: String(machineId), logId: String(log.body?.log?._id) };
+  }
+
+  it('puts the sandbox user\'s machine and log in the sandbox', async () => {
+    // Establishes the premise: the JSON routes DO route correctly, so
+    // any failure below is about the upload and nothing else.
+    const { machineId } = await machineWithLog(sandboxUser);
+
+    expect(await raw('sandbox_db', 'machines').countDocuments()).toBeGreaterThan(0);
+    expect(await raw('primary_db', 'machines').countDocuments()).toBe(0);
+    expect(machineId).toBeTruthy();
+  });
+
+  it('finds the sandbox log when a bill is attached to it', async () => {
+    const { machineId, logId } = await machineWithLog(sandboxUser);
+
+    const res = await request(app).post('/api/v2/machine/service-bill')
+      .set('Cookie', cookie(sandboxUser))
+      .attach('file', PDF, { filename: 'bill.pdf', contentType: 'application/pdf' })
+      .field('machineId', machineId)
+      .field('serviceLogId', logId)
+      .field('kind', 'service_bill');
+
+    expect(res.status).toBe(201);
+  });
+
+  it('writes the bill into the sandbox, never into production', async () => {
+    const { machineId, logId } = await machineWithLog(sandboxUser);
+
+    await request(app).post('/api/v2/machine/service-bill')
+      .set('Cookie', cookie(sandboxUser))
+      .attach('file', PDF, { filename: 'bill.pdf', contentType: 'application/pdf' })
+      .field('machineId', machineId)
+      .field('serviceLogId', logId)
+      .field('kind', 'service_bill');
+
+    expect(await raw('sandbox_db', 'machineservicebills').countDocuments()).toBe(1);
+    expect(await raw('primary_db', 'machineservicebills').countDocuments()).toBe(0);
+  });
+});
+
+// ── The diagnostic has to name the RIGHT database ─────────────────
+//  The "cannot find it" error prints which database it looked in.
+//  Reading the default connection makes it name the LIVE database for
+//  every sandbox user, which is exactly backwards: it sends somebody
+//  looking in the one place the answer cannot be. It has to be the
+//  database the request itself used.
+describe('the not-found message names the request\'s database', () => {
+  const missing = (as) =>
+    request(app).post('/api/v2/machine/service-bill')
+      .set('Cookie', cookie(as))
+      .attach('file', PDF, { filename: 'b.pdf', contentType: 'application/pdf' })
+      .field('machineId', String(new mongoose.Types.ObjectId()))
+      .field('serviceLogId', String(new mongoose.Types.ObjectId()))
+      .field('kind', 'service_bill');
+
+  it('says the sandbox to a sandbox user', async () => {
+    const res = await missing(sandboxUser);
+    expect(res.status).toBe(404);
+    expect(res.body.message).toContain('sandbox_db');
+    expect(res.body.message).not.toContain('primary_db');
+  });
+
+  it('says the live database to everybody else', async () => {
+    const res = await missing(admin);
+    expect(res.status).toBe(404);
+    expect(res.body.message).toContain('primary_db');
+    expect(res.body.message).not.toContain('sandbox_db');
   });
 });
