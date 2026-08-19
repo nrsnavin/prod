@@ -302,6 +302,214 @@ router.patch(
   })
 );
 
+// ─────────────────────────────────────────────────────────────
+//  3b. EDIT THE MACHINE'S DETAILS
+//      PATCH /machine/update-details
+//
+//  Body: { machineId, ID?, manufacturer?, NoOfHooks?, DateOfPurchase?,
+//          confirmHooks? }
+//
+//  Until now the only things about a machine that could be changed
+//  after registration were its head count, its status and its head map.
+//  A typo in the ID, the wrong manufacturer, a hook count entered as 12
+//  when the loom has 24 — all of them meant deleting the machine and
+//  registering it again, which is not possible once anything references
+//  it. So they were simply lived with, and a wrong hook count is not a
+//  cosmetic thing to live with: it decides which products the machine
+//  is allowed to run.
+//
+//  ── Only what was sent is touched ────────────────────────────────
+//  A PATCH that fills in the fields it was not given with defaults
+//  quietly wipes whatever it was not told about. Absent means "leave
+//  it", and only keys actually present in the body are written.
+//
+//  ── Two of these are gated, two are not ──────────────────────────
+//  `manufacturer` and `DateOfPurchase` are labels. Nothing in this
+//  system computes anything from them, so they can be corrected at any
+//  time, on any machine.
+//
+//  `NoOfHooks` and `ID` are not labels:
+//
+//    • Hooks per head is the machine's physical capacity. checkHookFit
+//      compares it against every elastic's `noOfHook` before allowing
+//      an assignment, and the planner reads it as capacity. Changing it
+//      under a running job silently changes what that job is allowed
+//      to be.
+//
+//    • The ID is what the loom is called on the floor. ProductionPlan
+//      snapshots it as a human label, so renaming a machine while a job
+//      is on it leaves the live plan naming a machine that no longer
+//      exists.
+//
+//  Both are therefore allowed only while the loom is FREE, enforced in
+//  the update filter rather than by a read-then-write, so a machine
+//  that starts running mid-request cannot slip through.
+//
+//  ── Lowering the hooks is a way round the fit rule ───────────────
+//  checkHookFit is enforced on the three routes that write a head map.
+//  None of them can stop somebody reaching the same place from the
+//  other direction: leave the map alone and lower the machine's hook
+//  count under it. So the same check runs here, against the elastics
+//  already threaded — and, as everywhere else, it asks rather than
+//  refuses. The floor sometimes knows better; it just has to say so on
+//  the record.
+// ─────────────────────────────────────────────────────────────
+
+/** Fields that may only be changed while the loom is free. */
+const DETAIL_FIELDS_REQUIRING_FREE = ["ID", "NoOfHooks"];
+
+router.patch(
+  "/update-details",
+  catchAsyncErrors(async (req, res, next) => {
+    const { machineId } = req.body;
+    if (!machineId) return next(new ErrorHandler("machineId is required.", 400));
+
+    const has = (k) => Object.prototype.hasOwnProperty.call(req.body, k)
+      && req.body[k] !== undefined;
+
+    // ── Build the update out of what was actually sent ──────────────
+    const updates = {};
+
+    if (has("ID")) {
+      const raw = String(req.body.ID ?? "").trim();
+      if (!raw) return next(new ErrorHandler("Machine ID cannot be empty.", 400));
+      updates.ID = raw.toUpperCase(); // same normalisation as create
+    }
+
+    if (has("manufacturer")) {
+      const raw = String(req.body.manufacturer ?? "").trim();
+      if (!raw) return next(new ErrorHandler("Manufacturer cannot be empty.", 400));
+      updates.manufacturer = raw;
+    }
+
+    if (has("NoOfHooks")) {
+      const n = Number(req.body.NoOfHooks);
+      if (!Number.isInteger(n) || n < 1) {
+        return next(
+          new ErrorHandler("NoOfHooks must be a positive whole number.", 400)
+        );
+      }
+      updates.NoOfHooks = n;
+    }
+
+    if (has("DateOfPurchase")) {
+      // Clearing it is legitimate — an unknown purchase date recorded as
+      // a guess is worse than no purchase date.
+      const raw = req.body.DateOfPurchase;
+      updates.DateOfPurchase = raw === null || raw === "" ? null : String(raw);
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return next(new ErrorHandler("Nothing to update.", 400));
+    }
+
+    const current = await Machine.findById(machineId);
+    if (!current) return next(new ErrorHandler("Machine not found.", 404));
+
+    // ── A duplicate ID, checked without the machine finding itself ──
+    // A machine must not be refused as a duplicate of itself, which is
+    // what happens if this lookup is written naively. Two things stop
+    // it — the check is skipped when the ID is not actually changing,
+    // and the machine is excluded from the lookup by _id. Either alone
+    // is sufficient; both are kept because they fail differently (the
+    // first stops the query, the second stops a wrong query).
+    if (updates.ID && updates.ID !== current.ID) {
+      const clash = await Machine.findOne({
+        ID: updates.ID,
+        _id: { $ne: current._id },
+      }).select("_id");
+      if (clash) {
+        return next(
+          new ErrorHandler(`Machine with ID "${updates.ID}" already exists.`, 409)
+        );
+      }
+    }
+
+    // ── Would the new hook count strand what is already threaded? ───
+    if (updates.NoOfHooks !== undefined && updates.NoOfHooks < current.NoOfHooks) {
+      const threaded = (current.elastics || []).map((e) => e?.elastic);
+      const fit = await checkHookFit(
+        { ...current.toObject(), NoOfHooks: updates.NoOfHooks },
+        threaded
+      );
+      if (!fit.fits && req.body.confirmHooks !== true) {
+        return next(hookFitError(current, fit, ErrorHandler));
+      }
+    }
+
+    // ── Guarded, atomic write ───────────────────────────────────────
+    const gated = DETAIL_FIELDS_REQUIRING_FREE.filter((f) => f in updates);
+    const filter = gated.length
+      ? { _id: machineId, status: "free" }
+      : { _id: machineId };
+
+    let before;
+    try {
+      before = await Machine.findOneAndUpdate(
+        filter,
+        { $set: updates },
+        { new: false, runValidators: true }
+      );
+    } catch (err) {
+      // Lost the race to a concurrent rename — the unique index is the
+      // real guarantee, the lookup above is only a friendlier message.
+      if (err && err.code === 11000) {
+        return next(
+          new ErrorHandler(`Machine with ID "${updates.ID}" already exists.`, 409)
+        );
+      }
+      throw err;
+    }
+
+    if (!before) {
+      // The document exists (checked above), so the filter can only have
+      // failed on the status guard — name the field and the status,
+      // because "update failed" is not something anybody can act on.
+      const fresh = await Machine.findById(machineId).select("status");
+      if (!fresh) return next(new ErrorHandler("Machine not found.", 404));
+      return next(
+        new ErrorHandler(
+          `${gated.join(" and ")} can only be changed while the machine is ` +
+          `free (current status: "${fresh.status}").`,
+          400
+        )
+      );
+    }
+
+    // Reported from the pre-update document, so it is what actually
+    // changed rather than what the client believed it was changing.
+    const changes = Object.keys(updates)
+      .map((field) => ({
+        field,
+        from: before[field] ?? null,
+        to: updates[field] ?? null,
+      }))
+      .filter((c) => String(c.from ?? "") !== String(c.to ?? ""));
+
+    console.log(
+      `[machine/update-details] ${before.ID}: ` +
+      (changes.map((c) => `${c.field} ${c.from} → ${c.to}`).join(", ") || "no change")
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: changes.length
+        ? `Updated ${changes.map((c) => c.field).join(", ")}.`
+        : "No changes were needed.",
+      changes,
+      data: {
+        machineId:      before._id,
+        machineID:      updates.ID ?? before.ID,
+        manufacturer:   updates.manufacturer ?? before.manufacturer,
+        noOfHooks:      updates.NoOfHooks ?? before.NoOfHooks,
+        dateOfPurchase: updates.DateOfPurchase !== undefined
+          ? updates.DateOfPurchase
+          : (before.DateOfPurchase ?? null),
+      },
+    });
+  })
+);
+
 
 router.get(
   "/get-machine-detail",
