@@ -391,6 +391,22 @@ describe('POST /machine/service-bill — resolving which machine', () => {
     expect(res.body.message).toMatch(/reload/i);
   });
 
+  test('names the database it is reading, so a crossed environment shows itself', async () => {
+    // The failure mode this cannot otherwise express: the page and the
+    // process answering the write are looking at DIFFERENT databases.
+    // Nothing on any screen in the app could say so — and both defaults
+    // in the web repo point at a hardcoded production host, in dev and
+    // in a build alike, so ending up there takes no mistake at all.
+    const res = await uploadBill({
+      machineId: new mongoose.Types.ObjectId(),
+      logId: new mongoose.Types.ObjectId(),
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.body.message).toContain(mongoose.connection.name);
+    expect(res.body.message).toMatch(/different environment/i);
+  });
+
   test('rejects a serviceLogId that is not an id', async () => {
     const { machine } = await machineWithLog();
 

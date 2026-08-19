@@ -947,13 +947,27 @@ async function findServiceLog(machineId, serviceLogId) {
     const claimed = mongoose.isValidObjectId(machineId)
       ? await Machine.findById(machineId).select('ID serviceLogs').lean()
       : null;
+    // ── Name the database ─────────────────────────────────────────
+    //  "It is on my screen and the API says it does not exist" has two
+    //  shapes, and only one of them is about the record. The other is
+    //  that the page and this process are looking at DIFFERENT
+    //  databases, which nothing in the app has ever been able to say.
+    //
+    //  It is easy to end up there without noticing: the web app
+    //  defaults to a hardcoded production host in BOTH dev (the Vite
+    //  proxy) and production builds, so a locally-run API and the page
+    //  in front of you are not necessarily the same system. Printing
+    //  the database name turns an afternoon into a glance.
+    const db = mongoose.connection?.name || "unknown";
     throw new ErrorHandler(
-      claimed
+      (claimed
         ? `Machine ${claimed.ID} has no service log ${serviceLogId}. It has ` +
           `${(claimed.serviceLogs || []).length} log(s) — the log may have ` +
           `been removed, or the page may be out of date.`
         : `No service log has id ${serviceLogId}. It may have been removed, ` +
-          `or the page may be out of date — reload and try again.`,
+          `or the page may be out of date — reload and try again.`) +
+      ` (This API is reading database "${db}"; if the page came from a ` +
+      `different environment, that is the mismatch.)`,
       404
     );
   }
