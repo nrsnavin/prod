@@ -904,17 +904,55 @@ router.post(
 
 /** Resolves the machine + service log a bill is being filed against. */
 async function findServiceLog(machineId, serviceLogId) {
+  // ── Say WHICH id was rejected ───────────────────────────────────
+  //  "Machine not found" on its own is a dead end: the person holding
+  //  the phone cannot tell whether the app sent the wrong id, sent the
+  //  service log's id by mistake, or is pointed at a machine somebody
+  //  deleted. All three produce the same four words.
+  //
+  //  A well-formed ObjectId that matches nothing is the interesting
+  //  case — it means the CLIENT is sending something plausible and
+  //  wrong, which is exactly the bug that cannot be found from a toast
+  //  saying "Machine not found".
   if (!mongoose.isValidObjectId(machineId)) {
-    throw new ErrorHandler("A valid machineId is required", 400);
+    throw new ErrorHandler(
+      `machineId "${machineId}" is not an id. The bill is attached to a ` +
+      `machine's database id, not its code.`,
+      400
+    );
   }
   if (!mongoose.isValidObjectId(serviceLogId)) {
-    throw new ErrorHandler("A valid serviceLogId is required", 400);
+    throw new ErrorHandler(
+      `serviceLogId "${serviceLogId}" is not an id.`, 400
+    );
   }
+
   const machine = await Machine.findById(machineId);
-  if (!machine) throw new ErrorHandler("Machine not found", 404);
+  if (!machine) {
+    // Is it the service log's own id, sent in the wrong field? That is
+    // the mistake this shape of call invites, and naming it saves
+    // somebody an afternoon.
+    const mixedUp = await Machine.findOne({ 'serviceLogs._id': machineId })
+      .select('ID')
+      .lean();
+    throw new ErrorHandler(
+      mixedUp
+        ? `No machine has id ${machineId} — that is a service log's id, ` +
+          `on machine ${mixedUp.ID}. Send the machine's id as machineId.`
+        : `No machine has id ${machineId}. It may have been deleted, or ` +
+          `the app may be sending the wrong id.`,
+      404
+    );
+  }
 
   const log = machine.serviceLogs.id(serviceLogId);
-  if (!log) throw new ErrorHandler("Service log not found on this machine", 404);
+  if (!log) {
+    throw new ErrorHandler(
+      `Machine ${machine.ID} has no service log ${serviceLogId}. It has ` +
+      `${machine.serviceLogs.length} log(s).`,
+      404
+    );
+  }
 
   return { machine, log };
 }

@@ -253,7 +253,9 @@ describe('service & spare bills', () => {
 
     const res = await uploadBill({ machineId: a.machine._id, logId: b.logId });
     expect(res.status).toBe(404);
-    expect(res.body.message).toMatch(/Service log not found/i);
+    // Names the machine it looked in, so "the log exists, I can see it"
+    // and "it is not on THIS machine" stop being the same message.
+    expect(res.body.message).toMatch(/Machine M-01 has no service log/);
   });
 
   test('never lists another machine’s bills', async () => {
@@ -292,5 +294,90 @@ describe('GET /machine/get-machine-detail — bill rollup', () => {
     const log = res.body.machine.serviceLogs.find((l) => String(l._id) === logId);
     expect(log.billCount).toBe(0);
     expect(log.billTotal).toBe(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  WHEN THE BILL WILL NOT ATTACH, SAY WHICH ID WAS WRONG
+//
+//  "Machine not found" was the answer to four different mistakes: an
+//  id that is not an id, the service log's id sent in the machineId
+//  field, a machine somebody deleted, and a log that belongs to some
+//  other machine. Same four words for all of them, on a phone, in a
+//  mill, with no log to read.
+//
+//  That is not a cosmetic complaint. It is why a report of this
+//  failure could not be reproduced from the message alone: the message
+//  carried none of the information needed to tell the causes apart.
+//  These pin that each one now names itself.
+// ══════════════════════════════════════════════════════════════════
+describe('POST /machine/service-bill — what it says when the ids are wrong', () => {
+  test('a machineId that is not an id says so, rather than "not found"', async () => {
+    // Sending the machine's CODE (M-01) instead of its database id is
+    // the obvious mistake, and 404 "not found" actively misleads: the
+    // machine exists.
+    const { logId } = await machineWithLog();
+
+    const res = await uploadBill({ machineId: 'M-01', logId });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/machineId "M-01" is not an id/);
+    expect(res.body.message).toMatch(/not its code/);
+  });
+
+  test('names the id when no machine has it', async () => {
+    const { logId } = await machineWithLog();
+    const ghost = new mongoose.Types.ObjectId();
+
+    const res = await uploadBill({ machineId: ghost, logId });
+
+    expect(res.status).toBe(404);
+    // The id itself, so the failing request can be matched to a record.
+    expect(res.body.message).toContain(String(ghost));
+    expect(res.body.message).toMatch(/deleted|wrong id/i);
+  });
+
+  test('spots the service log’s own id sent as the machineId', async () => {
+    // The one mix-up this call shape invites: two ids, adjacent fields,
+    // both ObjectIds, and swapping them looks exactly like a deleted
+    // machine unless somebody goes looking.
+    const { logId } = await machineWithLog();
+
+    const res = await uploadBill({ machineId: logId, logId });
+
+    expect(res.status).toBe(404);
+    expect(res.body.message).toMatch(/that is a service log's id/);
+    expect(res.body.message).toMatch(/on machine M-01/);
+    expect(res.body.message).toMatch(/Send the machine's id as machineId/);
+  });
+
+  test('says how many logs the machine has when the log id misses', async () => {
+    const { machine } = await machineWithLog();
+
+    const res = await uploadBill({
+      machineId: machine._id, logId: new mongoose.Types.ObjectId(),
+    });
+
+    expect(res.status).toBe(404);
+    expect(res.body.message).toMatch(/Machine M-01 has no service log/);
+    expect(res.body.message).toMatch(/1 log\(s\)/);
+  });
+
+  test('accepts the bill when the file is sent before the fields', async () => {
+    // The browser's FormData appends the file first, and multer parses
+    // the stream in order — so with the wrong parser the metadata is
+    // not on req.body yet when the handler runs, and every upload from
+    // the web client fails on an id that was sent correctly. This is
+    // the shape that actually goes over the wire.
+    const { machine, logId } = await machineWithLog();
+
+    const res = await request(app).post('/api/v2/machine/service-bill')
+      .set('Cookie', adminCookie())
+      .attach('file', PDF, { filename: 'bill.pdf', contentType: 'application/pdf' })
+      .field('machineId', String(machine._id))
+      .field('serviceLogId', logId)
+      .field('kind', 'service_bill');
+
+    expect(res.status).toBe(201);
   });
 });
