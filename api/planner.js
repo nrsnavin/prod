@@ -38,10 +38,19 @@ const C = require("../utils/etaConfig");
 
 // Tunables for the objective. Lateness dominates; changeovers and load
 // imbalance are secondary shapers.
+//
+// These are now DEFAULTS rather than constants. They assert that one
+// late working day is worth ten changeovers, which is a claim about
+// this plant that nobody ever checked — so the objective weights are
+// learned from the plans admins actually accept, and these are what the
+// planner runs on until it has seen enough corrections to do better.
+// The live values arrive on `ctx.weights`; see services/plannerLearning.js.
 const CHANGEOVER_DAYS = 0.5;
-const W_LATE          = 10;
-const W_CHANGE        = 1;
-const W_BAL           = 0.1;
+const { DEFAULT_WEIGHTS } = require("../models/PlannerWeights");
+const plannerLearning = require("../services/plannerLearning");
+const W_LATE          = DEFAULT_WEIGHTS.late;
+const W_CHANGE        = DEFAULT_WEIGHTS.changeover;
+const W_BAL           = DEFAULT_WEIGHTS.balance;
 const W_BAL_SMALL     = 0.05;
 const MAX_ITER        = 6;
 const EPS             = 1e-6;
@@ -252,6 +261,7 @@ function _evaluate(assignmentMap, ctx) {
   let changeovers = 0;
   let totalLate = 0;
   const cursors = [];
+  const loaded = new Set();
 
   for (const [machineId, list] of perMachine) {
     const machine = machinesById.get(machineId);
@@ -296,13 +306,38 @@ function _evaluate(assignmentMap, ctx) {
       seq += 1;
     }
     cursors.push(cursor);
+    loaded.add(machineId);
+  }
+
+  // ── Idle looms count ──
+  //
+  // This term used to average over the machines that HAD work, which
+  // made it do the opposite of its name. Two looms at 3 days and 1 day
+  // gave max 3, average 2, imbalance 1. Piling both jobs onto one loom
+  // and leaving the other standing gave a single cursor: max 4, average
+  // 4, imbalance ZERO. The balance term therefore scored the most
+  // concentrated plan available as perfectly balanced, and rewarded
+  // exactly what it exists to prevent.
+  //
+  // Every machine the optimiser could have used is counted, starting
+  // from whatever it already owes. An idle loom is then a real gap in
+  // the average, which is what somebody looking at the shop floor would
+  // say it is.
+  for (const [machineId] of machinesById) {
+    if (!loaded.has(machineId)) cursors.push(backlog?.get(machineId) || 0);
   }
 
   const maxC = cursors.length ? Math.max(...cursors) : 0;
   const avgC = cursors.length ? cursors.reduce((s, x) => s + x, 0) / cursors.length : 0;
   const imbalance = maxC - avgC;
-  const score = totalLate * W_LATE + changeovers * W_CHANGE + imbalance * W_BAL;
-  return { results, changeovers, totalLate, score };
+  // Weights come from the context so the same evaluator can score a plan
+  // under the learned objective and under the defaults — which is
+  // exactly what POST /accept needs when it measures a human's edit
+  // against what was offered. Falling back to the defaults keeps every
+  // existing caller and every unit test working unchanged.
+  const w = ctx.weights || DEFAULT_WEIGHTS;
+  const score = totalLate * w.late + changeovers * w.changeover + imbalance * w.balance;
+  return { results, changeovers, totalLate, imbalance, score };
 }
 
 // ── Greedy seed: earliest due date first, finish-/changeover-aware ─
@@ -380,20 +415,21 @@ function _localSearch(assignmentMap, lines, machines, ctx) {
   return base;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  GET /planner/suggest-plan?horizonDays=7
-// ═══════════════════════════════════════════════════════════════════
-router.get(
-  "/suggest-plan",
-  isAdmin("admin"),
-  catchAsyncErrors(async (req, res) => {
-    // Day granularity throughout: the model counts working days, and a
-    // clock reading half past two turns "finishes on the due date" into
-    // "one day late" on every line. See _startOfDay.
-    const now = _startOfDay(new Date());
-    const horizonDays = Math.min(Math.max(Number(req.query.horizonDays) || 7, 1), 60);
-
-    const [gathered, machineDocs, plantRate] = await Promise.all([
+/**
+ * Everything the optimiser needs to score a plan: the lines in the
+ * horizon, the machines, the (elastic, machine) rates, what each loom
+ * already owes, and the objective weights.
+ *
+ * Extracted because POST /accept has to score an EDITED plan, and it has
+ * to score it the same way /suggest-plan scored the proposal. Building
+ * the context twice in two places is how the accept path would
+ * eventually acquire a different rate lookup or a different backlog
+ * and quietly start comparing two plans measured on different rulers —
+ * at which point every weight the planner learned would be learned from
+ * a difference the human never made.
+ */
+async function _buildContext(now, horizonDays) {
+  const [gathered, machineDocs, plantRate] = await Promise.all([
       _gatherLines(now, horizonDays),
       Machine.find().lean(),
       _loadPlantRate(now),
@@ -439,7 +475,34 @@ router.get(
         ?? _coldStart(machinesById.get(machineId)?.heads || 0)
     );
 
-    const ctx = { linesById, machinesById, rate, planDate: now, backlog };
+  // The objective this plant has taught the planner, or the defaults
+  // until it has seen enough corrections to have taught it anything.
+  const weights = await plannerLearning.currentWeights();
+  const ctx = { linesById, machinesById, rate, planDate: now, backlog, weights };
+
+  return {
+    ctx, lines, machines, linesById, machinesById, weights,
+    backlog, beyondHorizon, horizonEnd,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  GET /planner/suggest-plan?horizonDays=7
+// ═══════════════════════════════════════════════════════════════════
+router.get(
+  "/suggest-plan",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res) => {
+    // Day granularity throughout: the model counts working days, and a
+    // clock reading half past two turns "finishes on the due date" into
+    // "one day late" on every line. See _startOfDay.
+    const now = _startOfDay(new Date());
+    const horizonDays = Math.min(Math.max(Number(req.query.horizonDays) || 7, 1), 60);
+
+    const built = await _buildContext(now, horizonDays);
+    const {
+      ctx, lines, machines, linesById, weights, backlog, beyondHorizon, horizonEnd,
+    } = built;
 
     const { assignmentMap, unplaceable } = _greedy(lines, machines, ctx);
     const evalResult = _localSearch(assignmentMap, lines, machines, ctx);
@@ -456,6 +519,12 @@ router.get(
           .map((r) => {
             const line = linesById.get(r.lineId);
             return {
+              // The optimiser's own key for this line. Carried to the
+              // client so a row can be moved and the edit read back
+              // against the plan that was offered — without it, an
+              // edited plan cannot be compared to the proposal and
+              // there is nothing for the objective to learn from.
+              lineId: r.lineId,
               orderId: line.orderId, orderNo: line.orderNo, customer: line.customer,
               elasticId: line.elasticId, elasticName: line.elasticName,
               qtyMeters: line.qtyMeters, heads: r.heads, sequence: r.sequence,
@@ -575,6 +644,18 @@ router.get(
       assumptions, aiRationale, aiGenerated,
       // Hand back to POST /accept so the outcome can be recorded.
       aiSuggestionId: aiSuggestionId ? String(aiSuggestionId) : null,
+      // The objective this plan was scored under, and whether it is the
+      // learned one yet. On the page so nobody has to guess why the
+      // planner started batching colours differently this month.
+      weights,
+      // The three terms the objective is built from, for THIS plan. The
+      // accepted plan is measured the same way, and the difference is
+      // what the weights are learned from.
+      objectiveTerms: {
+        late: evalResult.totalLate,
+        changeover: evalResult.changeovers,
+        balance: evalResult.imbalance,
+      },
     });
   })
 );
@@ -586,14 +667,116 @@ router.post(
   "/accept",
   isAdmin("admin"),
   catchAsyncErrors(async (req, res) => {
-    const { generatedAt, horizonDays, objective, machines, assumptions, aiSuggestionId } = req.body || {};
+    const {
+      generatedAt, horizonDays, objective, machines, assumptions, aiSuggestionId,
+      // What the planner offered, as the client received it. Sent back
+      // so the difference between offered and accepted can be measured.
+      // Absent on an unedited accept from an older client, in which case
+      // there is simply nothing to learn — see the note below.
+      proposedMachines,
+    } = req.body || {};
     if (!Array.isArray(machines)) {
       return res.status(400).json({ success: false, message: "machines[] is required" });
     }
 
+    // ── Learning from the edit ────────────────────────────────────
+    //
+    // If the admin moved lines before accepting, they chose a plan the
+    // current objective scores WORSE than the one it offered. That is a
+    // statement about the weights, and it is the only signal in this
+    // system that can correct them — no amount of production data can
+    // reveal whether this plant would rather take a late day or a
+    // changeover.
+    //
+    // BOTH plans are re-scored here, in one freshly built context, for
+    // the reason in _buildContext: the two figures have to come off the
+    // same ruler. The rows the client posts carry finish dates computed
+    // for the machine the line was originally on, so an edited plan that
+    // was not re-evaluated would be stored with dates that are simply
+    // wrong — and the objective terms derived from them would teach the
+    // planner a difference nobody made.
+    //
+    // A note on trust: `proposedMachines` comes from the client, so an
+    // admin could in principle post a fabricated proposal. That is not
+    // an escalation — they could teach the planner the same preference
+    // by genuinely editing plans, which is the feature working as
+    // intended — and every update is recorded with both plans' figures
+    // in models/PlannerWeights.js, so a nonsense run can be pointed at
+    // rather than argued about. Weighed against a server-side stash with
+    // its own expiry and cleanup, this was the smaller thing to get wrong.
+    let learning = { updated: false, reason: "not-attempted" };
+    let recomputed = null;
+    let proposedTerms = null;
+    try {
+      const now = _startOfDay(new Date());
+      const hz = Math.min(Math.max(Number(horizonDays) || 7, 1), 60);
+      const built = await _buildContext(now, hz);
+
+      const mapFrom = (mpList) => {
+        const m = new Map();
+        for (const mp of mpList || []) {
+          for (const r of mp.rows || []) {
+            // Insertion order IS the sequence — _evaluate walks each
+            // machine's lines in the order they were added, so building
+            // the map in the admin's row order is what honours a manual
+            // reorder.
+            if (r.lineId && built.linesById.has(r.lineId) && built.machinesById.has(mp.machineId)) {
+              m.set(r.lineId, mp.machineId);
+            }
+          }
+        }
+        return m;
+      };
+
+      const acceptedMap = mapFrom(machines);
+      const proposedMap = mapFrom(proposedMachines);
+
+      if (acceptedMap.size > 0) {
+        recomputed = _evaluate(acceptedMap, built.ctx);
+        if (proposedMap.size > 0) {
+          const before = _evaluate(proposedMap, built.ctx);
+          proposedTerms = {
+            late: before.totalLate,
+            changeover: before.changeovers,
+            balance: before.imbalance,
+          };
+          learning = await plannerLearning.observe({
+            proposed: {
+              totalLate: before.totalLate,
+              changeovers: before.changeovers,
+              imbalance: before.imbalance,
+            },
+            accepted: {
+              totalLate: recomputed.totalLate,
+              changeovers: recomputed.changeovers,
+              imbalance: recomputed.imbalance,
+            },
+            lines: acceptedMap.size,
+            actor: req.user?.name || req.user?.username || "admin",
+          });
+        } else {
+          learning = { updated: false, reason: "no-proposal" };
+        }
+      } else {
+        learning = { updated: false, reason: "no-lines" };
+      }
+    } catch (err) {
+      // Learning is a refinement. A plan of record that cannot be
+      // accepted because the weight update threw would be a far worse
+      // failure than an objective that stays where it was.
+      console.warn("[planner] learning from accept failed:", err?.message);
+      learning = { updated: false, reason: "error" };
+    }
+
+    // Recomputed figures win where we have them: after an edit the
+    // client's rows describe the plan the admin was shown, not the one
+    // they accepted.
+    const detailByLine = new Map((recomputed?.results || []).map((r) => [r.lineId, r]));
+
     const assignments = [];
     for (const mp of machines) {
       for (const r of mp.rows || []) {
+        const fresh = r.lineId ? detailByLine.get(r.lineId) : null;
         assignments.push({
           machine:    mongoose.Types.ObjectId.isValid(mp.machineId) ? mp.machineId : undefined,
           machineID:  mp.machineID || "",
@@ -604,15 +787,23 @@ router.post(
           elastic:    mongoose.Types.ObjectId.isValid(r.elasticId) ? r.elasticId : undefined,
           elasticName:r.elasticName || "",
           qtyMeters:  r.qtyMeters || 0,
-          weavingDays:r.weavingDays || 0,
-          sequence:   r.sequence || 0,
-          startWorkingDay: r.startWorkingDay || 0,
-          projectedFinish: r.projectedFinish ? new Date(r.projectedFinish) : undefined,
+          // Everything below describes when the work lands, and after an
+          // edit the client's copy describes the machine the line USED
+          // to be on. `fresh` is the same line re-scored on the machine
+          // it actually ended up on. Storing the client's figures here
+          // would put a plan of record on the wall with finish dates for
+          // a schedule nobody is running.
+          weavingDays: fresh?.weavingDays ?? r.weavingDays ?? 0,
+          sequence:    fresh?.sequence ?? r.sequence ?? 0,
+          startWorkingDay: fresh?.startWorkingDay ?? r.startWorkingDay ?? 0,
+          projectedFinish: fresh?.projectedFinish
+            ? new Date(fresh.projectedFinish)
+            : (r.projectedFinish ? new Date(r.projectedFinish) : undefined),
           dueDate:    r.dueDate ? new Date(r.dueDate) : undefined,
-          late:       !!r.late,
-          lateWorkingDays: r.lateWorkingDays || 0,
-          changeover: !!r.changeover,
-          rateSource: r.rateSource || "coldstart",
+          late:       fresh ? !!fresh.late : !!r.late,
+          lateWorkingDays: fresh?.lateWorkingDays ?? r.lateWorkingDays ?? 0,
+          changeover: fresh ? !!fresh.changeover : !!r.changeover,
+          rateSource: fresh?.rateSource ?? r.rateSource ?? "coldstart",
         });
       }
     }
@@ -641,6 +832,17 @@ router.post(
           assignments,
           assumptions: Array.isArray(assumptions) ? assumptions : [],
           status: "accepted",
+          // What the plan of record cost against what was offered. Kept
+          // on the plan itself so "the planner suggested something else
+          // and we overrode it" is a fact somebody can look up months
+          // later, rather than an argument about who remembers what.
+          edited: !!learning.updated,
+          proposedTerms: proposedTerms || undefined,
+          objectiveTerms: recomputed ? {
+            late: recomputed.totalLate,
+            changeover: recomputed.changeovers,
+            balance: recomputed.imbalance,
+          } : undefined,
         }], { session });
         plan = created;
       });
@@ -659,7 +861,40 @@ router.post(
       });
     }
 
-    res.json({ success: true, planId: plan._id, acceptedAt: plan.acceptedAt });
+    res.json({
+      success: true, planId: plan._id, acceptedAt: plan.acceptedAt,
+      // What the planner took from this acceptance. Reported rather than
+      // done quietly: an objective that reshapes itself with no visible
+      // trace is the thing people switch off.
+      learning,
+    });
+  })
+);
+
+// ═══════════════════════════════════════════════════════════════════
+//  GET /planner/weights — what the planner has learned, and from what
+// ═══════════════════════════════════════════════════════════════════
+router.get(
+  "/weights",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res) => {
+    res.json({ success: true, data: await plannerLearning.report() });
+  })
+);
+
+// ═══════════════════════════════════════════════════════════════════
+//  POST /planner/weights/reset — back to the constants
+//
+// A learner that cannot be switched off is a learner nobody will leave
+// switched on. The reset is recorded, not silent.
+// ═══════════════════════════════════════════════════════════════════
+router.post(
+  "/weights/reset",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res) => {
+    const actor = req.user?.name || req.user?.username || "admin";
+    const weights = await plannerLearning.reset(actor);
+    res.json({ success: true, weights });
   })
 );
 
