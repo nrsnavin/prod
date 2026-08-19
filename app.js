@@ -295,6 +295,21 @@ app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), async (req, r
     uptimeSeconds: Math.round(process.uptime()),
     node:          process.version,
     env:           process.env.NODE_ENV || "development",
+    // ── WHICH database is this process actually talking to ─────────
+    //  "The record is on my screen and the API says it does not
+    //  exist" has exactly two shapes: it was deleted, or the process
+    //  answering the write is not reading the database that served
+    //  the page. The second is invisible from every screen in the app
+    //  and costs an afternoon to find — a second API still running
+    //  under an old unit file, a stale config/.env, a restore that
+    //  landed in a differently-named database.
+    //
+    //  Name and host only. This route is admin-gated, but credentials
+    //  never belong in a response whatever the gate.
+    database: {
+      name: mongoose.connection?.name || null,
+      host: mongoose.connection?.host || null,
+    },
     // Code that has landed but whose database changes have not. A
     // non-empty list here is the answer to "why is the new page
     // missing?" — run `npm run migrate`.
