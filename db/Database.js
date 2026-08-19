@@ -23,6 +23,22 @@ const RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * Does this URI name a database in its path?
+ *
+ * `mongodb+srv://host/mydb?opts` does. `mongodb+srv://host/?opts` and
+ * `mongodb+srv://host` do not, and both connect to `test` without
+ * comment. Exported so a test can hold the distinction.
+ */
+function databaseNamedIn(uri) {
+  const s = String(uri || '');
+  const afterScheme = s.slice(s.indexOf('://') + 3);
+  const slash = afterScheme.indexOf('/');
+  if (slash === -1) return false;                     // no path at all
+  const path = afterScheme.slice(slash + 1).split('?')[0];
+  return path.length > 0;
+}
+
+/**
  * @param {object} [opts]
  * @param {number[]} [opts.retryDelays] override the backoff schedule (tests)
  * @param {() => any} [opts.onGiveUp]   what to do when out of attempts;
@@ -35,7 +51,24 @@ const connectDatabase = async ({
   for (let attempt = 0; ; attempt++) {
     try {
       const data = await mongoose.connect(process.env.MONGO_URL, {});
-      console.log(`mongod connected with server: ${data.connection.host}`);
+      // ── Say the DATABASE, not only the host ──────────────────────
+      //  A MongoDB URI carries its database in the PATH, so a URI that
+      //  ends `…/?appName=X` names none and silently connects to one
+      //  called `test`. That is not an error and nothing reports it —
+      //  the boot line said "connected" either way, and the first
+      //  symptom was records that were plainly on screen coming back
+      //  as "does not exist" weeks later.
+      console.log(
+        `mongod connected with server: ${data.connection.host}` +
+        ` — database: ${data.connection.name}`
+      );
+      if (!databaseNamedIn(process.env.MONGO_URL)) {
+        console.warn(
+          `[db] MONGO_URL names no database, so this process is using ` +
+          `"${data.connection.name}" — MongoDB's default. If that is not ` +
+          `deliberate, put the name in the PATH: mongodb+srv://host/<database>?options`
+        );
+      }
       return data;
     } catch (err) {
       if (attempt >= retryDelays.length) {
@@ -70,4 +103,4 @@ function databaseHealth() {
   };
 }
 
-module.exports = { connectDatabase, databaseHealth, RETRY_DELAYS_MS };
+module.exports = { connectDatabase, databaseHealth, databaseNamedIn, RETRY_DELAYS_MS };

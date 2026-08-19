@@ -958,7 +958,16 @@ async function findServiceLog(machineId, serviceLogId) {
     //  proxy) and production builds, so a locally-run API and the page
     //  in front of you are not necessarily the same system. Printing
     //  the database name turns an afternoon into a glance.
-    const db = mongoose.connection?.name || "unknown";
+    //  It must be the database THIS REQUEST used, not the one the
+    //  process happens to be connected to. Those differ for every
+    //  sandbox user (db/tenants.js routes them to a second database on
+    //  the same client), and the first version of this read the default
+    //  connection — so it told a sandbox user their API was reading the
+    //  live database while their request was correctly reading the
+    //  sandbox. A diagnostic that is wrong is worse than none: it sends
+    //  somebody looking in the one place the answer cannot be.
+    const { currentDb } = require("../db/tenants.js");
+    const db = currentDb() || mongoose.connection?.name || "unknown";
     throw new ErrorHandler(
       (claimed
         ? `Machine ${claimed.ID} has no service log ${serviceLogId}. It has ` +

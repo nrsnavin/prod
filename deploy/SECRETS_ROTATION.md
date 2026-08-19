@@ -38,18 +38,41 @@ On the EC2 box:
 
 ```sh
 nano ~/prod/config/.env
-#   MONGO_URL=mongodb+srv://navin:<NEW_PASSWORD>@cluster0.ftoq7bw.mongodb.net/?appName=Cluster0
+#   MONGO_URL=mongodb+srv://navin:<NEW_PASSWORD>@cluster0.ftoq7bw.mongodb.net/baluElastics?appName=Cluster0
 #   JWT_SECRET_KEY=<output of openssl rand>
 sudo systemctl restart jarvis
-journalctl -u jarvis -n 5 --no-pager   # expect "mongod connected"
+journalctl -u jarvis -n 5 --no-pager   # expect "mongod connected with server: … database: baluElastics"
 curl -s https://api.baluelastics.com/api/v2/health/ready   # {"status":"ready","db":"connected"}
 ```
+
+> **The database name goes in the PATH, before the `?`.**
+>
+> This line used to read `…mongodb.net/?appName=Cluster0` — no database
+> at all. A MongoDB URI with no path silently connects to a database
+> literally named **`test`**, so that instruction quietly put live data
+> in `test` and left `baluElastics` empty. Two things then go wrong and
+> neither announces itself:
+>
+> - Sandbox routing (`SANDBOX_DB=test`, see `db/tenants.js`) points at
+>   the same database as the primary, so it switches itself off and the
+>   sandbox users are working in production believing otherwise.
+> - The day somebody adds the name back, every id in every open browser
+>   tab stops resolving, because the data is in the other database.
+>
+> Confirm what the running process actually holds:
+>
+> ```sh
+> curl -s -b cookies.txt https://api.baluelastics.com/api/v2/health/build | jq .database
+> #   { "name": "baluElastics", "host": "…" }
+> ```
 
 Notes:
 - Changing the JWT secret logs EVERYONE out (web + both mobile apps).
   Expected — they just log in again.
 - If the WhatsApp cron or anything else holds its own copy of MONGO_URL,
   update it too (`grep -r MONGO_URL /etc/cron*` to check).
+- Whatever you set, it must be the SAME database the data is already in.
+  Moving between databases is a data migration, not a config change.
 
 ## 4. Purge the secrets from git history
 
