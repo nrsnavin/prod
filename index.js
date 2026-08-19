@@ -20,8 +20,16 @@ process.on("uncaughtException", (err) => {
 // it here too makes index.js safe to run standalone). Path is absolute so
 // it works regardless of process.cwd().
 if (process.env.NODE_ENV !== "PRODUCTION") {
+  // "config/.env", not "/.env". path.resolve DISCARDS everything before
+  // an absolute segment, so `path.resolve(__dirname, "/.env")` was the
+  // filesystem root — a path that does not exist, loading nothing, and
+  // saying nothing about it. It has been harmless only because app.js
+  // is required on the line above and loads the real file first; the
+  // moment anything reordered that, this process would start with no
+  // configuration and connect wherever a stray environment variable
+  // pointed it.
   require("dotenv").config({
-    path: path.resolve(__dirname, "/.env"),
+    path: path.resolve(__dirname, "config/.env"),
   });
 }
 
