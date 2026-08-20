@@ -414,6 +414,73 @@ describe('GET /materials/categories', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+//  WHAT THE CLIENTS ACTUALLY PUT ON THE WIRE
+//
+//  Both the web form and the phone's add-material screen send BOTH
+//  fields on every save, and send `group: null` rather than omitting
+//  the key when nobody picked one. "File this under nothing" is a
+//  choice; an absent key reads as "leave it alone", and those are
+//  different instructions the day an edit path exists.
+//
+//  Pinned here because it is the shape two clients are written
+//  against, and nothing else in this file sends an explicit null.
+// ══════════════════════════════════════════════════════════════════
+describe('the two-picker payload', () => {
+  it('accepts an explicit null group', async () => {
+    const res = await createMaterial({ category: 'warp', group: null });
+    expect(res.status).toBe(201);
+    const m = await RawMaterial.findOne({ name: 'M' }).lean();
+    expect(m.category).toBe('warp');
+    expect(m.group).toBeNull();
+  });
+
+  it('accepts a category and an unrelated group together', async () => {
+    const g = await createGroup({ name: 'Trim Tape' });
+    const res = await createMaterial({
+      category: 'warp',
+      group: g.body.group._id,
+    });
+    expect(res.status).toBe(201);
+
+    const m = await RawMaterial.findOne({ name: 'M' }).lean();
+    // The group does NOT leak into the category. That leak is the
+    // whole bug: it is what made a yarn stop answering the warp
+    // picker's find({ category: 'warp' }).
+    expect(m.category).toBe('warp');
+    expect(String(m.group)).toBe(String(g.body.group._id));
+  });
+
+  it('rejects a group name sent as the category, by name', async () => {
+    // Exactly what the phone used to send. The message has to name the
+    // legal values, because the person reading it is looking at a
+    // picker that just offered them the illegal one.
+    await createGroup({ name: 'Trim Tape' });
+    const res = await createMaterial({ category: 'Trim Tape', group: null });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/not a material category/i);
+    expect(res.body.message).toMatch(/warp/);
+  });
+
+  it('CONTROL: the same request with a real category succeeds', async () => {
+    // Without this, the rejection above could be failing for some
+    // unrelated reason and the test would still pass.
+    await createGroup({ name: 'Trim Tape' });
+    const res = await createMaterial({ category: 'Rubber', group: null });
+    expect(res.status).toBe(201);
+  });
+
+  it('folds the casing an older build would have sent', async () => {
+    // The phone shipped 'rubber' at one point. find({category:'Rubber'})
+    // is an exact literal, so storing what the client sent would leave
+    // that material invisible to the picker forever.
+    const res = await createMaterial({ category: 'rubber', group: null });
+    expect(res.status).toBe(201);
+    const m = await RawMaterial.findOne({ name: 'M' }).lean();
+    expect(m.category).toBe('Rubber');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 //  THE ELASTIC RECIPE PICKER
 //
 //  Reads `category`, and now reads a field nothing else can write
