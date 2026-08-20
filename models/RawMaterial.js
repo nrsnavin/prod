@@ -74,24 +74,40 @@ const RawMaterialSchema = new mongoose.Schema(
   {
     name:     { type: String, required: true },
 
-    // ── The group, and its name ────────────────────────────────────
-    // `category` is the group's NAME, denormalised onto the material.
-    // It stays required and stays authoritative for every reader that
-    // already had it — the MRP sheet, the forecast, stock-count scope,
-    // the mobile chips, the elastic recipe pickers. None of them had to
-    // change when groups arrived, which is the whole reason the two
-    // fields coexist rather than one replacing the other.
+    // ── Two independent classifications ────────────────────────────
     //
-    // `group` is the link. It is what a rename moves, what the pickers
-    // are built from, and what a report groups by when it wants the
-    // group's colour or kind. Renaming a group rewrites `category` on
-    // every member in the same operation (api/materialGroup.js), so the
-    // two cannot drift.
+    // These used to be one thing wearing two hats: `category` held the
+    // GROUP'S NAME, and renaming a group rewrote it on every member.
+    // That made the mill's own groups and the system's vocabulary the
+    // same field, so adding a group called "Trim Tape" put a value into
+    // `category` that the elastic recipe picker, the MRP sheet and the
+    // phone's colour chips had never heard of — and renaming a group
+    // silently restated eighty materials.
     //
-    // Optional, because a material can exist before anyone has tidied
-    // it into a group — rows predating this field have a category and
-    // no link, and must keep working.
+    // They are now separate, because they answer separate questions:
+    //
+    //   category — WHAT THE SYSTEM NEEDS TO KNOW. warp / weft /
+    //              covering / Rubber / Chemicals, and nothing else.
+    //              This is the vocabulary the recipe pickers, the MRP
+    //              sheet and the forecast are written in. It is fixed:
+    //              a new value here is a code change, because code
+    //              would have to learn what to do with it.
+    //
+    //   group    — WHAT THE MILL WANTS TO TRACK. Free, admin-managed,
+    //              as many as they like, renameable at will. Nothing
+    //              in the engine branches on it; it exists for
+    //              filtering, colour and reporting.
+    //
+    // The schema deliberately does NOT enum `category`. Live rows
+    // written under the old scheme hold group names, and an enum would
+    // make every one of them unsaveable the moment somebody edited an
+    // unrelated field. The WRITE ROUTES validate against
+    // MATERIAL_CATEGORIES instead, so new and edited data converges
+    // while old data keeps loading. See api/rawMaterial.js.
     category: { type: String, required: true },
+
+    // The mill's own classification. Optional and always was —
+    // a material can exist before anyone has filed it.
     group: {
       type: mongoose.Types.ObjectId,
       ref: 'MaterialGroup',
@@ -223,3 +239,13 @@ const RawMaterial = mongoose.model("RawMaterial", RawMaterialSchema);
 
 module.exports = RawMaterial;
 module.exports.MAX_EMBEDDED_MOVEMENTS = MAX_EMBEDDED_MOVEMENTS;
+
+// The vocabulary lives in utils/materialCategories.js — a frozen
+// array and a string comparison are not model behaviour, and putting
+// them here made them vanish under jest.mock(). Re-exported so a
+// caller that already has the model does not need a second require.
+const materialCategories = require("../utils/materialCategories");
+
+module.exports.MATERIAL_CATEGORIES = materialCategories.MATERIAL_CATEGORIES;
+module.exports.MATERIAL_POSITIONS  = materialCategories.MATERIAL_POSITIONS;
+module.exports.canonicalCategory   = materialCategories.canonicalCategory;

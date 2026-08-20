@@ -102,193 +102,235 @@ describe('creating a group', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
-describe('a material filed under a group', () => {
-  it('carries the group AND the name, so old readers still work', async () => {
-    const g = (await createGroup({ name: 'Warp' })).body.group;
-    const res = await createMaterial({ group: g._id });
-
+describe('a material carries both, independently', () => {
+  it('stores the category in its canonical spelling', async () => {
+    // "rubber" from the phone and "Rubber" from the web have to land
+    // on ONE value, or the recipe picker's literal match finds one and
+    // not the other — the split this whole area exists to end.
+    const res = await createMaterial({ category: 'RUBBER' });
     expect(res.status).toBe(201);
-    expect(String(res.body.material.group)).toBe(g._id);
-    // Every existing reader — the MRP sheet, the forecast, stock-count
-    // scope, the mobile chips — reads this string and nothing else.
-    expect(res.body.material.category).toBe('Warp');
-  });
-
-  it('is filed by name too, matched case-insensitively', async () => {
-    const g = (await createGroup({ name: 'Rubber' })).body.group;
-    const res = await createMaterial({ category: 'rubber' });
-
-    // Stored under the GROUP's spelling, not the caller's — this is
-    // what stops mobile and web writing two variants of one group.
     expect(res.body.material.category).toBe('Rubber');
-    expect(String(res.body.material.group)).toBe(g._id);
   });
 
-  it('accepts a category naming no group, and leaves it unlinked', async () => {
-    // Categories have been free text for years. Refusing an unknown one
-    // would break every client that has not been updated.
-    const res = await createMaterial({ category: 'Chemicals' });
+  it('refuses a category outside the fixed five, and names them', async () => {
+    const res = await createMaterial({ category: 'Trim Tape' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/not a material category/i);
+    expect(res.body.message).toMatch(/material groups instead/i);
+  });
+
+  it('takes a group and a category that have nothing to do with each other', async () => {
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    const res = await createMaterial({ category: 'warp', group: g._id });
+
     expect(res.status).toBe(201);
-    expect(res.body.material.category).toBe('Chemicals');
-    expect(res.body.material.group).toBeNull();
+    // The group does NOT overwrite the category any more. That was the
+    // whole fusion: filing a material under "Trim Tape" used to set its
+    // category to "Trim Tape", a value the engine cannot read.
+    expect(res.body.material.category).toBe('warp');
+    expect(String(res.body.material.group)).toBe(String(g._id));
+  });
+
+  it('CONTROL: a category alone leaves the group unset', async () => {
+    // Without this, `group` could be defaulting to something and the
+    // assertion above would pass for the wrong reason.
+    const res = await createMaterial({ category: 'weft' });
+    expect(res.status).toBe(201);
+    expect(res.body.material.group ?? null).toBeNull();
   });
 
   it('refuses to be filed under an archived group', async () => {
-    const g = (await createGroup({ name: 'Old Yarn' })).body.group;
-    // It needs a member, or the delete removes it outright rather than
-    // archiving it — and a group that is gone is a different refusal.
-    await createMaterial({ name: 'Existing', group: g._id });
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
     await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
+    // Nothing is in it, so that deleted rather than archived it.
+    const g2 = (await createGroup({ name: 'Zip Tape' })).body.group;
+    await createMaterial({ name: 'Held', category: 'warp', group: g2._id });
+    await request(app).delete(`${api}/${g2._id}`).set('Cookie', cookie());
 
-    const res = await createMaterial({ name: 'New one', group: g._id });
+    const res = await createMaterial({ name: 'New', category: 'warp', group: g2._id });
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/archived/);
-  });
-
-  it('inherits the group defaults, and its own figure still wins', async () => {
-    const g = (await createGroup({
-      name: 'Chemicals', defaultUnit: 'ltr', defaultMinStock: 25,
-    })).body.group;
-
-    const inherited = await createMaterial({ group: g._id });
-    expect(inherited.body.material.unit).toBe('ltr');
-    expect(inherited.body.material.minStock).toBe(25);
-
-    const own = await createMaterial({ group: g._id, unit: 'kg', minStock: 5 });
-    expect(own.body.material.unit).toBe('kg');
-    expect(own.body.material.minStock).toBe(5);
+    expect(res.body.message).toMatch(/archived/i);
   });
 
   it('defaults the unit to kg, which used to always come back empty', async () => {
-    // api/rawMaterial.js read `m.unit || ""` long before the field
-    // existed, so every unit it returned was the empty string.
-    const res = await createMaterial({ category: 'Warp' });
+    const res = await createMaterial({ category: 'warp' });
     expect(res.body.material.unit).toBe('kg');
   });
 });
 
 // ══════════════════════════════════════════════════════════════════
-describe('renaming a group', () => {
-  it('rewrites the category on every member', async () => {
-    const g = (await createGroup({ name: 'Rubber' })).body.group;
-    await createMaterial({ name: 'Spandex 40', group: g._id });
-    await createMaterial({ name: 'Spandex 70', group: g._id });
+describe('editing a material', () => {
+  const edit = (id, body) =>
+    request(app).put('/api/v2/materials/edit-raw-material')
+      .set('Cookie', cookie()).send({ _id: id, ...body });
 
-    const res = await request(app).put(`${api}/update`)
-      .set('Cookie', cookie())
-      .send({ id: g._id, name: 'Spandex' });
+  it('changing the category does not disturb the group', async () => {
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    const m = (await createMaterial({ category: 'warp', group: g._id })).body.material;
 
+    const res = await edit(m._id, { category: 'weft' });
     expect(res.status).toBe(200);
-    expect(res.body.materialsRenamed).toBe(2);
 
-    const members = await RawMaterial.find({ group: g._id }).lean();
-    expect(members.map((m) => m.category)).toEqual(['Spandex', 'Spandex']);
+    const after = await RawMaterial.findById(m._id).lean();
+    expect(after.category).toBe('weft');
+    expect(String(after.group)).toBe(String(g._id));
   });
 
-  it('picks up members that only ever had the name, never the link', async () => {
-    // Rows predating the migration. The rename has to find them or
-    // they are stranded under a name no group has.
-    await RawMaterial.create({
-      name: 'Legacy yarn', category: 'Rubber', supplier: supplier._id,
-    });
-    const g = (await createGroup({ name: 'Rubber' })).body.group;
+  it('changing the group does not disturb the category', async () => {
+    const a = (await createGroup({ name: 'Trim Tape' })).body.group;
+    const b = (await createGroup({ name: 'Zip Tape' })).body.group;
+    const m = (await createMaterial({ category: 'Chemicals', group: a._id })).body.material;
 
-    await request(app).put(`${api}/update`)
-      .set('Cookie', cookie()).send({ id: g._id, name: 'Spandex' });
+    await edit(m._id, { group: b._id });
 
-    const legacy = await RawMaterial.findOne({ name: 'Legacy yarn' }).lean();
-    expect(legacy.category).toBe('Spandex');
-    expect(String(legacy.group)).toBe(g._id);
+    const after = await RawMaterial.findById(m._id).lean();
+    expect(after.category).toBe('Chemicals');
+    expect(String(after.group)).toBe(String(b._id));
   });
 
-  it('keeps the code, which is the handle that survives a rename', async () => {
-    const g = (await createGroup({ name: 'Rubber' })).body.group;
-    const res = await request(app).put(`${api}/update`)
-      .set('Cookie', cookie()).send({ id: g._id, name: 'Spandex' });
-
-    expect(res.body.group.code).toBe('RUBBER');
-  });
-
-  it('refuses a rename onto another group, before touching any member', async () => {
-    const a = (await createGroup({ name: 'Warp' })).body.group;
-    await createGroup({ name: 'Weft' });
-    await createMaterial({ group: a._id });
-
-    const res = await request(app).put(`${api}/update`)
-      .set('Cookie', cookie()).send({ id: a._id, name: 'weft' });
-
-    expect(res.status).toBe(409);
-    const member = await RawMaterial.findOne({ group: a._id }).lean();
-    expect(member.category).toBe('Warp');   // untouched
+  it('refuses an unknown category on edit too', async () => {
+    const m = (await createMaterial({ category: 'warp' })).body.material;
+    const res = await edit(m._id, { category: 'Trim Tape' });
+    expect(res.status).toBe(400);
   });
 });
 
 // ══════════════════════════════════════════════════════════════════
-//  The chip colour. Three screens on the phone used to hold a hardcoded
-//  switch each — one of them case-sensitive — so a group the mill added
-//  was grey everywhere and renaming "Rubber" to "rubber" lost its
-//  colour on the add-material form only.
+describe('renaming a group', () => {
+  it('does NOT touch any member category', async () => {
+    // This is the behaviour that was removed. It used to rewrite
+    // category on every member, which is how a group rename could put
+    // a value the engine cannot read into a field it branches on.
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await createMaterial({ name: 'A', category: 'warp',   group: g._id });
+    await createMaterial({ name: 'B', category: 'Rubber', group: g._id });
+
+    await request(app).put(`${api}/update`)
+      .set('Cookie', cookie()).send({ id: g._id, name: 'Edge Tape' });
+
+    const a = await RawMaterial.findOne({ name: 'A' }).lean();
+    const b = await RawMaterial.findOne({ name: 'B' }).lean();
+    expect(a.category).toBe('warp');
+    expect(b.category).toBe('Rubber');
+    // Still filed under it — the link is what membership means.
+    expect(String(a.group)).toBe(String(g._id));
+  });
+
+  it('keeps the code, which is the handle that survives a rename', async () => {
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    const res = await request(app).put(`${api}/update`)
+      .set('Cookie', cookie()).send({ id: g._id, name: 'Edge Tape' });
+    expect(res.body.group.code).toBe('TRIM_TAPE');
+  });
+
+  it('refuses a rename onto another group', async () => {
+    await createGroup({ name: 'Trim Tape' });
+    const b = (await createGroup({ name: 'Zip Tape' })).body.group;
+
+    const res = await request(app).put(`${api}/update`)
+      .set('Cookie', cookie()).send({ id: b._id, name: 'trim tape' });
+    expect(res.status).toBe(409);
+  });
+});
+
 // ══════════════════════════════════════════════════════════════════
 describe('a group colour', () => {
   it('round-trips to the clients that draw the chips', async () => {
-    const g = (await createGroup({ name: 'Warp', colour: '#3B82F6' })).body.group;
+    const g = (await createGroup({ name: 'Trim Tape', colour: '#3B82F6' })).body.group;
     expect(g.colour).toBe('#3B82F6');
-
-    const list = await request(app).get(api).set('Cookie', cookie());
-    expect(list.body.groups[0].colour).toBe('#3B82F6');
   });
 
   it('is empty until somebody picks one', async () => {
-    // Both clients fall back to the colours they have always drawn, so
-    // a group with no colour looks the way it did yesterday rather than
-    // going grey.
-    const g = (await createGroup({ name: 'Warp' })).body.group;
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
     expect(g.colour).toBe('');
   });
 
   it('is cleared by sending an empty string', async () => {
-    const g = (await createGroup({ name: 'Warp', colour: '#3B82F6' })).body.group;
+    const g = (await createGroup({ name: 'Trim Tape', colour: '#3B82F6' })).body.group;
     const res = await request(app).put(`${api}/update`)
       .set('Cookie', cookie()).send({ id: g._id, colour: '' });
     expect(res.body.group.colour).toBe('');
   });
-
-  it('stores nonsense rather than refusing it, because both clients ignore it', async () => {
-    // Deliberate. The phone parses the hex and falls back when it
-    // cannot; the browser hands it to CSS, which drops an invalid
-    // colour. Refusing here would mean a validation rule to keep in
-    // step with two renderers for no gain.
-    const g = (await createGroup({ name: 'Warp', colour: 'not a colour' })).body.group;
-    expect(g.colour).toBe('not a colour');
-  });
 });
 
 // ══════════════════════════════════════════════════════════════════
-describe('deleting a group', () => {
-  it('deletes one nothing has ever used', async () => {
-    const g = (await createGroup({ name: 'Typo' })).body.group;
-    const res = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
+//  MEMBERSHIP IS THE LINK, AND ONLY THE LINK
+//
+//  It used to be "linked OR category matches the group's name",
+//  because category HELD the name. With the two separated that rule
+//  is actively dangerous: a group called "Rubber" would claim every
+//  rubber material in the mill without anybody filing one, and
+//  deleting it would archive them.
+// ══════════════════════════════════════════════════════════════════
+describe('membership', () => {
+  const countFor = async (name) => {
+    const res = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
+    return res.body.groups.find((g) => g.name === name)?.materialCount;
+  };
 
+  it('counts a material that was filed under it', async () => {
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await createMaterial({ name: 'A', category: 'warp', group: g._id });
+    expect(await countFor('Trim Tape')).toBe(1);
+  });
+
+  it('does NOT count a material that merely shares the name as a category', async () => {
+    // A group named after a category is legal and means nothing.
+    const g = (await createGroup({ name: 'Rubber Tape' })).body.group;
+    await RawMaterial.create({
+      name: 'Loose', category: 'Rubber', supplier: supplier._id,
+    });
+    expect(await countFor('Rubber Tape')).toBe(0);
+    expect(g).toBeTruthy();
+  });
+
+  it('deletes a group nothing was filed under, even with matching categories about', async () => {
+    const g = (await createGroup({ name: 'Rubber Tape' })).body.group;
+    await RawMaterial.create({
+      name: 'Loose', category: 'Rubber', supplier: supplier._id,
+    });
+
+    const res = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
+    expect(res.status).toBe(200);
+    // Removed outright: nothing was ever filed under it. Under the old
+    // rule this archived instead, because it counted the category.
     expect(res.body.archived).toBe(false);
-    expect(await MaterialGroup.countDocuments()).toBe(0);
   });
 
   it('archives one that holds materials, rather than orphaning them', async () => {
-    const g = (await createGroup({ name: 'Warp' })).body.group;
-    await createMaterial({ group: g._id });
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await createMaterial({ name: 'A', category: 'warp', group: g._id });
 
     const res = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
     expect(res.body.archived).toBe(true);
-    expect(res.body.materials).toBe(1);
+  });
 
-    // The material still reads correctly — that is the whole point.
-    const m = await RawMaterial.findOne({ group: g._id }).lean();
-    expect(m.category).toBe('Warp');
+  it('the dialog count agrees with the rule that decides archive-vs-delete', async () => {
+    // The dialog says what will happen using the count; the server acts
+    // using its own rule. If they disagree the dialog is wrong.
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await createMaterial({ name: 'A', category: 'warp', group: g._id });
+
+    expect(await countFor('Trim Tape')).toBe(1);
+    const res = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
+    expect(res.body.archived).toBe(true);
+  });
+
+  it('counts archived members for the decision, but not for the display', async () => {
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await createMaterial({ name: 'Live',    category: 'warp', group: g._id });
+    await createMaterial({ name: 'Shelved', category: 'warp', group: g._id });
+    await RawMaterial.updateOne({ name: 'Shelved' }, { $set: { archived: true } });
+
+    const res = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
+    const row = res.body.groups.find((x) => x.name === 'Trim Tape');
+    expect(row.materialCount).toBe(1);
+    expect(row.totalMaterialCount).toBe(2);
   });
 
   it('keeps an archived group out of the pickers but findable', async () => {
-    const g = (await createGroup({ name: 'Warp' })).body.group;
-    await createMaterial({ group: g._id });
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await createMaterial({ category: 'warp', group: g._id });
     await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
 
     const pickers = await request(app).get(api).set('Cookie', cookie());
@@ -299,8 +341,8 @@ describe('deleting a group', () => {
   });
 
   it('restores one archived by mistake', async () => {
-    const g = (await createGroup({ name: 'Warp' })).body.group;
-    await createMaterial({ group: g._id });
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await createMaterial({ category: 'warp', group: g._id });
     await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
 
     await request(app).post(`${api}/restore`).set('Cookie', cookie()).send({ id: g._id });
@@ -312,68 +354,78 @@ describe('deleting a group', () => {
 // ══════════════════════════════════════════════════════════════════
 describe('the list', () => {
   it('sorts by sortOrder, then name', async () => {
-    await createGroup({ name: 'Weft',     sortOrder: 20 });
-    await createGroup({ name: 'Warp',     sortOrder: 10 });
-    await createGroup({ name: 'Covering', sortOrder: 20 });
+    await createGroup({ name: 'Zip Tape',  sortOrder: 20 });
+    await createGroup({ name: 'Trim Tape', sortOrder: 10 });
+    await createGroup({ name: 'Adhesive',  sortOrder: 20 });
 
     const res = await request(app).get(api).set('Cookie', cookie());
-    expect(res.body.groups.map((g) => g.name)).toEqual(['Warp', 'Covering', 'Weft']);
+    expect(res.body.groups.map((g) => g.name)).toEqual(
+      ['Trim Tape', 'Adhesive', 'Zip Tape']
+    );
   });
 
-  it('filters to the positions, which is what a recipe picker wants', async () => {
-    await createGroup({ name: 'Warp',      kind: 'position' });
-    await createGroup({ name: 'Chemicals', kind: 'material' });
+  it('filters by kind', async () => {
+    await createGroup({ name: 'Selvedge', kind: 'position' });
+    await createGroup({ name: 'Adhesive', kind: 'material' });
 
     const res = await request(app).get(`${api}?kind=position`).set('Cookie', cookie());
-    expect(res.body.groups.map((g) => g.name)).toEqual(['Warp']);
+    expect(res.body.groups.map((g) => g.name)).toEqual(['Selvedge']);
   });
 
   it('counts members in one query, not one per group', async () => {
-    const g = (await createGroup({ name: 'Warp' })).body.group;
-    await createMaterial({ name: 'A', group: g._id });
-    await createMaterial({ name: 'B', group: g._id });
-    await createGroup({ name: 'Weft' });
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await createMaterial({ name: 'A', category: 'warp', group: g._id });
+    await createMaterial({ name: 'B', category: 'warp', group: g._id });
+    await createGroup({ name: 'Zip Tape' });
 
     const res = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
     const byName = Object.fromEntries(res.body.groups.map((x) => [x.name, x.materialCount]));
-    expect(byName).toEqual({ Warp: 2, Weft: 0 });
+    expect(byName).toEqual({ 'Trim Tape': 2, 'Zip Tape': 0 });
   });
 });
 
 // ══════════════════════════════════════════════════════════════════
-describe('filtering the material list', () => {
-  it('finds rows written under any spelling of the group name', async () => {
-    const g = (await createGroup({ name: 'Rubber' })).body.group;
-    await createMaterial({ name: 'Linked', group: g._id });
-    await RawMaterial.create({ name: 'Legacy', category: 'rubber', supplier: supplier._id });
+//  THE FIXED VOCABULARY, SERVED FROM ONE PLACE
+// ══════════════════════════════════════════════════════════════════
+describe('GET /materials/categories', () => {
+  const cats = () =>
+    request(app).get('/api/v2/materials/categories').set('Cookie', cookie());
 
-    const res = await request(app)
-      .get(`/api/v2/materials/get-raw-materials?group=${g._id}`)
-      .set('Cookie', cookie());
-
-    expect(res.body.materials.map((m) => m.name).sort()).toEqual(['Legacy', 'Linked']);
+  it('serves the five, in display order', async () => {
+    const res = await cats();
+    expect(res.body.categories).toEqual(
+      ['warp', 'weft', 'covering', 'Rubber', 'Chemicals']
+    );
   });
 
-  it('matches a category chip case-insensitively', async () => {
-    await RawMaterial.create({ name: 'Legacy', category: 'rubber', supplier: supplier._id });
-    const res = await request(app)
-      .get('/api/v2/materials/get-raw-materials?category=Rubber')
-      .set('Cookie', cookie());
+  it('serves the positions separately, for the recipe pickers', async () => {
+    const res = await cats();
+    expect(res.body.positions).toEqual(['warp', 'weft', 'covering']);
+  });
 
-    expect(res.body.materials).toHaveLength(1);
+  it('does not change when groups are added', async () => {
+    // The point of separating them: the mill can add as many groups as
+    // it likes and the vocabulary the engine reads stays fixed.
+    await createGroup({ name: 'Trim Tape' });
+    await createGroup({ name: 'Zip Tape' });
+    const res = await cats();
+    expect(res.body.categories).toHaveLength(5);
   });
 });
 
 // ══════════════════════════════════════════════════════════════════
-//  The picker that used to empty itself.
+//  THE ELASTIC RECIPE PICKER
+//
+//  Reads `category`, and now reads a field nothing else can write
+//  arbitrary values into. That is the win: before, adding a group
+//  called "Trim Tape" and filing a yarn under it removed that yarn
+//  from the picker, because its category stopped being "warp".
 // ══════════════════════════════════════════════════════════════════
 describe('the elastic recipe picker', () => {
   const pick = () =>
     request(app).get('/api/v2/materials/materialForNewElastic').set('Cookie', cookie());
 
-  it('still works on a database with no groups at all', async () => {
-    // The fallback: nothing has been seeded, so it matches the literal
-    // keywords exactly as the endpoint always did.
+  it('buckets by category', async () => {
     await RawMaterial.create({ name: 'W1', category: 'warp',     supplier: supplier._id });
     await RawMaterial.create({ name: 'R1', category: 'Rubber',   supplier: supplier._id });
     await RawMaterial.create({ name: 'C1', category: 'covering', supplier: supplier._id });
@@ -385,21 +437,19 @@ describe('the elastic recipe picker', () => {
   });
 
   it('survives the casing change that used to empty it', async () => {
-    // The old code was find({ category: "Rubber" }) — an exact literal.
-    // A material stored as "rubber" matched nothing, and the elastic
-    // form offered no rubber with no error of any kind.
-    await RawMaterial.create({ name: 'R1', category: 'rubber', supplier: supplier._id });
+    // The old code was find({ category: "Rubber" }) — an exact literal,
+    // so a material saved as "rubber" vanished from the picker. The
+    // write path now canonicalises, so both spellings land on one.
+    const res0 = await createMaterial({ name: 'R1', category: 'rubber' });
+    expect(res0.body.material.category).toBe('Rubber');
 
     const res = await pick();
     expect(res.body.rubber.map((m) => m.name)).toEqual(['R1']);
   });
 
-  it('follows a group through a rename', async () => {
-    const g = (await createGroup({ name: 'Warp', kind: 'position' })).body.group;
-    await createMaterial({ name: 'W1', group: g._id });
-
-    await request(app).put(`${api}/update`)
-      .set('Cookie', cookie()).send({ id: g._id, name: 'Warp Yarn' });
+  it('is unaffected by which group a material is filed under', async () => {
+    const g = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await createMaterial({ name: 'W1', category: 'warp', group: g._id });
 
     const res = await pick();
     expect(res.body.warp.map((m) => m.name)).toEqual(['W1']);
@@ -411,124 +461,5 @@ describe('the elastic recipe picker', () => {
     });
     const res = await pick();
     expect(res.body.warp).toHaveLength(0);
-  });
-});
-
-// ══════════════════════════════════════════════════════════════════
-//  COUNTING MEMBERS — three rules where there should be one
-//
-//  Three places decide "what is in this group", and they did not agree:
-//
-//    memberCount()      link OR category, name matched EXACTLY
-//    ?withCounts        $group by category — link ignored entirely
-//    rename's updateMany link OR category, name matched EXACTLY
-//
-//  Every material this app writes now carries the group's own spelling,
-//  so the three agree on new data. They disagree on data that predates
-//  the migration, or that an un-updated client wrote — which is exactly
-//  the data the group screen exists to tidy up.
-//
-//  It matters because the count drives what the confirm dialog SAYS
-//  will happen. A group reading "0 materials" offers to delete outright;
-//  the server then archives it instead, because its own rule found
-//  members. The dialog was telling the truth about a different query.
-// ══════════════════════════════════════════════════════════════════
-describe('what counts as being in a group', () => {
-  const countFor = async (name) => {
-    const res = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
-    return res.body.groups.find((g) => g.name === name)?.materialCount;
-  };
-
-  it('counts a member linked by id whose category is spelled differently', async () => {
-    const g = (await createGroup({ name: 'Rubber' })).body.group;
-    await createMaterial({ name: 'Legacy', group: g._id });
-    // A client that has not been updated rewrites the name only.
-    await RawMaterial.updateOne({ name: 'Legacy' }, { $set: { category: 'rubber' } });
-
-    expect(await countFor('Rubber')).toBe(1);
-  });
-
-  it('counts a member that carries the name only, in another case', async () => {
-    await createGroup({ name: 'Rubber' });
-    await RawMaterial.create({ name: 'Old', category: 'rubber', supplier: supplier._id });
-
-    expect(await countFor('Rubber')).toBe(1);
-  });
-
-  it('agrees with the rule that decides archive-vs-delete', async () => {
-    // The dialog says what will happen using the count; the server acts
-    // using its own rule. If they disagree the dialog is wrong.
-    const g = (await createGroup({ name: 'Rubber' })).body.group;
-    await RawMaterial.create({ name: 'Old', category: 'rubber', supplier: supplier._id });
-
-    expect(await countFor('Rubber')).toBe(1);
-    const res = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
-    expect(res.body.archived).toBe(true);
-  });
-
-  it('renames a member that carries the name in another case', async () => {
-    const g = (await createGroup({ name: 'Rubber' })).body.group;
-    await RawMaterial.create({ name: 'Old', category: 'rubber', supplier: supplier._id });
-
-    await request(app).put(`${api}/update`)
-      .set('Cookie', cookie()).send({ id: g._id, name: 'Spandex' });
-
-    const m = await RawMaterial.findOne({ name: 'Old' }).lean();
-    expect(m.category).toBe('Spandex');
-  });
-});
-
-describe('a group whose only members are archived', () => {
-  it('is archived rather than deleted, so the link survives', async () => {
-    // An archived material still names its group. Deleting the group
-    // outright leaves it pointing at nothing, and restoring the material
-    // later brings back a row filed under a group that no longer exists.
-    const g = (await createGroup({ name: 'Retired Yarn' })).body.group;
-    await createMaterial({ name: 'Shelved', group: g._id });
-    await RawMaterial.updateOne({ name: 'Shelved' }, { $set: { archived: true } });
-
-    const res = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
-    expect(res.body.archived).toBe(true);
-    expect(await MaterialGroup.countDocuments()).toBe(1);
-  });
-});
-
-describe('the two counts the settings screen needs', () => {
-  it('shows live members, and reports archived ones separately', async () => {
-    const g = (await createGroup({ name: 'Warp' })).body.group;
-    await createMaterial({ name: 'Live', group: g._id });
-    await createMaterial({ name: 'Shelved', group: g._id });
-    await RawMaterial.updateOne({ name: 'Shelved' }, { $set: { archived: true } });
-
-    const res = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
-    const row = res.body.groups[0];
-    expect(row.materialCount).toBe(1);       // what the table shows
-    expect(row.totalMaterialCount).toBe(2);  // what the delete dialog needs
-  });
-
-  it('lets the dialog predict archive-vs-delete for an archived-only group', async () => {
-    // Reading only the live count, the dialog said "removed outright"
-    // and the server archived it. Same lie, one layer up.
-    const g = (await createGroup({ name: 'Retired' })).body.group;
-    await createMaterial({ name: 'Shelved', group: g._id });
-    await RawMaterial.updateOne({ name: 'Shelved' }, { $set: { archived: true } });
-
-    const list = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
-    const row = list.body.groups[0];
-    expect(row.materialCount).toBe(0);
-    expect(row.totalMaterialCount).toBe(1);
-
-    const del = await request(app).delete(`${api}/${g._id}`).set('Cookie', cookie());
-    // The dialog's prediction (total > 0 → archive) matches what happened.
-    expect(row.totalMaterialCount > 0).toBe(del.body.archived);
-    expect(del.body.message).toMatch(/archived and still filed under it/);
-  });
-
-  it('does not double-count a material that is both linked and named', async () => {
-    const g = (await createGroup({ name: 'Warp' })).body.group;
-    await createMaterial({ name: 'Both', group: g._id });   // link AND category='Warp'
-
-    const res = await request(app).get(`${api}?withCounts=1`).set('Cookie', cookie());
-    expect(res.body.groups[0].materialCount).toBe(1);
   });
 });

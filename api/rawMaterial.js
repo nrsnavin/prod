@@ -4,6 +4,10 @@ const express           = require("express");
 const router            = express.Router();
 const mongoose          = require("mongoose");
 const RawMaterial       = require("../models/RawMaterial");
+// From utils, NOT the model: tests automock the model, which would
+// stub canonicalCategory into rejecting every valid category.
+const { MATERIAL_CATEGORIES, MATERIAL_POSITIONS, canonicalCategory } =
+  require("../utils/materialCategories");
 const MaterialGroup     = require("../models/MaterialGroup");
 const PurchaseOrder     = require("../models/PurchaseOrder");
 const MaterialInward    = require("../models/MaterialInward");
@@ -43,53 +47,57 @@ const {
 const DAY_MS = 86_400_000;
 
 /**
- * Settle the group and the category name against each other.
+ * Settle the two classifications independently.
  *
- * A caller may send either — the web form sends a group id, older
- * clients and the mobile app send a category string — and whichever
- * arrives, both fields are written. That is the invariant the whole
- * feature rests on: `category` is the group's name, denormalised, and
- * every existing reader (MRP, forecast, stock-count scope, the mobile
- * chips) still reads only that.
+ * They USED to settle against each other: `category` held the group's
+ * name, so sending either wrote both. That fusion is what has been
+ * undone. They now answer different questions and neither derives from
+ * the other:
  *
- * A category naming no group is NOT rejected. Groups are a tidy-up of
- * data that has been free text for years, and refusing an unrecognised
- * string here would break every client that has not been updated yet.
- * It is stored with a null link, and the settings screen shows it as
- * ungrouped so somebody can file it.
+ *   category — the system's fixed vocabulary. Validated against
+ *              MATERIAL_CATEGORIES and stored in the canonical
+ *              spelling, so "rubber" from the phone and "Rubber" from
+ *              the web land on the same value and the recipe picker's
+ *              literal match finds both.
+ *
+ *   group    — the mill's own classification. Optional. Any live
+ *              group, no relationship to category at all.
+ *
+ * ── Why an unknown category is refused here but not in the schema ──
+ * The schema has to keep loading rows written under the old scheme,
+ * which hold group names. Refusing at the write path means new and
+ * edited data converges on the five while old data still opens. A
+ * material whose category is a legacy group name keeps it until
+ * somebody saves that material, and then has to pick a real one.
  *
  * @returns {{ error: string } | { group: ObjectId|null, category: string }}
  */
-async function resolveGroup({ group, category }) {
-  if (group !== undefined && group !== null && group !== "") {
-    if (!mongoose.Types.ObjectId.isValid(group)) {
-      return { error: "group must be a valid id" };
-    }
-    const doc = await MaterialGroup.findById(group).select("name archived").lean();
-    if (!doc) return { error: "That material group does not exist" };
-    if (doc.archived) {
-      return { error: `"${doc.name}" is archived — restore it before filing materials under it.` };
-    }
-    // The group wins over any category string sent alongside it. They
-    // can only disagree because a client sent a stale name, and the id
-    // is the one that was chosen from a list.
-    return { group: doc._id, category: doc.name };
+async function resolveClassification({ group, category }) {
+  const canon = canonicalCategory(category);
+  if (!canon) {
+    const sent = String(category ?? "").trim();
+    return {
+      error: sent
+        ? `"${sent}" is not a material category. Choose one of: ` +
+          `${MATERIAL_CATEGORIES.join(", ")}. To track your own ` +
+          `classifications, use material groups instead.`
+        : `A category is required — one of: ${MATERIAL_CATEGORIES.join(", ")}`,
+    };
   }
 
-  const name = String(category ?? "").trim();
-  if (!name) return { error: "A category or group is required" };
+  if (group === undefined || group === null || group === "") {
+    return { group: null, category: canon };
+  }
 
-  const match = await MaterialGroup.findOne({ name, archived: { $ne: true } })
-    .collation({ locale: "en", strength: 2 })
-    .select("name")
-    .lean();
-
-  // Matched case-insensitively but stored under the GROUP's spelling,
-  // so "warp" and "Warp" from two different clients both land in one
-  // group rather than creating the split this feature exists to end.
-  return match
-    ? { group: match._id, category: match.name }
-    : { group: null, category: name };
+  if (!mongoose.Types.ObjectId.isValid(group)) {
+    return { error: "group must be a valid id" };
+  }
+  const doc = await MaterialGroup.findById(group).select("name archived").lean();
+  if (!doc) return { error: "That material group does not exist" };
+  if (doc.archived) {
+    return { error: `"${doc.name}" is archived — restore it before filing materials under it.` };
+  }
+  return { group: doc._id, category: canon };
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -105,7 +113,7 @@ router.post(
       return next(new ErrorHandler("name and supplier are required", 400));
     }
 
-    const resolved = await resolveGroup({ group, category });
+    const resolved = await resolveClassification({ group, category });
     if (resolved.error) return next(new ErrorHandler(resolved.error, 400));
 
     // The group's defaults fill blanks at CREATE only, and are copied
@@ -141,6 +149,34 @@ router.post(
 //  2.  GET RAW MATERIALS LIST
 //      GET /materials/get-raw-materials
 //      ?search=<n> ?category=<cat> ?lowStock=true
+// ══════════════════════════════════════════════════════════════
+//  GET /categories — the fixed vocabulary, from one place
+//
+//  Not a convenience. This list lived in eight places that disagreed:
+//  the web knew four values, the phone knew five, and this server
+//  matched four literals by exact case — which is how a material
+//  entered on the phone as "Chemicals" became invisible on the web.
+//
+//  Both clients read it here now, so a change is a change everywhere.
+//  `positions` is the subset the elastic recipe pickers want: the
+//  three that say WHERE in the cloth, without the two that say what
+//  the material is.
+//
+//  Unauthenticated-adjacent on purpose (the router's own gate still
+//  applies): it is a constant, carries nothing about this mill, and a
+//  picker that cannot populate is worse than one anybody can read.
+// ══════════════════════════════════════════════════════════════
+router.get(
+  "/categories",
+  catchAsyncErrors(async (_req, res) => {
+    res.json({
+      success: true,
+      categories: MATERIAL_CATEGORIES,
+      positions: MATERIAL_POSITIONS,
+    });
+  })
+);
+
 // ══════════════════════════════════════════════════════════════
 router.get(
   "/get-raw-materials",
@@ -459,14 +495,16 @@ router.put(
     if (!existing) return next(new ErrorHandler("Raw material not found", 404));
 
     // `category` and `group` are settled together, never separately.
-    // Whitelisting `category` as a plain field — which is what this did
-    // before groups existed — would let an edit move a material's
-    // category name while leaving its group link pointing at the old
-    // one, which is the exact drift the denormalised name is supposed
-    // to be safe from.
+    // Both go through the resolver even when only one was sent, so an
+    // edit cannot slip an unvalidated category in as a plain field.
+    //
+    // `group` is passed as sent, INCLUDING when it is absent: the two
+    // are independent now, so changing a material's category must not
+    // silently move or clear which group it is filed under. An edit
+    // that omits `group` keeps the existing link.
     if (req.body.category !== undefined || req.body.group !== undefined) {
-      const resolved = await resolveGroup({
-        group:    req.body.group,
+      const resolved = await resolveClassification({
+        group: req.body.group !== undefined ? req.body.group : existing.group,
         category: req.body.category ?? existing.category,
       });
       if (resolved.error) return next(new ErrorHandler(resolved.error, 400));

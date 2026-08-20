@@ -7,15 +7,22 @@
 //  the top of models/MaterialGroup.js for the eight disagreeing copies
 //  this replaces.
 //
-//  ── The one rule this router exists to hold ──────────────────────
-//  A material carries BOTH the group link and the group's name (as
-//  `category`, which every existing reader already uses). Those two
-//  must never disagree. So a rename is not a one-document write: it
-//  rewrites `category` on every member in the same request, and the
-//  members are updated FIRST. If that write fails the group keeps its
-//  old name and the data is still consistent; renaming the group first
-//  and failing on the members would leave a group whose own members
-//  claim to be in a group that no longer exists under that name.
+//  ── Groups and categories are SEPARATE ───────────────────────────
+//  They were one field wearing two hats: `RawMaterial.category` held
+//  the group's NAME, so renaming a group rewrote it on every member
+//  and creating a group put a new value into a field the engine
+//  branches on. A group called "Trim Tape" therefore produced
+//  materials whose category the recipe pickers, the MRP sheet and the
+//  phone's colour chips had never heard of.
+//
+//  Now:
+//    category — fixed vocabulary, five values, owned by the system.
+//               See MATERIAL_CATEGORIES in models/RawMaterial.js.
+//    group    — free, admin-managed, owned by the mill. Nothing in
+//               the engine branches on it.
+//
+//  Nothing in this router writes `category` any more, and membership
+//  is the LINK alone.
 // ══════════════════════════════════════════════════════════════════
 
 const express  = require('express');
@@ -90,12 +97,20 @@ async function deriveCode(name) {
 //
 // Case-insensitive on the name, because "rubber" and "Rubber" are the
 // same group written twice — the split this whole feature exists to end.
-const memberFilter = (group) => ({
-  $or: [
-    { group: group._id },
-    { category: new RegExp(`^${escapeRegex(group.name)}$`, 'i') },
-  ],
-});
+//
+// ── It is the LINK, and only the link ────────────────────────────
+// This used to be `{ group: id } OR { category: /^name$/i }`, because
+// `category` HELD the group's name and a row written by an older
+// client had the name and no link. Now that the two fields are
+// independent, that second clause is actively wrong: a material whose
+// category is "Rubber" is in the CATEGORY Rubber and says nothing
+// about whether anybody filed it under a group of that name.
+//
+// Leaving it in would mean creating a group called "Rubber" instantly
+// claimed every rubber material in the mill as a member, and deleting
+// that group reported — and archived — against materials nobody had
+// ever put in it.
+const memberFilter = (group) => ({ group: group._id });
 
 /**
  * Live members, and members of any kind.
@@ -164,11 +179,12 @@ router.get(
     // archived members or it promises "removed outright" for a group the
     // server will archive — the same lie, one layer up.
     const buckets = await RawMaterial.aggregate([
+      // Only filed materials can be members now — see memberFilter.
+      { $match: { group: { $ne: null } } },
       {
         $group: {
           _id: {
             group: '$group',
-            cat: { $toLower: '$category' },
             archived: { $eq: ['$archived', true] },
           },
           n: { $sum: 1 },
@@ -178,11 +194,10 @@ router.get(
 
     const countFor = (g) => {
       const id = String(g._id);
-      const name = String(g.name).toLowerCase();
       let live = 0;
       let total = 0;
       for (const b of buckets) {
-        if (String(b._id.group) !== id && b._id.cat !== name) continue;
+        if (String(b._id.group) !== id) continue;
         total += b.n;
         if (!b._id.archived) live += b.n;
       }
@@ -282,15 +297,22 @@ router.put(
           ));
         }
 
-        // Members first. If this write fails, the group keeps its old
-        // name and nothing has drifted — the other order leaves members
-        // stranded under a name their group no longer has.
-        // memberFilter against the OLD name — the same rule the counts
-        // and the delete use, so a member cannot be visible to one and
-        // invisible to another.
+        // ── A rename no longer touches `category` ────────────────
+        //
+        // It used to rewrite category on every member, because the two
+        // were one field: category HELD the group's name. That is the
+        // fusion this change undoes. category is now the system's own
+        // fixed vocabulary — warp / weft / covering / Rubber /
+        // Chemicals — and the recipe pickers and MRP branch on it, so
+        // renaming a group must not be able to write "Trim Tape" into
+        // it.
+        //
+        // What still needs doing is adopting the LINK for rows filed
+        // under this group by name alone, before the link existed.
+        // One-way tidy-up: sets `group`, leaves `category` alone.
         const moved = await RawMaterial.updateMany(
-          memberFilter({ _id: group._id, name: oldName }),
-          { $set: { category: name, group: group._id } }
+          { group: null, category: new RegExp(`^${escapeRegex(oldName)}$`, 'i') },
+          { $set: { group: group._id } }
         );
         renamedCount = moved.modifiedCount || 0;
         group.name = name;
