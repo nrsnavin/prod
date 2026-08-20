@@ -112,6 +112,75 @@ function dbForUser(user) {
   return sandboxUsers().has(String(email).toLowerCase()) ? db : null;
 }
 
+// ══════════════════════════════════════════════════════════════════
+//  WHY A REQUEST IS NOT IN THE SANDBOX
+//
+//  "Not routed" has four causes and they need four different fixes,
+//  but they produce one identical symptom: the request is served from
+//  the live database and nothing says so.
+//
+//  The one that costs the most time is not even in this file. The
+//  systemd unit sets NODE_ENV=PRODUCTION, and BOTH app.js and index.js
+//  skip dotenv under that — so on a live box `config/.env` is never
+//  read by node at all. systemd's EnvironmentFile is the only source,
+//  and it needs `systemctl restart` to re-read. Add SANDBOX_DB to
+//  config/.env, reload the page, and absolutely nothing changes: the
+//  running process has never seen the variable.
+//
+//  So the state is reportable, and it is reported — at boot, and in
+//  the errors that are otherwise a dead end.
+// ══════════════════════════════════════════════════════════════════
+
+/** Machine-readable reason a user is or is not routed. */
+function routingStateFor(user) {
+  const db = sandboxDb();
+  if (!db) {
+    return {
+      routed: false,
+      reason: 'not-configured',
+      detail:
+        'SANDBOX_DB is not set in this process. Note that the systemd unit ' +
+        'sets NODE_ENV=PRODUCTION, which makes node skip config/.env — ' +
+        'systemd reads it, so a change there needs `systemctl restart jarvis`.',
+    };
+  }
+  if (sandboxIsPrimary()) {
+    return {
+      routed: false,
+      reason: 'same-as-primary',
+      detail:
+        `SANDBOX_DB="${db}" is the database MONGO_URL already connects to, so ` +
+        'routing is disabled. Give MONGO_URL its database in the PATH.',
+    };
+  }
+  const email = user && (user.email || user.get?.('email'));
+  if (!email) return { routed: false, reason: 'no-user', detail: 'No signed-in user.' };
+  if (!sandboxUsers().has(String(email).toLowerCase())) {
+    return {
+      routed: false,
+      reason: 'not-listed',
+      detail: `${email} is not in SANDBOX_USERS (${sandboxUsers().size} listed).`,
+    };
+  }
+  return { routed: true, reason: 'routed', detail: `Routed to "${db}".` };
+}
+
+/** One line at boot saying whether routing is on, and for whom. */
+function describeRouting() {
+  const db = sandboxDb();
+  if (!db) return 'sandbox routing: OFF (SANDBOX_DB not set)';
+  if (sandboxIsPrimary()) {
+    return `sandbox routing: DISABLED — SANDBOX_DB "${db}" is the database ` +
+           'MONGO_URL already connects to';
+  }
+  const users = sandboxUsers();
+  if (users.size === 0) {
+    return `sandbox routing: "${db}" configured, but SANDBOX_USERS is empty — ` +
+           'nobody is routed';
+  }
+  return `sandbox routing: "${db}" for ${users.size} user(s): ${[...users].join(', ')}`;
+}
+
 // ── Connections ──────────────────────────────────────────────────
 const connections = new Map();
 const registeredCount = new Map();
@@ -240,6 +309,8 @@ module.exports = {
   install,
   tenantAware,
   dbForUser,
+  routingStateFor,
+  describeRouting,
   sandboxIsPrimary,
   currentDb,
   connectionFor,

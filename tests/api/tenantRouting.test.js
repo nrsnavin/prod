@@ -431,3 +431,100 @@ describe('the not-found message names the request\'s database', () => {
     expect(res.body.message).not.toContain('sandbox_db');
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  "NOT ROUTED" HAS FOUR CAUSES AND ONE SYMPTOM
+//
+//  A sandbox user reading "this request read database baluElastics"
+//  learns half of what they need. The expensive half is WHY: off the
+//  list, SANDBOX_DB unset, or SANDBOX_DB colliding with the primary.
+//  Three different fixes, and from the outside they are identical.
+//
+//  The one that costs the most is not in the app at all: the systemd
+//  unit sets NODE_ENV=PRODUCTION, and node skips config/.env under
+//  that, so systemd's EnvironmentFile is the only source and a change
+//  needs `systemctl restart`. Adding SANDBOX_DB and reloading the page
+//  changes nothing, because the process never saw the variable.
+// ══════════════════════════════════════════════════════════════════
+describe('why a request is not in the sandbox', () => {
+  const { routingStateFor, describeRouting } = require('../../db/tenants.js');
+
+  const withEnv = (env, fn) => {
+    const saved = { SANDBOX_DB: process.env.SANDBOX_DB, SANDBOX_USERS: process.env.SANDBOX_USERS };
+    Object.assign(process.env, env);
+    try { return fn(); } finally { Object.assign(process.env, saved); }
+  };
+
+  it('says a listed user is routed', () => {
+    expect(routingStateFor(sandboxUser)).toMatchObject({ routed: true, reason: 'routed' });
+  });
+
+  it('says an unlisted user is not on the list, and how many are', () => {
+    const state = routingStateFor(admin);
+    expect(state).toMatchObject({ routed: false, reason: 'not-listed' });
+    expect(state.detail).toContain('owner@t.co');
+    expect(state.detail).toMatch(/SANDBOX_USERS/);
+  });
+
+  it('points at systemd when SANDBOX_DB never reached the process', () => {
+    // The failure mode: added to config/.env, service not restarted.
+    withEnv({ SANDBOX_DB: '' }, () => {
+      const state = routingStateFor(sandboxUser);
+      expect(state).toMatchObject({ routed: false, reason: 'not-configured' });
+      expect(state.detail).toMatch(/systemctl restart/);
+      expect(state.detail).toMatch(/NODE_ENV=PRODUCTION/);
+    });
+  });
+
+  it('says so when the sandbox names the live database', () => {
+    withEnv({ SANDBOX_DB: mongoose.connection.name }, () => {
+      expect(routingStateFor(sandboxUser)).toMatchObject({
+        routed: false, reason: 'same-as-primary',
+      });
+    });
+  });
+
+  it('gives one boot line naming the database and who is on it', () => {
+    expect(describeRouting()).toContain('sandbox_db');
+    expect(describeRouting()).toContain('rsnavin02@gmail.com');
+  });
+
+  it('says OFF at boot when nothing is configured', () => {
+    withEnv({ SANDBOX_DB: '' }, () => {
+      expect(describeRouting()).toMatch(/OFF \(SANDBOX_DB not set\)/);
+    });
+  });
+
+  it('says nobody is routed when the list is empty', () => {
+    // Configured but useless — silently identical to not configured.
+    withEnv({ SANDBOX_USERS: '' }, () => {
+      expect(describeRouting()).toMatch(/nobody is routed/);
+    });
+  });
+
+  it('puts the reason in the not-found error a user actually sees', async () => {
+    const res = await request(app).post('/api/v2/machine/service-bill')
+      .set('Cookie', cookie(admin))
+      .attach('file', PDF, { filename: 'b.pdf', contentType: 'application/pdf' })
+      .field('machineId', String(new mongoose.Types.ObjectId()))
+      .field('serviceLogId', String(new mongoose.Types.ObjectId()))
+      .field('kind', 'service_bill');
+
+    expect(res.status).toBe(404);
+    expect(res.body.message).toContain('primary_db');
+    expect(res.body.message).toMatch(/not in SANDBOX_USERS/);
+  });
+
+  it('adds no noise for a correctly routed user', async () => {
+    // They are where they should be; the reason would be clutter.
+    const res = await request(app).post('/api/v2/machine/service-bill')
+      .set('Cookie', cookie(sandboxUser))
+      .attach('file', PDF, { filename: 'b.pdf', contentType: 'application/pdf' })
+      .field('machineId', String(new mongoose.Types.ObjectId()))
+      .field('serviceLogId', String(new mongoose.Types.ObjectId()))
+      .field('kind', 'service_bill');
+
+    expect(res.body.message).toContain('sandbox_db');
+    expect(res.body.message).not.toMatch(/SANDBOX_USERS|systemctl/);
+  });
+});

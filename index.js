@@ -34,7 +34,14 @@ if (process.env.NODE_ENV !== "PRODUCTION") {
 }
 
 // connect db
-connectDatabase.connectDatabase();
+connectDatabase.connectDatabase().then(() => {
+  // Say whether per-user database routing is actually on. It is
+  // configured through systemd's EnvironmentFile (NODE_ENV=PRODUCTION
+  // makes node skip config/.env entirely), so "I added SANDBOX_DB and
+  // nothing happened" is the normal way this goes wrong — the running
+  // process simply never saw the variable. One line here answers it.
+  console.log(`[tenants] ${require('./db/tenants.js').describeRouting()}`);
+});
 
 // Transactional-outbox dispatcher — delivers alerts enqueued inside
 // business transactions (utils/outbox.js), with retry + backoff.

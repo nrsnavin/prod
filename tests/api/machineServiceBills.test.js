@@ -404,7 +404,11 @@ describe('POST /machine/service-bill — resolving which machine', () => {
 
     expect(res.status).toBe(404);
     expect(res.body.message).toContain(mongoose.connection.name);
-    expect(res.body.message).toMatch(/different environment/i);
+    // And WHY that database. Naming it answers half the question; a
+    // sandbox user reading only the name still cannot tell whether
+    // they are off the list, whether SANDBOX_DB is unset, or whether
+    // it collided with the primary — three fixes, one symptom.
+    expect(res.body.message).toMatch(/SANDBOX_DB is not set|not in SANDBOX_USERS|already connects to/);
   });
 
   test('rejects a serviceLogId that is not an id', async () => {

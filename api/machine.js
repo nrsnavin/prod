@@ -966,8 +966,17 @@ async function findServiceLog(machineId, serviceLogId) {
     //  live database while their request was correctly reading the
     //  sandbox. A diagnostic that is wrong is worse than none: it sends
     //  somebody looking in the one place the answer cannot be.
-    const { currentDb } = require("../db/tenants.js");
+    const { currentDb, routingStateFor } = require("../db/tenants.js");
+    const { getCurrentUser } = require("../middleware/userContext.js");
     const db = currentDb() || mongoose.connection?.name || "unknown";
+
+    //  And WHY that database. "Reading baluElastics" answers half the
+    //  question and leaves the expensive half — a sandbox user reads
+    //  that and still cannot tell whether they are off the list,
+    //  whether SANDBOX_DB is unset, or whether it collided with the
+    //  primary. Three causes, three different fixes, one symptom.
+    const routing = routingStateFor(getCurrentUser());
+    const why = routing.routed ? "" : ` ${routing.detail}`;
     throw new ErrorHandler(
       (claimed
         ? `Machine ${claimed.ID} has no service log ${serviceLogId}. It has ` +
@@ -975,8 +984,7 @@ async function findServiceLog(machineId, serviceLogId) {
           `been removed, or the page may be out of date.`
         : `No service log has id ${serviceLogId}. It may have been removed, ` +
           `or the page may be out of date — reload and try again.`) +
-      ` (This API is reading database "${db}"; if the page came from a ` +
-      `different environment, that is the mismatch.)`,
+      ` (This request read database "${db}".${why})`,
       404
     );
   }
