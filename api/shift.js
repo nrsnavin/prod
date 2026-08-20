@@ -27,6 +27,10 @@ const {
   _rederiveShiftProduction,
 } = require("../services/shiftCascadeService.js");
 const multer = require("multer");
+// multer finishes from a stream event, which loses the request's
+// AsyncLocalStorage stores — the database it routes to and the user
+// it audits as. See middleware/userContext.js.
+const { keepRequestContext } = require("../middleware/userContext.js");
 const { buildShiftSheetPdf, shortCode } = require("../utils/shiftSheetPdf");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
@@ -1248,7 +1252,7 @@ router.get(
 router.post(
   "/:shiftPlanId/ingest-sheet",
   isAdmin("admin"),
-  sheetUpload.single("file"),
+  keepRequestContext(sheetUpload.single("file")),
   catchAsyncErrors(async (req, res, next) => {
     const { shiftPlanId } = req.params;
     if (!/^[a-f\d]{24}$/i.test(shiftPlanId)) return next(new ErrorHandler("Invalid shiftPlanId", 400));

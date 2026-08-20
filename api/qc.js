@@ -12,6 +12,10 @@
 
 const express = require("express");
 const multer  = require("multer");
+// multer finishes from a stream event, which loses the request's
+// AsyncLocalStorage stores — the database it routes to and the user
+// it audits as. See middleware/userContext.js.
+const { keepRequestContext } = require("../middleware/userContext.js");
 const mongoose = require("mongoose");
 const router = express.Router();
 
@@ -71,7 +75,7 @@ router.get(
 // ── AI vision draft — classify defects from a photo (not saved) ────
 router.post(
   "/vision-draft",
-  imageUpload.single("image"),
+  keepRequestContext(imageUpload.single("image")),
   catchAsyncErrors(async (req, res, next) => {
     if (!req.file) return next(new ErrorHandler('No image uploaded (field name must be "image").', 400));
     const { elasticId } = req.body;

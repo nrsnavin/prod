@@ -5,6 +5,10 @@ const router  = express.Router();
 
 const mongoose         = require("mongoose");
 const multer           = require("multer");
+// multer finishes from a stream event, which loses the request's
+// AsyncLocalStorage stores — the database it routes to and the user
+// it audits as. See middleware/userContext.js.
+const { keepRequestContext } = require("../middleware/userContext.js");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const ShiftDetail      = require("../models/ShiftDetail");
@@ -46,7 +50,7 @@ const billUpload = multer({
  * error handler would report as a 500. Turn them into the 400s they are.
  */
 function handleBillUpload(req, res, next) {
-  billUpload.single("file")(req, res, (err) => {
+  keepRequestContext(billUpload.single("file"))(req, res, (err) => {
     if (!err) return next();
     if (err instanceof multer.MulterError) {
       const message =

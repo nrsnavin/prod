@@ -19,6 +19,10 @@ const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
 const { requireReason } = require("../utils/auditReason.js");
 const multer   = require("multer");
+// multer finishes from a stream event, which loses the request's
+// AsyncLocalStorage stores — the database it routes to and the user
+// it audits as. See middleware/userContext.js.
+const { keepRequestContext } = require("../middleware/userContext.js");
 const poIntake = require("../services/inboundPoIntake.js");
 
 // A photographed PO is a phone camera image; 12 MB covers a multi-page
@@ -2185,7 +2189,7 @@ router._etaHelpers = {
 // ══════════════════════════════════════════════════════════════════
 router.post(
   "/intake-po",
-  poUpload.single("file"),
+  keepRequestContext(poUpload.single("file")),
   catchAsyncErrors(async (req, res, next) => {
     if (!req.file) {
       return next(new ErrorHandler('No file uploaded (field name must be "file").', 400));

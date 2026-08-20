@@ -528,3 +528,96 @@ describe('why a request is not in the sandbox', () => {
     expect(res.body.message).not.toMatch(/SANDBOX_USERS|systemctl/);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  THE BUG THAT DEPENDED ON FILE SIZE
+//
+//  Both request stores are AsyncLocalStorage. multer consumes the
+//  request stream and calls next() from a STREAM EVENT, emitted by the
+//  socket — an async resource created when the connection was accepted,
+//  before this request had a user. The handler therefore ran with an
+//  EMPTY store: currentDb() null, so every model resolved to the LIVE
+//  database whoever the user was, and getCurrentUser() null, so the
+//  upload was saved unattributed.
+//
+//  It survived because it depends on SIZE. A few bytes arrive in one
+//  chunk, busboy finishes synchronously, the store is intact — and
+//  every fixture in this repo was a 15-byte PDF. A real photo is not:
+//
+//        16 B  → "read database sandbox_db"
+//       900 KB → "read database primary_db. No signed-in user."
+//
+//  The second line is the production report, word for word. So the
+//  fixtures here are DELIBERATELY LARGE. A test that shrinks them
+//  passes while the bug is back.
+// ══════════════════════════════════════════════════════════════════
+describe('a large upload keeps the request context', () => {
+  // Comfortably more than one chunk, which is the entire point.
+  const BIG = Buffer.alloc(900_000, 0x41);
+
+  const uploadAs = (as, bytes) =>
+    request(app).post('/api/v2/machine/service-bill')
+      .set('Cookie', cookie(as))
+      .attach('file', bytes, { filename: 'bill.pdf', contentType: 'application/pdf' })
+      .field('machineId', String(new mongoose.Types.ObjectId()))
+      .field('serviceLogId', String(new mongoose.Types.ObjectId()))
+      .field('kind', 'service_bill');
+
+  it('still knows who is signed in after 900 KB of file', async () => {
+    // "No signed-in user" on an authenticated route is the tell: the
+    // store was gone, so audit stamps were gone with it.
+    const res = await uploadAs(sandboxUser, BIG);
+    expect(res.body.message).not.toMatch(/No signed-in user/);
+  });
+
+  it('still routes a sandbox user to the sandbox after 900 KB', async () => {
+    const res = await uploadAs(sandboxUser, BIG);
+    expect(res.body.message).toContain('sandbox_db');
+    expect(res.body.message).not.toContain('primary_db');
+  });
+
+  it('files a large bill into the sandbox, not into production', async () => {
+    // The consequence that matters: a sandbox user's uploads were
+    // landing in the live database, which is the exact failure
+    // db/tenants.js exists to prevent.
+    const created = await request(app).post('/api/v2/machine/create-machine')
+      .set('Cookie', cookie(sandboxUser))
+      .send({ ID: 'LOOM-BIG', manufacturer: 'Comez', NoOfHead: 8, NoOfHooks: 24 });
+    const machineId = String(created.body.machine._id);
+    const log = await request(app).post('/api/v2/machine/add-service-log')
+      .set('Cookie', cookie(sandboxUser))
+      .send({ machineId, type: 'Corrective', description: 'Belt' });
+
+    const res = await request(app).post('/api/v2/machine/service-bill')
+      .set('Cookie', cookie(sandboxUser))
+      .attach('file', BIG, { filename: 'bill.pdf', contentType: 'application/pdf' })
+      .field('machineId', machineId)
+      .field('serviceLogId', String(log.body.log._id))
+      .field('kind', 'service_bill');
+
+    expect(res.status).toBe(201);
+    expect(await raw('sandbox_db', 'machineservicebills').countDocuments()).toBe(1);
+    expect(await raw('primary_db', 'machineservicebills').countDocuments()).toBe(0);
+  });
+
+  it('stamps the uploader on a large bill', async () => {
+    // getCurrentUser() feeds the auditFields plugin. An empty store
+    // means every upload is filed by nobody.
+    const created = await request(app).post('/api/v2/machine/create-machine')
+      .set('Cookie', cookie(sandboxUser))
+      .send({ ID: 'LOOM-BIG2', manufacturer: 'Comez', NoOfHead: 8, NoOfHooks: 24 });
+    const machineId = String(created.body.machine._id);
+    const log = await request(app).post('/api/v2/machine/add-service-log')
+      .set('Cookie', cookie(sandboxUser))
+      .send({ machineId, type: 'Corrective', description: 'Belt' });
+
+    const res = await request(app).post('/api/v2/machine/service-bill')
+      .set('Cookie', cookie(sandboxUser))
+      .attach('file', BIG, { filename: 'bill.pdf', contentType: 'application/pdf' })
+      .field('machineId', machineId)
+      .field('serviceLogId', String(log.body.log._id))
+      .field('kind', 'service_bill');
+
+    expect(String(res.body.bill.uploadedBy)).toBe(String(sandboxUser._id));
+  });
+});

@@ -26,6 +26,10 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const multer = require('multer');
+// multer finishes from a stream event, which loses the request's
+// AsyncLocalStorage stores — the database it routes to and the user
+// it audits as. See middleware/userContext.js.
+const { keepRequestContext } = require("../middleware/userContext.js");
 const router = express.Router();
 
 const catchAsyncErrors = require('../middleware/catchAsyncErrors.js');
@@ -56,7 +60,7 @@ const photoUpload = multer({
 
 /** multer reports its limits as a MulterError, which is a 400, not a 500. */
 function handlePhotoUpload(req, res, next) {
-  photoUpload.single('photo')(req, res, (err) => {
+  keepRequestContext(photoUpload.single('photo'))(req, res, (err) => {
     if (!err) return next();
     if (err instanceof multer.MulterError) {
       const message = err.code === 'LIMIT_FILE_SIZE'

@@ -10,11 +10,20 @@
 //    node scripts/add-user.js "Navin" rsnavin1@gmail.com --db baluElastics
 //    node scripts/add-user.js "Navin" rsnavin1@gmail.com --update
 //
-//  Writes to the `test` database by default, whatever MONGO_URL points
-//  at — this exists to seed logins into the sandbox, and defaulting to
-//  "wherever the app happens to be connected" is how you create an
-//  account in the wrong one and spend an afternoon on it. --db picks
-//  another.
+//  Writes to the database MONGO_URL names — the one the app actually
+//  reads logins from. That is not a preference, it is the only value
+//  that works: db/tenants.js pins `User` and `CustomerUser` to the
+//  PRIMARY database, so an account created anywhere else is invisible
+//  to sign-in. This used to default to `test`, which produced accounts
+//  that looked created, reported success, and could never log in.
+//
+//  Per-user sandbox routing sends a listed user's DATA to SANDBOX_DB
+//  while their LOGIN stays here — one set of credentials, by design.
+//  So the sandbox needs no account of its own; it needs the email in
+//  SANDBOX_USERS.
+//
+//  --db is still there for the rare deliberate case, and the script
+//  says which database it wrote to either way.
 //
 //  NO PASSWORD IS ASKED FOR. The web app signs in by emailed OTP, so a
 //  password is never typed; the schema requires one, so a long random
@@ -55,7 +64,9 @@ const positional = (() => {
 })();
 
 const [nameArg, emailArg] = positional;
-const DB = flagValue('--db') || 'test';
+// null → the database MONGO_URL names. See the header: anywhere else
+// and the account cannot sign in.
+const DB = flagValue('--db');
 const DEPARTMENT = flagValue('--department') || 'admin';
 const UPDATE = argv.includes('--update');
 const SHOW_PASSWORD = argv.includes('--show-password');
@@ -64,7 +75,8 @@ const bail = (msg) => { console.error(`\n${msg}\n`); process.exit(1); };
 
 const USAGE =
   'Usage: node scripts/add-user.js "Full Name" email@company.com\n' +
-  '         [--db <database>] [--department admin|production|packing|finance]\n' +
+  '         [--db <database>]   (default: the database MONGO_URL names)\n' +
+  '         [--department admin|production|packing|finance]\n' +
   '         [--update] [--show-password]';
 
 async function main() {
@@ -83,11 +95,18 @@ async function main() {
 
   // The connection may be pointed anywhere; useDb puts this write in the
   // database that was asked for, over the same client.
-  const connection = mongoose.connection.name === DB
+  const connection = !DB || mongoose.connection.name === DB
     ? mongoose.connection
     : mongoose.connection.useDb(DB, { useCache: true });
 
   console.log(`\nConnected to cluster; writing to database: ${connection.name}`);
+  if (DB && DB !== mongoose.connection.name) {
+    console.warn(
+      `\n⚠  --db ${DB} is NOT the database MONGO_URL connects to ` +
+      `(${mongoose.connection.name}). Sign-in reads users from the primary ` +
+      'only, so this account will not be able to log in.\n'
+    );
+  }
 
   const User = connection.model('User', require('../models/User').schema);
 
