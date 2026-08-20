@@ -10,6 +10,7 @@ const { escapeRegex } = require("../utils/escapeRegex");
 
 const DeliveryChallan = require("../models/DeliveryChallan");
 const Order           = require("../models/Order");
+const JobOrder        = require("../models/JobOrder");
 const StockMovement   = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { applyMovement } = require("../utils/elasticStock");
@@ -279,33 +280,176 @@ async function _reverseDcItem(session, dc, item, reasonContext, userId) {
   return { refund, restored: restoring, strandedReservation };
 }
 
+/**
+ * The order, shaped the way the "new DC" form needs it.
+ *
+ * Shared by /order-info (picked from the search box) and /job-order
+ * (arrived at by scanning a job label), because the two have to agree.
+ * A field added to one and not the other is a form that fills in
+ * differently depending on which way the person got there, and that is
+ * exactly the kind of difference nobody notices until a challan goes
+ * out with a blank GSTIN on it.
+ */
+function orderInfoPayload(order) {
+  return {
+    orderNo:  order.orderNo,
+    // The form does not gate on this, and neither does /create — a
+    // closed order still despatches, it simply has no reservation left
+    // to discharge (see _applyDcItems). It is reported so the screen
+    // can SAY so, rather than quietly behaving differently.
+    orderStatus: order.status ?? "",
+    customer: {
+      name:    order.customer?.name         ?? "",
+      phone:   order.customer?.phoneNumber  ?? "",
+      gstin:   order.customer?.gstin        ?? "",
+      contact: order.customer?.contactName  ?? "",
+    },
+    elastics: (order.elasticOrdered ?? []).map((e) => ({
+      elasticId:   e.elastic?._id,
+      elasticName: e.elastic?.name      ?? "",
+      weaveType:   e.elastic?.weaveType ?? "",
+      orderedQty:  e.quantity           ?? 0,
+    })),
+  };
+}
+
+const populateOrderForDc = (q) => q
+  .populate("customer", "name phoneNumber gstin contactName")
+  .populate("elasticOrdered.elastic", "name weaveType");
+
 router.get(
   "/order-info",
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("Order id is required", 400));
+    if (!mongoose.Types.ObjectId.isValid(String(id))) {
+      return next(new ErrorHandler("Invalid order id", 400));
+    }
 
-    const order = await Order.findById(id)
-      .populate("customer", "name phoneNumber gstin contactName")
-      .populate("elasticOrdered.elastic", "name weaveType");
-
+    const order = await populateOrderForDc(Order.findById(id));
     if (!order) return next(new ErrorHandler("Order not found", 404));
+
+    res.json({ success: true, ...orderInfoPayload(order) });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  THE ORDER BEHIND A SCANNED JOB LABEL
+//
+//  The person raising a challan is standing at a trolley with the job
+//  label taped to it, and the challan is raised against the ORDER. So
+//  the label — which names a job — has to be resolved one hop further
+//  before it is any use here.
+//
+//  ── Why the server does the hop ────────────────────────────────
+//  The obvious client-side version is: fetch the job, read its order
+//  id, fetch the order. That is two round trips over a mill wifi for
+//  something the database joins for free, and it leaves the phone
+//  holding a half-resolved state if the second call fails — an order
+//  id with no order, which the form has no way to render.
+//
+//  ── What comes back ────────────────────────────────────────────
+//  The order, in exactly the shape /order-info returns, PLUS the lines
+//  this particular job covers. The order may span several jobs; the
+//  trolley holds one. Sending the job's own lines lets the form open
+//  with that job's elastics ticked and its PACKED quantities filled
+//  in, instead of the whole order's ordered quantities — which is the
+//  difference between filling in the order and filling in the
+//  despatch.
+//
+//  Quantities are directly comparable: Order.elasticOrdered.quantity
+//  and JobOrder.packedElastic.quantity are both in the elastic's own
+//  unit (meters). See models/Order.js.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/job-order",
+  catchAsyncErrors(async (req, res, next) => {
+    const { jobId, jobNo } = req.query;
+
+    // The label carries an id; a hand-typed fallback carries a number.
+    // Exactly one, so a request that means two things is rejected
+    // rather than silently resolved by parameter order.
+    const hasId = jobId !== undefined && String(jobId).trim() !== "";
+    const hasNo = jobNo !== undefined && String(jobNo).trim() !== "";
+    if (hasId === hasNo) {
+      return next(new ErrorHandler("Give exactly one of jobId or jobNo", 400));
+    }
+
+    let job;
+    if (hasId) {
+      if (!mongoose.Types.ObjectId.isValid(String(jobId).trim())) {
+        return next(new ErrorHandler("Invalid job id", 400));
+      }
+      job = await JobOrder.findById(String(jobId).trim())
+        .select("jobOrderNo status order elastics packedElastic")
+        .lean();
+      if (!job) {
+        return next(new ErrorHandler(
+          "That label was read, but no job with that id exists.", 404));
+      }
+    } else {
+      const n = Number(String(jobNo).trim());
+      if (!Number.isInteger(n) || n <= 0) {
+        return next(new ErrorHandler("Invalid job number", 400));
+      }
+      // jobOrderNo comes from an auto-increment counter, so duplicates
+      // mean the data has been through surgery. Picking one anyway
+      // could load a DIFFERENT customer's order onto a challan, so it
+      // asks rather than guesses.
+      const hits = await JobOrder.find({ jobOrderNo: n })
+        .select("jobOrderNo status order elastics packedElastic")
+        .limit(2)
+        .lean();
+      if (hits.length === 0) {
+        return next(new ErrorHandler(`No job numbered ${n}.`, 404));
+      }
+      if (hits.length > 1) {
+        return next(new ErrorHandler(
+          `More than one job is numbered ${n}. Pick the order by hand.`, 409));
+      }
+      job = hits[0];
+    }
+
+    // `order` is required on JobOrder, so a missing one here means the
+    // order document was deleted out from under the job rather than
+    // that this job never had one — worth saying, because "order not
+    // found" on a good label reads as a broken scanner.
+    if (!job.order) {
+      return next(new ErrorHandler(
+        `Job #${job.jobOrderNo} is not linked to an order.`, 409));
+    }
+
+    const order = await populateOrderForDc(Order.findById(job.order));
+    if (!order) {
+      return next(new ErrorHandler(
+        `Job #${job.jobOrderNo} points at an order that no longer exists.`, 404));
+    }
+
+    const qtyByElastic = new Map();
+    for (const e of job.packedElastic ?? []) {
+      if (e?.elastic) qtyByElastic.set(String(e.elastic), e.quantity ?? 0);
+    }
 
     res.json({
       success: true,
-      orderNo:  order.orderNo,
-      customer: {
-        name:    order.customer?.name         ?? "",
-        phone:   order.customer?.phoneNumber  ?? "",
-        gstin:   order.customer?.gstin        ?? "",
-        contact: order.customer?.contactName  ?? "",
+      orderId: String(order._id),
+      ...orderInfoPayload(order),
+      job: {
+        id:         String(job._id),
+        jobOrderNo: job.jobOrderNo ?? null,
+        status:     job.status ?? "",
       },
-      elastics: (order.elasticOrdered ?? []).map((e) => ({
-        elasticId:   e.elastic?._id,
-        elasticName: e.elastic?.name      ?? "",
-        weaveType:   e.elastic?.weaveType ?? "",
-        orderedQty:  e.quantity           ?? 0,
-      })),
+      // What this job planned and what it actually packed, per elastic.
+      // packedQty is 0 until the job reaches packing — a real answer,
+      // not a missing one, and the form says which it is rather than
+      // prefilling a zero that looks like a typed figure.
+      jobLines: (job.elastics ?? [])
+        .filter((e) => e?.elastic)
+        .map((e) => ({
+          elasticId:  String(e.elastic),
+          plannedQty: e.quantity ?? 0,
+          packedQty:  qtyByElastic.get(String(e.elastic)) ?? 0,
+        })),
     });
   })
 );
