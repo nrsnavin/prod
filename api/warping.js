@@ -13,7 +13,6 @@ const YarnLot          = require("../models/YarnLot");
 const Elastic          = require("../models/Elastic");
 const { nextNumber }   = require("../utils/sequence");
 const { drawFromLot, returnToLot } = require("../services/yarnLotService");
-const { appendStockMovement } = require("../utils/stockLedger");
 const { buildBeamsFromTemplates } = require("../services/warpingTemplate");
 const { plannedLotsForJob, distinctLots } = require("../services/yarnLotTrail");
 const { earmarksForJob, consumeEarmark } = require("../services/lotAllocation");
@@ -1072,63 +1071,6 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
 //  See models/YarnLot.js.
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Record a batch's lot movements on the RAW MATERIAL ledger too.
- *
- * The lot's own ledger has always had these. The material's has not,
- * so the one place someone goes to ask "what happened to this yarn"
- * could say when it was bought and when an order committed it, but
- * never when it actually came off the rack.
- *
- * ── Why the quantity is zero ─────────────────────────────────────
- * Issuing a batch deliberately does not move `RawMaterial.stock` —
- * that was debited earlier, at order approval, and debiting it again
- * would take the same yarn out twice. See the long note at the top of
- * models/YarnLot.js; this function does not change that and must not
- * be made to.
- *
- * So the row carries `quantity: 0`, which is the truth about its
- * effect on the balance, and the kilos drawn go in `lotQuantity`.
- * MOVEMENT_DIRECTION maps both batch types to 0 as well, so the
- * ledger's backwards balance walk cannot be disturbed by these rows
- * even if a future writer got the quantity wrong. Both layers are
- * covered by tests/utils/stockLedgerBatchRows.test.js.
- *
- * ── Not best-effort ──────────────────────────────────────────────
- * Called inside the caller's transaction, and deliberately allowed to
- * throw. Swallowing a failure here would issue the batch and leave a
- * hole in the very ledger this exists to complete — a gap nobody would
- * ever notice, because a missing row looks exactly like a batch that
- * was never raised.
- *
- * The transaction makes the alternative cheap: a throw rolls the lot
- * draws back with it, the batch stays `planned`, and the operator
- * retries an issue that has not half-happened. That is a better
- * outcome than a silent gap, which is why the fingerprint write below
- * IS best-effort and this is not — an audit line and a stock ledger
- * are not the same kind of record.
- */
-async function recordBatchOnMaterialLedger(batch, type, session) {
-  for (const a of batch.allocations || []) {
-    // A batch line with no material cannot be posted anywhere. It
-    // should not exist — /batch/create requires one — so this is a
-    // guard against malformed history, not an expected case.
-    if (!a.rawMaterial) continue;
-    await appendStockMovement(
-      a.rawMaterial,
-      {
-        type,
-        quantity: 0,
-        lotQuantity: Math.abs(Number(a.quantity) || 0),
-        yarnLot: a.yarnLot,
-        lotNo: a.lotNo || "",
-        refNo: batch.batchNo || "",
-      },
-      session
-    );
-  }
-}
-
 /** Beam numbers the plan actually defines, for validating a batch. */
 function planBeamNumbers(plan) {
   return new Set(
@@ -1495,10 +1437,6 @@ router.post("/batch/:id/issue", isAdmin("admin", "production"), catchAsyncErrors
           warpingBatch: claimed._id, refNo: claimed.batchNo,
         });
       }
-      // And on the material's ledger, so the one page somebody opens to
-      // ask "what happened to this yarn" can answer it too.
-      await recordBatchOnMaterialLedger(claimed, "BATCH_ISSUE", session);
-
       // ── Spend the order's earmark down ──────────────────────────
       // A lot's free balance is `received − consumed − earmarked`. The
       // draws above just raised `consumed`; if the earmark stayed
@@ -1597,10 +1535,6 @@ router.patch("/batch/:id/cancel", isAdmin("admin", "production"), catchAsyncErro
             reason: 'batch cancelled',
           });
         }
-        // Guarded by issuedDate for the same reason the returns are: a
-        // batch cancelled while still `planned` never drew anything, so
-        // posting a return for it would invent a movement.
-        await recordBatchOnMaterialLedger(claimed, "BATCH_RETURN", session);
       }
       batch = claimed;
     });

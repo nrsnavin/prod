@@ -69,14 +69,6 @@ const MOVEMENT_DIRECTION = {
   JOB_CONSUMPTION:     -1,
   PO_INWARD:           +1,
   ORDER_CANCEL_REFUND: +1,
-  // Zero, and that is the whole point. A warping batch moves yarn off
-  // the rack without moving `stock` — see the note on
-  // RawMaterial.stockMovements.lotQuantity, and the long one at the
-  // top of models/YarnLot.js for why the two counters must not be
-  // reconciled. These rows exist so the ledger can say WHEN a lot left,
-  // and they must not disturb the balance column while doing it.
-  BATCH_ISSUE:          0,
-  BATCH_RETURN:         0,
 };
 
 /**
@@ -91,19 +83,7 @@ const TYPE_LABEL = {
   PO_INWARD:           'Goods received',
   JOB_CONSUMPTION:     'Issued to job',
   STOCK_ADJUST:        'Manual adjustment',
-  BATCH_ISSUE:         'Drawn for warping',
-  BATCH_RETURN:        'Returned to rack',
 };
-
-/**
- * Types that record a physical draw off the rack rather than a change
- * in the commercial balance.
- *
- * The UI needs to tell them apart: a row saying "40 kg" beside a
- * balance that did not move is a lie unless the screen says which of
- * the two numbers it is talking about.
- */
-const LOT_ONLY_TYPES = new Set(['BATCH_ISSUE', 'BATCH_RETURN']);
 
 /** Pull an id out of a field that may or may not have been populated. */
 const idOf = (v) => (v && typeof v === 'object' ? v._id ?? null : v ?? null);
@@ -178,24 +158,7 @@ function normaliseMovements(movements = [], currentStock = 0) {
     const qty = Number(row.quantity) || 0;
     // Math.abs first: a row already stored with the right sign must not
     // be flipped back by applying the direction a second time.
-    //
-    // `dir != null` rather than a plain truthiness test, because the
-    // batch types map to 0 and 0 is falsy — the old form fell through
-    // to the stored value, which happened to be 0 as well. That is a
-    // right answer for the wrong reason, and the next person to add a
-    // type would not know which of the two rules they were relying on.
-    row.quantity = dir != null ? Math.abs(qty) * dir : qty;
-
-    // ── The rack, alongside the balance ────────────────────────────
-    // A warping batch draws yarn without moving stock, so its row
-    // carries 0 above and the kilos here. Signed the same way an
-    // ordinary movement would be — out is negative — so the two read
-    // alike even though only one of them touches the balance.
-    const lotQty = Number(row.lotQuantity);
-    row.lotOnly = LOT_ONLY_TYPES.has(row.type);
-    row.lotQuantity = Number.isFinite(lotQty)
-      ? (row.type === 'BATCH_ISSUE' ? -Math.abs(lotQty) : Math.abs(lotQty))
-      : null;
+    row.quantity = dir ? Math.abs(qty) * dir : qty;
 
     // What this movement was worth. Priced from the cost snapshotted on
     // the row, never from the material's cost today — the average moves
@@ -241,6 +204,5 @@ module.exports = {
   describeMovement,
   TYPE_LABEL,
   MOVEMENT_DIRECTION,
-  LOT_ONLY_TYPES,
   MAX_EMBEDDED_MOVEMENTS,
 };
