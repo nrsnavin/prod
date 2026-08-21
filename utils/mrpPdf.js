@@ -177,17 +177,24 @@ async function buildMrpPdf(data) {
   // anyway: an operator reads down the name column and needs the bag
   // number at the same glance, not four columns to the right.
   //
-  // A programmed lot is marked, because "this beam will run off
-  // D-4471" and "D-2002 is on the rack" are different sentences, and a
-  // sheet that printed them alike would have somebody warping off the
-  // wrong bag. Said in a word rather than a symbol — these print in
-  // mono, and a glyph that does not render is worse than no marker.
+  // Each lot is marked with WHICH decision put it there, because
+  // three different sentences arrive in one list:
+  //
+  //   set aside   the order earmarked this bag at approval — a claim
+  //               on the yarn, made before any beam existed;
+  //   programmed  the warping plan chose it for a beam section;
+  //   (bare)      it is merely open on the rack.
+  //
+  // Printing them alike would have somebody warping off the wrong bag.
+  // Said in words rather than symbols — these print in mono, and a
+  // glyph that does not render is worse than no marker at all.
+  const LOT_MARK = { order: " (set aside)", programme: " (programmed)" };
   const lotLine = (m) => {
     const lots = m.lots || [];
     if (!lots.length) return "";
     const shown = lots
       .slice(0, 3)
-      .map((l) => (l.committed ? `${l.lotNo} (programmed)` : l.lotNo))
+      .map((l) => (l.lotNo ? `${l.lotNo}${LOT_MARK[l.source] || ""}` : ""))
       .filter(Boolean);
     if (!shown.length) return "";
     const more = lots.length > shown.length ? ` +${lots.length - shown.length}` : "";

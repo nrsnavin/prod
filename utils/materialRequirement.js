@@ -160,12 +160,28 @@ async function lotsForMaterials(rows = [], committedByMat = new Map()) {
         lotNo: c.lotNo || "",
         shade: c.shade || "",
         // A committed lot may be quarantined, exhausted or gone since
-        // the programme named it. Balance is filled in below from the
-        // open lots when it is still one of them, and left null when
-        // it is not — which is itself worth seeing on the sheet.
+        // it was named. Balance is filled in below from the open lots
+        // when it is still one of them, and left null when it is not —
+        // which is itself worth seeing on the sheet.
         balance: null,
         ageDays: null,
         committed: true,
+        // WHICH commitment. Two different decisions arrive as
+        // `committed` and the sheet has to be able to tell them apart:
+        //
+        //   order      the order earmarked this bag when it was
+        //              approved — a claim on the yarn, made before any
+        //              beam existed;
+        //   programme  the warping plan chose it for a beam section,
+        //              which is a decision about where in the cloth it
+        //              goes.
+        //
+        // They usually agree. When they do not, that disagreement is
+        // the single most useful thing this column can show, so it is
+        // not flattened.
+        source: c.source || "programme",
+        // Kg the order set aside, when the commitment came from there.
+        quantity: c.quantity != null ? Number(c.quantity) : null,
       });
     }
 
@@ -188,6 +204,8 @@ async function lotsForMaterials(rows = [], committedByMat = new Map()) {
         balance: lot.balance,
         ageDays: lot.ageDays,
         committed: false,
+        source: "available",
+        quantity: null,
       });
     }
 

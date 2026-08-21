@@ -48,12 +48,58 @@ const ReservationSchema = new mongoose.Schema(
   { _id: false }
 );
 
+/**
+ * One dye lot this order has EARMARKED for a material.
+ *
+ * ── Earmarked, not consumed ──────────────────────────────────────
+ * Approving the order debits `RawMaterial.stock` — the commercial
+ * balance — and this says which bags that debit is expected to come
+ * out of. It deliberately does NOT move `YarnLot.consumedQty`: the
+ * yarn is still on the rack, and it leaves when a warping batch draws
+ * it. Moving the lot here as well would take the same yarn out twice,
+ * which models/YarnLot.js explains at length.
+ *
+ * So a lot's free balance is `received − consumed − earmarked`, and
+ * the earmark is what stops a second order planning against bags this
+ * one is already counting on.
+ *
+ * ── Why the earmark lives here and not on the lot ────────────────
+ * One writer. Mirroring the same figure onto YarnLot would give two
+ * documents a claim on one fact and no way to tell which had drifted;
+ * services/lotAllocation.js aggregates from here instead, the way
+ * placedQuantity already aggregates lot balances.
+ */
+const RawMaterialLotEarmarkSchema = new mongoose.Schema(
+  {
+    yarnLot:  { type: mongoose.Types.ObjectId, ref: "YarnLot", required: true },
+    // Snapshotted beside the reference, so the order still reads
+    // correctly if the lot is archived years later — the same reason
+    // the warping programme snapshots its lot numbers.
+    lotNo:    { type: String, trim: true, default: "" },
+    shade:    { type: String, trim: true, default: "" },
+    /** Kg of this lot promised to this order. */
+    quantity: { type: Number, required: true, min: 0 },
+    assignedAt: { type: Date, default: Date.now },
+    assignedBy: { type: mongoose.Types.ObjectId, ref: "User" },
+  },
+  { _id: false }
+);
+
 const RawMaterialRequirementSchema = new mongoose.Schema(
   {
     rawMaterial:    { type: mongoose.Types.ObjectId, ref: "RawMaterial", required: true },
     name:           { type: String },
     requiredWeight: { type: Number },
     inStock:        { type: Number },
+
+    // Which dye lots this order's draw is expected to come out of.
+    //
+    // Optional and routinely PARTIAL: a long-lead yarn is earmarked as
+    // it arrives, so 250 kg of a 400 kg requirement being spoken for is
+    // an ordinary state and not an error. Empty means no choice has
+    // been made, which leaves every downstream picker unconstrained —
+    // the behaviour every order had before this existed.
+    lots: { type: [RawMaterialLotEarmarkSchema], default: [] },
   },
   { _id: false }
 );

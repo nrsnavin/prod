@@ -16,6 +16,7 @@ const { drawFromLot, returnToLot } = require("../services/yarnLotService");
 const { appendStockMovement } = require("../utils/stockLedger");
 const { buildBeamsFromTemplates } = require("../services/warpingTemplate");
 const { plannedLotsForJob, distinctLots } = require("../services/yarnLotTrail");
+const { earmarksForJob, consumeEarmark } = require("../services/lotAllocation");
 const { checkWarpingIssued } = require("../services/warpingIssueReadiness");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -1282,6 +1283,65 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
     ));
   }
 
+  // ── The order's earmarked lots ──────────────────────────────────
+  //
+  // Approving the order named which bags its draw was expected to come
+  // out of. Drawing a different one is not forbidden — a lot goes
+  // quarantined, a bag comes up short, and production cannot stop
+  // while somebody edits an order — but it does need saying out loud,
+  // because an earmark nobody honours is an earmark nobody can plan
+  // against either.
+  //
+  // Only materials the order actually earmarked are constrained. A
+  // material with no earmarks is unconstrained, which is every order
+  // approved before this existed and every one approved without
+  // choosing.
+  const jobForOrder = await JobOrder.findById(warping.job).select("order").lean();
+  const earmarks = await earmarksForJob(jobForOrder);
+
+  if (earmarks.size > 0) {
+    const offMark = [];
+    for (const line of parsed) {
+      const rows = earmarks.get(String(line.rawMaterial));
+      if (!rows || !rows.length) continue;
+      const named = rows.some((r) => String(r.yarnLot) === String(line.yarnLot));
+      if (!named) {
+        offMark.push(
+          `${line.lotNo || line.yarnLot} is not one of the lots this order set aside ` +
+          `(${rows.map((r) => r.lotNo).filter(Boolean).join(", ")})`
+        );
+      }
+    }
+    if (offMark.length) {
+      const reason = String(req.body?.lotOverrideReason || "").trim();
+      if (reason.length < 8) {
+        const err = new ErrorHandler(
+          `${offMark.join("; ")}. Draw one of those, or say why not ` +
+          `(lotOverrideReason, at least 8 characters).`,
+          400
+        );
+        // Named so a client can offer the override in place rather than
+        // making the operator guess which of several rules was hit.
+        err.code = "LOT_NOT_EARMARKED";
+        err.details = { offMark };
+        return next(err);
+      }
+      // Recorded on the job's audit trail, where a shade query starts.
+      try {
+        await JobOrder.updateOne(
+          { _id: warping.job },
+          { $push: { fingerprints: buildFingerprint(ACTION_CODES.WARPING_STARTED, {
+            entityId: warping.job,
+            actor: actorFromRequest(req),
+            meta: { lotOverride: true, reason, detail: offMark },
+          }) } }
+        );
+      } catch (fpErr) {
+        console.warn("Lot override fingerprint failed:", fpErr.message);
+      }
+    }
+  }
+
   // Which elastic is this batch warping for? Answering it is what turns
   // "this lot went into job 812" into "this lot is in this roll".
   const job = await JobOrder.findById(warping.job).select("elastics").lean();
@@ -1438,6 +1498,23 @@ router.post("/batch/:id/issue", isAdmin("admin", "production"), catchAsyncErrors
       // And on the material's ledger, so the one page somebody opens to
       // ask "what happened to this yarn" can answer it too.
       await recordBatchOnMaterialLedger(claimed, "BATCH_ISSUE", session);
+
+      // ── Spend the order's earmark down ──────────────────────────
+      // A lot's free balance is `received − consumed − earmarked`. The
+      // draws above just raised `consumed`; if the earmark stayed
+      // where it was, the same kilos would be subtracted twice and a
+      // 40 kg draw would take 80 kg out of what anyone else can plan
+      // against. The promise has been kept, so it stops being
+      // outstanding. See services/lotAllocation.js.
+      const jobRef = await JobOrder.findById(claimed.job)
+        .select("order").session(session).lean();
+      const orderId = jobRef?.order;
+      if (orderId) {
+        for (const a of claimed.allocations) {
+          await consumeEarmark(orderId, a.rawMaterial, a.yarnLot, a.quantity, session);
+        }
+      }
+
       batch = claimed;
     });
 

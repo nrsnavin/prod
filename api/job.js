@@ -26,6 +26,7 @@ const { triageShortfall, createShortfallPos, skipReasons } = require('../service
 const { issuedForOrder, shareForJob } = require('../services/orderIssuance');
 const { checkWeavingReadiness } = require('../services/weavingReadiness');
 const { plannedLotsForJob, distinctLots } = require('../services/yarnLotTrail');
+const { earmarksForJob } = require('../services/lotAllocation');
 const { shiftFigures, clockToMinutes } = require('../utils/shiftFigures');
 const { buildMrpPdf } = require('../utils/mrpPdf');
 const { getPdfBranding } = require('../services/documentSettings.js');
@@ -2008,7 +2009,7 @@ async function jobRequirement(job) {
   // that names its lots is a stronger answer than any inference, and
   // it is already recorded — it was simply never carried onto the
   // sheet the floor prints. See services/yarnLotTrail.js.
-  const committedLots = await committedLotsByMaterial(job._id);
+  const committedLots = await committedLotsByMaterial(job._id, job);
 
   const materials = await computeMaterialRequirement(job.elastics || [], { committedLots });
   const orderId = job.order?._id || job.order;
@@ -2037,8 +2038,38 @@ async function jobRequirement(job) {
  * warpYarn reference, and putting them under a guessed material would
  * be worse than leaving the row's lots to the available list.
  */
-async function committedLotsByMaterial(jobId) {
+async function committedLotsByMaterial(jobId, job) {
   const out = new Map();
+
+  // ── The order's earmarks come FIRST ─────────────────────────────
+  // They are the older and broader claim: approving the order set
+  // these bags aside for it before any beam existed. The programme's
+  // choices are then layered on top, and where the two name the same
+  // lot the programme's entry is skipped as a duplicate — so the
+  // sheet shows one row per lot with the order's claim on it.
+  //
+  // Read through a separate try: a job whose order has been deleted
+  // must not lose its programmed lots as well.
+  try {
+    const earmarks = await earmarksForJob(job || { order: null });
+    for (const [materialId, rows] of earmarks) {
+      const list = [];
+      for (const r of rows) {
+        if (!r.yarnLot && !r.lotNo) continue;
+        list.push({
+          yarnLot: r.yarnLot ? String(r.yarnLot) : null,
+          lotNo: r.lotNo || "",
+          shade: r.shade || "",
+          quantity: Number(r.quantity) || 0,
+          source: "order",
+        });
+      }
+      if (list.length) out.set(String(materialId), list);
+    }
+  } catch (err) {
+    console.warn(`MRP: could not read the order's earmarked lots for job ${jobId}:`, err.message);
+  }
+
   try {
     const trail = await plannedLotsForJob(jobId);
     for (const e of trail.entries || []) {
@@ -2047,7 +2078,7 @@ async function committedLotsByMaterial(jobId) {
       const list = out.get(e.materialId);
       const key = String(e.yarnLot || e.lotNo || "");
       if (!key || list.some((l) => String(l.yarnLot || l.lotNo) === key)) continue;
-      list.push({ yarnLot: e.yarnLot, lotNo: e.lotNo, shade: e.shade });
+      list.push({ yarnLot: e.yarnLot, lotNo: e.lotNo, shade: e.shade, source: "programme" });
     }
   } catch (err) {
     // The requirement itself does not depend on this, and a sheet with

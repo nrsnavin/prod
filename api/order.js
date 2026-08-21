@@ -39,6 +39,10 @@ const {
 const { assertVersion } = require("../utils/versioning.js");
 const { applyMovement } = require("../utils/elasticStock.js");
 const { releaseAllReservations } = require("../services/orderReservations");
+const {
+  releaseAllEarmarks, assignableLots, LIVE_ORDER_STATUSES,
+} = require("../services/lotAllocation");
+const { applyLotAssignments } = require("../services/orderService.js");
 const { appendStockMovement } = require("../utils/stockLedger.js");
 const { receiveAtCost } = require("../utils/materialValuation.js");
 const { estimateOrderEta } = require("../utils/orderEta.js");
@@ -93,6 +97,24 @@ async function computeRawMaterialRequired(elasticOrdered) {
 // the reserved stock stayed held for a finished order forever. Moving
 // it to a service was the point: one implementation, both callers.
 async function _releaseAllReservations(session, order, actor, context) {
+  // Dye-lot earmarks are released through the same door, and for the
+  // same reason the elastic reservations are: an order that has stopped
+  // needing yarn must stop holding it. A Completed order's lots were
+  // drawn by its warping batches; a Cancelled one's were never drawn at
+  // all. Either way the promise is over, and an earmark nobody releases
+  // is yarn on the rack that no other order can plan against.
+  //
+  // Mutates the order without saving, like releaseAllReservations —
+  // both callers save it afterwards along with their own writes.
+  const earmarked = releaseAllEarmarks(order);
+  if (earmarked > 0) {
+    order.fingerprints.push(buildFingerprint(ACTION_CODES.STOCK_RELEASED, {
+      entityId: order._id,
+      actor,
+      meta: { lotEarmarks: true, quantity: earmarked, unit: 'kg', context },
+    }));
+  }
+
   return releaseAllReservations(session, order, actor, context);
 }
 
@@ -664,7 +686,14 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const session = await mongoose.startSession();
     try {
-      const { orderId, force = false, forceReason = "" } = req.body;
+      const {
+        orderId, force = false, forceReason = "",
+        // Optional: which dye lots this order's draw is expected to
+        // come out of. Absent means unassigned, which is how every
+        // approval before this behaved and how the WhatsApp path still
+        // does — it carries no material detail at all.
+        lotAssignments,
+      } = req.body;
       const actor = actorFromRequest(req);
 
       // The transactional domain logic (validate → pre-flight → force
@@ -688,6 +717,7 @@ router.post(
           orderId, force, forceReason, actor,
           whatsappActor: req.body?.whatsappActor,
           userId:        req.user?._id,
+          lotAssignments,
         });
       });
 
@@ -2215,6 +2245,119 @@ router.post(
     }
 
     res.json({ success: true, ...out });
+  })
+);
+
+
+// ════════════════════════════════════════════════════════════════
+//  DYE LOT EARMARKS
+//
+//  Approving an order debits RawMaterial.stock without saying which
+//  bags the yarn comes out of. These two routes are that sentence:
+//  which lots may be chosen, and which this order has chosen.
+//
+//  GET  /order/:orderId/assignable-lots?materialId=  what is free
+//  POST /order/assign-lots                            record the choice
+//
+//  An earmark moves nothing on the lot — the yarn is still on the rack
+//  and leaves when a warping batch draws it. See
+//  services/lotAllocation.js for the arithmetic and why the two
+//  counters must not be collapsed.
+// ════════════════════════════════════════════════════════════════
+
+router.get(
+  "/:orderId/assignable-lots",
+  catchAsyncErrors(async (req, res, next) => {
+    const { orderId } = req.params;
+    const { materialId } = req.query;
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      return next(new ErrorHandler("Invalid order id", 400));
+    }
+    if (!materialId || !mongoose.Types.ObjectId.isValid(String(materialId))) {
+      return next(new ErrorHandler("materialId is required", 400));
+    }
+
+    const order = await Order.findById(orderId).select("rawMaterialRequired").lean();
+    if (!order) return next(new ErrorHandler("Order not found", 404));
+
+    const rm = (order.rawMaterialRequired || []).find(
+      (r) => String(r.rawMaterial) === String(materialId)
+    );
+    if (!rm) {
+      return next(new ErrorHandler("This order does not require that material", 400));
+    }
+
+    // Excluding this order's own earmarks from the "already promised"
+    // total. Without it, re-opening the picker would show the lots this
+    // order holds as having no room left — its own promise counted
+    // against itself.
+    const lots = await assignableLots(materialId, { excludeOrder: orderId });
+
+    const assigned = (rm.lots || []).reduce((t, l) => t + (Number(l.quantity) || 0), 0);
+
+    res.json({
+      success: true,
+      materialId: String(materialId),
+      requiredWeight: Number(rm.requiredWeight) || 0,
+      assigned: Math.round(assigned * 1000) / 1000,
+      // Partial is normal, so the gap is reported rather than treated
+      // as an error state.
+      unassigned: Math.max(0, Math.round(((Number(rm.requiredWeight) || 0) - assigned) * 1000) / 1000),
+      current: rm.lots || [],
+      lots,
+    });
+  })
+);
+
+router.post(
+  "/assign-lots",
+  isAdmin("admin", "production", "accounts"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { orderId, assignments } = req.body || {};
+    if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+      return next(new ErrorHandler("Valid orderId is required", 400));
+    }
+    if (!Array.isArray(assignments)) {
+      return next(new ErrorHandler("assignments must be a list", 400));
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      let order;
+      await session.withTransaction(async () => {
+        const doc = await Order.findById(orderId).session(session);
+        if (!doc) throw new ErrorHandler("Order not found", 404);
+
+        // Only an order that still holds yarn can promise any. An Open
+        // order has not drawn stock yet and a Completed one has already
+        // used what it drew — earmarking either would hold bags for a
+        // claim that does not exist.
+        if (!LIVE_ORDER_STATUSES.includes(doc.status)) {
+          throw new ErrorHandler(
+            `Order is ${doc.status} — lots can only be assigned while it is ` +
+              LIVE_ORDER_STATUSES.join(" or "),
+            409
+          );
+        }
+
+        await applyLotAssignments(session, doc, assignments, {
+          actor: actorFromRequest(req),
+          userId: req.user?._id,
+        });
+        await doc.save({ session });
+        order = doc;
+      });
+
+      res.json({
+        success: true,
+        message: "Dye lots assigned.",
+        rawMaterialRequired: order.rawMaterialRequired,
+      });
+    } catch (err) {
+      return next(err);
+    } finally {
+      session.endSession();
+    }
   })
 );
 

@@ -22,6 +22,84 @@ const { buildFingerprint, ACTION_CODES } = require('../utils/fingerprint');
 const { applyMovement } = require('../utils/elasticStock');
 const { appendStockMovement } = require('../utils/stockLedger');
 const { costOf } = require('../utils/materialValuation');
+const YarnLot = require('../models/YarnLot');
+const { validateEarmarks, allocatedByLot } = require('./lotAllocation');
+
+/**
+ * Write the dye-lot earmarks for an order, replacing whatever it held.
+ *
+ * ── Replace, not merge ───────────────────────────────────────────
+ * A submission is the whole answer for the materials it names. Merging
+ * would make "remove this lot" impossible to express: an absent row
+ * and an unmentioned row would mean the same thing, and the only way
+ * to unassign would be to send a zero, which the validator rejects.
+ * Materials NOT named are left exactly as they were.
+ *
+ * Validation happens against the free balance excluding this order's
+ * own current earmarks — re-saving 60 kg on a lot this order already
+ * holds 60 kg of must not read as wanting 120.
+ *
+ * @param {Array} assignments [{ rawMaterial, lots: [{ yarnLot, quantity }] }]
+ * @returns {Promise<Array>} one fingerprint per material touched
+ */
+async function applyLotAssignments(session, order, assignments, { actor, userId } = {}) {
+  if (!Array.isArray(assignments) || assignments.length === 0) return [];
+
+  const mongoose = require('mongoose');
+  const fingerprints = [];
+
+  for (const a of assignments) {
+    const materialId = String(a?.rawMaterial ?? '');
+    if (!mongoose.Types.ObjectId.isValid(materialId)) {
+      throw new ErrorHandler('Lot assignment: invalid material', 400);
+    }
+
+    const rm = (order.rawMaterialRequired || []).find(
+      (r) => String(r.rawMaterial) === materialId
+    );
+    if (!rm) {
+      throw new ErrorHandler(
+        'Lot assignment names a material this order does not require',
+        400
+      );
+    }
+
+    const rows = Array.isArray(a.lots) ? a.lots : [];
+
+    // Every lot on the material, not only the open ones: the validator
+    // has to be able to say "that lot is quarantined" rather than the
+    // much less useful "that lot is not on this material".
+    const lots = await YarnLot.find({ rawMaterial: materialId }).session(session);
+    const allocated = await allocatedByLot(
+      lots.map((l) => l._id),
+      { excludeOrder: order._id, session }
+    );
+
+    const validated = validateEarmarks(rows, lots, allocated, rm.requiredWeight);
+    const stamped = validated.map((v) => ({
+      ...v, assignedAt: new Date(), assignedBy: userId || null,
+    }));
+
+    rm.lots = stamped;
+
+    const fp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_DEDUCTED, {
+      entityId: order._id,
+      actor,
+      meta: {
+        lotAssignment:   true,
+        rawMaterialId:   materialId,
+        rawMaterialName: rm.name || '',
+        requiredWeight:  Number(rm.requiredWeight) || 0,
+        assigned:        stamped.reduce((t, r) => t + r.quantity, 0),
+        lots:            stamped.map((r) => `${r.lotNo} (${r.quantity})`),
+      },
+    });
+    order.fingerprints.push(fp);
+    fingerprints.push(fp);
+  }
+
+  return fingerprints;
+}
 
 // Approve an Open order inside a transaction: pre-flight stock check,
 // (optional) forced-override fingerprint, raw-material deduction +
@@ -41,6 +119,7 @@ const { costOf } = require('../utils/materialValuation');
 // }
 async function approveOrderTxn(session, {
   orderId, force = false, forceReason = '', actor, whatsappActor, userId,
+  lotAssignments,
 } = {}) {
   const mongoose = require('mongoose');
   if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
@@ -175,6 +254,22 @@ async function approveOrderTxn(session, {
     deductionFingerprints.push(deductFp);
   }
 
+  // ── Earmark the dye lots this draw comes out of ─────────────────
+  //
+  // Optional, and skipped entirely when the caller sends nothing —
+  // which is every approval made before this existed, and the WhatsApp
+  // approval path, which carries no material detail. An order with no
+  // earmarks behaves exactly as it always has and leaves every
+  // downstream picker unconstrained.
+  //
+  // Earmarking moves NOTHING on the lot. The stock debit above is the
+  // commercial draw; the yarn is still on the rack and leaves when a
+  // warping batch takes it. See services/lotAllocation.js for why the
+  // two must not be collapsed.
+  const earmarkFingerprints = await applyLotAssignments(
+    session, order, lotAssignments, { actor, userId }
+  );
+
   // ── Reserve elastic units ───────────────────────────────────────
   const reservationFingerprints = [];
   for (const line of order.elasticOrdered) {
@@ -242,8 +337,9 @@ async function approveOrderTxn(session, {
 
   return {
     order, approveFp, deductionFingerprints, reservationFingerprints,
+    earmarkFingerprints,
     stockoutSnapshots, shortfalls, forced: force === true && shortfalls.length > 0,
   };
 }
 
-module.exports = { approveOrderTxn };
+module.exports = { approveOrderTxn, applyLotAssignments };
