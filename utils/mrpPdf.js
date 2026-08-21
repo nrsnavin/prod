@@ -190,7 +190,7 @@ async function buildMrpPdf(data) {
   // glyph that does not render is worse than no marker at all.
   const LOT_MARK = { order: " (set aside)", programme: " (programmed)" };
   const lotLine = (m) => {
-    const lots = m.lots || [];
+    const lots = m.lotOptions || [];
     if (!lots.length) return "";
     const shown = lots
       .slice(0, 3)

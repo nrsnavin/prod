@@ -594,6 +594,17 @@ router.get(
           : outstanding > 0 ? "partial" : "full",
         inStock,
         stockSufficient: inStock >= outstanding,
+        // The dye lots this order has set aside for the material.
+        // This projection is hand-built, so a field not named here
+        // simply never reaches the client — which is why the assign
+        // panel had nothing to show even on orders that had earmarks.
+        lots: (rm.lots || []).map((l) => ({
+          yarnLot:  l.yarnLot,
+          lotNo:    l.lotNo || "",
+          shade:    l.shade || "",
+          quantity: Number(l.quantity) || 0,
+          assignedAt: l.assignedAt,
+        })),
       };
     });
 

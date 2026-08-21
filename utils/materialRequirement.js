@@ -341,12 +341,32 @@ async function computeMaterialRequirement(lines = [], opts = {}) {
     // twice for goods nobody ordered.
     const toBuy = Math.max(0, round3(shortfall - onOrder));
 
+    // ── Named lotOptions, not lots, and that matters ───────────────
+    // api/job.js assigns this whole result onto
+    // `order.rawMaterialRequired`, relying on Mongoose to keep the
+    // paths it knows and drop the rest. That is safe for every extra
+    // field EXCEPT one the schema also has.
+    //
+    // `Order.rawMaterialRequired[].lots` is the order's EARMARKS —
+    // bags promised to it, where quantity is required and means kilos.
+    // These are display rows for a sheet: one per lot that could be
+    // used, with a null quantity on the merely available ones. Calling
+    // them both `lots` made the assignment throw
+    // ("lots.0.quantity: Path `quantity` is required") and, where it
+    // cast, silently replace a promise with a list of candidates.
+    //
+    // The rename is what makes that impossible rather than fixed once.
+    // See tests/utils/requirementIntoOrder.test.js.
+    //
     // Always an array, so the sheet never has to guard a null — an
     // empty one means "no lots", which the UI renders as such rather
     // than as a missing field.
-    const lots = lotsByMaterial.get(key) || [];
+    const lotOptions = lotsByMaterial.get(key) || [];
 
-    return { ...m, requiredWeight, allocated, outstanding, shortfall, onOrder, toBuy, lots };
+    return {
+      ...m, requiredWeight, allocated, outstanding, shortfall, onOrder, toBuy,
+      lotOptions,
+    };
   });
 }
 
