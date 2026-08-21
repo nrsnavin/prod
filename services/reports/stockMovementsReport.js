@@ -17,7 +17,7 @@ const MaterialOut    = require("../../models/MaterialOut.cjs");
 const RawMaterial    = require("../../models/RawMaterial.js");
 const { previousWindow } = require("./range.js");
 
-const GROUP_BYS = ["material", "day"];
+const GROUP_BYS = ["material", "day", "lot"];
 
 function round(n, dp = 2) {
   const f = 10 ** dp;
@@ -79,6 +79,38 @@ async function _rows(from, to, groupBy) {
       .sort((a, b) => String(a.label).localeCompare(String(b.label)));
   }
 
+  if (groupBy === "lot") {
+    // ── Grouped by dye lot ──────────────────────────────────────────
+    // Only what the documents THEMSELVES recorded. A receipt keyed with
+    // a lot number and an adjustment that named one both carry it; an
+    // order approval never did, because it is a debit against the
+    // pooled balance and nobody chose a bag.
+    //
+    // Those unattributed rows are reported together under one heading
+    // rather than dropped or spread across the lots. The material page
+    // infers a lot for them (services/lotAttribution.js), and that is
+    // right for reading one material's history — but a REPORT that
+    // silently folded inferences into its totals would be presenting a
+    // reading as a measurement, and a total is exactly where that does
+    // the most damage.
+    const lotKey = { $ifNull: ["$lotNo", ""] };
+    const [inRows, outRows] = await Promise.all([
+      MaterialInward.aggregate([{ $match: inMatch(from, to) }, { $group: { _id: lotKey, qty: { $sum: "$quantity" } } }]),
+      MaterialOut.aggregate([{ $match: outMatch(from, to) }, { $group: { _id: lotKey, qty: { $sum: "$quantity" } } }]),
+    ]);
+    return _merge(inRows, outRows)
+      .map((r) => ({
+        ...r,
+        label: String(r.key || "").trim() || "No lot recorded",
+        unattributed: !String(r.key || "").trim(),
+      }))
+      // Unattributed last, then busiest first. It is usually the
+      // largest row and putting it at the top would bury the lots.
+      .sort((a, b) =>
+        Number(a.unattributed) - Number(b.unattributed) ||
+        (b.inQty + b.outQty) - (a.inQty + a.outQty));
+  }
+
   // material (default)
   const [inRows, outRows] = await Promise.all([
     MaterialInward.aggregate([{ $match: inMatch(from, to) }, { $group: { _id: "$rawMaterial", qty: { $sum: "$quantity" } } }]),
@@ -104,7 +136,7 @@ async function _series(from, to) {
 }
 
 function _columns(groupBy) {
-  const header = groupBy === "day" ? "Date" : "Material";
+  const header = groupBy === "day" ? "Date" : groupBy === "lot" ? "Dye lot" : "Material";
   return [
     { key: "label", header, format: "text" },
     { key: "inQty", header: "In (kg)", format: "number" },

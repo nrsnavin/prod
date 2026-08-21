@@ -2003,7 +2003,14 @@ router.get('/:jobId', async (req, res) => {
  * @param job  lean job with `order` populated (orderNo + rawMaterialRequired)
  */
 async function jobRequirement(job) {
-  const materials = await computeMaterialRequirement(job.elastics || []);
+  // Which lots this job's warping programme has already committed to,
+  // keyed by material so an MRP row can pick up its own. A programme
+  // that names its lots is a stronger answer than any inference, and
+  // it is already recorded — it was simply never carried onto the
+  // sheet the floor prints. See services/yarnLotTrail.js.
+  const committedLots = await committedLotsByMaterial(job._id);
+
+  const materials = await computeMaterialRequirement(job.elastics || [], { committedLots });
   const orderId = job.order?._id || job.order;
   if (!orderId) return materials;
 
@@ -2012,7 +2019,45 @@ async function jobRequirement(job) {
 
   return computeMaterialRequirement(job.elastics || [], {
     allocated: shareForJob(drawn, job.order?.rawMaterialRequired || [], materials),
+    committedLots,
   });
+}
+
+/**
+ * The job's programmed lots, grouped by the material they belong to.
+ *
+ * The trail reports one entry per (elastic, lot), because a programme
+ * commonly runs one lot across six sections of a beam and listing it
+ * six times says nothing. The MRP is per MATERIAL, so those are folded
+ * again here — the same lot named for two elastics of the same yarn is
+ * one commitment on the sheet, not two.
+ *
+ * Entries with no material cannot be placed on a row and are dropped:
+ * they come from programmes written before the section carried a
+ * warpYarn reference, and putting them under a guessed material would
+ * be worse than leaving the row's lots to the available list.
+ */
+async function committedLotsByMaterial(jobId) {
+  const out = new Map();
+  try {
+    const trail = await plannedLotsForJob(jobId);
+    for (const e of trail.entries || []) {
+      if (!e.materialId) continue;
+      if (!out.has(e.materialId)) out.set(e.materialId, []);
+      const list = out.get(e.materialId);
+      const key = String(e.yarnLot || e.lotNo || "");
+      if (!key || list.some((l) => String(l.yarnLot || l.lotNo) === key)) continue;
+      list.push({ yarnLot: e.yarnLot, lotNo: e.lotNo, shade: e.shade });
+    }
+  } catch (err) {
+    // The requirement itself does not depend on this, and a sheet with
+    // available lots instead of committed ones is still a usable sheet.
+    // Said out loud rather than swallowed, because a programme that
+    // silently stops reaching the MRP is exactly the kind of quiet
+    // regression nobody reports.
+    console.warn(`MRP: could not read programmed lots for job ${jobId}:`, err.message);
+  }
+  return out;
 }
 
 // Assemble the plain MRP data object the JSON route and the PDF

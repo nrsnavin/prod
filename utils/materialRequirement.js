@@ -20,6 +20,8 @@ const Elastic       = require("../models/Elastic.js");
 const mongoose      = require("mongoose");
 const RawMaterial   = require("../models/RawMaterial.js");
 const PurchaseOrder = require("../models/PurchaseOrder.js");
+const YarnLot       = require("../models/YarnLot.js");
+const { isLotTracked } = require("./materialCategories.js");
 // Required for its side effect: populating `supplier` below needs the
 // model registered, and this module is loaded by callers (the MRP unit
 // tests among them) that have no other reason to pull Supplier in.
@@ -97,6 +99,101 @@ async function onOrderByMaterial(materialIds = []) {
     }
   }
   return due;
+}
+
+/**
+ * The dye lots standing behind each material on the sheet.
+ *
+ * ── Two different facts, and the sheet says which ────────────────
+ * A job's warping programme usually names the lot each beam section
+ * will run off — the choice is made at programming time, because two
+ * lots meeting inside one beam show as a shade band. That is a
+ * COMMITMENT, and it is a far better answer than anything this
+ * function could work out. It is passed in by the caller (only the
+ * job MRP has a programme to read) and marked `committed: true`.
+ *
+ * Everything else is what is simply AVAILABLE: open lots with
+ * something left, oldest first, because the oldest is the one the
+ * floor should be using up and the one to look at when a shade
+ * complaint arrives.
+ *
+ * The two are never merged into one list without the flag. "This yarn
+ * will come off D-4471" and "there are three lots you could use" are
+ * different sentences, and a sheet that printed them the same way
+ * would have an operator warping off the wrong bag.
+ *
+ * ── Only for the materials it means anything for ─────────────────
+ * Non-warp materials are skipped: nothing in the system ever chooses
+ * a lot for them, so listing their lots on a requirement sheet would
+ * be filling a column because it exists.
+ *
+ * @param {Array}  rows           the MRP rows, needing `rawMaterial` + `category`
+ * @param {Map}    committedByMat materialId → [{ lotNo, shade, yarnLot }]
+ * @returns {Promise<Map<string, Array>>} materialId → lot rows
+ */
+async function lotsForMaterials(rows = [], committedByMat = new Map()) {
+  const trackedIds = rows
+    .filter((r) => isLotTracked(r.category))
+    .map((r) => String(r.rawMaterial))
+    .filter((id) => mongoose.Types.ObjectId.isValid(id));
+
+  const out = new Map();
+  if (!trackedIds.length) return out;
+
+  // Virtuals are needed for `balance` and `ageDays`, so not .lean().
+  const lots = await YarnLot.find({
+    rawMaterial: { $in: trackedIds },
+    status: "open",
+  }).sort({ receivedDate: 1 });
+
+  for (const id of trackedIds) {
+    const committed = committedByMat.get(id) || [];
+    const seen = new Set();
+    const list = [];
+
+    for (const c of committed) {
+      const key = String(c.yarnLot || c.lotNo || "");
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      list.push({
+        yarnLot: c.yarnLot || null,
+        lotNo: c.lotNo || "",
+        shade: c.shade || "",
+        // A committed lot may be quarantined, exhausted or gone since
+        // the programme named it. Balance is filled in below from the
+        // open lots when it is still one of them, and left null when
+        // it is not — which is itself worth seeing on the sheet.
+        balance: null,
+        ageDays: null,
+        committed: true,
+      });
+    }
+
+    for (const lot of lots) {
+      if (String(lot.rawMaterial) !== id) continue;
+      if (lot.balance <= 0) continue;
+
+      const already = list.find(
+        (l) => (l.yarnLot && String(l.yarnLot) === String(lot._id)) || l.lotNo === lot.lotNo
+      );
+      if (already) {
+        already.balance = lot.balance;
+        already.ageDays = lot.ageDays;
+        continue;
+      }
+      list.push({
+        yarnLot: String(lot._id),
+        lotNo: lot.lotNo || "",
+        shade: lot.shade || "",
+        balance: lot.balance,
+        ageDays: lot.ageDays,
+        committed: false,
+      });
+    }
+
+    if (list.length) out.set(id, list);
+  }
+  return out;
 }
 
 // lines: [{ elastic: ObjectId|string, quantity: Number(metres) }]
@@ -197,6 +294,14 @@ async function computeMaterialRequirement(lines = [], opts = {}) {
 
   const allocatedMap = toMap(opts.allocated);
 
+  // Which dye lots stand behind each material. Only the job MRP has a
+  // warping programme to read commitments from, so `committedLots` is
+  // optional and every other caller gets the available lots alone.
+  const lotsByMaterial = await lotsForMaterials(
+    Array.from(rawMap.values()),
+    toMap(opts.committedLots)
+  );
+
   // Finalise derived fields (round weight to 3 dp; compute shortfall).
   return Array.from(rawMap.values()).map((m) => {
     const key = String(m.rawMaterial);
@@ -218,7 +323,12 @@ async function computeMaterialRequirement(lines = [], opts = {}) {
     // twice for goods nobody ordered.
     const toBuy = Math.max(0, round3(shortfall - onOrder));
 
-    return { ...m, requiredWeight, allocated, outstanding, shortfall, onOrder, toBuy };
+    // Always an array, so the sheet never has to guard a null — an
+    // empty one means "no lots", which the UI renders as such rather
+    // than as a missing field.
+    const lots = lotsByMaterial.get(key) || [];
+
+    return { ...m, requiredWeight, allocated, outstanding, shortfall, onOrder, toBuy, lots };
   });
 }
 
@@ -231,4 +341,4 @@ function toMap(allocated) {
   return new Map();
 }
 
-module.exports = { computeMaterialRequirement, onOrderByMaterial };
+module.exports = { computeMaterialRequirement, onOrderByMaterial, lotsForMaterials };

@@ -66,6 +66,35 @@ const StockMovementSchema = new mongoose.Schema(
     // average is that it changes, so a movement priced at today's
     // average is priced wrong.
     unitCost: { type: Number },
+
+    // ── Which dye lot ───────────────────────────────────────────────
+    // Set by the writers that KNOW — a warping batch draws named lots
+    // off the rack, so BATCH_ISSUE and BATCH_RETURN stamp the lot here
+    // and it is a record, not a reading.
+    //
+    // Left empty on every other type, including the receipts and
+    // adjustments that did record a lot on their own document. Those
+    // are attributed at read time from MaterialInward / MaterialOut by
+    // services/lotAttribution.js, so nothing has to be backfilled and
+    // the two can never disagree. See that file for the three kinds of
+    // answer and why they are kept apart.
+    yarnLot: { type: mongoose.Types.ObjectId, ref: "YarnLot" },
+    lotNo:   { type: String, trim: true, default: "" },
+
+    // ── How much left the RACK, when that is not how much left STOCK ─
+    // A warping batch draws yarn physically and deliberately does not
+    // move `stock` — that was debited earlier, at order approval, and
+    // debiting it again would take the same yarn out twice. See the
+    // long note at the top of models/YarnLot.js.
+    //
+    // So a batch row's `quantity` is 0, which is the truth about its
+    // effect on the balance, and the kilos actually drawn live here.
+    // They MUST stay apart: normaliseMovements rebuilds missing
+    // balances by walking backwards subtracting `quantity`, so a batch
+    // row carrying its draw in that field would subtract yarn the
+    // balance never lost and silently restate every older row on the
+    // page. That failure looks like plausible numbers, not an error.
+    lotQuantity: { type: Number },
   },
   { _id: false }
 );

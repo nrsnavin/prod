@@ -169,7 +169,35 @@ async function buildMrpPdf(data) {
     { key: "onOrder",        label: "On order",   w: 0.13, align: "right" },
     { key: "shortfall",      label: "Shortfall",  w: 0.13, align: "right" },
   ];
-  const rowH = 20;
+  const materials = data.materials || [];
+
+  // ── The dye lots, under the material name ───────────────────────
+  // A column of its own would have meant taking width from the five
+  // that already earn theirs, and the lot belongs beside the material
+  // anyway: an operator reads down the name column and needs the bag
+  // number at the same glance, not four columns to the right.
+  //
+  // A programmed lot is marked, because "this beam will run off
+  // D-4471" and "D-2002 is on the rack" are different sentences, and a
+  // sheet that printed them alike would have somebody warping off the
+  // wrong bag. Said in a word rather than a symbol — these print in
+  // mono, and a glyph that does not render is worse than no marker.
+  const lotLine = (m) => {
+    const lots = m.lots || [];
+    if (!lots.length) return "";
+    const shown = lots
+      .slice(0, 3)
+      .map((l) => (l.committed ? `${l.lotNo} (programmed)` : l.lotNo))
+      .filter(Boolean);
+    if (!shown.length) return "";
+    const more = lots.length > shown.length ? ` +${lots.length - shown.length}` : "";
+    return `Lot ${shown.join(" · ")}${more}`;
+  };
+
+  const anyLots = materials.some((m) => lotLine(m));
+  // Taller rows only when there is a second line to put in them, so a
+  // sheet with no lot tracking prints exactly as it did before.
+  const rowH = anyLots ? 28 : 20;
   const pad = 6;
   let y = doc.y;
 
@@ -201,7 +229,6 @@ async function buildMrpPdf(data) {
   let segTop = y;
   y = drawHeader(y);
 
-  const materials = data.materials || [];
   if (materials.length === 0) {
     doc.font("Helvetica").fontSize(10).fillColor(MUTED)
       .text("No BOM materials resolved for the elastics on this job.", left + pad, y + 6);
@@ -239,6 +266,12 @@ async function buildMrpPdf(data) {
           .fontSize(9)
           .text(String(cells[c.key]), colX[i] + pad, y + 6, { width: cw - pad * 2, align: c.align });
       });
+
+      const lots = lotLine(m);
+      if (lots) {
+        doc.fillColor(MUTED).font("Helvetica").fontSize(7)
+          .text(lots, colX[0] + pad, y + 17, { width: cols[0].w * width - pad * 2, lineBreak: false });
+      }
       doc.strokeColor(LINE).lineWidth(0.5)
         .moveTo(left, y + rowH).lineTo(right, y + rowH).stroke();
       y += rowH;

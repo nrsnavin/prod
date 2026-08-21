@@ -60,9 +60,36 @@ function isMaterialCategory(value) {
   return canonicalCategory(value) !== null;
 }
 
+/**
+ * Whether this material's movements are worth attributing to a dye lot.
+ *
+ * Warp yarn is what a warping programme draws by lot — a beam section
+ * names the lot it runs off, because two lots meeting inside one beam
+ * show as a shade band in the finished elastic. Nothing else in the
+ * system chooses a lot at any point, so nothing else has a lot to
+ * attribute a movement to beyond the one the receipt recorded.
+ *
+ * ── Why derived rather than a per-material flag ──────────────────
+ * The alternative was a `lotTracked` boolean on RawMaterial. It was
+ * not taken: a flag has to be set on every material by hand before it
+ * does anything, and one that nobody remembers to set reads exactly
+ * like a material with no lots. This answer is already true of the
+ * data — no migration, no admin step, and no way for the two to drift.
+ *
+ * The cost is that it cannot be overridden per material, and that a
+ * legacy row holding a GROUP NAME in `category` (see RawMaterial.js)
+ * folds to null here and reads as untracked. Untracked is the safe
+ * direction: such a row shows the lots that were actually recorded on
+ * it and no inferred ones, rather than inventing an attribution.
+ */
+function isLotTracked(category) {
+  return canonicalCategory(category) === 'warp';
+}
+
 module.exports = {
   MATERIAL_CATEGORIES,
   MATERIAL_POSITIONS,
   canonicalCategory,
   isMaterialCategory,
+  isLotTracked,
 };

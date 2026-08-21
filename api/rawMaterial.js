@@ -18,7 +18,10 @@ const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
-const { appendStockMovement, normaliseMovements } = require("../utils/stockLedger");
+const {
+  appendStockMovement, normaliseMovements, LOT_ONLY_TYPES,
+} = require("../utils/stockLedger");
+const { attributeMovements, withLots } = require("../services/lotAttribution");
 const { receiveAtCost, costOf } = require("../utils/materialValuation");
 const { countUsage } = require("../utils/masterUsage");
 const YarnLot           = require("../models/YarnLot");
@@ -241,17 +244,30 @@ router.get(
 
     if (!material) return next(new ErrorHandler("Raw material not found", 404));
 
-    // Sort stockMovements newest-first, keep last 50, then normalise.
+    // ── Which movements the page gets ───────────────────────────────
+    // Newest first, then a window — the array is capped at 500 and the
+    // page has never shown more than the recent tail.
     //
+    // The window is taken in TWO parts on purpose. Warping batch rows
+    // (BATCH_ISSUE / BATCH_RETURN) record yarn leaving the rack without
+    // moving stock, and a busy warp yarn can raise several a day. Taken
+    // as one list of 50 they would crowd the receipts and approvals out
+    // of view, so the ledger that gained lot detail would have lost the
+    // movements it existed to show. Each kind gets its own allowance and
+    // the two are merged back into one date order.
+    const allMoves = (material.stockMovements || [])
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    const stockRows = allMoves.filter((m) => !LOT_ONLY_TYPES.has(m.type)).slice(0, 50);
+    const lotRows   = allMoves.filter((m) =>  LOT_ONLY_TYPES.has(m.type)).slice(0, 25);
+
     // Normalising is what makes the ledger readable for rows already in
     // the database: order approvals were written with a positive quantity
     // even though they debit stock, and PO receipts recorded no balance
     // at all. Both are fixed at the writers now, but years of history
     // would still read wrongly without this. See utils/stockLedger.js.
     material.stockMovements = normaliseMovements(
-      (material.stockMovements || [])
-        .sort((a, b) => new Date(b.date) - new Date(a.date))
-        .slice(0, 50),
+      [...stockRows, ...lotRows].sort((a, b) => new Date(b.date) - new Date(a.date)),
       material.stock
     );
 
@@ -319,6 +335,29 @@ router.get(
       // same claim, and the UI marks it as such.
       mv.referenceDerived = true;
     }
+
+    // ── Which dye lot each movement came out of ────────────────────
+    // Placed after the lots, inwards and outwards are loaded because it
+    // reads all three: a receipt's lot is on the inward, an
+    // adjustment's is on the outward, a batch stamped its own, and
+    // everything else on a warp yarn falls to the earliest-lot rule.
+    //
+    // Computed at READ time, deliberately. The alternative was
+    // backfilling a lot onto every historical row, which would have
+    // needed a migration over the embedded arrays of every material and
+    // would have frozen one day's reading of the rule into the data.
+    // See services/lotAttribution.js for the three kinds of answer and
+    // why they are marked apart.
+    material.stockMovements = withLots(
+      material.stockMovements,
+      attributeMovements({
+        material,
+        movements: material.stockMovements,
+        lots,
+        inwards,
+        outwards,
+      })
+    );
 
     // What this shelf is worth. `avgCost` is 0 for material that has
     // not been received since averaging existed, and costOf falls back
