@@ -23,6 +23,24 @@ exports.isAuthenticated = catchAsyncErrors(async (req, res, next) => {
         return next(new ErrorHandler("Session is invalid — please login again", 401));
     }
 
+    // ── Has this account's sessions been ended since? ──────────────
+    // The app holds a token for ninety days, so "wait for it to
+    // expire" is not an answer to a lost phone. Bumping
+    // User.tokenVersion invalidates every token already issued for
+    // the account, on every device, immediately.
+    //
+    // Tokens minted before the claim existed carry no `v`, and those
+    // are honoured rather than rejected — deliberately, and for the
+    // same reason the `userid` fallback above exists. Rejecting them
+    // would sign out every user in the mill the moment this deploys,
+    // which is a worse outage than the narrow window it closes. They
+    // age out on their own within 24 hours, since every token issued
+    // before this change was a 24-hour one.
+    if (decoded.v !== undefined && decoded.v !== (req.user.tokenVersion ?? 0)) {
+        return next(new ErrorHandler(
+            "You have been signed out. Please login again.", 401));
+    }
+
     next();
 });
 

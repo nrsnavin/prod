@@ -53,6 +53,23 @@ const userSchema = new mongoose.Schema(
       type: [String],
       default: undefined,
     },
+    // ── Session generation ─────────────────────────────────────
+    // Bumped to invalidate every token already issued for this
+    // account, everywhere, at once.
+    //
+    // It exists because the mobile app holds a long-lived token so an
+    // operator on the floor is not re-authenticating every day. That
+    // is the right trade for a shared factory phone in a locked
+    // building, and the wrong one for a phone left in a taxi — so
+    // there has to be a way to end those sessions that does not
+    // involve waiting for them to expire.
+    //
+    // Tokens carry the value they were minted under as `v`. Tokens
+    // minted before this field existed carry no `v` at all and are
+    // still honoured; see middleware/auth.js for why that is
+    // deliberate rather than an oversight.
+    tokenVersion: { type: Number, default: 0 },
+
     // Optional link to the Employee document. Set on User creation
     // for any user that's also a workforce member, so the mobile
     // employee app can look up their wastage / shift / payroll

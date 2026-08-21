@@ -90,7 +90,8 @@ router.post(
         return next(new ErrorHandler("Invalid email or password", 401));
       }
 
-      const token = generateToken(user);
+      const longLived = wantsLongSession(req);
+      const token = generateToken(user, { longLived });
 
       res
         .status(201)
@@ -98,7 +99,7 @@ router.post(
           httpOnly: true,
           sameSite: "none",
           secure: true,
-          maxAge: 24 * 60 * 60 * 1000, // 24h
+          maxAge: longLived ? APP_MAX_AGE : WEB_MAX_AGE,
         })
         .json({
           username: user.name,
@@ -436,14 +437,15 @@ router.post(
     user.clearLoginOtp();
     await user.save({ validateBeforeSave: false });
 
-    const token = generateToken(user);
+    const otpLongLived = wantsLongSession(req);
+    const token = generateToken(user, { longLived: otpLongLived });
     res
       .status(201)
       .cookie("token", token, {
         httpOnly: true,
         sameSite: "none",
         secure: true,
-        maxAge: 24 * 60 * 60 * 1000, // 24h — matches /login-user
+        maxAge: otpLongLived ? APP_MAX_AGE : WEB_MAX_AGE,
       })
       .json({
         username: user.name,
@@ -477,10 +479,33 @@ router.get(
         return next(new ErrorHandler("User doesn't exists", 400));
       }
 
-      res.status(200).json({
-        success: true,
-        user,
-      });
+      // ── Renew the app's session on every cold start ─────────────
+      // This is the call the app makes when it opens, to find out
+      // whether its stored token is still good. Handing back a fresh
+      // one turns the ninety-day window into a gap between USES
+      // rather than a countdown from first sign-in: anybody who opens
+      // the app inside three months never sees the login screen
+      // again until they choose to.
+      //
+      // Only for callers that asked for a long session. A browser
+      // gets nothing extra here and keeps its 24 hours, because its
+      // cookie is httpOnly and it has no use for a token in the body.
+      const body = { success: true, user };
+      if (wantsLongSession(req)) {
+        const fresh = generateToken(user, { longLived: true });
+        res.cookie("token", fresh, {
+          httpOnly: true,
+          sameSite: "none",
+          secure: true,
+          maxAge: APP_MAX_AGE,
+        });
+        // The app stores the token itself and sends it as a header —
+        // it does not keep a cookie jar — so the cookie above is not
+        // enough on its own.
+        body.token = fresh;
+      }
+
+      res.status(200).json(body);
     } catch (error) {
       return next(new ErrorHandler(error.message, 500));
     }
@@ -672,14 +697,62 @@ router.get(
 // BUG FIX: payload key is 'id' (not 'userid') so middleware/auth.js
 // (which reads decoded.id) actually finds the user. Old tokens issued
 // with 'userid' still work via the back-compat fallback in auth.js.
-function generateToken(user) {
+// ══════════════════════════════════════════════════════════════
+//  HOW LONG A SESSION LASTS, AND WHY IT DEPENDS ON THE CLIENT
+//
+//  The browser gets 24 hours. It is a shared desktop in an office,
+//  the cookie is httpOnly, and signing in again is a ten-second
+//  interruption to somebody already sitting at a keyboard.
+//
+//  The app gets ninety days, because the same rule there is not a
+//  ten-second interruption — it is an operator standing at a machine
+//  with gloves on, in a shed with patchy wifi, discovering that the
+//  scanner will not open a job until they type an email address. A
+//  daily re-login on the floor does not make the system safer; it
+//  makes people stop using the part of it that records what
+//  happened.
+//
+//  ── This is a real trade, and it is bounded three ways ─────────
+//    * it is opt-in per request — a client must ASK for a long
+//      session, so the web cannot get one by accident
+//    * the window is finite, so an abandoned phone stops working
+//    * every token names the generation it was minted under, so an
+//      admin can end all of an account's sessions at once by
+//      bumping User.tokenVersion — the answer to a lost phone
+//
+//  The app refreshes its token on every cold start (see
+//  /user/getuser), so ninety days is the gap between USES, not a
+//  countdown from the day somebody first signed in. Open the app
+//  inside three months and the session simply continues.
+// ══════════════════════════════════════════════════════════════
+
+const WEB_SESSION  = "24h";
+const APP_SESSION  = "90d";
+const WEB_MAX_AGE  = 24 * 60 * 60 * 1000;
+const APP_MAX_AGE  = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * True when the caller identified itself as the mobile app.
+ *
+ * Read from an explicit header rather than sniffed from the
+ * user-agent: a guess about who is calling should not decide how long
+ * a credential lives. Anything that does not ask, gets the short one.
+ */
+function wantsLongSession(req) {
+  return String(req.get("X-Client") || "").toLowerCase() === "mobile";
+}
+
+function generateToken(user, { longLived = false } = {}) {
   const payload = {
     id: user._id,
     username: user.name,
     role: user.role,
+    // The generation this token belongs to. Compared on every
+    // request; see middleware/auth.js.
+    v: user.tokenVersion ?? 0,
   };
   const options = {
-    expiresIn: "24h",
+    expiresIn: longLived ? APP_SESSION : WEB_SESSION,
   };
   return jwt.sign(payload, process.env.JWT_SECRET_KEY, options);
 }
