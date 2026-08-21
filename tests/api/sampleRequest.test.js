@@ -610,3 +610,128 @@ describe('access', () => {
     expect(res.status).toBe(200);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  ONE CUSTOMER'S SAMPLES
+//
+//  The customer page shows a brief of what has been asked for. Two
+//  things have to hold for that brief to be worth showing:
+//
+//    * it matches on the LINK, never the typed name — a prospect
+//      later added to the master keeps the name they were typed with
+//      and no link, and claiming those would put another company's
+//      enquiries on this company's page
+//    * the tab counts follow the customer — a search narrows which of
+//      a set you see, but a customer filter changes WHICH SET, and
+//      "3 open" beside a customer with none is worse than no number
+// ══════════════════════════════════════════════════════════════════
+describe("a customer's own samples", () => {
+  let zenith, harlow;
+
+  // Customer requires a contact and a phone; the names are what these
+  // tests are about, the rest is ballast.
+  const mkCustomer = (name) => M.Customer.create({
+    name, contactName: 'Buyer', phoneNumber: '9000000000',
+  });
+
+  beforeEach(async () => {
+    await M.Customer.deleteMany({});
+    zenith = await mkCustomer('Zenith Apparel');
+    harlow = await mkCustomer('Harlow Garments');
+  });
+
+  const listFor = (id) =>
+    request(app).get(`/api/v2/sample?customerId=${id}`).set('Cookie', cookie(sales));
+
+  it('returns only the samples linked to that customer', async () => {
+    await raise(sales, { customerId: zenith._id, title: 'Zenith navy' });
+    await raise(sales, { customerId: zenith._id, title: 'Zenith black' });
+    await raise(sales, { customerId: harlow._id, title: 'Harlow ecru' });
+
+    const res = await listFor(zenith._id);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.samples.map((s) => s.title).sort())
+      .toEqual(['Zenith black', 'Zenith navy']);
+  });
+
+  it('does NOT claim a sample that merely names the customer', async () => {
+    // The regression that matters. This one was typed for a prospect
+    // before they existed in the master: same name, no link.
+    await raise(sales, { customerName: 'Zenith Apparel', title: 'Typed, unlinked' });
+    await raise(sales, { customerId: zenith._id, title: 'Linked' });
+
+    const res = await listFor(zenith._id);
+    expect(res.body.total).toBe(1);
+    expect(res.body.samples[0].title).toBe('Linked');
+  });
+
+  it('does not sweep up a customer whose name merely resembles theirs', async () => {
+    const zen = await mkCustomer('Zenith Apparel International');
+    await raise(sales, { customerId: zen._id, title: 'The other Zenith' });
+    await raise(sales, { customerId: zenith._id, title: 'This Zenith' });
+
+    const res = await listFor(zenith._id);
+    expect(res.body.total).toBe(1);
+    expect(res.body.samples[0].title).toBe('This Zenith');
+  });
+
+  it('counts the tabs for THAT customer, not the whole mill', async () => {
+    const a = await raise(sales, { customerId: zenith._id });
+    await raise(sales, { customerId: harlow._id });
+    await raise(sales, { customerId: harlow._id });
+
+    // Move Zenith's one along so the counts are not all in one bucket.
+    await request(app)
+      .put(`/api/v2/sample/${a.body.sample._id}/status`)
+      .set('Cookie', cookie(admin))
+      .send({ status: 'in_progress', note: 'On the loom' });
+
+    const res = await listFor(zenith._id);
+    expect(res.body.counts.in_progress).toBe(1);
+    // Harlow's two must not appear here.
+    expect(res.body.counts.open).toBe(0);
+  });
+
+  it('CONTROL: with no customerId the counts are the whole mill', async () => {
+    // Without this, counts scoped to nothing would look identical to
+    // counts scoped correctly, and the assertion above would pass on
+    // an implementation that always filtered by the first customer.
+    await raise(sales, { customerId: zenith._id });
+    await raise(sales, { customerId: harlow._id });
+
+    const res = await request(app).get('/api/v2/sample').set('Cookie', cookie(sales));
+    expect(res.body.counts.open).toBe(2);
+  });
+
+  it('refuses an unparseable customerId rather than ignoring it', async () => {
+    // A filter that silently stops filtering is how one customer's
+    // page ends up showing another customer's enquiries.
+    await raise(sales, { customerId: zenith._id });
+    const res = await listFor('not-an-id');
+    expect(res.status).toBe(400);
+    expect(String(res.body.message)).toMatch(/customerId/i);
+  });
+
+  it('returns nothing for a real id with no samples', async () => {
+    await raise(sales, { customerId: zenith._id });
+    const res = await listFor(new mongoose.Types.ObjectId());
+    expect(res.body.total).toBe(0);
+    expect(res.body.samples).toEqual([]);
+  });
+
+  it('still honours the status filter alongside the customer', async () => {
+    const a = await raise(sales, { customerId: zenith._id, title: 'Moved on' });
+    await raise(sales, { customerId: zenith._id, title: 'Still open' });
+    await request(app)
+      .put(`/api/v2/sample/${a.body.sample._id}/status`)
+      .set('Cookie', cookie(admin))
+      .send({ status: 'in_progress', note: 'On the loom' });
+
+    const res = await request(app)
+      .get(`/api/v2/sample?customerId=${zenith._id}&status=open`)
+      .set('Cookie', cookie(sales));
+    expect(res.body.total).toBe(1);
+    expect(res.body.samples[0].title).toBe('Still open');
+  });
+});

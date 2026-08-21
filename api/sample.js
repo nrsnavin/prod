@@ -300,7 +300,7 @@ router.post(
 // ── The list ─────────────────────────────────────────────────────
 router.get(
   '/',
-  catchAsyncErrors(async (req, res) => {
+  catchAsyncErrors(async (req, res, next) => {
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(MAX_PAGE, Math.max(1, Number(req.query.limit) || DEFAULT_PAGE));
 
@@ -318,6 +318,26 @@ router.get(
       filter.$or = or;
     }
 
+    // ── One customer's samples ────────────────────────────────────
+    // Matches on the LINK, not the name snapshot. A sample raised for
+    // a prospect who was later added to the customer master keeps the
+    // name it was typed with and has no link, so it is not this
+    // customer's — matching on name would claim it, and would also
+    // sweep up anybody whose name merely resembled theirs.
+    //
+    // An unparseable id returns nothing rather than everything: a
+    // filter that silently stops filtering is how a screen ends up
+    // showing one customer another customer's enquiries.
+    const customerId = String(req.query.customerId ?? '').trim();
+    let customerFilter = null;
+    if (customerId) {
+      if (!mongoose.Types.ObjectId.isValid(customerId)) {
+        return next(new ErrorHandler('customerId is not a valid id', 400));
+      }
+      customerFilter = new mongoose.Types.ObjectId(customerId);
+      filter.customer = customerFilter;
+    }
+
     const [total, docs, byStatus] = await Promise.all([
       SampleRequest.countDocuments(filter),
       SampleRequest.find(filter)
@@ -326,9 +346,19 @@ router.get(
         .limit(limit)
         .populate('customer', 'name')
         .lean(),
-      // Counts for the tabs are over EVERY request, not the filtered set —
-      // a tab that reads 0 because the search excluded it is a lie.
-      SampleRequest.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
+      // Counts for the tabs ignore the SEARCH, deliberately — a tab that
+      // reads 0 because the text query excluded it is a lie.
+      //
+      // They do NOT ignore the customer, and that distinction matters.
+      // A search narrows which of a set you are looking at; a customer
+      // filter changes WHICH SET. On a customer's own page, tabs
+      // counting every sample in the mill would describe somebody
+      // else's work, and "3 open" beside a customer with none is worse
+      // than no number at all.
+      SampleRequest.aggregate([
+        ...(customerFilter ? [{ $match: { customer: customerFilter } }] : []),
+        { $group: { _id: '$status', n: { $sum: 1 } } },
+      ]),
     ]);
 
     const counts = { open: 0, in_progress: 0, completed: 0, closed: 0 };
