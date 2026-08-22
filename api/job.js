@@ -26,7 +26,7 @@ const { triageShortfall, createShortfallPos, skipReasons } = require('../service
 const { issuedForOrder, shareForJob } = require('../services/orderIssuance');
 const { checkWeavingReadiness } = require('../services/weavingReadiness');
 const { plannedLotsForJob, distinctLots } = require('../services/yarnLotTrail');
-const { earmarksForJob } = require('../services/lotAllocation');
+const { earmarksForJob, carryEarmarksForward } = require('../services/lotAllocation');
 const { shiftFigures, clockToMinutes } = require('../utils/shiftFigures');
 const { buildMrpPdf } = require('../utils/mrpPdf');
 const { getPdfBranding } = require('../services/documentSettings.js');
@@ -444,6 +444,7 @@ router.post(
     // computed for the ordered quantity. Now that more is being made,
     // it is restated for what is actually PLANNED, so the requirement
     // sheet and the yarn that left stock tell the same story.
+    let earmarkChanges = { trimmed: [], dropped: [] };
     if (excessRows.length > 0) {
       const plannedLines = (order.elasticOrdered || []).map((l) => {
         const row = rows.find((r) => r.elastic === String(l.elastic));
@@ -452,8 +453,15 @@ router.post(
           quantity: row ? Math.max(row.ordered, row.totalPlanned) : Number(l.quantity) || 0,
         };
       });
-      order.rawMaterialRequired = await computeMaterialRequirement(plannedLines);
+      // Carried, not assigned. computeMaterialRequirement returns rows
+      // with no `lots` field, so assigning its result straight onto the
+      // order threw away every dye lot the order had set aside — with
+      // nothing failing and nothing logged. See carryEarmarksForward.
+      const recomputed = await computeMaterialRequirement(plannedLines);
+      const carried = carryEarmarksForward(order.rawMaterialRequired, recomputed);
+      order.rawMaterialRequired = carried.rows;
       order.updatedItemsAt = new Date();
+      earmarkChanges = carried;
     }
     // Approved → InProgress. A no-op when the order is already running,
     // and refused outright for anything terminal — raising a job must
@@ -470,6 +478,14 @@ router.post(
         elasticCount:   elastics.length,
         relatedHash:    jobFp.hash,
         relatedShortId: jobFp.shortId,
+        // Only when there is something to say. A replan that shrank a
+        // requirement below what was already promised cuts the surplus,
+        // and yarn ceasing to be spoken for without anybody asking is
+        // exactly the kind of thing a timeline exists to record.
+        ...(earmarkChanges.trimmed.length
+          ? { lotsTrimmed: earmarkChanges.trimmed } : {}),
+        ...(earmarkChanges.dropped.length
+          ? { lotsReleased: earmarkChanges.dropped } : {}),
       },
     });
     await order.save();
@@ -952,13 +968,32 @@ router.post(
         quantity: row ? Math.max(row.ordered, row.totalPlanned) : Number(l.quantity) || 0,
       };
     });
-    order.rawMaterialRequired = await computeMaterialRequirement(plannedLines);
+    // Carried, not assigned — the same reason as the create route.
+    // computeMaterialRequirement returns rows with no `lots` field, so
+    // this line used to wipe every dye lot the order had set aside,
+    // silently, every time somebody edited a job's quantity.
+    const recomputed = await computeMaterialRequirement(plannedLines);
+    const carried = carryEarmarksForward(order.rawMaterialRequired, recomputed);
+    order.rawMaterialRequired = carried.rows;
     order.updatedItemsAt = new Date();
     await order.save();
 
+    // Say it in the response rather than only in a log. Cutting a job's
+    // quantity can shrink a requirement below what was already promised,
+    // and the planner who just did it is the one person who can decide
+    // whether the freed yarn should go somewhere else.
+    const lotNote = [
+      carried.trimmed.length
+        && `Dye lots trimmed to fit on ${carried.trimmed.map((t) => t.name).join(', ')}`,
+      carried.dropped.length
+        && `Dye lots released on ${carried.dropped.map((d) => d.name).join(', ')}`,
+    ].filter(Boolean).join('. ');
+
     res.json({
       success: true,
-      message: 'Job quantities updated, and the order requirement recalculated',
+      message: 'Job quantities updated, and the order requirement recalculated'
+        + (lotNote ? `. ${lotNote}.` : ''),
+      lots: { trimmed: carried.trimmed, released: carried.dropped },
       job: {
         _id: job._id,
         jobOrderNo: job.jobOrderNo,

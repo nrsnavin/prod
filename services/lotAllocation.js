@@ -309,6 +309,126 @@ function releaseAllEarmarks(order) {
 }
 
 /**
+ * Carry an order's earmarks across a recomputed requirement.
+ *
+ * ── The bug this exists for ──────────────────────────────────────
+ * Raising a second job, or editing a job's quantities, restates the
+ * order's requirement for what is now PLANNED:
+ *
+ *     order.rawMaterialRequired = await computeMaterialRequirement(...)
+ *
+ * computeMaterialRequirement returns fresh rows that carry no `lots`
+ * field at all, so that one assignment silently threw away every dye
+ * lot the order had set aside. Nothing failed and nothing was logged —
+ * the panel simply read "Nothing set aside" the next time it was
+ * opened, and the yarn those bags were holding quietly became free for
+ * anyone else to promise.
+ *
+ * ── Why this is not a blind copy ─────────────────────────────────
+ * validateEarmarks refuses a total larger than the requirement, on the
+ * grounds that surplus promises hold yarn out of everyone's reach for
+ * nothing. A replan can SHRINK a requirement — a job's quantity is cut,
+ * or an elastic drops off the plan — so copying the old lots across
+ * unchanged would leave the order in a state the assign route would
+ * have refused outright, and leave it there silently.
+ *
+ * So a carried set that no longer fits is trimmed to fit, newest
+ * promise first: the oldest earmarks are the ones the floor has been
+ * planning against longest, and the most recently added is the most
+ * likely surplus. A lot trimmed to nothing is dropped.
+ *
+ * A material that has left the requirement entirely takes its earmarks
+ * with it — there is no row left to hold them. That is reported rather
+ * than done quietly, because it is the one case where yarn a person
+ * chose stops being spoken for without them asking.
+ *
+ * Pure, and returns a new array: the caller assigns it, so this cannot
+ * half-apply if something later in the request throws.
+ *
+ * @param {Array} previousRows  order.rawMaterialRequired as it stands
+ * @param {Array} freshRows     what computeMaterialRequirement returned
+ * @returns {{rows: Array, trimmed: Array, dropped: Array}}
+ */
+function carryEarmarksForward(previousRows = [], freshRows = []) {
+  const before = new Map();
+  for (const r of previousRows || []) {
+    const key = idStr(r?.rawMaterial);
+    if (key) before.set(key, r);
+  }
+
+  const trimmed = [];
+  const dropped = [];
+  const kept = new Set();
+
+  const rows = (freshRows || []).map((fresh) => {
+    const key = idStr(fresh?.rawMaterial);
+    const prev = key ? before.get(key) : null;
+    const lots = (prev?.lots || []).map((l) => ({
+      yarnLot: l.yarnLot,
+      lotNo: l.lotNo || '',
+      shade: l.shade || '',
+      quantity: round3(l.quantity),
+      assignedAt: l.assignedAt || undefined,
+      assignedBy: l.assignedBy || undefined,
+    }));
+    if (key) kept.add(key);
+    if (!lots.length) return { ...fresh, lots: [] };
+
+    const required = round3(fresh?.requiredWeight);
+    const total = lots.reduce((t, l) => round3(t + l.quantity), 0);
+
+    // A requirement of zero means the sheet no longer asks for this
+    // material at all, which is the same situation as it having left —
+    // trimming to zero would drop the promises without saying so.
+    if (!(required > 0)) {
+      dropped.push({ rawMaterial: key, name: fresh?.name || prev?.name || '', quantity: total });
+      return { ...fresh, lots: [] };
+    }
+
+    if (total <= required) return { ...fresh, lots };
+
+    // Trim newest-first. Rows with no assignedAt sort oldest, so a
+    // promise made before the field existed is the last to be cut.
+    const order = lots
+      .map((l, i) => ({ l, i, at: l.assignedAt ? new Date(l.assignedAt).getTime() : 0 }))
+      .sort((a, b) => (b.at - a.at) || (b.i - a.i));
+
+    let excess = round3(total - required);
+    const cut = new Map();
+    for (const { l, i } of order) {
+      if (excess <= 0) break;
+      const take = Math.min(l.quantity, excess);
+      cut.set(i, round3(l.quantity - take));
+      excess = round3(excess - take);
+    }
+
+    const next = lots
+      .map((l, i) => (cut.has(i) ? { ...l, quantity: cut.get(i) } : l))
+      .filter((l) => l.quantity > 0);
+
+    trimmed.push({
+      rawMaterial: key,
+      name: fresh?.name || prev?.name || '',
+      from: total,
+      to: round3(next.reduce((t, l) => round3(t + l.quantity), 0)),
+      required,
+    });
+    return { ...fresh, lots: next };
+  });
+
+  // Materials that fell off the sheet. Their earmarks have no row left
+  // to live on, so they are released whatever we do — saying which is
+  // the only thing that separates this from the silent wipe above.
+  for (const [key, prev] of before) {
+    if (kept.has(key)) continue;
+    const total = (prev.lots || []).reduce((t, l) => round3(t + (Number(l.quantity) || 0)), 0);
+    if (total > 0) dropped.push({ rawMaterial: key, name: prev.name || '', quantity: total });
+  }
+
+  return { rows, trimmed, dropped };
+}
+
+/**
  * The lots of one material, each with what is free after other orders.
  *
  * What a lot picker needs in one call. Open lots only — a quarantined
@@ -350,5 +470,6 @@ module.exports = {
   earmarksForJob,
   consumeEarmark,
   releaseAllEarmarks,
+  carryEarmarksForward,
   assignableLots,
 };

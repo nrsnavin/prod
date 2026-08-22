@@ -40,7 +40,7 @@ const { assertVersion } = require("../utils/versioning.js");
 const { applyMovement } = require("../utils/elasticStock.js");
 const { releaseAllReservations } = require("../services/orderReservations");
 const {
-  releaseAllEarmarks, assignableLots, LIVE_ORDER_STATUSES,
+  releaseAllEarmarks, assignableLots, carryEarmarksForward, LIVE_ORDER_STATUSES,
 } = require("../services/lotAllocation");
 const { applyLotAssignments } = require("../services/orderService.js");
 const { appendStockMovement } = require("../utils/stockLedger.js");
@@ -1300,9 +1300,39 @@ router.post(
           order.pendingElastic      = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: e.quantity }));
           order.producedElastic     = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
           order.packedElastic       = elasticOrdered.map((e) => ({ elastic: e.elastic, quantity: 0 }));
-          order.rawMaterialRequired = rawMaterialRequired;
+          // ── And keep the dye lots that were set aside ─────────────
+          //
+          // A GUARD, not a live fix — and worth knowing which. This
+          // route refuses anything that is not Open, and /assign-lots
+          // refuses anything that is not Approved or InProgress, so no
+          // order reaching this line can currently be holding a lot.
+          //
+          // But it is the same shape as the bug described above for
+          // `rate`, in the field beside it: computeRawMaterialRequired
+          // returns rows with no `lots`, so assigning them wholesale
+          // would release every bag silently. The day somebody widens
+          // the status gate above — and the gate is a business rule, not
+          // a law — that assignment starts throwing yarn away. Carrying
+          // costs nothing and makes that impossible rather than
+          // remembered. See tests/api/earmarksSurviveReplan.test.js,
+          // which pins the disjointness this relies on.
+          //
+          // Carried rather than copied because this route can shrink a
+          // requirement, and validateEarmarks refuses a total larger
+          // than one. See services/lotAllocation.js.
+          const carriedLots = carryEarmarksForward(
+            order.rawMaterialRequired,
+            rawMaterialRequired
+          );
+          order.rawMaterialRequired = carriedLots.rows;
           order.updatedItemsAt      = new Date();
           changed.elasticOrdered    = `${elasticOrdered.length} item(s)`;
+          if (carriedLots.trimmed.length || carriedLots.dropped.length) {
+            changed.dyeLots = [
+              carriedLots.trimmed.length && `${carriedLots.trimmed.length} trimmed to fit`,
+              carriedLots.dropped.length && `${carriedLots.dropped.length} released`,
+            ].filter(Boolean).join(', ');
+          }
         }
 
         if (Object.keys(changed).length === 0) {
