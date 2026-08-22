@@ -43,6 +43,9 @@ const {
   buildIndex,
   resolveLeadTime,
 } = require("../services/leadTimeLearning");
+const { materialLedger, parseRange } = require("../services/materialLedger");
+const { buildMaterialLedgerPdf } = require("../utils/materialLedgerPdf");
+const { getPdfBranding } = require("../services/documentSettings");
 
 const DAY_MS = 86_400_000;
 
@@ -1782,6 +1785,71 @@ router.get(
         estimatedValue: Math.round(g.estimatedValue * 100) / 100,
       })),
     });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  GET /materials/ledger?id=&from=&to=
+//
+//  Stock movements for one material over a date range, with a
+//  running balance and the balances on either side of the window.
+//
+//  The material detail page used to show the newest 50 rows off
+//  the embedded stockMovements array and nothing else — no way to
+//  ask about a month that had scrolled off. This reads the
+//  uncapped inward/outward logs instead. See services/materialLedger.js.
+//
+//  from/to are optional and inclusive of whole local days.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/ledger",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.query;
+    if (!id || !mongoose.Types.ObjectId.isValid(id))
+      return next(new ErrorHandler("Material ID required", 400));
+
+    const range = parseRange(req.query);
+    const ledger = await materialLedger(id, range);
+    res.json({ success: true, ...ledger });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  GET /materials/ledger.pdf?id=&from=&to=
+//
+//  The same ledger as a printable SAP-style sheet. Same query
+//  parameters as /ledger, so the web app can point the print link
+//  at exactly the range that is on screen.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/ledger.pdf",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.query;
+    if (!id || !mongoose.Types.ObjectId.isValid(id))
+      return next(new ErrorHandler("Material ID required", 400));
+
+    const range = parseRange(req.query);
+    const ledger = await materialLedger(id, range);
+    ledger.branding = await getPdfBranding();
+    const pdf = await buildMaterialLedgerPdf(ledger);
+
+    // A filename that says which material and which period, because
+    // these get saved in a folder and opened again weeks later.
+    const slug = String(ledger.material.name || "material")
+      .replace(/[^\w\d]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "material";
+    const period = [
+      range.from ? range.from.toISOString().slice(0, 10) : "start",
+      range.to ? range.to.toISOString().slice(0, 10) : "today",
+    ].join("_to_");
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="stock-ledger-${slug}-${period}.pdf"`
+    );
+    return res.send(pdf);
   })
 );
 
