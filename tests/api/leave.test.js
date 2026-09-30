@@ -226,7 +226,9 @@ describe('GET /conflicts', () => {
   test('matches an approved leave against an open shift on the same day', async () => {
     const { emp } = await makeWorker('Clash', 'clash@t.co');
     const ShiftDetail = require('../../models/ShiftDetail.js');
-    const day = new Date('2026-09-11'); day.setHours(0, 0, 0, 0);
+    // A future day: /conflicts only looks from today onwards, so a fixed
+    // date passed its own test until the calendar caught up with it.
+    const day = new Date(Date.now() + 5 * 86_400_000); day.setHours(0, 0, 0, 0);
 
     await LeaveRequest.create({
       employee: emp._id, date: day, shift: 'DAY',

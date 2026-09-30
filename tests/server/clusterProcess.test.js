@@ -29,8 +29,13 @@ const freePort = () => new Promise((resolve) => {
   });
 });
 
+// A new connection per request (agent: false). Node's default agent
+// keeps sockets alive, and a pooled socket to a worker that was just
+// killed fails on reuse — a client artefact, which browsers and nginx
+// absorb by retrying an idle connection that was reset, and not the
+// server behaviour this file is measuring.
 const get = (port, p) => new Promise((resolve) => {
-  const req = http.get({ host: '127.0.0.1', port, path: p, timeout: 2000 }, (res) => {
+  const req = http.get({ host: '127.0.0.1', port, path: p, timeout: 2000, agent: false }, (res) => {
     let body = '';
     res.on('data', (c) => { body += c; });
     res.on('end', () => resolve({ status: res.statusCode, body }));
@@ -95,15 +100,20 @@ describe('WEB_CONCURRENCY=2', () => {
     const before = childrenOf(srv.child.pid);
     process.kill(before[0], 'SIGKILL');
 
-    // Keep asking while the replacement starts. The surviving worker
-    // answers, so no request fails — which is the point: one crash used
-    // to be a full outage until systemd restarted the unit.
+    // A request the worker was in the middle of dies with it — a hard
+    // crash loses what that process held. Wait for the primary to have
+    // reaped it (which is also when it forks the replacement)...
+    expect(await until(async () => !childrenOf(srv.child.pid).includes(before[0]))).toBe(true);
+
+    // ...and from then on nothing fails, including while the
+    // replacement is still booting: the surviving worker answers. One
+    // crash used to be a full outage until systemd restarted the unit.
     const statuses = [];
     for (let i = 0; i < 20; i++) {
       statuses.push((await get(srv.port, '/api/v2/health')).status);
       await new Promise((r) => setTimeout(r, 50));
     }
-    expect(statuses.every((s) => s === 200)).toBe(true);
+    expect(statuses).toEqual(Array(20).fill(200));
 
     const replaced = await until(async () => {
       const now = childrenOf(srv.child.pid);

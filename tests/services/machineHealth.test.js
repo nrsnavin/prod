@@ -78,6 +78,7 @@ const givePosterior = (machine, elastic, meanPerHead, observations = 50) =>
  * decaying machine is written.
  */
 let dayCursor = 0;
+const FIRST_SHIFT_DAY = (() => { const d = new Date(Date.now() - 230 * 86_400_000); d.setHours(0, 0, 0, 0); return d; })();
 let fixtureOperator = null;
 async function runShifts(machine, elastic, count, perHead) {
   const heads = machine.NoOfHead;
@@ -93,7 +94,10 @@ async function runShifts(machine, elastic, count, perHead) {
   const plans = [];
   const details = [];
   for (let i = 0; i < count; i++) {
-    const date = new Date(2026, 0, 1);
+    // Anchored to today, not a calendar date: analyse() looks back 240
+    // days from now, and a fixed start aged out of that window on its
+    // own. 230 days back leaves room for the longest test (160 shifts).
+    const date = new Date(FIRST_SHIFT_DAY);
     date.setDate(date.getDate() + dayCursor++);
     const planId = new mongoose.Types.ObjectId();
     const value = typeof perHead === 'function' ? perHead(i) : perHead;
@@ -407,11 +411,10 @@ describe('the report explains itself', () => {
     await givePosterior(m, e, 1000);
     await runShifts(m, e, 30, 1200);      // comfortably above expectation
 
-    // The fixture lays shifts down from a fixed 1 Jan 2026 while this
-    // helper works in windows back from `now`, so `now` is pinned just
-    // past the run rather than the fixture being made relative.
+    // This helper works in windows back from `now`, so `now` is pinned
+    // just past the 30-shift run that starts at FIRST_SHIFT_DAY.
     const drift = await health.driftByMachine({
-      recentDays: 7, baselineDays: 21, now: new Date(2026, 0, 31),
+      recentDays: 7, baselineDays: 21, now: new Date(FIRST_SHIFT_DAY.getTime() + 30 * 86_400_000),
     });
     const row = drift.get(String(m._id));
     expect(row.dropPct).toBe(0);
