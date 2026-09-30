@@ -36,6 +36,10 @@ EnvironmentFile=/home/ubuntu/prod/config/.env
 # Bind to localhost — the TLS proxy is the only public entry point.
 Environment=NODE_ENV=PRODUCTION
 Environment=HOST=127.0.0.1
+# API processes behind the one port (server/cluster.js). Unset = one per
+# core, at most 4. Uncomment and set to 1 to go back to a single process
+# without a code change, then `systemctl restart`.
+#Environment=WEB_CONCURRENCY=1
 ExecStart=/usr/bin/node index.js
 # `always`, not `on-failure`: a clean exit(0) from an unexpected path is
 # still the service not running, which is the thing we care about.
