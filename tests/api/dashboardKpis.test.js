@@ -67,7 +67,7 @@ describe('what the dashboard is told', () => {
 
   it('keeps the shape the web app reads', async () => {
     const { data } = (await kpis()).body;
-    expect(Object.keys(data).sort()).toEqual(['attendanceToday', 'lowStock', 'openJobs', 'pendingLeaves']);
+    expect(Object.keys(data).sort()).toEqual(['attendanceToday', 'lateOrders', 'lowStock', 'openJobs', 'pendingLeaves']);
     expect(Object.keys(data.lowStock.items[0]).sort()).toEqual(['category', 'id', 'minStock', 'name', 'stock']);
     expect(Object.keys(data.attendanceToday).sort()).toEqual(
       ['attendancePct', 'breakdown', 'totalEmployees', 'totalMarked', 'unmarked']
@@ -114,5 +114,35 @@ describe('what it costs', () => {
     forgetShared();
     await kpis();
     expect(scans).toBe(2);
+  });
+});
+
+describe('late orders', () => {
+  it('counts open orders past their supply date, and nothing finished, cancelled or still in time', async () => {
+    const Order = require('../../models/Order');
+    const Customer = require('../../models/Customer');
+    const c = await Customer.create({ name: 'Late Co', contactName: 'R', phoneNumber: '9000000077' });
+    const day = 86_400_000;
+    const base = { customer: c._id, po: 'PO', date: new Date(Date.now() - 30 * day), elastics: [] };
+    const past = new Date(Date.now() - 3 * day);
+    const future = new Date(Date.now() + 3 * day);
+    // Validation is beside the point here, and each status has its own
+    // required fields; insert the documents directly.
+    await Order.collection.insertMany([
+      { ...base, orderNo: 9001, status: 'Open', supplyDate: past },
+      { ...base, orderNo: 9002, status: 'Approved', supplyDate: past },
+      { ...base, orderNo: 9003, status: 'InProgress', supplyDate: past },
+      { ...base, orderNo: 9004, status: 'InProgress', supplyDate: future },
+      { ...base, orderNo: 9005, status: 'Completed', supplyDate: past },
+      { ...base, orderNo: 9006, status: 'Cancelled', supplyDate: past },
+      { ...base, orderNo: 9007, status: 'Deleted', supplyDate: past },
+      // Due today is not late yet — there is still the day to ship it.
+      { ...base, orderNo: 9008, status: 'Open', supplyDate: (() => { const d = new Date(); d.setHours(12, 0, 0, 0); return d; })() },
+    ]);
+    try {
+      expect((await kpis()).body.data.lateOrders).toBe(3);
+    } finally {
+      await Order.collection.deleteMany({ orderNo: { $gte: 9001, $lte: 9008 } });
+    }
   });
 });

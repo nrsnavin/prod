@@ -18,6 +18,7 @@ const LeaveRequest = require("../models/LeaveRequest");
 const Attendance   = require("../models/Attendence.js");
 const RawMaterial  = require("../models/RawMaterial");
 const Employee     = require("../models/Employee");
+const Order        = require("../models/Order");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { sharedResult } = require("../utils/sharedResult");
@@ -55,6 +56,9 @@ router.get(
 
 const KPI_TTL_MS = 5_000;
 
+// Not yet delivered in full and not abandoned. "Deleted" is a soft delete.
+const LIVE_ORDER_STATUSES = ["Open", "Approved", "InProgress"];
+
 async function computeKpis() {
   const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
   const endOfToday   = new Date(); endOfToday.setHours(23, 59, 59, 999);
@@ -65,6 +69,7 @@ async function computeKpis() {
     attendanceGroups,
     lowStock,
     totalEmployees,
+    lateOrders,
   ] = await Promise.all([
     JobOrder.countDocuments({ status: { $in: ACTIVE_JOB_STATUSES } }),
     LeaveRequest.countDocuments({ status: "pending" }),
@@ -90,6 +95,13 @@ async function computeKpis() {
       },
     ]),
     Employee.countDocuments({}),
+    // Orders still open whose supply date has passed — the one number
+    // a supervisor opens the dashboard to find out. Served by the
+    // { status, supplyDate } index.
+    Order.countDocuments({
+      status: { $in: LIVE_ORDER_STATUSES },
+      supplyDate: { $lt: startOfToday },
+    }),
   ]);
 
   const breakdown = {
@@ -113,6 +125,7 @@ async function computeKpis() {
   return {
     openJobs,
     pendingLeaves,
+    lateOrders,
     lowStock: {
       count: lowStockCount,
       items: lowStockMaterials.map((m) => ({
