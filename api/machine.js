@@ -579,6 +579,10 @@ router.get(
       machine: {
         id:           machine.ID,
         status:       machine.status,
+        // The document version, sent back as `expectedVersion` by the
+        // edit and head-map forms so a save from a stale screen is a 409
+        // rather than a silent overwrite. See utils/versioning.js.
+        __v:          machine.__v ?? 0,
         // Head → elastic map, sorted by head, with the elastic populated
         // to { _id, name } so the UI can show which elastic runs on each head.
         elastics:     [...(machine.elastics || [])]
