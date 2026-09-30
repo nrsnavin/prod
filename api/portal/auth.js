@@ -14,6 +14,7 @@ const express          = require("express");
 const router           = express.Router();
 const catchAsyncErrors = require("../../middleware/catchAsyncErrors.js");
 const ErrorHandler     = require("../../utils/ErrorHandler.js");
+const { verifyPassword, dummyHash } = require("../../utils/passwordHash.js");
 
 const CustomerUser = require("../../models/CustomerUser.js");
 const Customer     = require("../../models/Customer.js");
@@ -49,11 +50,12 @@ router.post(
     const user = await CustomerUser.findOne({ email: String(email).toLowerCase().trim() })
       .select("+password");
 
-    // Always run comparePassword (constant-time-ish) when the user
-    // exists, but the timing-leak risk on a missing user is small for
-    // a B2B portal — collapsing to one generic message is what
-    // matters for the UX and prevents user-enumeration.
-    const ok = user ? await user.comparePassword(password) : false;
+    // One generic message, AND the same work either way: an unknown
+    // email used to answer before a known one had finished hashing, so
+    // the timing gave away which addresses have portal accounts.
+    const ok = user
+      ? await user.comparePassword(password)
+      : (await verifyPassword(String(password), await dummyHash()), false);
     if (!user || !ok) {
       return next(new ErrorHandler("Invalid email or password", 401));
     }

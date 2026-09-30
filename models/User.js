@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
+const { hashPassword, verifyPassword } = require("../utils/passwordHash");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 
@@ -110,12 +110,17 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-userSchema.pre("save", async function (next){
-  if(!this.isModified("password")){
-    next();
-  }
-
-  this.password = await bcrypt.hash(this.password, 10);
+// Hash on write. Async and next-less on purpose.
+//
+// This used to call next() on the unmodified path WITHOUT returning, so
+// it fell through and hashed the existing hash. A single save got away
+// with it — the write raced ahead of the re-hash — but saving the same
+// loaded document twice stored a hash of a hash, and that user could
+// never log in again. No route saves a user twice today; the first one
+// that did would have locked people out with nothing in the logs.
+userSchema.pre("save", async function () {
+  if (!this.isModified("password")) return;
+  this.password = await hashPassword(this.password);
 });
 
 // jwt token
@@ -126,8 +131,23 @@ userSchema.methods.getJwtToken = function () {
 };
 
 // compare password
+// Checks the password, and quietly upgrades a legacy bcrypt hash to the
+// current scheme once the password has been proven right. The upgrade
+// is a direct update rather than a save: it must not trip the pre-save
+// hook, and must not write whatever else happens to be modified on this
+// document. See utils/passwordHash.js.
 userSchema.methods.comparePassword = async function (enteredPassword) {
-  return await bcrypt.compare(enteredPassword, this.password);
+  const { ok, needsRehash } = await verifyPassword(enteredPassword, this.password);
+  if (ok && needsRehash) {
+    try {
+      const upgraded = await hashPassword(enteredPassword);
+      await this.constructor.updateOne({ _id: this._id }, { $set: { password: upgraded } });
+    } catch (err) {
+      // The login still succeeds; the upgrade is tried again next time.
+      console.warn(`[auth] hash upgrade skipped for ${this._id}: ${err?.message}`);
+    }
+  }
+  return ok;
 };
 
 // ─────────────────────────────────────────────────────────────

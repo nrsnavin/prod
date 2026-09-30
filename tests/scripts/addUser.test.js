@@ -135,7 +135,7 @@ describe('adding a user', () => {
     const out = run(['Navin', 'rsnavin1@gmail.com']);
     expect(out).not.toMatch(/password   \S/);
     const user = await usersIn('connected_db').findOne({}, { projection: { password: 1 } });
-    expect(user.password).toMatch(/^\$2[aby]\$/);   // bcrypt, not plain text
+    expect(user.password).toMatch(/^scrypt\$\d+\$\d+\$\d+\$/);   // hashed, not plain text
   }, 60_000);
 
   it('prints the password only when asked, for the mobile app', async () => {

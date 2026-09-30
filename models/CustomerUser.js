@@ -10,7 +10,7 @@
 // — those are just records of who to call; CustomerUsers actually
 // authenticate).
 const mongoose = require("mongoose");
-const bcrypt   = require("bcryptjs");
+const { hashPassword, verifyPassword } = require("../utils/passwordHash");
 const jwt      = require("jsonwebtoken");
 
 const CustomerUserSchema = new mongoose.Schema(
@@ -65,10 +65,9 @@ const CustomerUserSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-CustomerUserSchema.pre("save", async function (next) {
-  if (!this.isModified("password")) return next();
-  this.password = await bcrypt.hash(this.password, 10);
-  next();
+CustomerUserSchema.pre("save", async function () {
+  if (!this.isModified("password")) return;
+  this.password = await hashPassword(this.password);
 });
 
 // JWT — separate cookie and (optionally) separate secret from the
@@ -92,8 +91,19 @@ CustomerUserSchema.methods.getJwtToken = function () {
   );
 };
 
-CustomerUserSchema.methods.comparePassword = function (entered) {
-  return bcrypt.compare(entered, this.password);
+// Same contract as User#comparePassword: verify, and upgrade a legacy
+// bcrypt hash in place once the password is proven.
+CustomerUserSchema.methods.comparePassword = async function (entered) {
+  const { ok, needsRehash } = await verifyPassword(entered, this.password);
+  if (ok && needsRehash) {
+    try {
+      const upgraded = await hashPassword(entered);
+      await this.constructor.updateOne({ _id: this._id }, { $set: { password: upgraded } });
+    } catch (err) {
+      console.warn(`[portal-auth] hash upgrade skipped for ${this._id}: ${err?.message}`);
+    }
+  }
+  return ok;
 };
 
 module.exports = mongoose.model("CustomerUser", CustomerUserSchema);

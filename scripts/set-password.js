@@ -38,7 +38,7 @@
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../config/.env') });
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
+const { verifyPassword } = require('../utils/passwordHash');
 
 const argv = process.argv.slice(2);
 const flagValue = (flag) => {
@@ -130,7 +130,9 @@ async function main() {
     // that somebody cannot get in; "probably worked" is not worth much
     // to them.
     const fresh = await User.findById(user._id).select('+password');
-    const ok = await bcrypt.compare(PASSWORD, fresh.password || '');
+    // Through the app's own verifier, so a hash the app cannot read is
+    // reported here rather than at the login screen.
+    const { ok } = await verifyPassword(PASSWORD, fresh.password || '');
 
     if (ok) {
       console.log(`  ✓ ${fresh.email} (${fresh.name}, ${fresh.role}) — password set and verified`);

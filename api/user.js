@@ -1,6 +1,7 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const User = require("../models/User.js");
+const { verifyPassword, dummyHash } = require("../utils/passwordHash");
 const Employee = require("../models/Employee.js");
 const router = express.Router();
 const ErrorHandler = require("../utils/ErrorHandler");
@@ -83,9 +84,13 @@ router.post(
       // Unify the "user not found" and "bad password" paths into one
       // generic 401. Distinguishing them lets attackers enumerate
       // registered emails via the response code.
+      //
+      // And make both paths take the same time. An unknown email used to
+      // answer instantly while a known one waited for a hash — so the
+      // response TIME said which emails are registered, whatever the code.
       const isPasswordValid = user
         ? await user.comparePassword(password)
-        : false;
+        : (await verifyPassword(password, await dummyHash()), false);
       if (!user || !isPasswordValid) {
         return next(new ErrorHandler("Invalid email or password", 401));
       }
