@@ -2,6 +2,7 @@ const express = require("express");
 const { renderPdf } = require("../utils/renderPdf");
 const { isAuthenticated, isAdmin } = require("../middleware/auth.js");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors.js");
+const { escapeRegex } = require("../utils/escapeRegex");
 const router = express.Router();
 const Order = require("../models/Order.js");
 const Job = require("../models/JobOrder.js");
@@ -241,6 +242,16 @@ router.get(
     // "All" (case-insensitive) lists every order regardless of status;
     // any other value filters to that exact status.
     const filter = String(status).toLowerCase() === "all" ? {} : { status };
+
+    // Optional ?search= for the app's global search: "42", "#42" or
+    // "order 42" is an order number; anything else matches the customer
+    // PO, case-insensitively. Escaped — it is typed by a person.
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    if (search) {
+      const asNumber = search.match(/^(?:order\s*)?#?\s*(\d+)$/i);
+      if (asNumber) filter.orderNo = Number(asNumber[1]);
+      else filter.po = { $regex: escapeRegex(search), $options: "i" };
+    }
 
     // Paginated. This route used to return every order ever placed, fully
     // hydrated into mongoose documents and sorted in memory — the one list
