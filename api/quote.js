@@ -20,6 +20,7 @@
 // ─────────────────────────────────────────────────────────────
 
 const express  = require('express');
+const { renderPdf } = require('../utils/renderPdf');
 const router   = express.Router();
 const mongoose = require('mongoose');
 
@@ -38,7 +39,6 @@ const { nextNumber }            = require('../utils/sequence');
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
 
 const PdfTemplate           = require('../models/PdfTemplate');
-const { renderTemplatePdf } = require('../services/pdf/templateRenderer');
 const { starterTemplate }   = require('../services/pdf/docTypes');
 const { getPdfBranding }    = require('../services/documentSettings');
 const { quoteToContext }    = require('../services/pdf/quoteContext');
@@ -556,7 +556,7 @@ router.get(
       getPdfBranding(),
     ]);
     const template = saved && saved.enabled ? saved : starterTemplate('quotation');
-    const pdf = await renderTemplatePdf(template, quoteToContext(quote, branding));
+    const pdf = await renderPdf('template', template, quoteToContext(quote, branding));
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(

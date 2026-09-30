@@ -19,6 +19,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express = require('express');
+const { renderPdf } = require('../utils/renderPdf');
 const mongoose = require('mongoose');
 const router = express.Router();
 
@@ -29,7 +30,6 @@ const Order = require('../models/Order.js');
 const JobOrder = require('../models/JobOrder.js');
 const CostSettings = require('../models/CostSettings.js');
 const { orderPnl } = require('../services/orderPnl.js');
-const { buildOrderPnlPdf } = require('../utils/orderPnlPdf.js');
 const { parseMoney, MAX_RATE, MAX_AMOUNT } = require('../utils/money.js');
 const { getPdfBranding } = require('../services/documentSettings.js');
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint.js');
@@ -237,7 +237,7 @@ router.get(
     if (!pnl) return next(new ErrorHandler('Order not found', 404));
 
     pnl.branding = await getPdfBranding();
-    const pdf = await buildOrderPnlPdf(pnl);
+    const pdf = await renderPdf('orderPnl', pnl);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',

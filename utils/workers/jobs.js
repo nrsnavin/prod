@@ -15,6 +15,12 @@ module.exports = {
    */
   'password.bcryptCompare': (plain, hash) => require('bcryptjs').compareSync(plain, hash),
 
+  /**
+   * Render a PDF by name (utils/workers/pdfRenderers.js). The arguments
+   * arrive already normalised by utils/cloneable.js.
+   */
+  'pdf.render': (name, args) => require('./pdfRenderers').render(name, args),
+
   /** Test-only: proves a job ran off the main thread, and how failures travel. */
   'pool.selfTest': (mode, value) => {
     const { isMainThread, threadId } = require('node:worker_threads');

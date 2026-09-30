@@ -13,6 +13,7 @@
 // ══════════════════════════════════════════════════════════════════════════
 
 const express        = require("express");
+const { renderPdf } = require("../utils/renderPdf");
 const mongoose       = require("mongoose");
 const router         = express.Router();
 
@@ -37,7 +38,6 @@ const { creditLot } = require("../services/yarnLotService");
 const { appendStockMovement } = require("../utils/stockLedger");
 const { receiveAtCost } = require("../utils/materialValuation");
 const PdfTemplate = require("../models/PdfTemplate");
-const { renderTemplatePdf } = require("../services/pdf/templateRenderer");
 const { starterTemplate }   = require("../services/pdf/docTypes");
 const { getPdfBranding }     = require("../services/documentSettings");
 const { poToContext }        = require("../services/pdf/poContext");
@@ -446,7 +446,7 @@ router.get(
     const template = saved && saved.enabled ? saved : starterTemplate("purchase-order");
 
     const context = poToContext(po, branding);
-    const pdf = await renderTemplatePdf(template, context);
+    const pdf = await renderPdf('template', template, context);
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(

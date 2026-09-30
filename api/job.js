@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const { renderPdf } = require('../utils/renderPdf');
 const router  = express.Router();
 const mongoose = require('mongoose');
 
@@ -28,7 +29,6 @@ const { checkWeavingReadiness } = require('../services/weavingReadiness');
 const { plannedLotsForJob, distinctLots } = require('../services/yarnLotTrail');
 const { earmarksForJob, carryEarmarksForward } = require('../services/lotAllocation');
 const { shiftFigures, clockToMinutes } = require('../utils/shiftFigures');
-const { buildMrpPdf } = require('../utils/mrpPdf');
 const { getPdfBranding } = require('../services/documentSettings.js');
 
 // Every job route requires a logged-in user. The previous setup left
@@ -2572,7 +2572,7 @@ router.get('/:jobId/mrp.pdf', async (req, res) => {
     if (!data) return res.status(404).json({ success: false, message: 'Job not found.' });
 
     data.branding = await getPdfBranding();
-    const pdf = await buildMrpPdf(data);
+    const pdf = await renderPdf('mrp', data);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',

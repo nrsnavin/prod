@@ -1,6 +1,7 @@
 "use strict";
 
 const express           = require("express");
+const { renderPdf } = require("../utils/renderPdf");
 const router            = express.Router();
 const mongoose          = require("mongoose");
 const RawMaterial       = require("../models/RawMaterial");
@@ -44,7 +45,6 @@ const {
   resolveLeadTime,
 } = require("../services/leadTimeLearning");
 const { materialLedger, parseRange } = require("../services/materialLedger");
-const { buildMaterialLedgerPdf } = require("../utils/materialLedgerPdf");
 const { getPdfBranding } = require("../services/documentSettings");
 
 const DAY_MS = 86_400_000;
@@ -1831,7 +1831,7 @@ router.get(
     const range = parseRange(req.query);
     const ledger = await materialLedger(id, range);
     ledger.branding = await getPdfBranding();
-    const pdf = await buildMaterialLedgerPdf(ledger);
+    const pdf = await renderPdf('materialLedger', ledger);
 
     // A filename that says which material and which period, because
     // these get saved in a folder and opened again weeks later.

@@ -1,4 +1,5 @@
 const express = require("express");
+const { renderPdf } = require("../utils/renderPdf");
 const { isAuthenticated, isAdmin } = require("../middleware/auth.js");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors.js");
 const router = express.Router();
@@ -11,7 +12,6 @@ const { buildOrderStatusReport } = require("../services/orderStatusReport.js");
 const PurchaseOrder = require("../models/PurchaseOrder.js");
 const { triageShortfall, createShortfallPos, skipReasons } = require("../services/shortfallPo.js");
 const { issuedForOrder } = require("../services/orderIssuance.js");
-const { buildOrderStatusPdf } = require("../utils/orderStatusPdf.js");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
@@ -1750,7 +1750,7 @@ router.get(
     if (!data) return next(new ErrorHandler('Order not found', 404));
 
     data.branding = await getPdfBranding();
-    const pdf = await buildOrderStatusPdf(data);
+    const pdf = await renderPdf('orderStatus', data);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',

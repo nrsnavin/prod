@@ -12,13 +12,13 @@
 // ══════════════════════════════════════════════════════════════
 
 const express = require("express");
+const { renderPdf } = require("../utils/renderPdf");
 const router = express.Router();
 const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const PdfTemplate = require("../models/PdfTemplate");
 const { listDocTypes, getDocType, starterTemplate } = require("../services/pdf/docTypes");
-const { renderTemplatePdf } = require("../services/pdf/templateRenderer");
 const { getPdfBranding } = require("../services/documentSettings");
 
 const EDITABLE = ["name", "pageSize", "orientation", "enabled", "elements"];
@@ -108,7 +108,7 @@ router.post(
       : (await PdfTemplate.findOne({ docType }).lean()) || starterTemplate(docType);
 
     const context = await previewContext(docType);
-    const pdf = await renderTemplatePdf(template, context);
+    const pdf = await renderPdf('template', template, context);
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="${docType}-preview.pdf"`);

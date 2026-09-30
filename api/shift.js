@@ -1,6 +1,7 @@
 "use strict";
 
 const express  = require("express");
+const { renderPdf } = require("../utils/renderPdf");
 const router   = express.Router();
 const moment   = require("moment");
 const mongoose = require("mongoose");
@@ -31,7 +32,7 @@ const multer = require("multer");
 // AsyncLocalStorage stores — the database it routes to and the user
 // it audits as. See middleware/userContext.js.
 const { keepRequestContext } = require("../middleware/userContext.js");
-const { buildShiftSheetPdf, shortCode } = require("../utils/shiftSheetPdf");
+const { shortCode } = require("../utils/shiftSheetPdf");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
 const { VISION_MODEL } = require("../utils/anthropicClient");
@@ -1276,7 +1277,7 @@ router.get(
 
     const dateLabel = moment(sp.date).format("DD-MMM-YYYY");
     const branding = await getPdfBranding();
-    const pdf = await buildShiftSheetPdf({
+    const pdf = await renderPdf('shiftSheet', {
       dateLabel,
       shift: sp.shift,
       planNo: `SP-${moment(sp.date).format("YYYYMMDD")}-${sp.shift === "NIGHT" ? "N" : "D"}`,

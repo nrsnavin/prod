@@ -1,4 +1,5 @@
 const express  = require("express");
+const { renderPdf } = require("../utils/renderPdf");
 const router   = express.Router();
 const mongoose = require("mongoose");
 
@@ -19,7 +20,6 @@ const { enqueue }       = require("../utils/outbox");
 const { nextNumber }    = require("../utils/sequence");
 const { currentFinancialYear } = require("../utils/financialYear");
 const PdfTemplate       = require("../models/PdfTemplate");
-const { renderTemplatePdf } = require("../services/pdf/templateRenderer");
 const { starterTemplate }   = require("../services/pdf/docTypes");
 const { getPdfBranding }     = require("../services/documentSettings");
 const { dcToContext }        = require("../services/pdf/dcContext");
@@ -968,7 +968,7 @@ router.get(
     const template = saved && saved.enabled ? saved : starterTemplate("delivery-challan");
 
     const context = dcToContext(dc, branding);
-    const pdf = await renderTemplatePdf(template, context);
+    const pdf = await renderPdf('template', template, context);
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(

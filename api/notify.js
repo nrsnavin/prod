@@ -10,6 +10,7 @@
 // route only exposes whether the provider is *configured*, so the
 // admin UI can show a "connect WhatsApp" hint when creds are absent.
 const express          = require("express");
+const { renderPdf } = require("../utils/renderPdf");
 const router           = express.Router();
 const catchAsyncErrors = require("../middleware/catchAsyncErrors.js");
 const ErrorHandler     = require("../utils/ErrorHandler.js");
@@ -193,9 +194,8 @@ async function runDigest(returnTextOnly = false) {
   // non-fatal — the text body still ships.
   let mediaUrl = null;
   try {
-    const { buildMorningDigestPdf } = require("../utils/reportPdf.js");
     const { publishPdf, pdfFilename } = require("../utils/reportPublisher.js");
-    const pdf = await buildMorningDigestPdf(data);
+    const pdf = await renderPdf('morningDigest', data);
     const published = await publishPdf(pdf, pdfFilename("morning-digest"));
     mediaUrl = published.url;
   } catch (err) {
@@ -249,9 +249,8 @@ async function runEveningReport(returnTextOnly = false) {
 
   let mediaUrl = null;
   try {
-    const { buildEveningReportPdf } = require("../utils/reportPdf.js");
     const { publishPdf, pdfFilename } = require("../utils/reportPublisher.js");
-    const pdf = await buildEveningReportPdf(data);
+    const pdf = await renderPdf('eveningReport', data);
     const published = await publishPdf(pdf, pdfFilename("evening-report"));
     mediaUrl = published.url;
   } catch (err) {
