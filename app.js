@@ -25,7 +25,6 @@ const cookieParser = require("cookie-parser");
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
 const sanitizeMongo = require("./middleware/sanitizeMongo.js");
 const { setUserContext } = require("./middleware/userContext.js");
 const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead, requireFeatureReadPaths } = require("./middleware/auth.js");
@@ -44,38 +43,13 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(ab, bb);
 }
 
-// Brute-force / abuse throttles. Keyed per-IP (trust proxy is set so
-// the real client IP is used behind the reverse proxy).
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,   // 15 min
-  max: 20,                    // 20 attempts / IP / window
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: "Too many login attempts — try again later." },
-});
-const webhookLimiter = rateLimit({
-  windowMs: 60 * 1000,        // 1 min
-  max: 30,                    // 30 inbound webhook hits / IP / min
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: "Rate limit exceeded." },
-});
-// Defence-in-depth global ceiling across the whole API. Generous
-// enough that a normal admin session (dashboards fan out many reads)
-// never trips it, but it caps scraping / brute-force / DoS on the
-// endpoints that aren't individually throttled. The tighter
-// loginLimiter still applies on top for /login-user.
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,   // 15 min
-  // The web app live-polls every mounted query every 10s, and a whole
-  // office can sit behind one NAT IP — e.g. 5 users × 3 queries/10s
-  // ≈ 1350 req/15min. Ceiling sized so normal polling never trips it
-  // while still capping scraping/brute-force.
-  max: 4000,                  // ~4.4 req/s sustained per IP
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: "Too many requests — slow down and try again shortly." },
-});
+// Brute-force / abuse throttles, and the API-wide ceiling. Built in
+// middleware/rateLimits.js, which says who is counted as whom and why:
+// per signed-in user rather than per office IP, failed logins only, and
+// counters in MongoDB so they hold across every worker process.
+const {
+  apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter,
+} = require("./middleware/rateLimits.js").buildLimiters();
 
 const user     = require("./api/user.js");
 const settings = require("./api/settings.js");
@@ -536,13 +510,13 @@ const gate = (...roles) => [isAuthenticated, isAdmin('admin', ...roles)];
 
 // Throttle credential-guessing before the login handler runs.
 app.use("/api/v2", apiLimiter);
-app.use("/api/v2/user/login-user", loginLimiter);
+app.use("/api/v2/user/login-user", loginAddressLimiter, loginAccountLimiter);
 // Unauthenticated, abuse-prone surfaces: forgot-password and both OTP
-// legs trigger emails / accept guesses — throttle them on the same tight
-// per-IP limiter as login to cap abuse/enumeration/brute-force.
-app.use("/api/v2/user/forgot-password", loginLimiter);
-app.use("/api/v2/user/request-otp", loginLimiter);
-app.use("/api/v2/user/verify-otp", loginLimiter);
+// legs trigger emails / accept guesses — every request counts here, not
+// only failures, because a successful one sends mail.
+app.use("/api/v2/user/forgot-password", otpLimiter);
+app.use("/api/v2/user/request-otp", otpLimiter);
+app.use("/api/v2/user/verify-otp", otpLimiter);
 // ── Every route carries a role gate ─────────────────────────────────
 // Live roles are only admin / production / accounts (roleForDepartment
 // derives them from the 5 departments — see utils/roles.js). The old
