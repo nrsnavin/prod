@@ -875,130 +875,183 @@ router.delete(
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));
+    if (!mongoose.Types.ObjectId.isValid(String(id))) {
+      return next(new ErrorHandler("id is not a valid Shift Plan id", 400));
+    }
 
-    const sp = await ShiftPlan.findById(id);
-    if (!sp) return next(new ErrorHandler("Shift Plan not found", 404));
+    // One transaction for the plan, its details and every reference to
+    // them. This used to walk the details one by one, load each machine
+    // and employee, filter its array and save() it back — outside any
+    // transaction, and as a read-modify-write, so a save landing in
+    // between was silently undone and a failure part-way left a plan
+    // with some of its references gone. It also never touched the job's
+    // own list of shifts, which was left pointing at deleted details.
+    const session = await mongoose.startSession();
+    let found = true;
+    try {
+      await session.withTransaction(async () => {
+        found = true;
+        const sp = await ShiftPlan.findById(id).select("plan").session(session);
+        if (!sp) { found = false; return; }
 
-    await Promise.all(
-      sp.plan.map(async (shiftDetailId) => {
-        const sd = await ShiftDetail.findById(shiftDetailId);
-        if (!sd) return;
+        const detailIds = sp.plan || [];
+        if (detailIds.length) {
+          const details = await ShiftDetail.find({ _id: { $in: detailIds } })
+            .select("machine employee").session(session).lean();
+          const machines = [...new Set(details.map((d) => String(d.machine)).filter(Boolean))];
+          const employees = [...new Set(details.map((d) => String(d.employee)).filter(Boolean))];
+          const pull = { $pull: { shifts: { $in: detailIds } } };
 
-        const [machine, emp] = await Promise.all([
-          Machine.findById(sd.machine),
-          Employee.findById(sd.employee),
-        ]);
-
-        if (machine) {
-          machine.shifts = machine.shifts.filter(
-            (sid) => sid.toString() !== sd._id.toString()
+          if (machines.length) await Machine.updateMany({ _id: { $in: machines } }, pull, { session });
+          if (employees.length) await Employee.updateMany({ _id: { $in: employees } }, pull, { session });
+          await JobOrder.updateMany(
+            { shiftDetails: { $in: detailIds } },
+            { $pull: { shiftDetails: { $in: detailIds } } },
+            { session }
           );
-          await machine.save();
+          await ShiftDetail.deleteMany({ _id: { $in: detailIds } }, { session });
         }
-        if (emp) {
-          emp.shifts = emp.shifts.filter(
-            (sid) => sid.toString() !== sd._id.toString()
-          );
-          await emp.save();
-        }
+        await ShiftPlan.deleteOne({ _id: id }, { session });
+      });
+    } finally {
+      await session.endSession();
+    }
 
-        await ShiftDetail.findByIdAndDelete(shiftDetailId);
-      })
-    );
-
-    await ShiftPlan.findByIdAndDelete(id);
-
+    if (!found) return next(new ErrorHandler("Shift Plan not found", 404));
     res.json({ success: true, message: "Shift Plan deleted successfully" });
   })
 );
 
+// ════════════════════════════════════════════════════════════════
+//  CREATE A SHIFT PLAN — whole, or not at all
+//
+//  One plan writes four collections: the ShiftPlan, a ShiftDetail per
+//  machine, the running job's list of shifts, and each operator's list
+//  of shifts. None of it used to run in a transaction, so a failure
+//  part-way — a bad row, a validation error, a dropped connection —
+//  left a plan naming some of its machines and operators holding shifts
+//  from a request that had answered with an error. Now it is one
+//  transaction, and the response is written only after it commits.
+//
+//  The details are still created with create(), one by one, rather than
+//  insertMany: the audit plugin (models/plugins/auditFields.js) stamps
+//  createdBy on save, not on insertMany, and a batched insert would have
+//  dropped it silently. The references are batched where the plugin
+//  still fires — one update per job and per operator, not per machine.
+// ════════════════════════════════════════════════════════════════
 router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, res) => {
+  const { date, shiftType, description = '', machines = [] } = req.body;
+
+  if (!date || !shiftType) {
+    return res.status(400).json({ success: false, message: 'date and shiftType are required.' });
+  }
+  if (!Array.isArray(machines) || machines.length === 0) {
+    return res.status(400).json({ success: false, message: 'At least one machine must be assigned.' });
+  }
+
+  // Rows missing a machine or an operator have always been skipped. A
+  // row naming something that is not an id is refused up front, before
+  // anything is written, rather than failing inside the loop.
+  const rows = machines.filter((m) => m && m.machine && m.operator);
+  const bad = rows.find((m) =>
+    !mongoose.Types.ObjectId.isValid(String(m.machine)) || !mongoose.Types.ObjectId.isValid(String(m.operator))
+  );
+  if (bad) {
+    return res.status(400).json({ success: false, message: 'Every row needs a valid machine and operator.' });
+  }
+
+  const planDate = new Date(date);
+  if (Number.isNaN(planDate.getTime())) {
+    return res.status(400).json({ success: false, message: 'date is not a valid date.' });
+  }
+  planDate.setUTCHours(0, 0, 0, 0);
+
+  const session = await mongoose.startSession();
+  let shiftPlan;
+  let detailCount = 0;
   try {
-    const { date, shiftType, description = '', machines = [] } = req.body;
-
-    if (!date || !shiftType) {
-      return res.status(400).json({ success: false, message: 'date and shiftType are required.' });
-    }
-
-    if (!Array.isArray(machines) || machines.length === 0) {
-      return res.status(400).json({ success: false, message: 'At least one machine must be assigned.' });
-    }
-
-    const planDate = new Date(date);
-    planDate.setUTCHours(0, 0, 0, 0);
-
-    const shiftPlan = await ShiftPlan.create({
-      date: planDate, shift: shiftType,
-      description: description.trim(), status: 'draft',
-    });
-
-    const detailIds = [];
-    const detailByOperator = [];
-    for (const m of machines) {
-      if (!m.machine || !m.operator) continue;
-
-      const machineDoc = await require('../models/Machine')
-        .findById(m.machine)
-        .populate('elastics.elastic')
-        .lean();
-
-      const elastics = (machineDoc?.elastics || []).map((e) => ({
-        head: e.head, elastic: e.elastic?._id ?? e.elastic,
-      }));
-
-      const detail = await ShiftDetail.create({
+    await session.withTransaction(async () => {
+      // Everything is derived inside the callback: withTransaction may
+      // run it again after a transient error, and a retry must start
+      // from nothing rather than from the aborted attempt's arrays.
+      [shiftPlan] = await ShiftPlan.create([{
         date: planDate, shift: shiftType,
-        // The machine's running job, or nothing. This used to fall back
-        // to `m.machine` when the machine was idle, which put a MACHINE
-        // id in a field declared as a JobOrder — a reference into the
-        // wrong collection that resolves to nothing and files the shift
-        // against a job that does not exist.
-        job: machineDoc?.orderRunning ?? null,
-        machine: m.machine, employee: m.operator,
-        shiftPlan: shiftPlan._id, elastics,
-        status: 'open', timer: '00:00:00',
-      });
+        description: String(description).trim(), status: 'draft',
+      }], { session });
 
-      detailIds.push(detail._id);
-      // Keep the job's own list true. The job page no longer depends on
-      // it — it reads the shifts by their `job` ref, which is the only
-      // thing that could show the years of shifts written before this
-      // was noticed — but leaving an array that nothing maintains is
-      // how it came to be a fact-shaped empty in the first place.
-      if (machineDoc?.orderRunning) {
-        await JobOrder.findByIdAndUpdate(machineDoc.orderRunning, {
-          $addToSet: { shiftDetails: detail._id },
-        });
+      const machineDocs = await Machine.find({ _id: { $in: rows.map((m) => m.machine) } })
+        .select('elastics orderRunning').session(session).lean();
+      const byId = new Map(machineDocs.map((m) => [String(m._id), m]));
+
+      const detailIds = [];
+      const byJob = new Map();       // job id → [detail ids]
+      const byOperator = new Map();  // operator id → [detail ids]
+
+      for (const m of rows) {
+        const machineDoc = byId.get(String(m.machine));
+        // A head the editor left empty is stored as `elastic: null`, and
+        // a ShiftDetail requires an elastic on every head it lists — so a
+        // partly threaded loom used to make this whole route throw. An
+        // empty head produces nothing; it is not a line on the sheet.
+        const elastics = (machineDoc?.elastics || [])
+          .filter((e) => e && e.elastic)
+          .map((e) => ({ head: e.head, elastic: e.elastic?._id ?? e.elastic }));
+
+        const [detail] = await ShiftDetail.create([{
+          date: planDate, shift: shiftType,
+          // The machine's running job, or nothing. This used to fall back
+          // to `m.machine` when the machine was idle, which put a MACHINE
+          // id in a field declared as a JobOrder.
+          job: machineDoc?.orderRunning ?? null,
+          machine: m.machine, employee: m.operator,
+          shiftPlan: shiftPlan._id, elastics,
+          status: 'open', timer: '00:00:00',
+        }], { session });
+
+        detailIds.push(detail._id);
+        if (machineDoc?.orderRunning) {
+          const k = String(machineDoc.orderRunning);
+          byJob.set(k, [...(byJob.get(k) || []), detail._id]);
+        }
+        // Each operator gets only their own shifts. This once pushed the
+        // whole plan to every operator, inflating everyone's history.
+        const op = String(m.operator);
+        byOperator.set(op, [...(byOperator.get(op) || []), detail._id]);
       }
-      // Pair the shift with the operator who is actually working it.
-      detailByOperator.push({ operator: m.operator, detailId: detail._id });
-    }
 
-    await ShiftPlan.findByIdAndUpdate(shiftPlan._id, { $push: { plan: { $each: detailIds } } });
-
-    // Each operator gets only their own shift. This used to push the whole
-    // plan's detailIds to every operator, so one worker's `shifts` array
-    // accumulated every machine's shift for that day — inflating
-    // totalShifts on the employee page and growing each employee document
-    // by the size of the entire plan, daily.
-    await Promise.all(
-      detailByOperator.map(({ operator, detailId }) =>
-        Employee.findByIdAndUpdate(operator, { $push: { shifts: detailId } })
-      )
-    );
-
-    return res.status(201).json({
-      success: true, shiftPlanId: shiftPlan._id, status: 'draft',
-      message: `Shift plan saved as draft (${detailIds.length} machine(s) included).`,
+      await ShiftPlan.updateOne(
+        { _id: shiftPlan._id },
+        { $push: { plan: { $each: detailIds } } },
+        { session }
+      );
+      // Keep the job's own list true. The job page reads shifts by their
+      // `job` ref, but an array nothing maintains is how it came to be a
+      // fact-shaped empty in the first place.
+      for (const [job, ids] of byJob) {
+        await JobOrder.updateOne({ _id: job }, { $addToSet: { shiftDetails: { $each: ids } } }, { session });
+      }
+      for (const [operator, ids] of byOperator) {
+        await Employee.updateOne({ _id: operator }, { $push: { shifts: { $each: ids } } }, { session });
+      }
+      detailCount = detailIds.length;
     });
-
   } catch (err) {
     if (err.code === 11000) {
       return res.status(409).json({ success: false, message: 'A shift plan already exists for this date and shift type.' });
     }
+    if (err.name === 'ValidationError' || err.name === 'CastError') {
+      return res.status(400).json({ success: false, message: err.message });
+    }
     console.error('[POST /create-shift-plan]', err);
     return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    await session.endSession();
   }
+
+  return res.status(201).json({
+    success: true, shiftPlanId: shiftPlan._id, status: 'draft',
+    message: `Shift plan saved as draft (${detailCount} machine(s) included).`,
+  });
 });
 
 router.post('/confirm-shift-plan', isAdmin('admin', 'production'), async (req, res) => {

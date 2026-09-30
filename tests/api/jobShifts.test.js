@@ -27,7 +27,9 @@ process.env.NODE_ENV = 'test';
 const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// A replica set: planning a shift is a transaction, and a standalone
+// server refuses those.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 let mongo, app;
 let JobOrder, Order, Customer, Elastic, Employee, Machine, ShiftDetail, User, admin;
@@ -37,7 +39,7 @@ const adminCookie = () => [
 ];
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   JobOrder    = require('../../models/JobOrder');
