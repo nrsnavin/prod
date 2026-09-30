@@ -1,4 +1,5 @@
 const express  = require("express");
+const { assertVersion, expectedVersionOf, conflictError } = require("../utils/versioning");
 const router   = express.Router();
 const mongoose = require("mongoose");
 
@@ -710,6 +711,10 @@ router.put(
       const elastic = await Elastic.findById(elasticData._id);
       if (!elastic)
         return next(new ErrorHandler("Elastic not found", 404));
+      // A save from a screen loaded before someone else's edit is refused
+      // — an elastic's recipe drives costing and every order's material
+      // requirement, so a silent overwrite of it is not a small thing.
+      assertVersion(elastic, req);
 
       // Only when the name is actually being changed — an edit that
       // leaves the name alone must not be refused by the elastic's own
@@ -742,7 +747,17 @@ router.put(
         }
       }
 
-      await elastic.save();
+      // Conditional on the version loaded above, so an edit landing
+      // between that read and this write is a 409 too.
+      elastic.increment();
+      try {
+        await elastic.save();
+      } catch (err) {
+        if (err?.name === "VersionError") {
+          return next(conflictError(expectedVersionOf(req), null));
+        }
+        throw err;
+      }
 
       const costingFields = [
         "weight", "pick", "noOfHook", "spandexEnds",
@@ -784,6 +799,10 @@ router.put(
       const updated = await _populate(Elastic.findById(elastic._id));
       res.json({ success: true, elastic: updated });
     } catch (err) {
+      // An error that already says what it is — the 409 from a stale
+      // version, a 404 — keeps its status. Rewrapping it as a 400 made a
+      // conflict indistinguishable from bad input.
+      if (err instanceof ErrorHandler && err.statusCode) return next(err);
       console.error("update-elastic error:", err);
       return next(new ErrorHandler(err.message, 400));
     }

@@ -59,7 +59,9 @@ describe("PUT /api/v2/customer/update", () => {
   beforeEach(() => jest.clearAllMocks());
 
   it("updates customer and returns 200", async () => {
-    Customer.findByIdAndUpdate = jest.fn().mockResolvedValue(fakeCustomer({ name: "Updated Corp" }));
+    // A conditional write now (findOneAndUpdate on _id + version), so a
+    // stale edit is a 409 — see tests/api/optimisticLocking.test.js.
+    Customer.findOneAndUpdate = jest.fn().mockResolvedValue(fakeCustomer({ name: "Updated Corp" }));
 
     const res = await request(app)
       .put("/api/v2/customer/update")
@@ -71,7 +73,13 @@ describe("PUT /api/v2/customer/update", () => {
   });
 
   it("returns 404 when customer not found", async () => {
-    Customer.findByIdAndUpdate = jest.fn().mockResolvedValue(null);
+    // The conditional write matches nothing, and the follow-up read says
+    // the document is gone (rather than moved on) — so 404, not 409.
+    Customer.findOneAndUpdate = jest.fn().mockResolvedValue(null);
+    Customer.findById = jest.fn().mockReturnValue({
+      select: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue(null),
+    });
 
     const res = await request(app)
       .put("/api/v2/customer/update")

@@ -324,8 +324,9 @@ describe("PUT /api/v2/materials/edit-raw-material", () => {
   });
 
   it("updates material and returns 200", async () => {
-    RawMaterial.findById = jest.fn().mockResolvedValue(fakeMaterial());
-    RawMaterial.findByIdAndUpdate = jest.fn().mockResolvedValue(fakeMaterial({ name: "Updated Thread" }));
+    RawMaterial.findById = jest.fn().mockResolvedValue(fakeMaterial({ __v: 0 }));
+    // Conditional on the version just read — see optimisticLocking.test.js.
+    RawMaterial.findOneAndUpdate = jest.fn().mockResolvedValue(fakeMaterial({ name: "Updated Thread" }));
 
     const res = await request(app)
       .put("/api/v2/materials/edit-raw-material")

@@ -1,4 +1,5 @@
 const express  = require("express");
+const { versionFilter, bumpVersion, explainMiss } = require("../utils/versioning");
 const mongoose = require("mongoose");
 const router   = express.Router();
 
@@ -49,12 +50,16 @@ router.put(
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return next(new ErrorHandler("Invalid customer id", 400));
     }
-    const customer = await Customer.findByIdAndUpdate(
-      id,
-      pickCustomer(req.body),
+    // Compare-and-set: two people editing one customer used to be last
+    // write wins, silently. With the version the form loaded, a stale
+    // save is a 409 instead. See utils/versioning.js.
+    const changes = pickCustomer(req.body);
+    const customer = await Customer.findOneAndUpdate(
+      { _id: id, ...versionFilter(req) },
+      { ...(Object.keys(changes).length ? { $set: changes } : {}), ...bumpVersion() },
       { new: true, runValidators: true }
     );
-    if (!customer) return next(new ErrorHandler("Customer not found", 404));
+    if (!customer) await explainMiss(Customer, id, req, "Customer not found");
     res.status(200).json({ success: true, data: customer });
   })
 );

@@ -1,6 +1,7 @@
 "use strict";
 
 const express           = require("express");
+const { assertVersion, bumpVersion, explainMiss } = require("../utils/versioning");
 const { renderPdf } = require("../utils/renderPdf");
 const router            = express.Router();
 const mongoose          = require("mongoose");
@@ -496,6 +497,9 @@ router.put(
 
     const existing = await RawMaterial.findById(_id);
     if (!existing) return next(new ErrorHandler("Raw material not found", 404));
+    // The form's version, when it sent one: a save made from a stale
+    // screen is a 409, not a silent overwrite of someone else's edit.
+    assertVersion(existing, req);
 
     // `category` and `group` are settled together, never separately.
     // Both go through the resolver even when only one was sent, so an
@@ -537,9 +541,17 @@ router.put(
       };
     }
 
-    const material = await RawMaterial.findByIdAndUpdate(_id, update, {
-      new: true, runValidators: true,
-    });
+    // Conditional on the version READ above, always — not only when the
+    // client sent one. The price-history row takes oldPrice from that
+    // read, and the category was resolved against it; a save landing in
+    // between would have been recorded against the wrong starting point.
+    // Now it is a 409 and nothing is written.
+    const material = await RawMaterial.findOneAndUpdate(
+      { _id, __v: existing.__v },
+      { ...update, ...bumpVersion() },
+      { new: true, runValidators: true }
+    );
+    if (!material) await explainMiss(RawMaterial, _id, { body: { expectedVersion: existing.__v } }, "Raw material not found");
 
     res.status(200).json({ success: true, material });
 

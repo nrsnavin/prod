@@ -1,6 +1,9 @@
 "use strict";
 
 const express = require("express");
+const {
+  assertVersion, versionFilter, bumpVersion, expectedVersionOf, conflictError,
+} = require("../utils/versioning");
 const router  = express.Router();
 
 const mongoose         = require("mongoose");
@@ -411,6 +414,10 @@ router.patch(
 
     const current = await Machine.findById(machineId);
     if (!current) return next(new ErrorHandler("Machine not found.", 404));
+    // A save from a screen loaded before someone else's edit is refused
+    // rather than silently overwriting it. Checked here to fail fast, and
+    // again inside the write below, where it cannot race.
+    assertVersion(current, req);
 
     // ── A duplicate ID, checked without the machine finding itself ──
     // A machine must not be refused as a duplicate of itself, which is
@@ -446,14 +453,14 @@ router.patch(
     // ── Guarded, atomic write ───────────────────────────────────────
     const gated = DETAIL_FIELDS_REQUIRING_FREE.filter((f) => f in updates);
     const filter = gated.length
-      ? { _id: machineId, status: "free" }
-      : { _id: machineId };
+      ? { _id: machineId, status: "free", ...versionFilter(req) }
+      : { _id: machineId, ...versionFilter(req) };
 
     let before;
     try {
       before = await Machine.findOneAndUpdate(
         filter,
-        { $set: updates },
+        { $set: updates, ...bumpVersion() },
         { new: false, runValidators: true }
       );
     } catch (err) {
@@ -471,8 +478,13 @@ router.patch(
       // The document exists (checked above), so the filter can only have
       // failed on the status guard — name the field and the status,
       // because "update failed" is not something anybody can act on.
-      const fresh = await Machine.findById(machineId).select("status");
+      const fresh = await Machine.findById(machineId).select("status __v");
       if (!fresh) return next(new ErrorHandler("Machine not found.", 404));
+      // Two guards share the filter; name the one that failed.
+      const expected = expectedVersionOf(req);
+      if (expected !== null && Number(fresh.__v ?? 0) !== expected) {
+        return next(conflictError(expected, Number(fresh.__v ?? 0)));
+      }
       return next(
         new ErrorHandler(
           `${gated.join(" and ")} can only be changed while the machine is ` +
@@ -692,8 +704,21 @@ router.put(
       return next(hookFitError(machine, fit, ErrorHandler));
     }
 
+    // Two supervisors threading the same loom used to be last write
+    // wins, with no trace. The form's version is checked, and
+    // increment() makes the save itself conditional on the version
+    // loaded here, so a write landing in between is a 409 too.
+    assertVersion(machine, req);
     machine.elastics = elastics;
-    await machine.save();
+    machine.increment();
+    try {
+      await machine.save();
+    } catch (err) {
+      if (err?.name === "VersionError") {
+        return next(conflictError(expectedVersionOf(req), null));
+      }
+      throw err;
+    }
 
     console.log(`[machine/updateOrder] Elastics updated for ${machine.ID}`);
 
