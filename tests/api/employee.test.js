@@ -25,6 +25,7 @@ jest.mock("../../models/ShiftDetail");
 const request = require("supertest");
 const app = require("../../app");
 const Employee = require("../../models/Employee");
+const ShiftDetail = require("../../models/ShiftDetail");
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -151,7 +152,7 @@ describe("GET /api/v2/employee/get-employee-detail", () => {
   });
 
   it("returns 404 when employee is not found", async () => {
-    const chain = { populate: jest.fn().mockReturnThis(), exec: jest.fn().mockResolvedValue(null) };
+    const chain = { select: jest.fn().mockReturnThis(), exec: jest.fn().mockResolvedValue(null) };
     Employee.findById = jest.fn().mockReturnValue(chain);
 
     const res = await request(app).get("/api/v2/employee/get-employee-detail?id=" + VALID_ID + "");
@@ -160,19 +161,35 @@ describe("GET /api/v2/employee/get-employee-detail", () => {
   });
 
   it("returns 200 with employee detail on success", async () => {
-    const emp = fakeEmployee({
-      shifts: [
-        { _id: "s1", date: "2024-01-01", shift: "A", timer: "06:00", productionMeters: 300, createdAt: new Date() },
-      ],
-    });
-    const chain = { populate: jest.fn().mockReturnThis(), exec: jest.fn().mockResolvedValue(emp) };
+    // Shifts come from ShiftDetail by the employee's ref now, not from
+    // Employee.shifts — which is given a stale, longer list here to show
+    // the page no longer counts it.
+    const emp = fakeEmployee({ shifts: ["x1", "x2", "x3"] });
+    const chain = { select: jest.fn().mockReturnThis(), exec: jest.fn().mockResolvedValue(emp) };
     Employee.findById = jest.fn().mockReturnValue(chain);
+
+    const shiftRows = [
+      { _id: "s1", date: "2024-01-01", shift: "DAY", timer: "06:00:00", productionMeters: 300, createdAt: new Date() },
+    ];
+    const findChain = {
+      sort: jest.fn().mockReturnThis(),
+      limit: jest.fn().mockReturnThis(),
+      populate: jest.fn().mockReturnThis(),
+      lean: jest.fn().mockResolvedValue(shiftRows),
+    };
+    ShiftDetail.find = jest.fn().mockReturnValue(findChain);
+    ShiftDetail.countDocuments = jest.fn().mockResolvedValue(1);
 
     const res = await request(app).get("/api/v2/employee/get-employee-detail?id=" + VALID_ID + "");
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.employee.name).toBe("John Doe");
+    expect(res.body.employee.totalShifts).toBe(1);
+    expect(res.body.employee.result).toHaveLength(1);
+    expect(res.body.employee.result[0].outputMeters).toBe(300);
+    expect(ShiftDetail.find).toHaveBeenCalledWith({ employee: "emp1" });
+    expect(findChain.limit).toHaveBeenCalledWith(10);
   });
 });
 

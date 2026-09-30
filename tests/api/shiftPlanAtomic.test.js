@@ -85,7 +85,8 @@ const counts = async () => ({
   plans: await M.ShiftPlan.countDocuments({}),
   details: await M.ShiftDetail.countDocuments({}),
   jobRefs: (await M.JobOrder.find({}).lean()).reduce((t, j) => t + (j.shiftDetails?.length || 0), 0),
-  empRefs: (await M.Employee.find({}).lean()).reduce((t, e) => t + (e.shifts?.length || 0), 0),
+  // Shifts attributed to an operator, by the ShiftDetail's own ref.
+  empRefs: await M.ShiftDetail.countDocuments({ employee: { $ne: null } }),
 });
 
 describe('creating a plan', () => {
@@ -165,10 +166,8 @@ describe('creating a plan', () => {
         ],
       });
     expect(res.status).toBe(201);
-    const opA = await M.Employee.findById(a.operator._id).lean();
-    const opB = await M.Employee.findById(b.operator._id).lean();
-    expect(opA.shifts).toHaveLength(2);
-    expect(opB.shifts ?? []).toHaveLength(0);
+    expect(await M.ShiftDetail.countDocuments({ employee: a.operator._id })).toBe(2);
+    expect(await M.ShiftDetail.countDocuments({ employee: b.operator._id })).toBe(0);
   });
 
   it('stamps who created each shift line', async () => {

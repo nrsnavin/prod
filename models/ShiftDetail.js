@@ -144,5 +144,10 @@ ShiftDetailSchema.index({ machine: 1, date: -1 });
 // ref is what replaced a denormalised array on the job that nothing ever
 // maintained, so this is now a hot path.
 ShiftDetailSchema.index({ job: 1, date: 1 });
+// The employee detail page: this person's shifts, newest first, and how
+// many there are. Same move as the job and machine pages — read by ref
+// from here, instead of from Employee.shifts, which grew without bound
+// and had to be populated whole to show ten rows.
+ShiftDetailSchema.index({ employee: 1, createdAt: -1 });
 
 module.exports = mongoose.model("ShiftDetail", ShiftDetailSchema);

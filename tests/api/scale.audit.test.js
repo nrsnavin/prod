@@ -257,11 +257,14 @@ describe('AUDIT E: a shift plan gives each operator only their own shift', () =>
     expect(res.status).toBe(201);
 
     for (const op of ops) {
+      // Previously every operator received all three ids. Each is now
+      // attributed exactly their own shift — read from ShiftDetail, the
+      // source of truth, since Employee.shifts is no longer written.
+      const mine = await ShiftDetail.find({ employee: op._id }).lean();
+      expect(mine).toHaveLength(1);
+      expect(String(mine[0].employee)).toBe(String(op._id));
       const fresh = await Employee.findById(op._id).lean();
-      // Previously every operator received all three ids.
-      expect(fresh.shifts).toHaveLength(1);
-      const detail = await ShiftDetail.findById(fresh.shifts[0]).lean();
-      expect(String(detail.employee)).toBe(String(op._id));
+      expect(fresh.shifts ?? []).toHaveLength(0);
     }
   });
 });

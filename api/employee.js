@@ -101,20 +101,28 @@ router.get(
       return next(new ErrorHandler("Invalid employee id", 400));
     }
 
-    const employee = await Employee.findById(id)
-      .populate({
-        path: "shifts",
-        populate: [
-          { path: "machine", model: "Machine", select: "ID" },
-        ],
-      })
-      .exec();
+    // The person's shifts are read from ShiftDetail by its `employee`
+    // ref — ten newest, and a count — not from Employee.shifts.
+    //
+    // That array held one ref per shift ever worked, and this route
+    // populated ALL of them (with each one's machine), sorted them in
+    // JavaScript and threw all but ten away: the page got slower by about
+    // 730 documents per operator per year, for good. The array was also
+    // wrong for older data, since the plan route once pushed a whole
+    // plan's shifts onto every operator in it — so "Total shifts" was
+    // inflated, and is now the true count. Indexed { employee, createdAt }.
+    const employee = await Employee.findById(id).select("-shifts").exec();
 
     if (!employee) return next(new ErrorHandler("Employee not found", 404));
 
-    const latestShifts = [...employee.shifts]
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-      .slice(0, 10);
+    const [latestShifts, totalShifts] = await Promise.all([
+      ShiftDetail.find({ employee: employee._id })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .populate({ path: "machine", model: "Machine", select: "ID" })
+        .lean(),
+      ShiftDetail.countDocuments({ employee: employee._id }),
+    ]);
 
     const result = latestShifts.map((shift) => {
       const runtimeMinutes = clockToMinutes(shift.timer);
@@ -148,7 +156,7 @@ router.get(
         skill:       employee.skill       || 0,
         hourlyRate:  employee.hourlyRate  || 0,
         skillProfile: employee.skillProfile || null,
-        totalShifts: employee.shifts.length,
+        totalShifts,
         result,
       },
     });

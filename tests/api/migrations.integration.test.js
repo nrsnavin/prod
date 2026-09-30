@@ -10,7 +10,7 @@
 // via MONGO_URL — dotenv does not override pre-set env vars, so the
 // config resolves to the test database, never config/.env.
 
-const { execFileSync } = require("child_process");
+const { execFile } = require("child_process");
 const path = require("path");
 const { MongoMemoryServer } = require("mongodb-memory-server");
 const { MongoClient } = require("mongodb");
@@ -20,12 +20,30 @@ const CLI  = path.join(ROOT, "node_modules/.bin/migrate-mongo");
 
 let mongo, client, db, uri;
 
+// Async, NOT execFileSync. The in-memory mongod is a child of THIS
+// process and writes its log into a pipe that only this process's event
+// loop drains. execFileSync blocks that loop for the whole CLI run, so
+// once ~64 KB of log lines pile up mongod blocks on its own log write,
+// every query stalls, and the CLI never exits. It held only while the
+// migrations happened to log little — adding one that created two
+// collections and two indexes was enough to deadlock this suite.
+// Same contract as before: resolves to stdout; on a non-zero exit,
+// rejects with an error carrying .stdout and .stderr.
 function run(args) {
-  return execFileSync(CLI, args, {
-    cwd: ROOT,
-    env: { ...process.env, MONGO_URL: uri },
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
+  return new Promise((resolve, reject) => {
+    execFile(CLI, args, {
+      cwd: ROOT,
+      env: { ...process.env, MONGO_URL: uri },
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        return reject(err);
+      }
+      resolve(stdout);
+    });
   });
 }
 
@@ -43,10 +61,10 @@ afterEach(async () => {
 
 describe("migration chain (real CLI)", () => {
   it("applies cleanly on a fresh database", async () => {
-    const out = run(["up"]);
+    const out = await run(["up"]);
     expect(out).toMatch(/MIGRATED UP/);
 
-    const status = run(["status"]);
+    const status = await run(["status"]);
     expect(status).not.toMatch(/PENDING/);
 
     // Unique poNo index exists.
@@ -55,6 +73,13 @@ describe("migration chain (real CLI)", () => {
     // Idempotency TTL index exists.
     const ttl = await db.collection("idempotencykeys").indexes();
     expect(ttl.some((i) => i.name === "createdAt_ttl")).toBe(true);
+
+    // 20260930000001: the employee page reads shifts by reference, and
+    // rate-limit windows expire on their own.
+    const sd = await db.collection("shiftdetails").indexes();
+    expect(sd.some((i) => i.name === "employee_1_createdAt_-1")).toBe(true);
+    const rl = await db.collection("ratelimits").indexes();
+    expect(rl.some((i) => i.name === "resetAt_1" && i.expireAfterSeconds === 0)).toBe(true);
   }, 60_000);
 
   it("seeds the poNo counter from existing data", async () => {
@@ -62,7 +87,7 @@ describe("migration chain (real CLI)", () => {
       { poNo: 1001, status: "Open" },
       { poNo: 1042, status: "Completed" },
     ]);
-    run(["up"]);
+    await run(["up"]);
 
     // Counters live in "doc_counters": the shared "counters" collection is
     // owned by mongoose-sequence, whose unique { id, reference_value }
@@ -96,7 +121,7 @@ describe("migration chain (real CLI)", () => {
       { type: "yarn", financialYear: "25/26", sequence: 3 },
     ]);
 
-    run(["up"]); // must not throw
+    await run(["up"]); // must not throw
 
     const dc = db.collection("doc_counters");
     expect((await dc.findOne({ _id: "poNo" })).seq).toBeGreaterThanOrEqual(1042);
@@ -120,7 +145,7 @@ describe("migration chain (real CLI)", () => {
     await db.collection("counters").insertOne({ _id: "poNo", seq: 1099 });
     await db.collection("purchaseorders").insertOne({ poNo: 1042, status: "Open" });
 
-    run(["up"]);
+    await run(["up"]);
 
     // The higher of the two wins, so no number can ever be re-issued.
     expect((await db.collection("doc_counters").findOne({ _id: "poNo" })).seq).toBe(1099);
@@ -142,9 +167,9 @@ describe("migration chain (real CLI)", () => {
     await db.collection("suppliers").createIndex({ name: 1 }, { unique: true, sparse: true });
     await db.collection("shiftdetails").createIndex({ status: 1, date: 1 });
 
-    run(["up"]); // must not throw
+    await run(["up"]); // must not throw
 
-    const status = run(["status"]);
+    const status = await run(["status"]);
     expect(status).not.toMatch(/PENDING/);
 
     // The constraint is what matters, not the label: the existing index
@@ -164,7 +189,7 @@ describe("migration chain (real CLI)", () => {
     // Non-unique where the migration needs unique.
     await db.collection("purchaseorders").createIndex({ poNo: 1 }, { name: "poNo_1" });
 
-    run(["up"]);
+    await run(["up"]);
 
     const idx = await db.collection("purchaseorders").indexes();
     const poNo = idx.filter((i) => i.key.poNo === 1);
@@ -173,7 +198,7 @@ describe("migration chain (real CLI)", () => {
   }, 60_000);
 
   it("installs DB validators that reject negative stock", async () => {
-    run(["up"]);
+    await run(["up"]);
 
     // Insert must fail schema validation — the DB is the last line of
     // defense even if application code regresses.
@@ -191,7 +216,7 @@ describe("migration chain (real CLI)", () => {
       { name: "40mm Woven" }, // duplicate master row
     ]);
     // Must complete — a master-data dupe must never block `npm start`.
-    run(["up"]);
+    await run(["up"]);
 
     const indexes = await db.collection("elastics").indexes();
     expect(indexes.some((i) => i.name === "name_unique")).toBe(false);
@@ -207,7 +232,7 @@ describe("migration chain (real CLI)", () => {
     ]);
     let failed = false;
     try {
-      run(["up"]);
+      await run(["up"]);
     } catch (err) {
       failed = true;
       const text = `${err.stdout || ""}${err.stderr || ""}${err.message || ""}`;

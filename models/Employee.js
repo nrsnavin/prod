@@ -88,6 +88,15 @@ const EmployeeSchema = new mongoose.Schema(
       max: 100,
     },
 
+    // NO LONGER WRITTEN. Kept so existing documents still load.
+    //
+    // A copy of "which shifts did this person work", one ref per shift,
+    // forever — ~730 a year per operator. Nothing reads it any more: the
+    // employee page reads ShiftDetail by its `employee` ref (indexed),
+    // as the job and machine pages already did. It was also WRONG for
+    // older data: the plan route once pushed a whole plan's shifts onto
+    // every operator in it. Existing arrays can be dropped with
+    // `$unset: { shifts: 1 }` once nobody needs to look at them.
     shifts: [
       {
         type: mongoose.Types.ObjectId,

@@ -926,19 +926,22 @@ router.delete(
 // ════════════════════════════════════════════════════════════════
 //  CREATE A SHIFT PLAN — whole, or not at all
 //
-//  One plan writes four collections: the ShiftPlan, a ShiftDetail per
-//  machine, the running job's list of shifts, and each operator's list
-//  of shifts. None of it used to run in a transaction, so a failure
-//  part-way — a bad row, a validation error, a dropped connection —
-//  left a plan naming some of its machines and operators holding shifts
-//  from a request that had answered with an error. Now it is one
-//  transaction, and the response is written only after it commits.
+//  One plan writes three collections: the ShiftPlan, a ShiftDetail per
+//  machine, and the running job's list of shifts. (It used to write a
+//  fourth, each operator's Employee.shifts; that array is no longer
+//  written — see models/Employee.js.)
+//
+//  None of it used to run in a transaction, so a failure part-way — a
+//  bad row, a validation error, a dropped connection — left a plan
+//  naming some of its machines, from a request that had answered with
+//  an error. Now it is one transaction, and the response is written
+//  only after it commits.
 //
 //  The details are still created with create(), one by one, rather than
 //  insertMany: the audit plugin (models/plugins/auditFields.js) stamps
 //  createdBy on save, not on insertMany, and a batched insert would have
 //  dropped it silently. The references are batched where the plugin
-//  still fires — one update per job and per operator, not per machine.
+//  still fires — one update per job, not per machine.
 // ════════════════════════════════════════════════════════════════
 router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, res) => {
   const { date, shiftType, description = '', machines = [] } = req.body;
@@ -986,7 +989,6 @@ router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, re
 
       const detailIds = [];
       const byJob = new Map();       // job id → [detail ids]
-      const byOperator = new Map();  // operator id → [detail ids]
 
       for (const m of rows) {
         const machineDoc = byId.get(String(m.machine));
@@ -1014,10 +1016,6 @@ router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, re
           const k = String(machineDoc.orderRunning);
           byJob.set(k, [...(byJob.get(k) || []), detail._id]);
         }
-        // Each operator gets only their own shifts. This once pushed the
-        // whole plan to every operator, inflating everyone's history.
-        const op = String(m.operator);
-        byOperator.set(op, [...(byOperator.get(op) || []), detail._id]);
       }
 
       await ShiftPlan.updateOne(
@@ -1030,9 +1028,6 @@ router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, re
       // fact-shaped empty in the first place.
       for (const [job, ids] of byJob) {
         await JobOrder.updateOne({ _id: job }, { $addToSet: { shiftDetails: { $each: ids } } }, { session });
-      }
-      for (const [operator, ids] of byOperator) {
-        await Employee.updateOne({ _id: operator }, { $push: { shifts: { $each: ids } } }, { session });
       }
       detailCount = detailIds.length;
     });
