@@ -31,7 +31,7 @@ const MODEL = TEXT_MODEL;
 //       advisor aggregates across every router (shift, job, materials,
 //       payroll…), which only admin can reach, so it stays admin-only.
 //    4. Missing key → 503; failed call → 502. Client falls back.
-//    5. (Out of band) set a $5/mo budget cap on platform.openai.com.
+//    5. (Out of band) set a monthly spend limit in the Anthropic console.
 // ═════════════════════════════════════════════════════════════════
 router.post(
   '/briefing',
