@@ -36,6 +36,15 @@ module.exports = (err, req, res, next) => {
     err = new ErrorHandler(message, 400);
   }
 
+  // A read that hit its time limit (models/plugins/queryTimeLimit.js).
+  // Not the caller's fault and not a crash: the database gave up on it.
+  if (err.code === 50 || err.codeName === "MaxTimeMSExpired") {
+    err = new ErrorHandler(
+      "This took too long to work out. Try a shorter date range, or try again in a minute.",
+      503
+    );
+  }
+
   // Duplicate key error
   if (err.code === 11000) {
     const message = `Duplicate key ${Object.keys(err.keyValue)} Entered`;

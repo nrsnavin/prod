@@ -17,6 +17,10 @@ require("./db/tenants.js").install();
 
 const auditFields = require("./models/plugins/auditFields.js");
 mongoose.plugin(auditFields);
+// Every read gets a server-side time limit (default 30 s), so a runaway
+// query can't hold the database long after its caller has gone. Server
+// only: migrations and scripts don't load app.js. See the plugin.
+mongoose.plugin(require("./models/plugins/queryTimeLimit.js"));
 
 const ErrorHandler = require("./middleware/error.js");
 const app = express();
