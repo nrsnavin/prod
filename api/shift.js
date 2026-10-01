@@ -58,7 +58,8 @@ router.use(isAuthenticated);
 const SHIFT_FEATURE_KEYS = ['/shift-plans', '/shift-verification', '/production'];
 const SELF_SHIFT_READS = new Set(['/employee-open-shifts', '/employee-closed-shifts']);
 router.use((req, res, next) => {
-  if ((req.method === 'GET' || req.method === 'HEAD') && SELF_SHIFT_READS.has(req.path)) {
+  if ((req.method === 'GET' || req.method === 'HEAD') &&
+      (SELF_SHIFT_READS.has(req.path) || req.path.startsWith('/active-jobs/'))) {
     return next();
   }
   requireFeature(...SHIFT_FEATURE_KEYS)(req, res, (err) => {
@@ -742,8 +743,12 @@ router.get(
   })
 );
 
+// selfOrAdmin: it returned any employee's loom and job to any production
+// login that changed the id. The employee app is its only caller and
+// asks for its own worker.
 router.get(
   "/active-jobs/:empId",
+  selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
     const { empId } = req.params;
     if (!empId) return next(new ErrorHandler("empId is required", 400));

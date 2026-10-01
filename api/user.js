@@ -10,7 +10,7 @@ const sendToken = require("../utils/jwtToken.js");
 const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 const { DEPARTMENTS, roleForDepartment, isDepartment } = require("../utils/roles");
-const { FEATURES, featuresForDepartment, sanitizeFeatures } = require("../utils/features");
+const { FEATURES, featuresForDepartment, sanitizeFeatures, isSelfServiceOnly, ALWAYS_ON } = require("../utils/features");
 const {
   sendPasswordResetEmail, sendLoginOtpEmail,
   isConfigured: mailerConfigured,
@@ -114,6 +114,9 @@ router.post(
           features: Array.isArray(user.features)
             ? user.features
             : featuresForDepartment(user.department || user.role),
+          // The employee view's switch, and whose records it reads.
+          employee: user.employee || null,
+          selfService: isSelfServiceOnly(user),
           token: token,
         });
     } catch (error) {
@@ -468,6 +471,9 @@ router.post(
         features: Array.isArray(user.features)
           ? user.features
           : featuresForDepartment(user.department || user.role),
+        // The employee view's switch, and whose records it reads.
+        employee: user.employee || null,
+        selfService: isSelfServiceOnly(user),
         token: token,
       });
   })
@@ -544,6 +550,9 @@ router.get(
         role:       user.role,
         department: user.department || null,
         employee:   user.employee || null,
+        // A worker's login: the web app shows it the employee view. The
+        // server's rule, so the app never keeps a second copy of it.
+        selfService: isSelfServiceOnly(user),
         // When this login was created — the profile page's "member since".
         createdAt:  user.createdAt,
         // Effective per-user feature set (falls back to the department
@@ -788,13 +797,15 @@ router.get(
   isAuthenticated, isAdmin("admin"),
   catchAsyncErrors(async (req, res) => {
     const users = await User.find({})
-      .select("name email role department features createdAt")
+      .select("name email role department features employee createdAt")
+      .populate("employee", "name department")
       .sort({ createdAt: -1 })
       .lean();
     // Backfill an effective feature set for legacy users with none stored,
     // so the admin screen shows what they can actually access.
     const withFeatures = users.map((u) => ({
       ...u,
+      selfService: isSelfServiceOnly(u),
       features: Array.isArray(u.features)
         ? u.features
         : featuresForDepartment(u.department || u.role),
@@ -802,6 +813,22 @@ router.get(
     res.json({ success: true, departments: DEPARTMENTS, features: FEATURES, users: withFeatures });
   })
 );
+
+// ── Linking a login to an employee ──────────────────────────────────
+//  An employee login (a worker's) is a login linked to an employee
+//  record and granted only the screens every login has. `employee` in
+//  the body: an id links, null or "" unlinks, absent leaves it alone.
+//  One login per employee — a second would split their records.
+async function resolveEmployeeLink(raw, userId) {
+  if (raw === undefined) return { set: false };
+  if (raw === null || raw === "") return { set: true, value: undefined };
+  if (!mongoose.isValidObjectId(raw)) return { error: ["Employee not found", 404] };
+  if (!(await Employee.exists({ _id: raw }))) return { error: ["Employee not found", 404] };
+  const taken = await User.findOne({ employee: raw, ...(userId ? { _id: { $ne: userId } } : {}) })
+    .select("email").lean();
+  if (taken) return { error: [`That employee already has a login (${taken.email})`, 409] };
+  return { set: true, value: raw };
+}
 
 // Create a user with a department; role is derived, never taken raw.
 router.post(
@@ -846,12 +873,21 @@ router.post(
       features = featuresForDepartment(department);
     }
 
+    const link = await resolveEmployeeLink(req.body.employee);
+    if (link.error) return next(new ErrorHandler(...link.error));
+    if (req.body.selfService === true) {
+      if (!link.value) return next(new ErrorHandler("An employee login must be linked to an employee", 400));
+      if (department === "admin") return next(new ErrorHandler("An admin login cannot be an employee login", 400));
+      features = [...ALWAYS_ON];
+    }
+
     const user = await User.create({
       name, email, password, department, role: roleForDepartment(department), features,
+      ...(link.value ? { employee: link.value } : {}),
     });
     res.status(201).json({
       success: true,
-      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department, features: user.features },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department, features: user.features, employee: user.employee || null, selfService: isSelfServiceOnly(user) },
     });
   })
 );
@@ -902,10 +938,19 @@ router.put(
       user.features = scoped;
     }
 
+    const link = await resolveEmployeeLink(req.body.employee, user._id);
+    if (link.error) return next(new ErrorHandler(...link.error));
+    if (link.set) user.employee = link.value;
+    if (req.body.selfService === true) {
+      if (!user.employee) return next(new ErrorHandler("An employee login must be linked to an employee", 400));
+      if (user.department === "admin") return next(new ErrorHandler("An admin login cannot be an employee login", 400));
+      user.features = [...ALWAYS_ON];
+    }
+
     await user.save();
     res.json({
       success: true,
-      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department, features: user.features },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department, features: user.features, employee: user.employee || null, selfService: isSelfServiceOnly(user) },
     });
   })
 );

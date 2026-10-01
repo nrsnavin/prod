@@ -24,6 +24,8 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { sharedResult } = require("../utils/sharedResult");
 const { currentDb } = require("../db/tenants");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { isSelfServiceOnly } = require("../utils/features");
+const ErrorHandler = require("../utils/ErrorHandler");
 
 const ACTIVE_JOB_STATUSES = [
   "preparatory", "weaving", "finishing", "checking", "packing",
@@ -37,6 +39,13 @@ const ACTIVE_JOB_STATUSES = [
 router.get(
   "/kpis",
   isAuthenticated, isAdmin('admin', 'production', 'accounts'),
+  // Plant-wide figures (every worker's attendance, stock, jobs) are not
+  // a worker's to read: a self-service login has the production role
+  // like any supervisor, so the role gate alone let them through.
+  (req, res, next) =>
+    isSelfServiceOnly(req.user)
+      ? next(new ErrorHandler("The plant dashboard is not available to an employee login", 403))
+      : next(),
   catchAsyncErrors(async (req, res) => {
     // Every authorised caller gets the same answer, and the web app asks
     // for it every ten seconds per open dashboard. So concurrent and

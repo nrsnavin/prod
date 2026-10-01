@@ -105,10 +105,26 @@ function sanitizeFeatures(arr) {
   return [...new Set(arr.filter((k) => FEATURE_KEY_SET.has(k)))];
 }
 
+/**
+ * A worker's login: linked to an employee record, and granted nothing
+ * beyond the screens every login has (dashboard, notices, feedback,
+ * machine issues, assistant, settings). The web app shows such a login
+ * the employee view, and plant-wide figures are refused to it.
+ *
+ * An ABSENT feature list is a legacy account that defers to its role,
+ * not a worker, so only an explicit list counts. Admins never are.
+ */
+function isSelfServiceOnly(user) {
+  if (!user || user.role === "admin" || !user.employee) return false;
+  if (!Array.isArray(user.features)) return false;
+  return user.features.every((k) => ALWAYS_ON.includes(k));
+}
+
 module.exports = {
   FEATURES,
   FEATURE_KEYS,
   ALWAYS_ON,
   featuresForDepartment,
   sanitizeFeatures,
+  isSelfServiceOnly,
 };

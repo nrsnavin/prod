@@ -533,6 +533,10 @@ app.use("/api/v2/user/verify-otp", otpLimiter);
 // `user` is the one exception: it can't be mount-gated because it hosts
 // the public login / OTP / forgot-password endpoints, so it self-gates.
 app.use("/api/v2/user", user);
+// The employee's own work (their shift, loom, elastics, history). Open to
+// any login linked to an employee; every route reads the employee from
+// the login and takes no id, so there is no role or feature gate to pass.
+app.use("/api/v2/me", isAuthenticated, require("./api/me.js"));
 app.use("/api/v2/settings",    gate('production', 'accounts'), settings);
 app.use("/api/v2/pdf-templates", gate('production', 'accounts'), pdfTemplates);
 // Per-user feature enforcement — requireFeature (writes) and
