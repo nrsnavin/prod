@@ -51,8 +51,7 @@ const {
 // times as a side effect of something happening to a job, and none of
 // those writes used to ask where the order actually was — which is how
 // cancelling a job on a CANCELLED order set it back to Approved.
-const { applyOrderStatus } = require('../domain/orderStatus');
-const { releaseAllReservations } = require('../services/orderReservations');
+const orderLifecycle = require('../services/orderLifecycle');
 const { isProductionLocked } = require('../utils/productionLock');
 const { outsourcingBlockers, outsourcingDerived } = require('../utils/outsourcingRecord');
 const {
@@ -463,30 +462,10 @@ router.post(
       order.updatedItemsAt = new Date();
       earmarkChanges = carried;
     }
-    // Approved → InProgress. A no-op when the order is already running,
-    // and refused outright for anything terminal — raising a job must
-    // not be a way to reopen a finished order.
-    applyOrderStatus(order, 'InProgress', req.user?._id);
-
-    // 🪪 Mirror fingerprint on the parent Order so the order timeline
-    //    also shows that a job was spun off.
-    stampFingerprint(order, ACTION_CODES.JOB_CREATED, {
-      actor,
-      meta: {
-        jobId:          job._id.toString(),
-        jobOrderNo:     job.jobOrderNo,
-        elasticCount:   elastics.length,
-        relatedHash:    jobFp.hash,
-        relatedShortId: jobFp.shortId,
-        // Only when there is something to say. A replan that shrank a
-        // requirement below what was already promised cuts the surplus,
-        // and yarn ceasing to be spoken for without anybody asking is
-        // exactly the kind of thing a timeline exists to record.
-        ...(earmarkChanges.trimmed.length
-          ? { lotsTrimmed: earmarkChanges.trimmed } : {}),
-        ...(earmarkChanges.dropped.length
-          ? { lotsReleased: earmarkChanges.dropped } : {}),
-      },
+    // The order starts running and its timeline mirrors the job
+    // (services/orderLifecycle.js). Saved here with the changes above.
+    orderLifecycle.jobRaised(order, {
+      job, jobFp, actor, userId: req.user?._id, elasticCount: elastics.length, earmarkChanges,
     });
     await order.save();
 
@@ -1119,31 +1098,13 @@ router.post(
         const session = await mongoose.startSession();
         try {
           await session.withTransaction(async () => {
-            const order = await Order.findById(job.order).session(session);
-            // A cancelled or deleted order is not completed by its jobs
-            // finishing — that used to resurrect it. Its reservations
-            // were released by the cancel and must not go back twice;
-            // releaseAllReservations empties the rows as it goes, so a
-            // second pass finds nothing, but the status guard stops it
-            // being reached at all.
-            if (order && applyOrderStatus(order, 'Completed', req.user?._id)) {
-              const releasedRes = await releaseAllReservations(
-                session, order, actor, 'order completed by its last job'
-              );
-              stampFingerprint(order, ACTION_CODES.ORDER_COMPLETED, {
-                actor,
-                meta: {
-                  previousStatus:  'InProgress',
-                  newStatus:       'Completed',
-                  triggeredByJob:  job._id.toString(),
-                  triggerJobNo:    job.jobOrderNo,
-                  releasedReservations: releasedRes.length,
-                  relatedHash:     completionFp.hash,
-                  relatedShortId:  completionFp.shortId,
-                },
-              });
-              await order.save({ session });
-
+            // Completes the order and releases its reservations
+            // (services/orderLifecycle.js) — unless it was cancelled or
+            // deleted, which its jobs finishing must never undo.
+            const closed = await orderLifecycle.lastJobCompleted(session, job, {
+              actor, userId: req.user?._id, completionFp,
+            });
+            if (closed) {
               // Saved inside the same transaction as the release. The
               // job's own status is what made this happen, and a
               // release that committed without it would leave the order
@@ -1243,18 +1204,9 @@ router.post(
     // Only now that the job is actually marked 'cancelled' does its planned
     // quantity return to pending — recompute AFTER the save, or the job
     // would still be counted as holding the quantity.
-    const order = await Order.findById(job.order);
-    if (order) {
-      await recomputePending(order);
-      const remainingJobs = await JobOrder.countDocuments({
-        order: job.order, _id: { $ne: job._id }, status: { $nin: ['cancelled', 'completed'] },
-      });
-      // Nothing is planned any more, so an order that was running goes
-      // back to waiting. Only from InProgress: a completed or cancelled
-      // order stays where it is.
-      if (remainingJobs === 0) applyOrderStatus(order, 'Approved', req.user?._id);
-      await order.save();
-    }
+    // Pending goes back up; with nothing live left, a running order
+    // goes back to waiting (services/orderLifecycle.js).
+    await orderLifecycle.jobCancelled(job, { userId: req.user?._id });
 
     res.json({
       success: true,
