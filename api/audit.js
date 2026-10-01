@@ -19,6 +19,7 @@ const Quote           = require("../models/Quote");
 const StockCount      = require("../models/StockCount");
 const DeliveryChallan = require("../models/DeliveryChallan");
 const MaterialGroup   = require("../models/MaterialGroup");
+const AccessEvent     = require("../models/AccessEvent");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 
@@ -69,7 +70,21 @@ router.get(
       recentFrom(MaterialGroup,   "MaterialGroup",   "code",       limit),
     ]);
 
-    const entries = [...orders, ...jobs, ...pos, ...dcs, ...quotes, ...counts, ...groups]
+    // Changes to logins live in their own collection (a deleted login
+    // can't carry its own history); shaped like every other entry.
+    const access = (await AccessEvent.find({}).sort({ at: -1 }).limit(limit).lean()).map((e) => ({
+      entityType: "Login",
+      entityId: e.subject?.id ?? null,
+      entityNo: e.subject?.name ?? null,
+      code: e.code,
+      label: e.label,
+      shortId: e.shortId,
+      at: e.at,
+      actor: e.actor,
+      reason: null,
+    }));
+
+    const entries = [...orders, ...jobs, ...pos, ...dcs, ...quotes, ...counts, ...groups, ...access]
       .filter((e) => e.at)
       .sort((a, b) => new Date(b.at) - new Date(a.at))
       .slice(0, limit);

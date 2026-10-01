@@ -235,3 +235,55 @@ describe('the Users screen', () => {
     expect((await signIn('9100000001', '4826')).status).toBe(401);
   });
 });
+
+// ── Every change to a login is on the record ─────────────────────────
+describe('the audit trail of access changes', () => {
+  const AccessEvent = () => require('../../models/AccessEvent');
+  const codesFor = async (id) => (await AccessEvent().find({ 'subject.id': String(id) }).sort({ at: 1 }).lean()).map((e) => e.code);
+
+  it('records phone sign-in given, reset and turned off, and the login made for it', async () => {
+    const e = await Employee.create({ name: 'Audit Hand', phoneNumber: '9100000077', department: 'weaving' });
+    await as(admin).post(access(e), { pin: '4826' });
+    await as(admin).post(access(e), { pin: '5937' });
+    await as(admin).del(access(e));
+    const u = await User.findOne({ employee: e._id });
+    expect(await codesFor(u._id)).toEqual(['LOGIN_CREATED', 'PHONE_SIGNIN_SET', 'PHONE_SIGNIN_RESET', 'PHONE_SIGNIN_OFF']);
+    const first = await AccessEvent().findOne({ 'subject.id': String(u._id) }).lean();
+    expect(first.actor).toMatchObject({ name: 'Owner' });
+    expect(first.subject).toMatchObject({ name: 'Audit Hand' });
+    expect(first.subject.email).toBeUndefined(); // the placeholder is never shown
+  });
+
+  it('records what an edit changed, and never a password', async () => {
+    const created = await as(admin).post('/api/v2/user/manage/create', {
+      name: 'Clerk', email: 'clerk@t.co', password: 'secret-1', department: 'production', features: ['/jobs'],
+    });
+    const id = created.body.user.id;
+    await as(admin).put(`/api/v2/user/manage/${id}`, { features: ['/jobs', '/warping'], password: 'secret-2' });
+    const ev = await AccessEvent().findOne({ 'subject.id': id, code: 'LOGIN_UPDATED' }).lean();
+    expect(ev.meta).toEqual({ features: { added: ['/warping'], removed: [] }, password: 'changed' });
+    const all = JSON.stringify(await AccessEvent().find({ 'subject.id': id }).lean());
+    expect(all).not.toMatch(/secret-|scrypt/);
+  });
+
+  it('keeps a deleted login in its own history, and shows it in the feed', async () => {
+    const created = await as(admin).post('/api/v2/user/manage/create', {
+      name: 'Temp Login', email: 'temp@t.co', password: 'secret-1', department: 'production',
+    });
+    const id = created.body.user.id;
+    expect((await as(admin).del(`/api/v2/user/manage/${id}`)).status).toBe(200);
+    expect(await codesFor(id)).toEqual(['LOGIN_CREATED', 'LOGIN_DELETED']);
+
+    const feed = await as(admin).get('/api/v2/audit/recent?limit=200');
+    const row = feed.body.entries.find((e) => e.entityType === 'Login' && e.entityId === id && e.code === 'LOGIN_DELETED');
+    expect(row).toMatchObject({ entityNo: 'Temp Login', label: 'Login Deleted', actor: { name: 'Owner' } });
+  });
+
+  it('records nothing for an edit that changed nothing', async () => {
+    const created = await as(admin).post('/api/v2/user/manage/create', {
+      name: 'Same', email: 'same@t.co', password: 'secret-1', department: 'production',
+    });
+    await as(admin).put(`/api/v2/user/manage/${created.body.user.id}`, { name: 'Same' });
+    expect(await codesFor(created.body.user.id)).toEqual(['LOGIN_CREATED']);
+  });
+});

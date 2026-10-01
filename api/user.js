@@ -17,6 +17,8 @@ const {
   isConfigured: mailerConfigured,
 } = require("../utils/mailer");
 const { escapeRegex } = require("../utils/escapeRegex");
+const { recordAccess } = require("../utils/accessLog");
+const { ACTION_CODES } = require("../utils/fingerprint");
 const {
   PIN_MAX_ATTEMPTS, PIN_LOCK_MINUTES, placeholderEmail, isPlaceholderEmail,
   normalisePhone, pinProblem, loginDepartmentFor,
@@ -57,6 +59,9 @@ router.post("/sign-up",
       ? sanitizeFeatures(req.body.features).filter((k) => signupScope.has(k))
       : featuresForDepartment(department),
     ...(req.body.employee ? { employee: req.body.employee } : {}),
+  });
+  await recordAccess(req, ACTION_CODES.LOGIN_CREATED, user, {
+    department: user.department, features: user.features, via: "sign-up",
   });
   try {
     res.status(200).json({
@@ -944,6 +949,32 @@ async function resolveEmployeeLink(raw, userId) {
   return { set: true, value: raw };
 }
 
+// What an access record compares before and after an edit. Never the
+// password or PIN themselves; only whether phone sign-in is on.
+function accessSnapshot(u) {
+  return {
+    name: u.name,
+    email: isPlaceholderEmail(u.email) ? null : u.email,
+    department: u.department || null,
+    features: Array.isArray(u.features) ? [...u.features].sort() : null,
+    employee: u.employee ? String(u.employee) : null,
+    selfService: isSelfServiceOnly(u),
+    phoneSignIn: !!u.pin,
+  };
+}
+
+function accessChanges(a, b) {
+  const out = {};
+  for (const k of ["name", "email", "department", "employee", "selfService", "phoneSignIn"]) {
+    if (a[k] !== b[k]) out[k] = { from: a[k], to: b[k] };
+  }
+  const was = new Set(a.features || []), now = new Set(b.features || []);
+  const added = [...now].filter((f) => !was.has(f));
+  const removed = [...was].filter((f) => !now.has(f));
+  if (added.length || removed.length) out.features = { added, removed };
+  return out;
+}
+
 // Create a user with a department; role is derived, never taken raw.
 router.post(
   "/manage/create",
@@ -999,6 +1030,9 @@ router.post(
       name, email, password, department, role: roleForDepartment(department), features,
       ...(link.value ? { employee: link.value } : {}),
     });
+    await recordAccess(req, ACTION_CODES.LOGIN_CREATED, user, {
+      department, features, employee: link.value || null, selfService: isSelfServiceOnly(user),
+    });
     res.status(201).json({
       success: true,
       user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department, features: user.features, employee: user.employee || null, selfService: isSelfServiceOnly(user) },
@@ -1013,6 +1047,7 @@ router.put(
   catchAsyncErrors(async (req, res, next) => {
     const user = await User.findById(req.params.id).select("+password +pin");
     if (!user) return next(new ErrorHandler("User not found", 404));
+    const before = accessSnapshot(user);
 
     if (typeof req.body.name === "string" && req.body.name.trim())
       user.name = req.body.name.trim();
@@ -1070,6 +1105,9 @@ router.put(
     }
 
     await user.save();
+    const changes = accessChanges(before, accessSnapshot(user));
+    if (typeof req.body.password === "string" && req.body.password) changes.password = "changed";
+    if (Object.keys(changes).length) await recordAccess(req, ACTION_CODES.LOGIN_UPDATED, user, changes);
     res.json({
       success: true,
       user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department, features: user.features, employee: user.employee || null, selfService: isSelfServiceOnly(user) },
@@ -1190,10 +1228,19 @@ router.post(
       // whatever sessions it has open end here.
       login.tokenVersion = (login.tokenVersion ?? 0) + 1;
     }
+    const hadPin = !!login.pin;
     login.pin = await hashPassword(pin);
     login.pinAttempts = 0;
     login.pinLockedUntil = undefined;
     await login.save();
+    if (created) {
+      await recordAccess(req, ACTION_CODES.LOGIN_CREATED, login, {
+        department: login.department, employee: String(employee._id), selfService: true, via: "worker access",
+      });
+    }
+    await recordAccess(req, hadPin ? ACTION_CODES.PHONE_SIGNIN_RESET : ACTION_CODES.PHONE_SIGNIN_SET, login, {
+      employee: String(employee._id),
+    });
 
     res.status(created ? 201 : 200).json({
       success: true,
@@ -1218,6 +1265,7 @@ router.delete(
       );
       login.pin = undefined;
       login.pinLockedUntil = undefined;
+      await recordAccess(req, ACTION_CODES.PHONE_SIGNIN_OFF, login, { employee: String(employee._id) });
     }
     res.json({ success: true, ...workerAccessView(employee, login) });
   })
@@ -1237,6 +1285,9 @@ router.delete(
       if (admins <= 1) return next(new ErrorHandler("Cannot delete the last admin", 400));
     }
     await user.deleteOne();
+    await recordAccess(req, ACTION_CODES.LOGIN_DELETED, user, {
+      department: user.department, employee: user.employee ? String(user.employee) : null,
+    });
     res.json({ success: true, message: "User deleted" });
   })
 );

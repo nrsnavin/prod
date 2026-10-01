@@ -94,6 +94,14 @@ const ACTION_CODES = Object.freeze({
   MATERIAL_GROUP_UPDATED:   'MATERIAL_GROUP_UPDATED',
   MATERIAL_GROUP_ARCHIVED:  'MATERIAL_GROUP_ARCHIVED',
   MATERIAL_GROUP_DELETED:   'MATERIAL_GROUP_DELETED',
+
+  // Access to the system itself (models/AccessEvent.js, utils/accessLog.js)
+  LOGIN_CREATED:            'LOGIN_CREATED',
+  LOGIN_UPDATED:            'LOGIN_UPDATED',
+  LOGIN_DELETED:            'LOGIN_DELETED',
+  PHONE_SIGNIN_SET:         'PHONE_SIGNIN_SET',
+  PHONE_SIGNIN_RESET:       'PHONE_SIGNIN_RESET',
+  PHONE_SIGNIN_OFF:         'PHONE_SIGNIN_OFF',
 });
 
 const ACTION_LABELS = Object.freeze({
@@ -152,6 +160,12 @@ const ACTION_LABELS = Object.freeze({
   DC_DELIVERED:             'DC Delivered',
   DC_CANCELLED:             'DC Cancelled',
   DC_DELETED:               'DC Deleted',
+  LOGIN_CREATED:            'Login Created',
+  LOGIN_UPDATED:            'Login Edited',
+  LOGIN_DELETED:            'Login Deleted',
+  PHONE_SIGNIN_SET:         'Phone Sign-in Given',
+  PHONE_SIGNIN_RESET:       'PIN Reset',
+  PHONE_SIGNIN_OFF:         'Phone Sign-in Turned Off',
 });
 
 /**
