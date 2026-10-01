@@ -1,6 +1,7 @@
 "use strict";
 
 const express  = require("express");
+const { inStages, POST_PREP_STAGES } = require('../domain/jobStatus');
 const router   = express.Router();
 const mongoose = require("mongoose");
 
@@ -112,7 +113,7 @@ router.get(
     // boxes. The list ran from weaving to checking and stopped one short
     // of the stage it is named after.
     const jobs = await JobOrder.find({
-          status: { $in: ["weaving", "finishing", "checking", "packing"] },
+          status: inStages(POST_PREP_STAGES),
         })
       .populate("customer", "name")
       .populate("elastics.elastic", "name")

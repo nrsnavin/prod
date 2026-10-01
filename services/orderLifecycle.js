@@ -25,6 +25,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Order = require('../models/Order');
+const { liveJobStatus } = require('../domain/jobStatus');
 const JobOrder = require('../models/JobOrder');
 const { applyOrderStatus } = require('../domain/orderStatus');
 const { stampFingerprint, ACTION_CODES } = require('../utils/fingerprint');
@@ -105,7 +106,7 @@ async function jobCancelled(job, { userId }) {
   if (!order) return null;
   await recomputePending(order);
   const remainingJobs = await JobOrder.countDocuments({
-    order: job.order, _id: { $ne: job._id }, status: { $nin: ['cancelled', 'completed'] },
+    order: job.order, _id: { $ne: job._id }, status: liveJobStatus(),
   });
   if (remainingJobs === 0) applyOrderStatus(order, 'Approved', userId);
   await order.save();

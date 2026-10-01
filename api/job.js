@@ -45,6 +45,7 @@ const {
   validateTransition,
   stampStage,
   enteredAtField,
+  liveJobStatus,
 } = require('../domain/jobStatus');
 
 // The order's own rule. This router changes an order's status three
@@ -1620,7 +1621,7 @@ router.get('/stale', async (req, res) => {
     const cutoff = new Date(Date.now() - days * 86_400_000);
 
     const jobs = await JobOrder.find({
-      status: { $nin: ['completed', 'cancelled'] },
+      status: liveJobStatus(),
     })
       .select('jobOrderNo status createdAt weavingAt finishingAt checkingAt packingAt customer')
       .populate('customer', 'name')

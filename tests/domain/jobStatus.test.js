@@ -107,3 +107,31 @@ describe('domain/jobStatus', () => {
     });
   });
 });
+
+// ── Named status groups (the query objects) ───────────────────────────
+// Each replaced a literal typed out at several call sites; these pin the
+// exact sets those literals held, so the change was a rename and nothing
+// else, and any later change to a set is a decision someone makes here.
+describe('named status groups', () => {
+  const js = require('../../domain/jobStatus');
+
+  it('hold exactly the statuses the queries used to spell out', () => {
+    expect(js.FINISHED_JOB_STATUSES).toEqual(['completed', 'cancelled']);
+    expect(js.OUTPUT_STAGES).toEqual(['weaving', 'finishing', 'checking']);
+    expect(js.POST_PREP_STAGES).toEqual(['weaving', 'finishing', 'checking', 'packing']);
+  });
+
+  it('build query conditions that callers cannot mutate into the shared sets', () => {
+    const live = js.liveJobStatus();
+    expect(live).toEqual({ $nin: ['completed', 'cancelled'] });
+    live.$nin.push('packing');
+    expect(js.liveJobStatus()).toEqual({ $nin: ['completed', 'cancelled'] });
+    expect(js.inStages(js.OUTPUT_STAGES)).toEqual({ $in: ['weaving', 'finishing', 'checking'] });
+  });
+
+  it('only name real statuses', () => {
+    for (const s of [...js.FINISHED_JOB_STATUSES, ...js.POST_PREP_STAGES]) {
+      expect(js.JOB_STATUSES).toContain(s);
+    }
+  });
+});

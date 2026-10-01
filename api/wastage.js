@@ -1,6 +1,7 @@
 "use strict";
 
 const express          = require("express");
+const { inStages, OUTPUT_STAGES } = require('../domain/jobStatus');
 const router           = express.Router();
 const mongoose         = require("mongoose");
 const moment           = require("moment");
@@ -360,7 +361,7 @@ router.get(
     // elastics + customer) on a single round-trip.
     const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 500);
     const jobs = await JobOrder.find({
-      status: { $in: ["weaving", "finishing", "checking"] },
+      status: inStages(OUTPUT_STAGES),
     })
       .populate("customer", "name")
       .populate("elastics.elastic", "name")

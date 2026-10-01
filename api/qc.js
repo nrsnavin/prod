@@ -11,6 +11,7 @@
 // ══════════════════════════════════════════════════════════════
 
 const express = require("express");
+const { inStages, OUTPUT_STAGES } = require('../domain/jobStatus');
 const multer  = require("multer");
 // multer finishes from a stream event, which loses the request's
 // AsyncLocalStorage stores — the database it routes to and the user
@@ -46,7 +47,7 @@ const QC_IMAGE_MAX_CHARS = 8 * 1024 * 1024;
 router.get(
   "/jobs-for-qc",
   catchAsyncErrors(async (_req, res) => {
-    const jobs = await JobOrder.find({ status: { $in: ["weaving", "finishing", "checking"] } })
+    const jobs = await JobOrder.find({ status: inStages(OUTPUT_STAGES) })
       .populate("customer", "name")
       .populate("elastics.elastic", "name testingParameters")
       .select("_id jobOrderNo status elastics customer")

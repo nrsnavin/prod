@@ -87,7 +87,35 @@ function enteredAtField(status) {
   return STAGE_TIMESTAMPS[status]?.at || null;
 }
 
+// ── Named groups of statuses, for queries ─────────────────────────
+//
+// The same few sets were typed out as literals in eight places. They
+// differ on purpose (the packing list includes jobs IN packing; QC and
+// wastage stop at checking), but as bare literals nothing said so, and
+// a ninth copy could drift from the rest unseen. Each now has a name
+// that says what it means, and the queries use the name.
+
+/** A job is finished once it is completed or cancelled. */
+const FINISHED_JOB_STATUSES = Object.freeze(['completed', 'cancelled']);
+
+/** On the loom or after it, up to checking: output, QC and wastage are recorded. */
+const OUTPUT_STAGES = Object.freeze(['weaving', 'finishing', 'checking']);
+
+/** Past preparatory and not yet finished: holding a machine's backlog, or packing. */
+const POST_PREP_STAGES = Object.freeze(['weaving', 'finishing', 'checking', 'packing']);
+
+/** Query condition: the job is still live (not completed, not cancelled). */
+const liveJobStatus = () => ({ $nin: [...FINISHED_JOB_STATUSES] });
+
+/** Query condition: the job is in one of `stages`. */
+const inStages = (stages) => ({ $in: [...stages] });
+
 module.exports = {
+  FINISHED_JOB_STATUSES,
+  OUTPUT_STAGES,
+  POST_PREP_STAGES,
+  liveJobStatus,
+  inStages,
   JOB_STATUSES,
   STATUS_TRANSITIONS,
   GATED_TRANSITIONS,

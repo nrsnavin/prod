@@ -1,4 +1,5 @@
 const express = require("express");
+const { liveJobStatus } = require('../domain/jobStatus');
 const { renderPdf } = require("../utils/renderPdf");
 const { isAuthenticated, isAdmin } = require("../middleware/auth.js");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors.js");
@@ -1092,7 +1093,7 @@ router.post(
         // be a rule with no escape.
         const openJobs = await Job.find({
           order: order._id,
-          status: { $nin: ["completed", "cancelled"] },
+          status: liveJobStatus(),
         }).select("jobOrderNo status").session(session).lean();
 
         if (openJobs.length > 0) {

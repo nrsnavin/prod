@@ -14,6 +14,7 @@
 // ═════════════════════════════════════════════════════════════════
 
 const mongoose    = require("mongoose");
+const { liveJobStatus } = require('../domain/jobStatus');
 const Job         = require("../models/JobOrder.js");
 const Machine     = require("../models/Machine.js");
 const ShiftDetail = require("../models/ShiftDetail.js");
@@ -38,7 +39,7 @@ const C = require("../utils/etaConfig.js");
 async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now, freeMachines = 1) {
   const activeJobs = await Job.find({
     order: order._id,
-    status: { $nin: ["completed", "cancelled"] },
+    status: liveJobStatus(),
   })
     .populate({ path: "machine", select: "ID NoOfHead elastics status" })
     .lean();

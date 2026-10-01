@@ -20,6 +20,7 @@
 // ═══════════════════════════════════════════════════════════════════
 
 const express          = require("express");
+const { inStages, POST_PREP_STAGES } = require('../domain/jobStatus');
 const router           = express.Router();
 const mongoose         = require("mongoose");
 
@@ -135,7 +136,7 @@ async function _machineBacklog(machineIds, rateFor) {
   const JobOrder = require("../models/JobOrder");
   const jobs = await JobOrder.find({
     machine: { $in: machineIds },
-    status: { $in: ["weaving", "finishing", "checking", "packing"] },
+    status: inStages(POST_PREP_STAGES),
   }).select("machine elastics producedElastic").lean();
 
   const backlog = new Map();       // machineId → committed working days
