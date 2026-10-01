@@ -18,6 +18,34 @@ const {
 } = require("../utils/mailer");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { recordAccess } = require("../utils/accessLog");
+const { validate, fields: { text, objectId, textish }, z } = require("../middleware/validate");
+
+// ── Request shapes (middleware/validate.js) ─────────────────────────
+// Types and sizes only; each handler still answers a missing field in
+// its own words. A password is capped so a 5 MB string is never hashed.
+const PASSWORD = text(1024);
+const EMAIL = text(254);
+const S = {
+  signUp: z.object({
+    name: text(100).optional(), email: EMAIL.optional(), password: PASSWORD.optional(),
+    department: text(50).nullable().optional(), role: text(50).optional(),
+    features: z.array(z.unknown()).max(200).optional(), employee: objectId.optional(),
+  }),
+  login: z.object({ email: EMAIL.optional(), password: PASSWORD.optional() }),
+  emailOnly: z.object({ email: EMAIL.optional() }),
+  reset: z.object({ token: text(200).optional(), password: PASSWORD.optional() }),
+  verifyOtp: z.object({ email: EMAIL.optional(), otp: textish(12).optional() }),
+  workerLogin: z.object({ phone: textish(30).optional(), pin: textish(12).optional() }),
+  profile: z.object({ name: text(100).optional(), email: EMAIL.optional(), phoneNumber: textish(20).optional() }),
+  manage: z.object({
+    name: text(100).optional(), email: EMAIL.optional(), password: PASSWORD.optional(),
+    department: text(50).optional(), features: z.array(z.unknown()).max(200).optional(),
+    employee: z.union([objectId, z.literal(""), z.null()]).optional(), selfService: z.boolean().optional(),
+  }),
+  pin: z.object({ pin: textish(12).optional() }),
+  idParam: z.object({ id: objectId }),
+  employeeParam: z.object({ employeeId: objectId }),
+};
 const { ACTION_CODES } = require("../utils/fingerprint");
 const {
   PIN_MAX_ATTEMPTS, PIN_LOCK_MINUTES, placeholderEmail, isPlaceholderEmail,
@@ -32,6 +60,7 @@ const RESET_TTL_MINUTES = 30;
 // any visitor create themselves an admin account (privilege escalation).
 router.post("/sign-up",
   isAuthenticated, isAdmin('admin'),
+  validate({ body: S.signUp }),
   catchAsyncErrors(async (req, res, next) => {
   // Store emails lowercase — mixed-case emails break the exact-match
   // lookups in login and (before it went case-insensitive) forgot-password.
@@ -77,6 +106,7 @@ router.post("/sign-up",
 // login user
 router.post(
   "/login-user",
+  validate({ body: S.login }),
   catchAsyncErrors(async (req, res, next) => {
     try {
       // Coerce to strings so a JSON object like {"$gt":""} can never
@@ -150,6 +180,7 @@ router.post(
 // ══════════════════════════════════════════════════════════════
 router.post(
   "/forgot-password",
+  validate({ body: S.emailOnly }),
   catchAsyncErrors(async (req, res, next) => {
     const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
     if (!email) {
@@ -237,6 +268,7 @@ router.post(
 // ══════════════════════════════════════════════════════════════
 router.post(
   "/reset-password",
+  validate({ body: S.reset }),
   catchAsyncErrors(async (req, res, next) => {
     const rawToken = typeof req.body.token === "string" ? req.body.token.trim() : "";
     const password = typeof req.body.password === "string" ? req.body.password : "";
@@ -290,6 +322,7 @@ const OTP_MAX_ATTEMPTS = 5;
 
 router.post(
   "/request-otp",
+  validate({ body: S.emailOnly }),
   catchAsyncErrors(async (req, res, next) => {
     const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
     if (!email) {
@@ -414,6 +447,7 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 router.post(
   "/verify-otp",
+  validate({ body: S.verifyOtp }),
   catchAsyncErrors(async (req, res, next) => {
     const email = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
     const otp   = typeof req.body.otp === "string" ? req.body.otp.trim()
@@ -510,6 +544,7 @@ router.post(
 // ══════════════════════════════════════════════════════════════
 router.post(
   "/worker-login",
+  validate({ body: S.workerLogin }),
   catchAsyncErrors(async (req, res, next) => {
     const phone = normalisePhone(req.body.phone);
     const pin   = typeof req.body.pin === "string" ? req.body.pin.trim()
@@ -701,6 +736,7 @@ router.get(
 router.patch(
   "/me",
   isAuthenticated,
+  validate({ body: S.profile }),
   catchAsyncErrors(async (req, res, next) => {
     const { name, email, phoneNumber } = req.body || {};
 
@@ -979,6 +1015,7 @@ function accessChanges(a, b) {
 router.post(
   "/manage/create",
   isAuthenticated, isAdmin("admin"),
+  validate({ body: S.manage }),
   catchAsyncErrors(async (req, res, next) => {
     const name       = typeof req.body.name === "string" ? req.body.name.trim() : "";
     const email      = typeof req.body.email === "string" ? req.body.email.trim().toLowerCase() : "";
@@ -1044,6 +1081,7 @@ router.post(
 router.put(
   "/manage/:id",
   isAuthenticated, isAdmin("admin"),
+  validate({ params: S.idParam, body: S.manage }),
   catchAsyncErrors(async (req, res, next) => {
     const user = await User.findById(req.params.id).select("+password +pin");
     if (!user) return next(new ErrorHandler("User not found", 404));
@@ -1179,6 +1217,7 @@ router.get(
 router.post(
   "/manage/worker-access/:employeeId",
   isAuthenticated, isAdmin("admin"),
+  validate({ params: S.employeeParam, body: S.pin }),
   catchAsyncErrors(async (req, res, next) => {
     const { employee, login: existing, error } = await workerAccessOf(req.params.employeeId);
     if (error) return next(new ErrorHandler(...error));

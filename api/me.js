@@ -27,6 +27,7 @@ const Elastic = require("../models/Elastic");
 const Employee = require("../models/Employee");
 const User = require("../models/User");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { validate, fields: { numberish }, z } = require("../middleware/validate");
 const ErrorHandler = require("../utils/ErrorHandler");
 const JobOrder = require("../models/JobOrder");
 const Machine = require("../models/Machine");
@@ -300,6 +301,13 @@ router.get(
 const TIMER = /^\d{1,2}:[0-5]\d(:[0-5]\d)?$/;
 router.post(
   "/shifts/:id/production",
+  validate({
+    body: z.object({
+      production: numberish.nullable().optional(),
+      timer: z.string().max(20).nullable().optional(),
+      feedback: z.string().max(2000).nullable().optional(),
+    }),
+  }),
   catchAsyncErrors(async (req, res, next) => {
     const employee = employeeOf(req, next);
     if (!employee) return;

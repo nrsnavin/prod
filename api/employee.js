@@ -11,6 +11,19 @@ const ShiftDetail      = require("../models/ShiftDetail");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { assertVersion } = require("../utils/versioning");
 const aadhaar = require("../utils/aadhaar");
+const { validate, fields: { text, textish, numberish, objectId }, z } = require("../middleware/validate");
+
+// Request shapes (middleware/validate.js). The skill profile is nested
+// and the model validates its levels; here it only has to be an object.
+const EMPLOYEE_FIELDS = {
+  name: text(100).optional(),
+  phoneNumber: textish(20).nullable().optional(),
+  role: text(100).nullable().optional(),
+  department: text(50).optional(),
+  aadhar: textish(30).nullable().optional(),
+  hourlyRate: numberish.nullable().optional(),
+  skillProfile: z.record(z.unknown()).nullable().optional(),
+};
 const { recordAccess } = require("../utils/accessLog");
 const { ACTION_CODES } = require("../utils/fingerprint");
 
@@ -57,6 +70,7 @@ function clockToMinutes(timeStr) {
 router.post(
   "/create-employee",
   isAdmin("admin"),
+  validate({ body: z.object(EMPLOYEE_FIELDS) }),
   catchAsyncErrors(async (req, res, next) => {
     const { name, phoneNumber, role, department, aadhar } = req.body;
 
@@ -223,6 +237,10 @@ router.get(
 
 router.put(
   "/update",
+  validate({
+    query: z.object({ id: objectId }).passthrough(),
+    body: z.object({ ...EMPLOYEE_FIELDS, skill: numberish.nullable().optional(), expectedVersion: numberish.optional() }),
+  }),
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("id is required", 400));
@@ -284,6 +302,7 @@ router.put(
 
 router.patch(
   "/performance",
+  validate({ body: z.object({ id: text(30).optional(), performance: numberish.nullable().optional() }) }),
   catchAsyncErrors(async (req, res, next) => {
     const { id, performance } = req.body;
 
