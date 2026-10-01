@@ -19,6 +19,7 @@
 const express    = require('express');
 const mongoose   = require('mongoose');
 const router     = express.Router();
+const { rangeProblem } = require('../utils/listLimit');
 const ShiftPlan  = require('../models/ShiftPlan');
 const ShiftDetail= require('../models/ShiftDetail');
 const Wastage    = require('../models/Wastage');
@@ -65,6 +66,8 @@ router.get('/date-range', async (req, res) => {
       rangeStart = parseDateParam(startDate, 0,0,0,0);
       rangeEnd   = parseDateParam(endDate, 23,59,59,999);
     } catch(e) { return res.status(400).json({ success:false, message:e.message }); }
+    const tooWide = rangeProblem(rangeStart, rangeEnd);
+    if (tooWide) return res.status(400).json({ success:false, message: tooWide });
 
     const shiftPlans = await ShiftPlan.find({ date:{ $gte:rangeStart, $lte:rangeEnd } })
       .select('date shift description totalProduction plan finalized finalizedAt finalizedBy')

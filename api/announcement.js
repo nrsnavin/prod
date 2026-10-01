@@ -18,6 +18,7 @@ const router       = express.Router();
 const Announcement = require("../models/Announcement");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { capped } = require("../utils/listLimit");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
@@ -62,10 +63,11 @@ router.get(
   "/",
   isAuthenticated, isAdmin('admin'),
   catchAsyncErrors(async (req, res, next) => {
-    const items = await Announcement.find()
-      .sort({ isPinned: -1, createdAt: -1 })
-      .lean();
-    res.json({ success: true, count: items.length, data: items });
+    // Pinned first, then newest: the cap keeps what matters (utils/listLimit).
+    const { rows: items, capped: cut } = await capped(
+      Announcement.find().sort({ isPinned: -1, createdAt: -1 }).lean(), res
+    );
+    res.json({ success: true, count: items.length, data: items, ...(cut ? { capped: true } : {}) });
   })
 );
 

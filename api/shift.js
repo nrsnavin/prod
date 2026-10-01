@@ -7,6 +7,7 @@ const moment   = require("moment");
 const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { rangeProblem } = require("../utils/listLimit");
 const ErrorHandler     = require("../utils/ErrorHandler");
 
 const Employee    = require("../models/Employee");
@@ -407,6 +408,8 @@ router.get(
     if (!start || !less) {
       return next(new ErrorHandler("start and less date params are required", 400));
     }
+    const tooWide = rangeProblem(moment(start, "YYYY-MM-DD").toDate(), moment(less, "YYYY-MM-DD").toDate());
+    if (tooWide) return next(new ErrorHandler(tooWide, 400));
 
     const shifts = await ShiftPlan.find({
       date: {

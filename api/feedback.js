@@ -19,6 +19,7 @@ const Feedback  = require("../models/EmployeeFeedback");
 const Employee  = require("../models/Employee");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { capped } = require("../utils/listLimit");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { notify } = require("../utils/notify");
@@ -119,12 +120,16 @@ router.get(
     if (type && type !== "all")       filter.type     = type;
     if (category && category !== "all") filter.category = category;
 
-    const items = await Feedback.find(filter)
-      .populate("employee", "name department role")
-      .populate("respondedBy", "name role")
-      .sort({ createdAt: -1 })
-      .lean();
-    res.json({ success: true, count: items.length, data: items });
+    // Newest first, at most LIST_CEILING (utils/listLimit): this list only grows.
+    const { rows: items, capped: cut } = await capped(
+      Feedback.find(filter)
+        .populate("employee", "name department role")
+        .populate("respondedBy", "name role")
+        .sort({ createdAt: -1 })
+        .lean(),
+      res
+    );
+    res.json({ success: true, count: items.length, data: items, ...(cut ? { capped: true } : {}) });
   })
 );
 

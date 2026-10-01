@@ -21,6 +21,7 @@ const Machine        = require("../models/Machine");
 const Employee       = require("../models/Employee");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { capped } = require("../utils/listLimit");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 const { resolveEmployeeId } = require("../utils/resolveEmployee");
@@ -105,13 +106,17 @@ router.get(
     if (status && status !== "all") filter.status = status;
     if (machineId) filter.machine = machineId;
 
-    const issues = await MachineIssue.find(filter)
-      .populate("machine", "ID status")
-      .populate("employee", "name department role")
-      .sort({ createdAt: -1 })
-      .lean();
+    // Newest first, at most LIST_CEILING (utils/listLimit): this list only grows.
+    const { rows: issues, capped: cut } = await capped(
+      MachineIssue.find(filter)
+        .populate("machine", "ID status")
+        .populate("employee", "name department role")
+        .sort({ createdAt: -1 })
+        .lean(),
+      res
+    );
 
-    res.json({ success: true, count: issues.length, data: issues });
+    res.json({ success: true, count: issues.length, data: issues, ...(cut ? { capped: true } : {}) });
   })
 );
 
