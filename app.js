@@ -349,6 +349,8 @@ app.get(
     const out = {
       status: "ok",
       configured: Boolean(anthropic()),
+      // Is the circuit open, and how many calls are running or queued.
+      gateway: require("./utils/aiGateway.js").gatewayState(),
       windowDays: days,
       models: {
         text:   { id: TEXT_MODEL,   pinned: isPinned(TEXT_MODEL) },

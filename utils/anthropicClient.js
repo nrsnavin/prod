@@ -13,12 +13,17 @@
 //    SHIFT_OCR_MODEL     vision default (shift-sheet OCR)
 // ─────────────────────────────────────────────────────────────────
 const Anthropic = require('@anthropic-ai/sdk');
+const { guard } = require('./aiGateway');
 
+// What callers get is the client behind the AI gateway: the same
+// `messages.create`, with a timeout, a concurrency cap and a circuit
+// breaker around it (utils/aiGateway.js). No call site reaches the raw
+// SDK client, so none can skip them.
 let _client = null;
 function anthropic() {
   if (_client) return _client;
   if (!process.env.ANTHROPIC_API_KEY) return null;
-  _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  _client = guard(new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }));
   return _client;
 }
 
