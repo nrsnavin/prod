@@ -10,6 +10,30 @@ const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { assertVersion } = require("../utils/versioning");
+const aadhaar = require("../utils/aadhaar");
+const { recordAccess } = require("../utils/accessLog");
+const { ACTION_CODES } = require("../utils/fingerprint");
+
+/** The masked number for a stored value, or null when there is none. */
+function maskedAadhaar(stored) {
+  if (!stored) return null;
+  try {
+    const plain = aadhaar.open(stored);
+    return plain && plain !== "Not Provided" ? aadhaar.mask(plain) : null;
+  } catch (err) {
+    console.error("[aadhaar] could not read a stored number:", err.message);
+    return "XXXX";
+  }
+}
+
+/** An employee as the API returns it: never the stored Aadhaar value. */
+function publicEmployee(doc) {
+  const out = typeof doc.toObject === "function" ? doc.toObject() : { ...doc };
+  const stored = out.aadhar;
+  delete out.aadhar;
+  if (stored !== undefined) out.aadhar = maskedAadhaar(stored);
+  return out;
+}
 
 // All employee management routes are admin-only.
 router.use(isAuthenticated, isAdmin('admin', 'accounts', 'production'));
@@ -65,7 +89,7 @@ router.post(
       phoneNumber: phoneNumber?.trim() || undefined,
       role:        role?.trim()        || undefined,
       department:  department.trim(),
-      aadhar:      aadhar?.trim()      || undefined,
+      aadhar:      aadhaar.seal(aadhar?.trim()) || undefined,
       // Shift salary from the onboarding form (stored as ₹/hour; the
       // web form converts a DAY-shift salary ÷ 12h).
       hourlyRate:  Number.isFinite(hourlyRate) && hourlyRate >= 0 ? hourlyRate : 0,
@@ -75,7 +99,7 @@ router.post(
 
     console.log(`[employee/create] ${employee.name} registered`);
 
-    res.status(201).json({ success: true, employee });
+    res.status(201).json({ success: true, employee: publicEmployee(employee) });
   })
 );
 
@@ -116,7 +140,7 @@ router.get(
     // wrong for older data, since the plan route once pushed a whole
     // plan's shifts onto every operator in it — so "Total shifts" was
     // inflated, and is now the true count. Indexed { employee, createdAt }.
-    const employee = await Employee.findById(id).select("-shifts").exec();
+    const employee = await Employee.findById(id).select("-shifts +aadhar").exec();
 
     if (!employee) return next(new ErrorHandler("Employee not found", 404));
 
@@ -156,7 +180,9 @@ router.get(
         phoneNumber: employee.phoneNumber || "—",
         department:  employee.department,
         role:        employee.role        || "—",
-        aadhar:      employee.aadhar      || "Not Provided",
+        // Masked for everyone; an admin sees the full number by asking
+        // for it (GET /aadhaar), which is recorded.
+        aadhar:      maskedAadhaar(employee.aadhar) || "Not Provided",
         performance: employee.performance || 0,
         skill:       employee.skill       || 0,
         hourlyRate:  employee.hourlyRate  || 0,
@@ -176,6 +202,22 @@ router.get(
       .sort({ name: 1 });
 
     res.status(200).json({ success: true, employees });
+  })
+);
+
+// GET /employee/aadhaar?id= — the full number, for an admin who asks.
+// Every answer is recorded in the audit trail (who looked, at whose).
+router.get(
+  "/aadhaar",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.query;
+    if (!mongoose.Types.ObjectId.isValid(id)) return next(new ErrorHandler("Invalid employee id", 400));
+    const employee = await Employee.findById(id).select("name +aadhar").lean();
+    if (!employee) return next(new ErrorHandler("Employee not found", 404));
+    const plain = employee.aadhar ? aadhaar.open(employee.aadhar) : null;
+    await recordAccess(req, ACTION_CODES.AADHAAR_VIEWED, { _id: employee._id, name: employee.name });
+    res.json({ success: true, aadhar: plain && plain !== "Not Provided" ? plain : null });
   })
 );
 
@@ -212,6 +254,20 @@ router.put(
       req.body.phoneNumber = phone; // "" still clears it, as before
     }
 
+    // Aadhaar: what comes back from the edit form is the masked number
+    // (or "Not Provided"), never the real one. That means "unchanged",
+    // and must never overwrite it. A new number is an admin's to set.
+    if (req.body.aadhar !== undefined) {
+      const typed = req.body.aadhar == null ? "" : String(req.body.aadhar).trim();
+      if (aadhaar.looksMasked(typed) || typed === "Not Provided") {
+        delete req.body.aadhar;
+      } else if (req.user?.role !== "admin") {
+        return next(new ErrorHandler("Only an admin can change an Aadhaar number", 403));
+      } else {
+        req.body.aadhar = typed ? aadhaar.seal(typed) : "";
+      }
+    }
+
     const allowed = ["name", "phoneNumber", "role", "department", "aadhar", "skill", "hourlyRate", "skillProfile"];
     for (const field of allowed) {
       if (req.body[field] !== undefined) {
@@ -222,7 +278,7 @@ router.put(
     employee.increment(); // bump __v so concurrent editors get a 409
     await employee.save();
 
-    res.status(200).json({ success: true, employee });
+    res.status(200).json({ success: true, employee: publicEmployee(employee) });
   })
 );
 

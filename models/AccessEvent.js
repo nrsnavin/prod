@@ -5,7 +5,8 @@ const mongoose = require("mongoose");
 //
 //  One append-only record per change to a login: created, edited (and
 //  what changed), deleted, and a worker's phone sign-in set, reset or
-//  turned off. Business records carry their audit fingerprints on the
+//  turned off. Also each time an admin views an employee's full Aadhaar
+//  number (subject = the employee). Business records carry their audit fingerprints on the
 //  document itself; a login can't, because deleting it would delete its
 //  own history. So these live here, and the audit feed reads them
 //  alongside the rest (api/audit.js).

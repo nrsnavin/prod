@@ -73,7 +73,8 @@ router.get(
     // Changes to logins live in their own collection (a deleted login
     // can't carry its own history); shaped like every other entry.
     const access = (await AccessEvent.find({}).sort({ at: -1 }).limit(limit).lean()).map((e) => ({
-      entityType: "Login",
+      // An Aadhaar view is about an employee record, not a login.
+      entityType: e.code === "AADHAAR_VIEWED" ? "Employee" : "Login",
       entityId: e.subject?.id ?? null,
       entityNo: e.subject?.name ?? null,
       code: e.code,

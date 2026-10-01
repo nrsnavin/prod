@@ -102,6 +102,7 @@ const ACTION_CODES = Object.freeze({
   PHONE_SIGNIN_SET:         'PHONE_SIGNIN_SET',
   PHONE_SIGNIN_RESET:       'PHONE_SIGNIN_RESET',
   PHONE_SIGNIN_OFF:         'PHONE_SIGNIN_OFF',
+  AADHAAR_VIEWED:           'AADHAAR_VIEWED',
 });
 
 const ACTION_LABELS = Object.freeze({
@@ -166,6 +167,7 @@ const ACTION_LABELS = Object.freeze({
   PHONE_SIGNIN_SET:         'Phone Sign-in Given',
   PHONE_SIGNIN_RESET:       'PIN Reset',
   PHONE_SIGNIN_OFF:         'Phone Sign-in Turned Off',
+  AADHAAR_VIEWED:           'Aadhaar Viewed',
 });
 
 /**

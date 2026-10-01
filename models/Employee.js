@@ -17,8 +17,12 @@ const EmployeeSchema = new mongoose.Schema(
     phoneNumber: {
       type: String,
     },
+    // A national identity number: never returned unless a query asks for
+    // it by name ("+aadhar"), sealed when AADHAAR_KEY is set, and masked
+    // for everyone but an admin who asks. See utils/aadhaar.js.
     aadhar: {
       type: String,
+      select: false,
     },
     skill: {
       type: Number,
