@@ -511,6 +511,7 @@ const gate = (...roles) => [isAuthenticated, isAdmin('admin', ...roles)];
 // Throttle credential-guessing before the login handler runs.
 app.use("/api/v2", apiLimiter);
 app.use("/api/v2/user/login-user", loginAddressLimiter, loginAccountLimiter);
+app.use("/api/v2/user/worker-login", loginAddressLimiter, loginAccountLimiter);
 // Unauthenticated, abuse-prone surfaces: forgot-password and both OTP
 // legs trigger emails / accept guesses — every request counts here, not
 // only failures, because a successful one sends mail.

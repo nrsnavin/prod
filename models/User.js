@@ -106,6 +106,25 @@ const userSchema = new mongoose.Schema(
       select: false,
       default: 0,
     },
+    // Phone + PIN sign-in, for worker logins only (see api/user.js
+    // /worker-login). Workers rarely have an email, so they sign in with
+    // the phone number on their employee record and a PIN an admin sets.
+    // The PIN is hashed like a password; wrong guesses lock the account
+    // for a while rather than counting per address, because a whole
+    // floor shares one address.
+    pin: {
+      type: String,
+      select: false,
+    },
+    pinAttempts: {
+      type: Number,
+      select: false,
+      default: 0,
+    },
+    pinLockedUntil: {
+      type: Date,
+      select: false,
+    },
   },
   { timestamps: true }
 );

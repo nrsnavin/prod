@@ -46,7 +46,12 @@ const userOrIpKey = (req) => (req.user?._id ? `u:${req.user._id}` : ipKey(req));
 /** One account at one address. Lower-cased: the login route matches case-sensitively, an attacker need not. */
 const accountKey = (req) => {
   const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-  return `${ipKey(req)}|${email}`;
+  if (email) return `${ipKey(req)}|${email}`;
+  // Worker sign-in names the account by phone, not email. Digits only,
+  // so "98765 43210" and "9876543210" are one account here too.
+  const phone = typeof req.body?.phone === 'string' || typeof req.body?.phone === 'number'
+    ? String(req.body.phone).replace(/\D/g, '').slice(-10) : '';
+  return `${ipKey(req)}|${phone ? `phone:${phone}` : ''}`;
 };
 
 const common = {

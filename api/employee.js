@@ -26,8 +26,13 @@ function clockToMinutes(timeStr) {
   return hours * 60 + minutes;
 }
 
+// Registering a worker is the admin's alone. Supervisors (production)
+// and accounts still read and correct employee records below, but a new
+// person on the payroll — and so a new login the admin may hand them —
+// starts with an admin.
 router.post(
   "/create-employee",
+  isAdmin("admin"),
   catchAsyncErrors(async (req, res, next) => {
     const { name, phoneNumber, role, department, aadhar } = req.body;
 
@@ -188,6 +193,24 @@ router.put(
     // Optimistic lock: reject the edit if another user saved since this
     // client loaded the employee (409 → client reloads).
     assertVersion(employee, req);
+
+    // The phone number is what a worker signs in with, so two employees
+    // must never share one. Checked only when it changes, so a legacy
+    // duplicate does not block unrelated edits to either record.
+    if (req.body.phoneNumber !== undefined) {
+      const raw = req.body.phoneNumber;
+      const phone = raw == null ? "" : String(raw).trim();
+      if (phone && !/^\d{10}$/.test(phone)) {
+        return next(new ErrorHandler("phoneNumber must be 10 digits", 400));
+      }
+      if (phone && phone !== employee.phoneNumber) {
+        const clash = await Employee.exists({ phoneNumber: phone, _id: { $ne: employee._id } });
+        if (clash) {
+          return next(new ErrorHandler(`An employee with phone number ${phone} already exists`, 409));
+        }
+      }
+      req.body.phoneNumber = phone; // "" still clears it, as before
+    }
 
     const allowed = ["name", "phoneNumber", "role", "department", "aadhar", "skill", "hourlyRate", "skillProfile"];
     for (const field of allowed) {

@@ -1,7 +1,8 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const User = require("../models/User.js");
-const { verifyPassword, dummyHash } = require("../utils/passwordHash");
+const crypto = require("crypto");
+const { hashPassword, verifyPassword, dummyHash } = require("../utils/passwordHash");
 const Employee = require("../models/Employee.js");
 const router = express.Router();
 const ErrorHandler = require("../utils/ErrorHandler");
@@ -16,6 +17,10 @@ const {
   isConfigured: mailerConfigured,
 } = require("../utils/mailer");
 const { escapeRegex } = require("../utils/escapeRegex");
+const {
+  PIN_MAX_ATTEMPTS, PIN_LOCK_MINUTES, placeholderEmail, isPlaceholderEmail,
+  normalisePhone, pinProblem, loginDepartmentFor,
+} = require("../utils/workerLogin");
 var jwt = require('jsonwebtoken');
 
 const RESET_TTL_MINUTES = 30;
@@ -479,6 +484,111 @@ router.post(
   })
 );
 
+// ══════════════════════════════════════════════════════════════
+//  WORKER SIGN-IN  —  POST /user/worker-login  { phone, pin }
+//
+//  Workers sign in with the phone number on their employee record and
+//  a PIN an admin set (see /manage/worker-access below). Issues the SAME
+//  cookie + JSON shape as /login-user, so both apps' session code is
+//  reused unchanged.
+//
+//  Only a worker login (linked to an employee, self-service only) can
+//  sign in this way: a four-digit PIN is fine for one person's own
+//  shift and payslip, and not for a login that can open the plant.
+//
+//  Wrong PINs count against the ACCOUNT, not the address: the whole
+//  floor signs in from one address, so a per-address limit alone would
+//  either lock everyone out or allow thousands of guesses. Five wrong
+//  PINs lock that login for fifteen minutes; an admin resetting the PIN
+//  lifts the lock. The per-address limiter at the app.js mount still
+//  applies on top.
+// ══════════════════════════════════════════════════════════════
+router.post(
+  "/worker-login",
+  catchAsyncErrors(async (req, res, next) => {
+    const phone = normalisePhone(req.body.phone);
+    const pin   = typeof req.body.pin === "string" ? req.body.pin.trim()
+                : typeof req.body.pin === "number" ? String(req.body.pin) : "";
+    if (!phone || !/^\d{4,6}$/.test(pin)) {
+      return next(new ErrorHandler("Enter your 10-digit phone number and your PIN", 400));
+    }
+
+    const wrong = (left) => next(new ErrorHandler(
+      left != null && left <= 2
+        ? `Wrong phone number or PIN. ${left} ${left === 1 ? "try" : "tries"} left before this login locks.`
+        : "Wrong phone number or PIN",
+      401
+    ));
+
+    const employees = await Employee.find({ phoneNumber: phone }).select("_id").limit(5).lean();
+    const user = employees.length
+      ? await User.findOne({ employee: { $in: employees.map((e) => e._id) }, pin: { $exists: true } })
+          .select("+pin +pinAttempts +pinLockedUntil")
+      : null;
+
+    // Same work whether or not the phone has a login, as /login-user does.
+    if (!user || !user.pin || !isSelfServiceOnly(user)) {
+      await verifyPassword(pin, await dummyHash());
+      return wrong();
+    }
+
+    if (user.pinLockedUntil && user.pinLockedUntil.getTime() > Date.now()) {
+      const mins = Math.max(1, Math.ceil((user.pinLockedUntil.getTime() - Date.now()) / 60000));
+      const err = new ErrorHandler(
+        `Too many wrong PINs. Try again in ${mins} minute${mins === 1 ? "" : "s"}, or ask an admin to reset your PIN.`,
+        429
+      );
+      err.code = "PIN_LOCKED";
+      return next(err);
+    }
+
+    const { ok } = await verifyPassword(pin, user.pin);
+    if (!ok) {
+      const attempts = (user.pinAttempts || 0) + 1;
+      if (attempts >= PIN_MAX_ATTEMPTS) {
+        await User.updateOne({ _id: user._id }, {
+          $set: { pinAttempts: 0, pinLockedUntil: new Date(Date.now() + PIN_LOCK_MINUTES * 60000) },
+        });
+        const err = new ErrorHandler(
+          `Too many wrong PINs. This login is locked for ${PIN_LOCK_MINUTES} minutes, or until an admin resets the PIN.`,
+          429
+        );
+        err.code = "PIN_LOCKED";
+        return next(err);
+      }
+      await User.updateOne({ _id: user._id }, { $set: { pinAttempts: attempts } });
+      return wrong(PIN_MAX_ATTEMPTS - attempts);
+    }
+
+    if (user.pinAttempts || user.pinLockedUntil) {
+      await User.updateOne({ _id: user._id }, { $set: { pinAttempts: 0 }, $unset: { pinLockedUntil: 1 } });
+    }
+
+    const longLived = wantsLongSession(req);
+    const token = generateToken(user, { longLived });
+    res
+      .status(201)
+      .cookie("token", token, {
+        httpOnly: true,
+        sameSite: "none",
+        secure: true,
+        maxAge: longLived ? APP_MAX_AGE : WEB_MAX_AGE,
+      })
+      .json({
+        username: user.name,
+        id: user._id,
+        role: user.role,
+        department: user.department || null,
+        features: Array.isArray(user.features)
+          ? user.features
+          : featuresForDepartment(user.department || user.role),
+        employee: user.employee || null,
+        selfService: isSelfServiceOnly(user),
+        token: token,
+      });
+  })
+);
+
 router.get(
   "/getuser",
   isAuthenticated,
@@ -546,7 +656,8 @@ router.get(
       user: {
         id:         user._id,
         name:       user.name,
-        email:      user.email,
+        // A worker login's placeholder is not an address; say there is none.
+        email:      isPlaceholderEmail(user.email) ? null : user.email,
         role:       user.role,
         department: user.department || null,
         employee:   user.employee || null,
@@ -797,14 +908,17 @@ router.get(
   isAuthenticated, isAdmin("admin"),
   catchAsyncErrors(async (req, res) => {
     const users = await User.find({})
-      .select("name email role department features employee createdAt")
+      .select("name email role department features employee createdAt +pin")
       .populate("employee", "name department")
       .sort({ createdAt: -1 })
       .lean();
     // Backfill an effective feature set for legacy users with none stored,
     // so the admin screen shows what they can actually access.
-    const withFeatures = users.map((u) => ({
+    const withFeatures = users.map(({ pin, ...u }) => ({
       ...u,
+      // Never the hash — only whether phone sign-in is on.
+      phoneSignIn: !!pin,
+      email: isPlaceholderEmail(u.email) ? null : u.email,
       selfService: isSelfServiceOnly(u),
       features: Array.isArray(u.features)
         ? u.features
@@ -897,7 +1011,7 @@ router.put(
   "/manage/:id",
   isAuthenticated, isAdmin("admin"),
   catchAsyncErrors(async (req, res, next) => {
-    const user = await User.findById(req.params.id).select("+password");
+    const user = await User.findById(req.params.id).select("+password +pin");
     if (!user) return next(new ErrorHandler("User not found", 404));
 
     if (typeof req.body.name === "string" && req.body.name.trim())
@@ -946,12 +1060,166 @@ router.put(
       if (user.department === "admin") return next(new ErrorHandler("An admin login cannot be an employee login", 400));
       user.features = [...ALWAYS_ON];
     }
+    // A PIN is a worker's credential. If this edit gives the login more
+    // than the worker's own records, the PIN goes, and so do the
+    // sessions it opened.
+    if (user.pin && !isSelfServiceOnly(user)) {
+      user.pin = undefined;
+      user.pinLockedUntil = undefined;
+      user.tokenVersion = (user.tokenVersion ?? 0) + 1;
+    }
 
     await user.save();
     res.json({
       success: true,
       user: { id: user._id, name: user.name, email: user.email, role: user.role, department: user.department, features: user.features, employee: user.employee || null, selfService: isSelfServiceOnly(user) },
     });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  WORKER ACCESS  —  an admin gives a worker phone + PIN sign-in
+//
+//    GET    /user/manage/worker-access/:employeeId        what they have now
+//    POST   /user/manage/worker-access/:employeeId {pin}  set (or reset) the PIN
+//    DELETE /user/manage/worker-access/:employeeId        turn phone sign-in off
+//
+//  Admin only, like every /manage route. Setting a PIN creates the
+//  worker's login if they have none: linked to the employee, granted
+//  only the self-service screens, with a placeholder email (see
+//  utils/workerLogin.js). An employee whose login is a manager login
+//  (it can open more than their own records) is refused — a PIN is not
+//  a credential for that.
+//
+//  Resetting or removing a PIN also ends every session the login has
+//  open (tokenVersion), which is the answer to a lost or shared phone.
+// ══════════════════════════════════════════════════════════════
+async function workerAccessOf(employeeId) {
+  if (!mongoose.isValidObjectId(employeeId)) return { error: ["Employee not found", 404] };
+  const employee = await Employee.findById(employeeId).select("name phoneNumber department").lean();
+  if (!employee) return { error: ["Employee not found", 404] };
+  const login = await User.findOne({ employee: employee._id })
+    // Every default field (tokenVersion among them, which a reset bumps)
+    // plus the two the schema hides.
+    .select("+pin +pinLockedUntil");
+  return { employee, login };
+}
+
+function workerAccessView(employee, login) {
+  const locked = login?.pinLockedUntil && login.pinLockedUntil.getTime() > Date.now();
+  return {
+    employee: {
+      id: employee._id,
+      name: employee.name,
+      phoneNumber: employee.phoneNumber || null,
+      department: employee.department || null,
+    },
+    login: login
+      ? {
+          id: login._id,
+          // A placeholder is not an address anyone can use; say so.
+          email: isPlaceholderEmail(login.email) ? null : login.email,
+          selfService: isSelfServiceOnly(login),
+          phoneSignIn: !!login.pin,
+          lockedUntil: locked ? login.pinLockedUntil : null,
+          since: login.createdAt,
+        }
+      : null,
+  };
+}
+
+router.get(
+  "/manage/worker-access/:employeeId",
+  isAuthenticated, isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { employee, login, error } = await workerAccessOf(req.params.employeeId);
+    if (error) return next(new ErrorHandler(...error));
+    res.json({ success: true, ...workerAccessView(employee, login) });
+  })
+);
+
+router.post(
+  "/manage/worker-access/:employeeId",
+  isAuthenticated, isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { employee, login: existing, error } = await workerAccessOf(req.params.employeeId);
+    if (error) return next(new ErrorHandler(...error));
+
+    const phone = normalisePhone(employee.phoneNumber);
+    if (!phone) {
+      return next(new ErrorHandler(
+        "Add a 10-digit phone number to this employee first. It is what they sign in with.", 400
+      ));
+    }
+    const shared = await Employee.findOne({ phoneNumber: employee.phoneNumber, _id: { $ne: employee._id } })
+      .select("name").lean();
+    if (shared) {
+      return next(new ErrorHandler(
+        `${shared.name} has the same phone number. Each worker needs their own number to sign in.`, 409
+      ));
+    }
+
+    const pin = typeof req.body.pin === "string" ? req.body.pin.trim() : "";
+    const problem = pinProblem(pin, phone);
+    if (problem) return next(new ErrorHandler(problem, 400));
+
+    if (existing && !isSelfServiceOnly(existing)) {
+      return next(new ErrorHandler(
+        `${employee.name} already has a manager login (${existing.email}). ` +
+        "Phone and PIN sign-in is only for worker logins.", 409
+      ));
+    }
+
+    let login = existing;
+    let created = false;
+    if (!login) {
+      const department = loginDepartmentFor(employee.department);
+      login = new User({
+        name: employee.name,
+        email: placeholderEmail(employee._id),
+        // Nobody knows this password; the worker signs in with the PIN.
+        password: crypto.randomBytes(24).toString("base64url"),
+        department,
+        role: roleForDepartment(department),
+        features: [...ALWAYS_ON],
+        employee: employee._id,
+      });
+      created = true;
+    } else {
+      // Reset, or phone sign-in added to an existing worker login:
+      // whatever sessions it has open end here.
+      login.tokenVersion = (login.tokenVersion ?? 0) + 1;
+    }
+    login.pin = await hashPassword(pin);
+    login.pinAttempts = 0;
+    login.pinLockedUntil = undefined;
+    await login.save();
+
+    res.status(created ? 201 : 200).json({
+      success: true,
+      created,
+      ...workerAccessView(employee, login),
+    });
+  })
+);
+
+router.delete(
+  "/manage/worker-access/:employeeId",
+  isAuthenticated, isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { employee, login, error } = await workerAccessOf(req.params.employeeId);
+    if (error) return next(new ErrorHandler(...error));
+    if (login?.pin) {
+      // The login itself stays (and its link to the employee); only the
+      // way in is removed, so turning it back on is one PIN away.
+      await User.updateOne(
+        { _id: login._id },
+        { $unset: { pin: 1, pinLockedUntil: 1 }, $set: { pinAttempts: 0 }, $inc: { tokenVersion: 1 } }
+      );
+      login.pin = undefined;
+      login.pinLockedUntil = undefined;
+    }
+    res.json({ success: true, ...workerAccessView(employee, login) });
   })
 );
 
