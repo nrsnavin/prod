@@ -19,6 +19,21 @@ const ShiftDetail  = require('../models/ShiftDetail');
 const Employee     = require('../models/Employee');
 const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
+const { validate, fields: { text, objectId }, z } = require('../middleware/validate');
+
+// A worker's own request (middleware/validate.js). The shift is matched
+// whatever its case, as the handler always has; anything that isn't text
+// used to crash .toUpperCase() with a 500.
+const LEAVE_REQUEST = z.object({
+  date: text(40).optional(),
+  shift: z.string().max(10).transform((v) => v.toUpperCase())
+    .pipe(z.enum(['DAY', 'NIGHT', 'BOTH'], { errorMap: () => ({ message: 'must be DAY, NIGHT or BOTH' }) }))
+    .optional(),
+  leaveType: z.enum(['casual', 'sick', 'unpaid'], { errorMap: () => ({ message: 'must be casual, sick or unpaid' }) }).optional(),
+  reason: text(500).optional(),
+  documentUrl: text(500).optional(),
+  employeeId: objectId.optional(), // admins only; resolveEmployeeId ignores it for anyone else
+});
 
 // Per-user feature gate. Worker self-service is exempt from writes:
 // submitting your own request (POST /request) and cancelling your own
@@ -67,7 +82,7 @@ function fmtLeave(l) {
 // ─────────────────────────────────────────────────────────────
 // POST /request
 // ─────────────────────────────────────────────────────────────
-router.post('/request', isAuthenticated, async (req, res) => {
+router.post('/request', isAuthenticated, validate({ body: LEAVE_REQUEST }), async (req, res) => {
   try {
     const { date, shift='DAY', leaveType, reason, documentUrl='' } = req.body;
     // Workers submit leave for themselves; admins may submit for anyone.
