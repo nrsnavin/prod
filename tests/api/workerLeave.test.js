@@ -33,6 +33,8 @@ beforeAll(async () => {
   const User = require('../../models/User');
   const Employee = require('../../models/Employee');
   LeaveRequest = require('../../models/LeaveRequest');
+  // The duplicate check relies on the unique index; wait until it exists.
+  await LeaveRequest.init();
   const { ALWAYS_ON } = require('../../utils/features');
   raviEmp = await Employee.create({ name: 'Ravi', department: 'weaving' });
   kumarEmp = await Employee.create({ name: 'Kumar', department: 'weaving' });

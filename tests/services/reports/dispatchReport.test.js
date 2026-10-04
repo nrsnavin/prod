@@ -24,29 +24,33 @@ let mongo;
 // A fresh mongod can stall mid-seed when the whole suite runs serially
 // on a loaded box (observed as a network timeout inside insertMany).
 // Boot + seed retries once before declaring failure.
+// Every challan carries its own dcNumber, as the model requires. The
+// seed used to leave it out, and whenever the model's unique dcNumber
+// index happened to finish building before the insert, the second
+// number-less challan was refused as a duplicate of the first (null).
 async function bootAndSeed() {
   mongo = await MongoMemoryServer.create();
   await mongoose.connect(mongo.getUri());
 
   await mongoose.connection.collection("deliverychallans").insertMany([
     // In-window, real dispatches.
-    { dispatchDate: new Date("2026-07-02T09:00:00Z"), status: "dispatched", customer: c1, customerName: "Acme",
+    { dcNumber: "DC-T1", dispatchDate: new Date("2026-07-02T09:00:00Z"), status: "dispatched", customer: c1, customerName: "Acme",
       totalQuantity: 100, totalAmount: 5000, items: [{ elastic: el1, elasticName: "20mm", quantity: 100, amount: 5000 }] },
-    { dispatchDate: new Date("2026-07-02T11:00:00Z"), status: "delivered", customer: c1, customerName: "Acme",
+    { dcNumber: "DC-T2", dispatchDate: new Date("2026-07-02T11:00:00Z"), status: "delivered", customer: c1, customerName: "Acme",
       totalQuantity: 50, totalAmount: 3000, items: [{ elastic: el2, elasticName: "30mm", quantity: 50, amount: 3000 }] },
-    { dispatchDate: new Date("2026-07-03T09:00:00Z"), status: "dispatched", customer: c2, customerName: "Beta",
+    { dcNumber: "DC-T3", dispatchDate: new Date("2026-07-03T09:00:00Z"), status: "dispatched", customer: c2, customerName: "Beta",
       totalQuantity: 200, totalAmount: 12000, items: [
         { elastic: el1, elasticName: "20mm", quantity: 80, amount: 4000 },
         { elastic: el2, elasticName: "30mm", quantity: 120, amount: 8000 },
       ] },
     // Excluded: draft (not yet dispatched) and cancelled (reversed).
-    { dispatchDate: new Date("2026-07-04T09:00:00Z"), status: "draft", customer: c1, customerName: "Acme", totalQuantity: 999, totalAmount: 99999, items: [] },
-    { dispatchDate: new Date("2026-07-04T09:00:00Z"), status: "cancelled", customer: c2, customerName: "Beta", totalQuantity: 999, totalAmount: 99999, items: [] },
+    { dcNumber: "DC-T4", dispatchDate: new Date("2026-07-04T09:00:00Z"), status: "draft", customer: c1, customerName: "Acme", totalQuantity: 999, totalAmount: 99999, items: [] },
+    { dcNumber: "DC-T5", dispatchDate: new Date("2026-07-04T09:00:00Z"), status: "cancelled", customer: c2, customerName: "Beta", totalQuantity: 999, totalAmount: 99999, items: [] },
     // Previous window (2026-06-24 .. 2026-07-01).
-    { dispatchDate: new Date("2026-06-28T09:00:00Z"), status: "delivered", customer: c1, customerName: "Acme",
+    { dcNumber: "DC-T6", dispatchDate: new Date("2026-06-28T09:00:00Z"), status: "delivered", customer: c1, customerName: "Acme",
       totalQuantity: 40, totalAmount: 2000, items: [{ elastic: el1, elasticName: "20mm", quantity: 40, amount: 2000 }] },
     // Excluded: well before any window.
-    { dispatchDate: new Date("2026-06-01T09:00:00Z"), status: "delivered", customer: c1, customerName: "Acme", totalQuantity: 1, totalAmount: 88888, items: [] },
+    { dcNumber: "DC-T7", dispatchDate: new Date("2026-06-01T09:00:00Z"), status: "delivered", customer: c1, customerName: "Acme", totalQuantity: 1, totalAmount: 88888, items: [] },
   ]);
 }
 
