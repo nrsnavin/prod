@@ -52,7 +52,7 @@ function safeEqual(a, b) {
 // per signed-in user rather than per office IP, failed logins only, and
 // counters in MongoDB so they hold across every worker process.
 const {
-  apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter,
+  apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter,
 } = require("./middleware/rateLimits.js").buildLimiters();
 
 const user     = require("./api/user.js");
@@ -728,6 +728,11 @@ app.use("/api/v2/complaint",   gate('production', 'accounts'),
   require("./api/complaint.js"));
 app.use("/api/v2/payroll",     gate('accounts', 'production'), payroll);
 app.use("/api/v2/leave",       gate('accounts', 'production'), leave);
+// Reading a loom's timer from a photo during production entry: anyone
+// who enters production (a worker on their own shift, a supervisor),
+// limited per person per hour since each read is an AI call. Saves
+// nothing to a shift — see api/timerOcr.js.
+app.use("/api/v2/ocr",         gate('production', 'accounts'), photoOcrLimiter, require("./api/timerOcr.js"));
 app.use("/api/v2/bonus",       gate('accounts', 'production'), bonus);
 app.use("/api/v2/machine-issue", gate('production', 'accounts'), machineIssue);
 app.use("/api/v2/announcement", gate('production', 'accounts'), announcement);

@@ -51,6 +51,12 @@ const PROMPTS = Object.freeze({
     system: null,   // lives in utils/qcVision.js
   },
 
+  'timer-ocr': {
+    version: 'v1.0',
+    notes: 'Every display on a loom panel, with kind, label, confidence and alternative readings; the client asks about anything unclear. Advisory only.',
+    system: null,   // lives in utils/timerOcr.js
+  },
+
   'shift-sheet-ocr': {
     version: 'v1.0',
     notes: 'Handwriting OCR of the printed shift sheet, batched by page.',

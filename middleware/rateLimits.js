@@ -73,6 +73,7 @@ function buildLimiters({
   loginPerAddress = 100,
   otpLimit = 20,
   webhookLimit = 30,
+  photoOcrPerHour = 40,
   storeFor = (prefix) => new MongoRateLimitStore({ prefix }),
 } = {}) {
   const apiLimiter = rateLimit({
@@ -129,7 +130,20 @@ function buildLimiters({
     message: { success: false, message: 'Rate limit exceeded.' },
   });
 
-  return { apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter };
+  // Reading a photo is an AI call that costs money; a stuck camera
+  // button or a script must not run up the bill. Per person, counted
+  // across every process (the shared store), generous for real use: a
+  // supervisor entering a whole floor photographs one timer per loom.
+  const photoOcrLimiter = rateLimit({
+    ...common,
+    windowMs: 60 * 60 * 1000,
+    limit: photoOcrPerHour,
+    keyGenerator: userOrIpKey,
+    store: storeFor('rl:photo-ocr:'),
+    message: { success: false, message: 'Too many photos read in the last hour. Type the value, or try again later.' },
+  });
+
+  return { apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter };
 }
 
 module.exports = { buildLimiters, userOrIpKey, accountKey, ipKey };

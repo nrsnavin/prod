@@ -53,6 +53,10 @@ const AI_SURFACES = Object.freeze([
   // no code to key against — so the ledger is the only way its accuracy
   // will ever be known.
   'inbound-po-ocr',
+  // A loom's run-time display read from a photo during production
+  // entry. The person confirms (or answers questions about) the value
+  // before it fills the field; settle() records what they used.
+  'timer-ocr',
   // Grouping complaint prose into recurring themes. The odd one out in
   // this list: it proposes no value a human then accepts or edits, so it
   // is never settled and its rows stay 'proposed' for ever. It is here
