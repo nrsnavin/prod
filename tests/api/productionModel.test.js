@@ -93,10 +93,10 @@ describe('the model summary', () => {
 });
 
 describe('a machine', () => {
-  it('predicts its metres for a run time at its current pick', async () => {
+  it('predicts its metres for a run time at the pick of the elastic running on it', async () => {
     const res = await get(admin, `/api/v2/production-model/machine/${fast._id}?runTime=8:00`);
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ pick: 12, pickFrom: 'heads', runTimeFrom: 'entered', machine: { code: 'LOOM-01', heads: 4 } });
+    expect(res.body).toMatchObject({ pick: 12, pickProblem: null, runTimeFrom: 'entered', machine: { code: 'LOOM-01', heads: 4 } });
     expect(res.body.elastics).toEqual([expect.objectContaining({ name: 'E12', pick: 12, heads: 4 })]);
     // 12 × 480 ÷ 12 = 480 m per head; four heads.
     expect(res.body.prediction.perHead).toBeGreaterThan(465);
@@ -105,20 +105,41 @@ describe('a machine', () => {
     expect(res.body.summary.metresPerHeadHour).toBeCloseTo(60, -1);
   });
 
-  it('answers "what if" for another pick, and a full shift when no run time is given', async () => {
-    const res = await get(admin, `/api/v2/production-model/machine/${fast._id}?pick=24`);
-    expect(res.body).toMatchObject({ pick: 24, pickFrom: 'entered', runTimeFrom: 'full-shift' });
-    expect(res.body.prediction.minutes).toBe(720);
-    expect(res.body.prediction.perHead).toBeCloseTo(360, -1); // 12 × 720 ÷ 24
+  it('takes the pick from the Elastic record, and follows a change to it; a typed pick is ignored', async () => {
+    // Trained first: the model reads the same records, so a pick changed
+    // before training would reinterpret the history too.
+    await get(admin, '/api/v2/production-model/summary');
+    await Elastic.updateOne({ _id: e12._id }, { pick: 24 });
+    try {
+      const res = await get(admin, `/api/v2/production-model/machine/${fast._id}?pick=6`);
+      expect(res.body).toMatchObject({ pick: 24, runTimeFrom: 'full-shift' });
+      expect(res.body.prediction.minutes).toBe(720);
+      expect(res.body.prediction.perHead).toBeCloseTo(360, -1); // 12 × 720 ÷ 24
+    } finally {
+      await Elastic.updateOne({ _id: e12._id }, { pick: 12 });
+    }
   });
 
-  it.each([
-    ['?runTime=banana', /7:45/],
-    ['?pick=-3', /pick/],
-  ])('refuses %s with 400', async (q, why) => {
-    const res = await get(admin, `/api/v2/production-model/machine/${fast._id}${q}`);
+  it('says why there is no prediction when the running elastics have no pick, or disagree', async () => {
+    const bare = await Machine.create({ ID: 'LOOM-09', manufacturer: 'Comez', NoOfHead: 2, NoOfHooks: 12 });
+    let res = await get(admin, `/api/v2/production-model/machine/${bare._id}`);
+    expect(res.body).toMatchObject({ pick: null, pickProblem: 'no-elastics', prediction: null });
+
+    const noPick = await Elastic.create({ name: 'E0', weaveType: '8', spandexEnds: 40, yarnEnds: 120, pick: 0, noOfHook: 8, weight: 2.4 });
+    await Machine.updateOne({ _id: bare._id }, { elastics: [{ head: 1, elastic: noPick._id }, { head: 2, elastic: e12._id }] });
+    res = await get(admin, `/api/v2/production-model/machine/${bare._id}`);
+    expect(res.body).toMatchObject({ pick: null, pickProblem: 'no-pick', prediction: null });
+
+    await Machine.updateOne({ _id: bare._id }, { elastics: [{ head: 1, elastic: e24._id }, { head: 2, elastic: e12._id }] });
+    res = await get(admin, `/api/v2/production-model/machine/${bare._id}?runTime=8:00`);
+    expect(res.body).toMatchObject({ pick: 16, pickProblem: 'mixed' }); // same total length as 12 and 24
+    expect(res.body.prediction).not.toBeNull();
+  });
+
+  it('refuses a run time it cannot read with 400', async () => {
+    const res = await get(admin, `/api/v2/production-model/machine/${fast._id}?runTime=banana`);
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(why);
+    expect(res.body.message).toMatch(/7:45/);
   });
 
   it('is 404 for a machine that does not exist and 400 for a bad id', async () => {

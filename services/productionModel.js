@@ -477,24 +477,43 @@ function minutesFor(shift, runTime) {
 }
 
 /**
- * What a machine with these elastics should make: the prediction for a
- * run time when there is one, and the hourly rate either way.
+ * The pick a loom is weaving, from the Elastic master data of the
+ * elastics on its heads. Every head runs on the same pick, so that pick
+ * is the answer; if the elastic records disagree, or one has no pick,
+ * that is a data problem to show, not something to guess past.
+ *
+ * @returns {{ pick: number|null, problem: null | 'no-elastics' | 'no-pick' | 'mixed' }}
  */
-async function expectFor({ machineId, elasticIds, minutes, pickOverride }) {
+function pickOfRunning(elastics) {
+  if (!elastics.length) return { pick: null, problem: 'no-elastics' };
+  const picks = elastics.map((e) => Number(e.pick));
+  if (picks.some((p) => !Number.isFinite(p) || p <= 0)) return { pick: null, problem: 'no-pick' };
+  const distinct = [...new Set(picks)];
+  // Mixed picks still give a prediction (the pick that makes the same
+  // total length), but the screen says the records disagree.
+  if (distinct.length > 1) return { pick: effectivePick(picks), problem: 'mixed' };
+  return { pick: distinct[0], problem: null };
+}
+
+/**
+ * What a machine with these elastics should make: the prediction for a
+ * run time when there is one, and the hourly rate either way. The pick
+ * always comes from the elastics' own records, never typed in.
+ */
+async function expectFor({ machineId, elasticIds, minutes }) {
   const trained = await getModel();
   const machine = await Machine.findById(machineId).select('ID NoOfHead').lean();
   if (!machine) return null;
   const ids = (elasticIds || []).filter(Boolean).map(String);
   const docs = ids.length ? await Elastic.find({ _id: { $in: ids } }).select('name pick').lean() : [];
   const byId = new Map(docs.map((d) => [String(d._id), d]));
-  const pickFromHeads = effectivePick(ids.map((id) => byId.get(id)?.pick));
-  const pick = Number(pickOverride) > 0 ? Number(pickOverride) : pickFromHeads;
   // One row per elastic, with how many heads carry it.
   const counts = new Map();
   for (const id of ids) counts.set(id, (counts.get(id) || 0) + 1);
   const elastics = [...counts].map(([id, heads]) => ({
     id, name: byId.get(id)?.name ?? null, pick: byId.get(id)?.pick ?? null, heads,
   }));
+  const { pick, problem: pickProblem } = pickOfRunning(elastics);
 
   const base = {
     available: trained.available,
@@ -503,7 +522,7 @@ async function expectFor({ machineId, elasticIds, minutes, pickOverride }) {
     machine: { id: String(machine._id), code: machine.ID, heads: machine.NoOfHead },
     elastics,
     pick: pick != null ? round(pick, 2) : null,
-    pickFrom: Number(pickOverride) > 0 ? 'entered' : pickFromHeads != null ? 'heads' : null,
+    pickProblem,
   };
   if (!trained.available) return { ...base, summary: null, prediction: null };
   return {
@@ -557,5 +576,5 @@ module.exports = {
   runMinutes,
   effectivePick,
   SHIFT_MINUTES,
-  _internals: { buildRows, fit, evaluate, loadRows, train, median },
+  _internals: { pickOfRunning, buildRows, fit, evaluate, loadRows, train, median },
 };
