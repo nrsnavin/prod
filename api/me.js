@@ -32,6 +32,7 @@ const ErrorHandler = require("../utils/ErrorHandler");
 const JobOrder = require("../models/JobOrder");
 const Machine = require("../models/Machine");
 const { assertShiftProductionOpen } = require("../utils/productionLock");
+const productionModel = require("../services/productionModel");
 
 const router = express.Router();
 
@@ -291,6 +292,29 @@ router.get(
     const elastic = await Elastic.findById(elasticId).select(ELASTIC_FIELDS).populate(MATERIAL_NAMES).lean();
     if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
     res.json({ success: true, elastic: shapeElastic(elastic) });
+  })
+);
+
+// ── GET /me/shifts/:id/expected?runTime=7:45 ───────────────────────
+//  What the worker's own shift should make in that run time, from the
+//  production model (services/productionModel.js), shown beside the
+//  metres they type. Scoped by employee like every /me read.
+router.get(
+  "/shifts/:id/expected",
+  validate({ query: z.object({ runTime: z.string().max(12).optional() }) }),
+  catchAsyncErrors(async (req, res, next) => {
+    const employee = employeeOf(req, next);
+    if (!employee) return;
+    if (!mongoose.isValidObjectId(req.params.id)) return next(new ErrorHandler("Shift not found", 404));
+    const shift = await ShiftDetail.findOne({ _id: req.params.id, employee })
+      .select("machine elastics timer submittedTimer")
+      .lean();
+    if (!shift) return next(new ErrorHandler("Shift not found", 404));
+    const out = await productionModel.expectForShift(shift, { runTime: req.query.runTime });
+    if (!out) return next(new ErrorHandler("Shift not found", 404));
+    // A worker sees what to expect, not the plant's model internals.
+    const { available, reason, prediction, runTimeFrom, pick, machine } = out;
+    res.json({ success: true, available, reason, prediction, runTimeFrom, pick, machine: { code: machine.code, heads: machine.heads } });
   })
 );
 

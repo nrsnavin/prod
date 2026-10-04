@@ -733,6 +733,11 @@ app.use("/api/v2/leave",       gate('accounts', 'production'), leave);
 // limited per person per hour since each read is an AI call. Saves
 // nothing to a shift — see api/timerOcr.js.
 app.use("/api/v2/ocr",         gate('production', 'accounts'), photoOcrLimiter, require("./api/timerOcr.js"));
+// Predicted production (services/productionModel.js): read-only, for the
+// machine page and the production entry screens.
+app.use("/api/v2/production-model", gate('production'),
+  requireFeatureRead('/machines', '/shift-plans', '/shift-verification', '/production', '/analytics'),
+  require("./api/productionModel.js"));
 app.use("/api/v2/bonus",       gate('accounts', 'production'), bonus);
 app.use("/api/v2/machine-issue", gate('production', 'accounts'), machineIssue);
 app.use("/api/v2/announcement", gate('production', 'accounts'), announcement);
