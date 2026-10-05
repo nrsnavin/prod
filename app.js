@@ -730,9 +730,14 @@ app.use("/api/v2/payroll",     gate('accounts', 'production'), payroll);
 app.use("/api/v2/leave",       gate('accounts', 'production'), leave);
 // Reading a loom's timer from a photo during production entry: anyone
 // who enters production (a worker on their own shift, a supervisor),
-// limited per person per hour since each read is an AI call. Saves
-// nothing to a shift — see api/timerOcr.js.
-app.use("/api/v2/ocr",         gate('production', 'accounts'), photoOcrLimiter, require("./api/timerOcr.js"));
+// limited per person per hour since each read is an AI call. The photo
+// is kept with the shift for whoever verifies it; the shift's figures are
+// saved by its own routes — see api/timerOcr.js.
+app.use("/api/v2/ocr",         gate('production', 'accounts'),
+  // Only READING a photo is limited (each one is an AI call); looking at
+  // a shift's kept timer photos while verifying is not.
+  (req, res, next) => (req.method === 'POST' && req.path === '/timer' ? photoOcrLimiter(req, res, next) : next()),
+  require("./api/timerOcr.js"));
 // Predicted production (services/productionModel.js): read-only, for the
 // machine page and the production entry screens.
 app.use("/api/v2/production-model", gate('production'),
