@@ -194,8 +194,10 @@ describe('seeing the photos when verifying', () => {
 describe('how long photos are kept', () => {
   const { expiryFrom } = require('../../models/TimerPhoto');
   const now = new Date('2026-10-05T00:00:00Z');
-  it('is 180 days unless set, and forever at 0', () => {
-    expect(expiryFrom(now, undefined).toISOString()).toBe('2027-04-03T00:00:00.000Z');
+  it('is 365 days unless set, and forever at 0', () => {
+    expect(expiryFrom(now, undefined).toISOString()).toBe('2027-10-05T00:00:00.000Z');
+    expect(expiryFrom(now, '').toISOString()).toBe('2027-10-05T00:00:00.000Z');
+    expect(expiryFrom(now, '365d').toISOString()).toBe('2027-10-05T00:00:00.000Z');
     expect(expiryFrom(now, '30').toISOString()).toBe('2026-11-04T00:00:00.000Z');
     expect(expiryFrom(now, '0')).toBeNull();
   });

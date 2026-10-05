@@ -18,7 +18,7 @@
 //  storage, and a shift document must not grow by a photo each retake.
 //  The web app shrinks a photo to ~1600 px before sending, a few hundred
 //  KB. `expiresAt` lets MongoDB drop old photos on its own (TTL index);
-//  how long they are kept is TIMER_PHOTO_RETENTION_DAYS (default 180,
+//  how long they are kept is TIMER_PHOTO_RETENTION_DAYS (default 365,
 //  0 = forever), long after any shift is verified.
 // ══════════════════════════════════════════════════════════════════
 
@@ -63,8 +63,10 @@ TimerPhotoSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 /** When a photo taken now should be dropped, or null to keep it. */
 function expiryFrom(now = new Date(), days = process.env.TIMER_PHOTO_RETENTION_DAYS) {
-  const n = days === undefined || days === '' ? 180 : Number(days);
-  if (!Number.isFinite(n) || n <= 0) return null;
+  let n = days === undefined || days === '' ? 365 : Number(days);
+  // A setting that isn't a number ("365d") is a typo, not "forever".
+  if (!Number.isFinite(n)) n = 365;
+  if (n <= 0) return null;
   return new Date(now.getTime() + n * 86_400_000);
 }
 
