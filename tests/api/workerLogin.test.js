@@ -287,3 +287,19 @@ describe('the audit trail of access changes', () => {
     expect(await codesFor(created.body.user.id)).toEqual(['LOGIN_CREATED']);
   });
 });
+
+describe('wrong PINs sent all at once', () => {
+  it('still lock the login', async () => {
+    const mani = await Employee.create({ name: 'Mani', phoneNumber: '9100000588', department: 'weaving', role: 'operator' });
+    expect((await as(admin).post(access(mani), { pin: '7351' })).status).toBe(201);
+
+    // Each guess used to read the count before any had written it, so a
+    // burst all wrote 1 and the lock never came.
+    const guesses = ['0001', '0002', '0003', '0004', '0005', '0006', '0007', '0008'];
+    await Promise.all(guesses.map((pin) => signIn('9100000588', pin)));
+
+    const login = await User.findOne({ employee: mani._id }).select('+pinLockedUntil').lean();
+    expect(login.pinLockedUntil).toBeTruthy();
+    expect((await signIn('9100000588', '7351')).status).toBe(429);
+  });
+});

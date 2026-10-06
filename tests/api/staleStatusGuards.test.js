@@ -114,3 +114,85 @@ it('a sample closed and reopened at the same moment: the second is told', async 
   expect(res.status).toBe(409);
   expect((await SampleRequest.findById(id).lean()).status).toBe('closed');
 });
+
+describe('the shift clock', () => {
+  const Attendance = () => require('../../models/Attendence.js');
+  const Employee = () => require('../../models/Employee');
+  const clock = (what, employeeId) =>
+    post(`/api/v2/attendance/clock-${what}`, { employeeId: String(employeeId), shift: 'DAY', date: '2026-06-02' });
+
+  it('a second clock-in does not move the start of a running shift', async () => {
+    const emp = await Employee().create({ name: 'Clock A', hourlyRate: 100 });
+    expect((await clock('in', emp._id)).status).toBe(200);
+    const started = (await Attendance().findOne({ employee: emp._id }).lean()).clockInAt;
+    // The double tap's look at the shift was taken before the first landed.
+    jest.spyOn(Attendance(), 'findOne').mockImplementationOnce(() => Promise.resolve(null));
+
+    const res = await clock('in', emp._id);
+    expect(res.status).toBe(409);
+    expect((await Attendance().findOne({ employee: emp._id }).lean()).clockInAt).toEqual(started);
+  });
+
+  it('a second clock-out does not move the end of a finished shift', async () => {
+    const emp = await Employee().create({ name: 'Clock B', hourlyRate: 100 });
+    await clock('in', emp._id);
+    const open = await Attendance().findOne({ employee: emp._id });
+    expect((await clock('out', emp._id)).status).toBe(200);
+    const ended = (await Attendance().findOne({ employee: emp._id }).lean()).clockOutAt;
+    jest.spyOn(Attendance(), 'findOne').mockImplementationOnce(() => Promise.resolve(open));
+
+    const res = await clock('out', emp._id);
+    expect(res.status).toBe(409);
+    expect((await Attendance().findOne({ employee: emp._id }).lean()).clockOutAt).toEqual(ended);
+  });
+});
+
+describe('the loom status override', () => {
+  it('will not free a loom running a job', async () => {
+    const job = new mongoose.Types.ObjectId();
+    const machine = await Machine.create({
+      ID: 'M-S2', manufacturer: 'Comez', NoOfHead: 2, NoOfHooks: 8, status: 'running', orderRunning: job, elastics: [],
+    });
+    const res = await request(app).patch('/api/v2/machine/status').set('Cookie', cookie())
+      .send({ id: String(machine._id), status: 'free' });
+    expect(res.status).toBe(409);
+    expect(String((await Machine.findById(machine._id).lean()).orderRunning)).toBe(String(job));
+  });
+
+  it('does not wipe a job assigned after it read the loom', async () => {
+    const machine = await Machine.create({
+      ID: 'M-S3', manufacturer: 'Comez', NoOfHead: 2, NoOfHooks: 8, status: 'maintenance', elastics: [],
+    });
+    const job = new mongoose.Types.ObjectId();
+    await staleAfter(Machine, machine._id, { $set: { status: 'running', orderRunning: job } });
+    const res = await request(app).patch('/api/v2/machine/status').set('Cookie', cookie())
+      .send({ id: String(machine._id), status: 'free' });
+    expect(res.status).toBe(409);
+    expect(await Machine.findById(machine._id).lean()).toMatchObject({ status: 'running' });
+    expect(String((await Machine.findById(machine._id).lean()).orderRunning)).toBe(String(job));
+  });
+
+  it('still frees a loom back from maintenance', async () => {
+    const machine = await Machine.create({
+      ID: 'M-S4', manufacturer: 'Comez', NoOfHead: 2, NoOfHooks: 8, status: 'maintenance', elastics: [],
+    });
+    const res = await request(app).patch('/api/v2/machine/status').set('Cookie', cookie())
+      .send({ id: String(machine._id), status: 'free' });
+    expect(res.status).toBe(200);
+    expect((await Machine.findById(machine._id).lean()).status).toBe('free');
+  });
+});
+
+it('an elastic is not archived as an order reserves stock on it', async () => {
+  const Elastic = require('../../models/Elastic');
+  const elastic = await Elastic.create({
+    name: 'Archive me', weaveType: '8', spandexEnds: 40, yarnEnds: 120, pick: 12, noOfHook: 8, weight: 2.4,
+  });
+  const stale = await Elastic.findById(elastic._id).select('_id name archived reservedStock');
+  await Elastic.updateOne({ _id: elastic._id }, { $set: { reservedStock: 300 } });
+  jest.spyOn(Elastic, 'findById').mockImplementationOnce(() => ({ select: () => Promise.resolve(stale) }));
+
+  const res = await request(app).patch(`/api/v2/elastic/${elastic._id}/archive`).set('Cookie', cookie()).send({});
+  expect(res.status).toBe(409);
+  expect((await Elastic.findById(elastic._id).lean()).archived).toBeFalsy();
+});

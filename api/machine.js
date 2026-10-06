@@ -768,13 +768,29 @@ router.patch(
       );
     }
 
+    // A loom weaving a job is released by the job (finishing, cancel,
+    // or moving it), never from here: freeing it cleared orderRunning
+    // while the job still named this loom, and the loom could then be
+    // planned onto a second job. The web only offers free <-> maintenance
+    // on a loom that is not running; the server now holds the same line,
+    // in the write itself, so a job assigned after the read is not wiped.
+    if (machine.status === "running") {
+      return next(new ErrorHandler(
+        "This machine is running a job. Stop or move the job before changing its status.", 409
+      ));
+    }
+
     const previousStatus = machine.status;
     const previousOrder  = machine.orderRunning;
     machine.status = status;
     if (status === "free") {
       machine.orderRunning = null;
     }
-    await machine.save();
+    if (!(await saveIf(machine, { status: { $ne: "running" } }))) {
+      return next(new ErrorHandler(
+        "This machine was just assigned to a job. Stop or move the job before changing its status.", 409
+      ));
+    }
 
     res.status(200).json({
       success: true,

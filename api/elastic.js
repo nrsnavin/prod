@@ -15,6 +15,7 @@ const StockMovement = require("../models/StockMovement");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
+const { saveIf } = require("../utils/conditionalSave");
 const { countUsage } = require("../utils/masterUsage");
 const { elasticNameKey } = require("../utils/elasticName.js");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
@@ -699,7 +700,16 @@ router.patch(
 
     elastic.archived   = wantArchived;
     elastic.archivedAt = wantArchived ? new Date() : undefined;
-    await elastic.save();
+    // The no-reservation check is repeated in the write: an order
+    // approved after the read above reserves stock on an elastic that
+    // then disappears from every list while it still owes that order.
+    if (wantArchived && !(await saveIf(elastic, { reservedStock: { $not: { $gt: 0 } } }))) {
+      return next(new ErrorHandler(
+        `Cannot archive "${elastic.name}" — an order reserved stock on it just now. Cancel or complete that order first.`,
+        409
+      ));
+    }
+    if (!wantArchived) await elastic.save();
 
     res.json({
       success:   true,

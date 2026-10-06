@@ -24,6 +24,7 @@ const { appendStockMovement } = require("../utils/stockLedger");
 const { costOf } = require("../utils/materialValuation");
 const { describeLotMovements } = require("../utils/lotLedger");
 const { isAdmin } = require("../middleware/auth");
+const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 
 const oid = (v) => mongoose.Types.ObjectId.isValid(v);
 
@@ -94,42 +95,62 @@ router.post("/create", isAdmin("admin", "production", "accounts"), catchAsyncErr
     return next(new ErrorHandler("Invalid supplier id", 400));
   }
 
-  const material = await RawMaterial.findById(rawMaterial).select("name stock");
-  if (!material) return next(new ErrorHandler("Raw material not found", 404));
+  // The check and the lot are one transaction that also writes the
+  // material. Two people opening lots for the same yarn at once each
+  // read the same unassigned stock and each took it; now they conflict,
+  // and the second re-reads what the first left. A receipt or an order
+  // approval moving the material's stock meanwhile conflicts the same way.
+  let lot;
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const material = await RawMaterial.findById(rawMaterial).select("name stock").session(session);
+      if (!material) throw new ErrorHandler("Raw material not found", 404);
+      await RawMaterial.updateOne(
+        { _id: material._id },
+        { $currentDate: { updatedAt: true } },
+        { session }
+      );
 
-  // A lot opened by hand assigns stock that already exists; it does not
-  // conjure any. Without this the quantity was free text, so a material
-  // holding 10 kg could carry a lot claiming 500 — and every screen
-  // downstream would read that as fact.
-  const unplaced = await unplacedQuantity(material);
-  if (unplaced <= 0) {
-    return next(new ErrorHandler(
-      `All of ${material.name}'s stock (${material.stock}) is already assigned to lots. ` +
-      `Receive or adjust stock in before opening another.`,
-      400
-    ));
-  }
-  if (qty > unplaced) {
-    return next(new ErrorHandler(
-      `Only ${unplaced} of ${material.name} is not yet assigned to a lot — ` +
-      `cannot open a lot for ${qty}.`,
-      400
-    ));
-  }
+      // A lot opened by hand assigns stock that already exists; it does not
+      // conjure any. Without this the quantity was free text, so a material
+      // holding 10 kg could carry a lot claiming 500 — and every screen
+      // downstream would read that as fact.
+      const unplaced = await unplacedQuantity(material, session);
+      if (unplaced <= 0) {
+        throw new ErrorHandler(
+          `All of ${material.name}'s stock (${material.stock}) is already assigned to lots. ` +
+          `Receive or adjust stock in before opening another.`,
+          400
+        );
+      }
+      if (qty > unplaced) {
+        throw new ErrorHandler(
+          `Only ${unplaced} of ${material.name} is not yet assigned to a lot — ` +
+          `cannot open a lot for ${qty}.`,
+          400
+        );
+      }
 
-  const lot = await creditLot({
-    rawMaterial,
-    lotNo,
-    quantity: qty,
-    shade,
-    dyer,
-    supplier,
-    receivedDate: receivedDate ? new Date(receivedDate) : undefined,
-  });
+      lot = await creditLot({
+        rawMaterial,
+        lotNo,
+        quantity: qty,
+        shade,
+        dyer,
+        supplier,
+        receivedDate: receivedDate ? new Date(receivedDate) : undefined,
+      }, session);
 
-  if (remarks) {
-    lot.remarks = String(remarks).trim();
-    await lot.save();
+      if (remarks) {
+        lot.remarks = String(remarks).trim();
+        await lot.save({ session });
+      }
+    });
+  } catch (err) {
+    return next(err);
+  } finally {
+    session.endSession();
   }
 
   res.status(201).json({ success: true, lot });
@@ -156,9 +177,16 @@ router.patch("/:id/status", isAdmin("admin", "production"), catchAsyncErrors(asy
   // "exhausted" is bookkeeping, not a decision — it is set and cleared by
   // the quantity moves themselves, so re-opening an empty lot by hand
   // would just be undone by the next issue. Reflect the balance instead.
+  const from = { status: lot.status, receivedQty: lot.receivedQty, consumedQty: lot.consumedQty };
   lot.status = status === "open" && lot.balance <= 0 ? "exhausted" : status;
   if (remarks !== undefined) lot.remarks = String(remarks).trim();
-  await lot.save();
+  // Decided on the balance read above. An issue or a receipt moving the
+  // lot meanwhile also moves its status (exhausted/open) in the same
+  // write, so saving over it would leave an empty lot "open" or a full
+  // one "exhausted". Saved only if the lot is still as it was read.
+  if (!(await saveIf(lot, from))) {
+    return next(changedMeanwhile("This lot", "issued from or received into"));
+  }
 
   res.json({ success: true, lot });
 }));

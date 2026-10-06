@@ -20,6 +20,7 @@ const Employee   = require('../models/Employee');
 const ShiftDetail= require('../models/ShiftDetail');
 const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
 const { maybeFireAttendanceCrashed } = require('../utils/attendanceAlerts');
+const { saveIf } = require('../utils/conditionalSave');
 const attendanceForecast = require('../services/attendanceForecast');
 
 router.use(isAuthenticated);
@@ -234,17 +235,33 @@ router.post('/clock-in', isAdmin('admin', 'accounts'), async (req, res) => {
       return res.status(409).json({ success: false, message: 'Already clocked in for this shift.' });
     }
 
-    const doc = await Attendance.findOneAndUpdate(
-      { employee: employeeId, date: dateObj, shift: shiftUp },
-      { $set: {
-          status: 'present',
-          clockInAt: new Date(),
-          clockOutAt: null,
-          workedMinutes: 0,
-          markedBy: req.user?.name || 'admin',
-        } },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    ).populate('employee', 'name department skill role');
+    // The check above, repeated in the write: only a shift not already
+    // running is (re)started. A double tap read "not clocked in" twice
+    // and the second moved the start time later, cutting the paid
+    // minutes. A running one does not match, the upsert tries to insert,
+    // and the unique (employee, date, shift) index refuses it.
+    let doc;
+    try {
+      doc = await Attendance.findOneAndUpdate(
+        {
+          employee: employeeId, date: dateObj, shift: shiftUp,
+          $or: [{ clockInAt: null }, { clockOutAt: { $ne: null } }],
+        },
+        { $set: {
+            status: 'present',
+            clockInAt: new Date(),
+            clockOutAt: null,
+            workedMinutes: 0,
+            markedBy: req.user?.name || 'admin',
+          } },
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+      ).populate('employee', 'name department skill role');
+    } catch (err) {
+      if (err?.code === 11000) {
+        return res.status(409).json({ success: false, message: 'Already clocked in for this shift.' });
+      }
+      throw err;
+    }
 
     return res.json({ success: true, data: fmtRecord(doc) });
   } catch (err) {
@@ -269,9 +286,16 @@ router.post('/clock-out', isAdmin('admin', 'accounts'), async (req, res) => {
     }
 
     const now = new Date();
+    const clockedInAt = doc.clockInAt;
     doc.clockOutAt = now;
     doc.workedMinutes = Math.max(0, Math.round((now - doc.clockInAt) / 60000));
-    await doc.save(); // pre-save recomputes hoursWorked from the worked duration
+    // pre-save recomputes hoursWorked from the worked duration. Saved
+    // only if this is still the same open shift: a double tap would
+    // otherwise move the clock-out later, and a clock-in landing in
+    // between would be closed against the old start time.
+    if (!(await saveIf(doc, { clockInAt: clockedInAt, clockOutAt: null }))) {
+      return res.status(409).json({ success: false, message: 'Already clocked out for this shift.' });
+    }
     await doc.populate('employee', 'name department skill role');
 
     return res.json({ success: true, data: fmtRecord(doc) });

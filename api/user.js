@@ -584,7 +584,15 @@ router.post(
 
     const { ok } = await verifyPassword(pin, user.pin);
     if (!ok) {
-      const attempts = (user.pinAttempts || 0) + 1;
+      // Counted in the database, not from the copy read above: guesses
+      // sent in parallel each read the same count and each wrote count+1,
+      // so a burst of them never reached the lock.
+      const counted = await User.findOneAndUpdate(
+        { _id: user._id },
+        { $inc: { pinAttempts: 1 } },
+        { new: true }
+      ).select("pinAttempts").lean();
+      const attempts = counted?.pinAttempts ?? (user.pinAttempts || 0) + 1;
       if (attempts >= PIN_MAX_ATTEMPTS) {
         await User.updateOne({ _id: user._id }, {
           $set: { pinAttempts: 0, pinLockedUntil: new Date(Date.now() + PIN_LOCK_MINUTES * 60000) },
@@ -596,7 +604,6 @@ router.post(
         err.code = "PIN_LOCKED";
         return next(err);
       }
-      await User.updateOne({ _id: user._id }, { $set: { pinAttempts: attempts } });
       return wrong(PIN_MAX_ATTEMPTS - attempts);
     }
 

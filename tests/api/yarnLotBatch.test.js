@@ -1234,3 +1234,53 @@ describe('opening a lot by hand', () => {
     expect(res.body.material.unplacedQty).toBe(0);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Two people at once
+// ══════════════════════════════════════════════════════════════════
+describe('lots opened or changed by two people at once', () => {
+  const open = (material, quantity, lotNo) =>
+    request(app).post('/api/v2/yarn-lots/create')
+      .set('Cookie', adminCookie())
+      .send({ rawMaterial: String(material._id), lotNo, quantity });
+
+  it('two lots opened at once cannot assign more yarn than there is', async () => {
+    const material = await makeMaterial({ stock: 100 });
+    // Both work out what is unassigned before either has opened its lot.
+    const real = YarnLot.aggregate.bind(YarnLot);
+    let arrived = 0; let release;
+    const gate = new Promise((r) => { release = r; });
+    jest.spyOn(YarnLot, 'aggregate').mockImplementation((...args) => {
+      const q = real(...args);
+      const then = q.then.bind(q);
+      q.then = (ok, fail) => (async () => {
+        if (++arrived === 2) release();
+        if (arrived <= 2) await Promise.race([gate, new Promise((r) => setTimeout(r, 2000))]);
+        return then(ok, fail);
+      })();
+      return q;
+    });
+    const [a, b] = await Promise.all([open(material, 70, 'P-1'), open(material, 70, 'P-2')]);
+    jest.restoreAllMocks();
+
+    expect([a.status, b.status].sort()).toEqual([201, 400]);
+    const lots = await YarnLot.find({ rawMaterial: material._id }).lean();
+    expect(lots.reduce((s, l) => s + l.receivedQty - l.consumedQty, 0)).toBe(70);
+  }, 20_000);
+
+  it('a status change does not reopen a lot emptied meanwhile', async () => {
+    const material = await makeMaterial();
+    const lot = await makeLot(material, { receivedQty: 20, consumedQty: 0, status: 'quarantined' });
+    // Read with 20 on it; then an issue takes the lot to nothing.
+    const stale = await YarnLot.findById(lot._id);
+    await YarnLot.updateOne({ _id: lot._id }, { $set: { consumedQty: 20, status: 'exhausted' } });
+    jest.spyOn(YarnLot, 'findById').mockImplementationOnce(() => Promise.resolve(stale));
+
+    const res = await request(app).patch(`/api/v2/yarn-lots/${lot._id}/status`)
+      .set('Cookie', adminCookie()).send({ status: 'open' });
+    jest.restoreAllMocks();
+
+    expect(res.status).toBe(409);
+    expect((await YarnLot.findById(lot._id).lean()).status).toBe('exhausted');
+  });
+});

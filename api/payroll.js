@@ -164,14 +164,24 @@ router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
           .map(r => ({ advance: r.id, amount: r.recovered }));
         delete data._advanceRecoveries;
 
+        // The checks above ran on a read taken before the (slow)
+        // compute. A finalize or payment landing in between would be
+        // reset to draft by an unconditional $set, so the write itself
+        // only matches a slip that is still an unpaid draft. Anything
+        // else makes the upsert try an insert, which the unique
+        // (employee, year, month) index refuses.
         await Payroll.findOneAndUpdate(
-          { employee: id, year: +year, month: +month },
+          { employee: id, year: +year, month: +month, status: 'draft', amountPaid: { $not: { $gt: 0 } } },
           { $set: data },
           { upsert: true, new: true }
         );
 
         results.push({ employeeId: id, netPay: data.netPay, status: data.status });
       } catch (err) {
+        if (err?.code === 11000) {
+          errors.push({ employeeId: id, error: 'Payroll was finalized or paid just now — not regenerated' });
+          continue;
+        }
         errors.push({ employeeId: id, error: err.message });
       }
     }
@@ -910,6 +920,19 @@ router.post('/advance', async (req, res) => {
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
 
+// The answer when an approve/reject matched nothing: missing, or already
+// past the point where that is allowed (said with its current status).
+async function advanceNotChangeable(id, verb, res) {
+  const cur = mongoose.isValidObjectId(id)
+    ? await AdvanceRequest.findById(id).select('status').lean()
+    : null;
+  if (!cur) return res.status(404).json({ success: false, message: 'Not found' });
+  return res.status(409).json({
+    success: false,
+    message: `This advance is ${cur.status.replace('_', ' ')}, so it can no longer be ${verb}.`,
+  });
+}
+
 router.put('/advance/:id/approve', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { deductMonth, deductYear, adminNotes = '', approvedBy = 'admin' } = req.body;
@@ -917,13 +940,19 @@ router.put('/advance/:id/approve', isAdmin('admin', 'accounts'), async (req, res
       return res.status(400).json({ success: false, message: 'deductMonth and deductYear required' });
     // Approval commits to the advance but no cash has moved yet, so nothing
     // is booked to the ledger until it is paid out (PUT /advance/:id/pay-out).
-    const adv = await AdvanceRequest.findByIdAndUpdate(req.params.id, {
-      $set: {
+    // Only an advance no cash has moved on can be approved (a request,
+    // a rejection reconsidered, an approval whose deduct month is being
+    // corrected). Re-approving an advance already paid out put it back
+    // to 'approved', and pay-out then handed the cash over a second time.
+    const adv = await AdvanceRequest.findOneAndUpdate(
+      { _id: req.params.id, status: { $in: ['requested', 'pending', 'approved', 'rejected'] } },
+      { $set: {
         status: 'approved', deductMonth: +deductMonth, deductYear: +deductYear,
         adminNotes, approvedBy, approvedAt: new Date(),
-      },
-    }, { new: true }).populate('employee', 'name');
-    if (!adv) return res.status(404).json({ success: false, message: 'Not found' });
+      } },
+      { new: true }
+    ).populate('employee', 'name');
+    if (!adv) return advanceNotChangeable(req.params.id, 'approved', res);
     res.json({ success: true, message: `Approved ₹${adv.amount} for ${adv.employee?.name}`, data: adv });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -959,10 +988,14 @@ router.put('/advance/:id/pay-out', isAdmin('admin', 'accounts'), async (req, res
 
 router.put('/advance/:id/reject', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const adv = await AdvanceRequest.findByIdAndUpdate(req.params.id, {
-      $set: { status: 'rejected', adminNotes: req.body.adminNotes || '' },
-    }, { new: true }).populate('employee', 'name');
-    if (!adv) return res.status(404).json({ success: false, message: 'Not found' });
+    // Not once the cash is out: a rejected advance is never recovered,
+    // so rejecting a paid-out one wrote the money off without a word.
+    const adv = await AdvanceRequest.findOneAndUpdate(
+      { _id: req.params.id, status: { $in: ['requested', 'pending', 'approved'] } },
+      { $set: { status: 'rejected', adminNotes: req.body.adminNotes || '' } },
+      { new: true }
+    ).populate('employee', 'name');
+    if (!adv) return advanceNotChangeable(req.params.id, 'rejected', res);
     res.json({ success: true, data: adv });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -1193,28 +1226,32 @@ router.post('/auto-generate', isAdmin('admin', 'accounts'), async (req, res) => 
     for (const id of todo) {
       const session = await mongoose.startSession();
       try {
+        let created = null;
         await session.withTransaction(async () => {
-          const data   = await computePayroll(id, year, month);
-          const advIds = data._advanceIds || [];
-          delete data._advanceIds;
+          created = null;
+          const data = await computePayroll(id, year, month);
+          // The same draft /generate stores: the recovery plan rides on
+          // the slip and is committed to the advances at /finalize. This
+          // route used to drop it (it read a `_advanceIds` that
+          // computePayroll never returns), so net pay was cut for the
+          // advance but finalize had nothing to recover, and the same
+          // advance was deducted again the next month.
+          data.advanceRecoveries = (data._advanceRecoveries || [])
+            .map((r) => ({ advance: r.id, amount: r.recovered }));
+          delete data._advanceRecoveries;
 
-          await Payroll.findOneAndUpdate(
-            { employee: id, year, month },
-            { $set: data },
-            { upsert: true, new: true, session }
+          // Only ever creates. The list of employees still to do was
+          // read before this loop; a slip made (or finalized, or paid)
+          // since then must not be overwritten. The unique
+          // (employee, year, month) index refuses the second insert.
+          [created] = await Payroll.create(
+            [{ ...data, employee: id, year, month }],
+            { session }
           );
-
-          if (advIds.length) {
-            await AdvanceRequest.updateMany(
-              { _id: { $in: advIds }, deductedInPayroll: { $ne: true } },
-              { $set: { deductedInPayroll: true } },
-              { session }
-            );
-          }
-
-          results.push({ employeeId: id, netPay: data.netPay });
         });
+        if (created) results.push({ employeeId: id, netPay: created.netPay });
       } catch (err) {
+        if (err?.code === 11000) continue; // generated meanwhile; leave it
         errors.push({ employeeId: id, error: err.message });
       } finally {
         await session.endSession();
