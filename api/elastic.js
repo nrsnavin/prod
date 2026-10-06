@@ -118,43 +118,59 @@ router.post(
       delete elasticData.reservedStock;
       delete elasticData.quantityProduced;
 
-      const elastic = await Elastic.create(elasticData);
-
-      if (openingStock > 0) {
-        await applyMovement(null, {
-          elasticId: elastic._id,
-          type:      "MANUAL_ADJUST",
-          quantity:  +openingStock,
-          reason:    "Opening stock at creation",
-          by:        req.user?._id,
-        });
-      }
-
-      if (
-        planTemplate &&
-        Array.isArray(planTemplate.beams) &&
-        planTemplate.beams.length > 0
-      ) {
-        elastic.warpingPlanTemplate = _normalisePlan(planTemplate);
-        await elastic.save();
-      }
-
+      // Priced before anything is written: it only reads the materials.
       const { materialCost, details } = await calculateElasticCosting(elasticData);
       const conversionCost = elasticData.conversionCost ?? 1.25;
       const totalCost = materialCost + conversionCost;
 
-      const costing = await Costing.create({
-        date: new Date(),
-        elastic: elastic._id,
-        conversionCost,
-        materialCost,
-        details,
-        totalCost,
-        status: "Draft",
-      });
+      // The elastic, its opening stock movement and its cost sheet in one
+      // transaction. They were separate writes, so a failure between them
+      // left an elastic with no cost sheet (or opening stock with no
+      // elastic to hold it), and a retry then met the name check.
+      let elastic;
+      let costing;
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(async () => {
+          [elastic] = await Elastic.create([elasticData], { session });
 
-      elastic.costing = costing._id;
-      await elastic.save();
+          if (openingStock > 0) {
+            await applyMovement(session, {
+              elasticId: elastic._id,
+              type:      "MANUAL_ADJUST",
+              quantity:  +openingStock,
+              reason:    "Opening stock at creation",
+              by:        req.user?._id,
+            });
+            // applyMovement wrote the stock with its own update; reload so
+            // the save below does not write the pre-movement figure back.
+            elastic = await Elastic.findById(elastic._id).session(session);
+          }
+
+          if (
+            planTemplate &&
+            Array.isArray(planTemplate.beams) &&
+            planTemplate.beams.length > 0
+          ) {
+            elastic.warpingPlanTemplate = _normalisePlan(planTemplate);
+          }
+
+          [costing] = await Costing.create([{
+            date: new Date(),
+            elastic: elastic._id,
+            conversionCost,
+            materialCost,
+            details,
+            totalCost,
+            status: "Draft",
+          }], { session });
+
+          elastic.costing = costing._id;
+          await elastic.save({ session });
+        });
+      } finally {
+        await session.endSession();
+      }
 
       res.status(201).json({ success: true, elastic, costing });
     } catch (err) {

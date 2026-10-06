@@ -152,16 +152,26 @@ describe('GET /job/by-number/:jobNo', () => {
     // sharing one means the data has been through surgery. Opening
     // either would show a real screen for the wrong job — worse than
     // opening none.
+    //
+    // The database now refuses a second job with the same number (a
+    // unique index), so this is data from before it existed: the index
+    // is set aside to make it, and rebuilt after.
     const c = await makeCustomer();
     const o = await makeOrder(c);
     const first  = await makeJob(o, c);
     const second = await makeJob(o, c);
-    await forceJobNo(second, first.jobOrderNo);
+    await JobOrder.collection.dropIndex('job_jobOrderNo_unique').catch(() => {});
+    try {
+      await forceJobNo(second, first.jobOrderNo);
 
-    const res = await byNumber(first.jobOrderNo);
+      const res = await byNumber(first.jobOrderNo);
 
-    expect(res.status).toBe(409);
-    expect(res.body.message).toMatch(/more than one/i);
+      expect(res.status).toBe(409);
+      expect(res.body.message).toMatch(/more than one/i);
+    } finally {
+      await JobOrder.deleteMany({ _id: second._id });
+      await JobOrder.createIndexes();
+    }
   });
 
   it('CONTROL: the id route still works and is not shadowed in turn', async () => {

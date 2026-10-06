@@ -4,6 +4,7 @@ const router   = express.Router();
 const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { assertVersion } = require("../utils/versioning");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { requireReason } = require("../utils/auditReason");
@@ -773,6 +774,10 @@ router.put(
       await session.withTransaction(async () => {
         const dc = await DeliveryChallan.findById(id).session(session);
         if (!dc) throw new ErrorHandler("Delivery Challan not found", 404);
+        // Two people editing one challan: the transaction alone made the
+        // second edit wait and then replace the first. With the version
+        // the form loaded, the second is a 409 and re-reads instead.
+        assertVersion(dc, req);
 
         if (dc.status === "delivered") {
           throw new ErrorHandler(
@@ -858,6 +863,7 @@ router.put(
           },
         });
         dc.fingerprints.push(fp);
+        dc.increment();
         await dc.save({ session });
 
         resp = { dc, fingerprint: fp };

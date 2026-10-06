@@ -356,15 +356,25 @@ router.post(
     // moved past weaving, its production figures are settled.
     await assertShiftProductionOpen(shift, { JobOrder, Machine }, "enter production");
 
-    shift.submittedProductionMeters = metres;
-    shift.submittedTimer = timer ? String(timer) : shift.submittedTimer || "00:00:00";
-    if (feedback != null) shift.submittedFeedback = String(feedback).trim();
-    shift.submittedAt = new Date();
-    shift.submittedBy = req.user._id;
-    shift.status = "pending_verification";
-    await shift.save();
+    const changes = {
+      submittedProductionMeters: metres,
+      submittedTimer: timer ? String(timer) : shift.submittedTimer || "00:00:00",
+      submittedAt: new Date(),
+      submittedBy: req.user._id,
+      status: "pending_verification",
+    };
+    if (feedback != null) changes.submittedFeedback = String(feedback).trim();
+    // The status check and the write in one step: a supervisor verifying
+    // the shift between the read above and here must not have it put
+    // back to "waiting", where verifying again would count it twice.
+    const updated = await ShiftDetail.findOneAndUpdate(
+      { _id: shift._id, employee, status: { $in: ["open", "pending_verification"] } },
+      { $set: changes },
+      { new: true, projection: { status: 1, submittedAt: 1 } }
+    );
+    if (!updated) return next(new ErrorHandler("This shift has already been verified and closed", 409));
 
-    res.json({ success: true, shift: { id: shift._id, status: shift.status, submittedAt: shift.submittedAt } });
+    res.json({ success: true, shift: { id: updated._id, status: updated.status, submittedAt: updated.submittedAt } });
   })
 );
 

@@ -117,6 +117,23 @@ describe("transactional outbox", () => {
     expect(doc.attempts).toBe(MAX_ATTEMPTS);
   });
 
+  it("reclaims an event abandoned mid-delivery once its lease runs out, and not before", async () => {
+    // A process that died while delivering left the event "processing"
+    // for good: never retried, never failed.
+    const ev = await enqueue(null, "test.event", { id: "stuck" });
+    const minutes = (n) => new Date(Date.now() - n * 60_000);
+    // Claimed 2 minutes ago by a process still (perhaps) delivering it:
+    // left alone, so it is not delivered twice.
+    await Outbox.collection.updateOne({ _id: ev._id }, { $set: { status: "processing", updatedAt: minutes(2) } });
+    await processDueEvents();
+    expect(mockCalls.filter((c) => c.id === "stuck")).toHaveLength(0);
+    // Claimed longer ago than the lease: taken to be abandoned.
+    await Outbox.collection.updateOne({ _id: ev._id }, { $set: { updatedAt: minutes(11) } });
+    await processDueEvents();
+    expect(mockCalls.filter((c) => c.id === "stuck")).toHaveLength(1);
+    expect((await Outbox.findById(ev._id).lean()).status).toBe("sent");
+  });
+
   it("unknown kinds fail loudly instead of vanishing", async () => {
     await Outbox.create([{ kind: "no.such.handler", payload: {} }]);
     const res = await processDueEvents();

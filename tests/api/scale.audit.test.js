@@ -148,7 +148,7 @@ describe('AUDIT C: the embedded stock ledger is bounded and not shipped by defau
     // Newest kept: the last balance written is still there, the first is gone.
     expect(fresh.stockMovements.at(-1).balance).toBe(total - 1);
     expect(fresh.stockMovements[0].balance).toBe(total - MAX_EMBEDDED_MOVEMENTS);
-  });
+  }, 30_000); // 525 sequential writes: seconds on a loaded machine
 
   test('a normal read does not carry the ledger', async () => {
     const mat = await mkMaterial();

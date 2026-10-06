@@ -207,6 +207,53 @@ describe('receiveAtCost', () => {
 //  RECEIPTS THROUGH THE ROUTES
 // ══════════════════════════════════════════════════════════════════
 describe('a goods receipt', () => {
+  const receive = (m, po, quantity, extra = {}) => request(app)
+    .post('/api/v2/materials/material-inward')
+    .set('Cookie', adminCookie())
+    .send({ rawMaterialId: String(m._id), purchaseOrderId: String(po._id), quantity, ...extra });
+
+  it('counts every one of several receipts against one PO at the same moment', async () => {
+    // The PO's received quantity was read, added to and saved outside
+    // any transaction: receipts landing together read the same figure
+    // and all but one of them were lost from it.
+    const m  = await makeMaterial({ stock: 0 });
+    const po = await makePo(m, { price: 300, quantity: 100 });
+    const results = await Promise.all([1, 2, 3, 4, 5].map(() => receive(m, po, 10)));
+    expect(results.map((r) => r.status)).toEqual([201, 201, 201, 201, 201]);
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(50);
+    const after = await PurchaseOrder.findById(po._id).lean();
+    expect(after.items[0].receivedQuantity).toBe(50);
+    expect(after.status).toBe('Partial');
+    expect(await MaterialInward.countDocuments({ rawMaterial: m._id })).toBe(5);
+  });
+
+  it('receives the same request only once, however often it is sent', async () => {
+    const m  = await makeMaterial({ stock: 0 });
+    const po = await makePo(m, { price: 300, quantity: 100 });
+    const first = await receive(m, po, 10, { requestId: 'inward-abc-1' });
+    const again = await receive(m, po, 10, { requestId: 'inward-abc-1' });
+    const both  = await Promise.all([
+      receive(m, po, 10, { requestId: 'inward-abc-2' }),
+      receive(m, po, 10, { requestId: 'inward-abc-2' }),
+    ]);
+    expect(first.status).toBe(201);
+    expect(again.body).toMatchObject({ success: true, duplicate: true });
+    expect(both.map((r) => r.status).sort()).toEqual([200, 201]);
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(20);
+    expect((await PurchaseOrder.findById(po._id).lean()).items[0].receivedQuantity).toBe(20);
+  });
+
+  it('records nothing at all when part of the receipt fails', async () => {
+    const m  = await makeMaterial({ stock: 0 });
+    const po = await makePo(m, { price: 300, quantity: 100 });
+    const boom = jest.spyOn(MaterialInward, 'create').mockRejectedValueOnce(new Error('disk full'));
+    const res = await receive(m, po, 10);
+    boom.mockRestore();
+    expect(res.status).toBe(500);
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(0);
+    expect((await PurchaseOrder.findById(po._id).lean()).items[0].receivedQuantity || 0).toBe(0);
+  });
+
   it('moves the average at the PO line price, and records it on the inward', async () => {
     const m  = await makeMaterial({ stock: 100, price: 300, avgCost: 300 });
     const po = await makePo(m, { price: 360, quantity: 100 });

@@ -157,5 +157,23 @@ JobOrderSchema.index({ "elastics.elastic": 1, date: -1 });
 // One customer's jobs, newest first — the complaint form's job picker,
 // and the exposure lookup behind the blast-radius trace.
 JobOrderSchema.index({ customer: 1, createdAt: -1 });
+// One job per number. The number comes from an atomic counter
+// (mongoose-sequence), so a duplicate should never be minted; this is
+// the backstop that makes "should never" a rule the database keeps.
+// sparse: a job saved before the counter ran has no number to collide.
+JobOrderSchema.index({ jobOrderNo: 1 }, { unique: true, sparse: true, name: "job_jobOrderNo_unique" });
 
-module.exports = mongoose.model("JobOrder", JobOrderSchema);
+const JobOrder = mongoose.model("JobOrder", JobOrderSchema);
+
+// Built by autoIndex at startup. On data that already holds a duplicate
+// number the build fails; say so and keep serving (an unhandled index
+// error would end the process), and retry on the next boot.
+JobOrder.on("index", (err) => {
+  if (!err) return;
+  console.warn(
+    `[job] unique job-number index not built — ${err.message}. ` +
+    `Two jobs share a number; renumber one and restart to build it.`
+  );
+});
+
+module.exports = JobOrder;

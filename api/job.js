@@ -6,6 +6,7 @@ const router  = express.Router();
 const mongoose = require('mongoose');
 
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
+const { assertVersion } = require('../utils/versioning');
 const ErrorHandler     = require('../utils/ErrorHandler');
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
 
@@ -509,140 +510,160 @@ router.post(
     if (new Set(ids).size !== ids.length)
       return next(new ErrorHandler('The same elastic appears twice', 400));
 
-    const job = await JobOrder.findById(jobId);
-    if (!job) return next(new ErrorHandler('Job not found', 404));
-    if (job.status !== 'preparatory') {
-      return next(new ErrorHandler(
-        `Quantities can only be changed while the job is preparatory (current: "${job.status}").`,
-        400
-      ));
+    // ── All of it in one transaction ────────────────────────────────
+    // The job, its warping and covering programmes and the order's
+    // pending and yarn requirement used to be separate writes: a failure
+    // between them left the sheets on the floor disagreeing with the job.
+    // And the "has preparation started?" check could be overtaken by a
+    // warping batch raised at the same moment; both now write the
+    // warping, so one is retried and re-checks.
+    let job;
+    let carried;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        job = await JobOrder.findById(jobId).session(session);
+        if (!job) throw new ErrorHandler('Job not found', 404);
+        // Two planners changing one job's quantities: the second is a 409
+        // and re-reads, rather than replacing the first person's figures.
+        assertVersion(job, req);
+        if (job.status !== 'preparatory') {
+          throw new ErrorHandler(
+            `Quantities can only be changed while the job is preparatory (current: "${job.status}").`,
+            400
+          );
+        }
+
+        // ── Has the floor started on it? ────────────────────────────────
+        const warping  = job.warping  ? await Warping.findById(job.warping).select('status').session(session).lean()   : null;
+        const covering = job.covering ? await Covering.findById(job.covering).select('status').session(session).lean() : null;
+        const batches  = await WarpingBatch.countDocuments({ job: job._id, status: { $ne: 'cancelled' } }).session(session);
+        const started = [];
+        if (warping  && warping.status  !== 'open') started.push(`warping is ${warping.status}`);
+        if (covering && covering.status !== 'open') started.push(`covering is ${covering.status}`);
+        // A batch is yarn off the rack, whatever the stage says.
+        if (batches > 0) started.push(`${batches} warping batch(es) already raised`);
+        if (started.length > 0) {
+          const err = new ErrorHandler(
+            `Quantities cannot be changed once preparation has started — ${started.join('; ')}.`,
+            409
+          );
+          err.code = 'JOB_PREPARATION_STARTED';
+          err.details = { blockers: started };
+          throw err;
+        }
+
+        const order = await Order.findById(job.order).session(session);
+        if (!order) throw new ErrorHandler('Order not found for this job', 404);
+
+        // ── Every line must still belong to the order ───────────────────
+        const siblings = await JobOrder.find({
+          order: order._id, status: { $ne: 'cancelled' }, _id: { $ne: job._id },
+        }).select('elastics').session(session).lean();
+
+        const rows = assessLines(elastics, order, plannedFromJobs(siblings));
+        const offOrder = rows.find((r) => !r.onOrder);
+        if (offOrder) {
+          throw new ErrorHandler(
+            `Elastic ${offOrder.elastic} is not part of this order`, 400
+          );
+        }
+
+        // ── The excess must not change ──────────────────────────────────
+        // See the note above. Compared against what THIS job's lines
+        // currently make it, with the siblings held constant.
+        const before = assessLines(
+          (job.elastics || []).map((e) => ({ elastic: e.elastic, quantity: e.quantity })),
+          order,
+          plannedFromJobs(siblings)
+        );
+        const excessOf = (set) =>
+          Math.round(set.reduce((sum, r) => sum + Math.max(0, r.excess || 0), 0) * 1000) / 1000;
+        const wasExcess = excessOf(before);
+        const nowExcess = excessOf(rows);
+
+        if (nowExcess !== wasExcess) {
+          const err = new ErrorHandler(
+            `This edit changes the over-planned quantity (${wasExcess} → ${nowExcess}), and the ` +
+            `yarn for the original excess has already been drawn from stock. Cancel this job and ` +
+            `raise it again at the quantity you want, so the material is drawn once and correctly.`,
+            409
+          );
+          err.code = 'JOB_EXCESS_WOULD_CHANGE';
+          err.details = { wasExcess, nowExcess };
+          throw err;
+        }
+
+        // ── Apply ───────────────────────────────────────────────────────
+        const previous = (job.elastics || []).map((e) => ({
+          elastic: String(e.elastic), quantity: e.quantity,
+        }));
+        const zeroed = elastics.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+
+        job.elastics       = elastics.map((e) => ({ elastic: e.elastic, quantity: Number(e.quantity) }));
+        // Nothing has been made yet — the job is preparatory and no beam
+        // has been started — so these are reset rather than carried across,
+        // which also drops rows for an elastic the edit removed.
+        job.producedElastic = zeroed;
+        job.packedElastic   = zeroed;
+        job.wastageElastic  = zeroed;
+
+        stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
+          req,
+          meta: {
+            change: 'elastics',
+            auditReason,
+            before: previous,
+            after: job.elastics.map((e) => ({ elastic: String(e.elastic), quantity: e.quantity })),
+          },
+        });
+        job.markModified('fingerprints');
+        job.increment();
+        await job.save({ session });
+
+        // The two programmes mirror the job's lines; they are written from
+        // them at create and would otherwise keep the old figures on the
+        // sheet that goes to the machine.
+        // One after the other (a session runs one operation at a time).
+        // Writing the warping also makes this edit collide with a warping
+        // batch being raised at the same moment, which writes it too: one
+        // of them is retried and sees the other.
+        if (job.warping) {
+          await Warping.updateOne({ _id: job.warping }, { $set: { elasticOrdered: job.elastics } }, { session });
+        }
+        if (job.covering) {
+          await Covering.updateOne({ _id: job.covering }, { $set: { elasticPlanned: job.elastics } }, { session });
+        }
+
+        // ── The order ───────────────────────────────────────────────────
+        // Pending is recomputed from the order's live jobs rather than
+        // adjusted in place, so a re-run cannot double-count.
+        await recomputePending(order, session);
+
+        // And the requirement is restated for what is now PLANNED — the
+        // "calculate the MRP again" half of this. Same shape as the create
+        // route uses, so the two cannot drift.
+        const allRows = assessLines(job.elastics, order, plannedFromJobs(siblings));
+        const plannedLines = (order.elasticOrdered || []).map((l) => {
+          const row = allRows.find((r) => String(r.elastic) === String(l.elastic));
+          return {
+            elastic: l.elastic,
+            quantity: row ? Math.max(row.ordered, row.totalPlanned) : Number(l.quantity) || 0,
+          };
+        });
+        // Carried, not assigned — the same reason as the create route.
+        // computeMaterialRequirement returns rows with no `lots` field, so
+        // this line used to wipe every dye lot the order had set aside,
+        // silently, every time somebody edited a job's quantity.
+        const recomputed = await computeMaterialRequirement(plannedLines);
+        carried = carryEarmarksForward(order.rawMaterialRequired, recomputed);
+        order.rawMaterialRequired = carried.rows;
+        order.updatedItemsAt = new Date();
+        await order.save({ session });
+      });
+    } finally {
+      await session.endSession();
     }
-
-    // ── Has the floor started on it? ────────────────────────────────
-    const [warping, covering, batches] = await Promise.all([
-      job.warping  ? Warping.findById(job.warping).select('status').lean()   : null,
-      job.covering ? Covering.findById(job.covering).select('status').lean() : null,
-      WarpingBatch.countDocuments({ job: job._id, status: { $ne: 'cancelled' } }),
-    ]);
-    const started = [];
-    if (warping  && warping.status  !== 'open') started.push(`warping is ${warping.status}`);
-    if (covering && covering.status !== 'open') started.push(`covering is ${covering.status}`);
-    // A batch is yarn off the rack, whatever the stage says.
-    if (batches > 0) started.push(`${batches} warping batch(es) already raised`);
-    if (started.length > 0) {
-      const err = new ErrorHandler(
-        `Quantities cannot be changed once preparation has started — ${started.join('; ')}.`,
-        409
-      );
-      err.code = 'JOB_PREPARATION_STARTED';
-      err.details = { blockers: started };
-      return next(err);
-    }
-
-    const order = await Order.findById(job.order);
-    if (!order) return next(new ErrorHandler('Order not found for this job', 404));
-
-    // ── Every line must still belong to the order ───────────────────
-    const siblings = await JobOrder.find({
-      order: order._id, status: { $ne: 'cancelled' }, _id: { $ne: job._id },
-    }).select('elastics').lean();
-
-    const rows = assessLines(elastics, order, plannedFromJobs(siblings));
-    const offOrder = rows.find((r) => !r.onOrder);
-    if (offOrder) {
-      return next(new ErrorHandler(
-        `Elastic ${offOrder.elastic} is not part of this order`, 400
-      ));
-    }
-
-    // ── The excess must not change ──────────────────────────────────
-    // See the note above. Compared against what THIS job's lines
-    // currently make it, with the siblings held constant.
-    const before = assessLines(
-      (job.elastics || []).map((e) => ({ elastic: e.elastic, quantity: e.quantity })),
-      order,
-      plannedFromJobs(siblings)
-    );
-    const excessOf = (set) =>
-      Math.round(set.reduce((sum, r) => sum + Math.max(0, r.excess || 0), 0) * 1000) / 1000;
-    const wasExcess = excessOf(before);
-    const nowExcess = excessOf(rows);
-
-    if (nowExcess !== wasExcess) {
-      const err = new ErrorHandler(
-        `This edit changes the over-planned quantity (${wasExcess} → ${nowExcess}), and the ` +
-        `yarn for the original excess has already been drawn from stock. Cancel this job and ` +
-        `raise it again at the quantity you want, so the material is drawn once and correctly.`,
-        409
-      );
-      err.code = 'JOB_EXCESS_WOULD_CHANGE';
-      err.details = { wasExcess, nowExcess };
-      return next(err);
-    }
-
-    // ── Apply ───────────────────────────────────────────────────────
-    const previous = (job.elastics || []).map((e) => ({
-      elastic: String(e.elastic), quantity: e.quantity,
-    }));
-    const zeroed = elastics.map((e) => ({ elastic: e.elastic, quantity: 0 }));
-
-    job.elastics       = elastics.map((e) => ({ elastic: e.elastic, quantity: Number(e.quantity) }));
-    // Nothing has been made yet — the job is preparatory and no beam
-    // has been started — so these are reset rather than carried across,
-    // which also drops rows for an elastic the edit removed.
-    job.producedElastic = zeroed;
-    job.packedElastic   = zeroed;
-    job.wastageElastic  = zeroed;
-
-    stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
-      req,
-      meta: {
-        change: 'elastics',
-        auditReason,
-        before: previous,
-        after: job.elastics.map((e) => ({ elastic: String(e.elastic), quantity: e.quantity })),
-      },
-    });
-    job.markModified('fingerprints');
-    await job.save();
-
-    // The two programmes mirror the job's lines; they are written from
-    // them at create and would otherwise keep the old figures on the
-    // sheet that goes to the machine.
-    await Promise.all([
-      job.warping
-        ? Warping.updateOne({ _id: job.warping }, { $set: { elasticOrdered: job.elastics } })
-        : null,
-      job.covering
-        ? Covering.updateOne({ _id: job.covering }, { $set: { elasticPlanned: job.elastics } })
-        : null,
-    ]);
-
-    // ── The order ───────────────────────────────────────────────────
-    // Pending is recomputed from the order's live jobs rather than
-    // adjusted in place, so a re-run cannot double-count.
-    await recomputePending(order);
-
-    // And the requirement is restated for what is now PLANNED — the
-    // "calculate the MRP again" half of this. Same shape as the create
-    // route uses, so the two cannot drift.
-    const allRows = assessLines(job.elastics, order, plannedFromJobs(siblings));
-    const plannedLines = (order.elasticOrdered || []).map((l) => {
-      const row = allRows.find((r) => String(r.elastic) === String(l.elastic));
-      return {
-        elastic: l.elastic,
-        quantity: row ? Math.max(row.ordered, row.totalPlanned) : Number(l.quantity) || 0,
-      };
-    });
-    // Carried, not assigned — the same reason as the create route.
-    // computeMaterialRequirement returns rows with no `lots` field, so
-    // this line used to wipe every dye lot the order had set aside,
-    // silently, every time somebody edited a job's quantity.
-    const recomputed = await computeMaterialRequirement(plannedLines);
-    const carried = carryEarmarksForward(order.rawMaterialRequired, recomputed);
-    order.rawMaterialRequired = carried.rows;
-    order.updatedItemsAt = new Date();
-    await order.save();
 
     // Say it in the response rather than only in a log. Cutting a job's
     // quantity can shrink a requirement below what was already promised,
@@ -1108,77 +1129,102 @@ router.post(
       return next(hookFitError(machine, fit, ErrorHandler));
     }
 
-    // ── Let go of whatever this job was on ───────────────────────────
+    // ── Claim the machine and link the job, in one transaction ──────
     //
-    // The link lives on BOTH documents: `job.machine` and
-    // `machine.orderRunning`. This used to release by `job.machine`
-    // alone, which misses a machine that holds the job while the job
-    // does not point back — and that state is reachable, because the
-    // machine and the job below are two separate writes with no
-    // transaction around them. A failure between them leaves a machine
-    // running a job that has never heard of it, and no later assignment
-    // would ever free it.
+    // The checks above read the machine and the job outside any
+    // transaction, so on their own they prove nothing by the time the
+    // write lands: two supervisors assigning the same free loom to two
+    // jobs both saw "free", both saved, and the second silently took the
+    // loom from under the first job, which still pointed at it. The
+    // machine and the job were also two separate writes, so a failure
+    // between them left a machine running a job that never heard of it.
     //
-    // Released by `orderRunning` instead, which is the machine's own
-    // claim, so any machine standing on this job is let go regardless of
-    // which side of the link survived. Scoped to THIS job, so a machine
-    // running someone else's is untouched — and to `running`, so a
-    // machine in maintenance is not put back in the picker while it is
-    // in pieces on the floor.
-    await Machine.updateMany(
-      {
-        _id: { $ne: machine._id },
-        orderRunning: job._id,
-        status: 'running',
-      },
-      { $set: { status: 'free', orderRunning: null, elastics: [] } }
-    );
-
-    // The mirror-image stray: the job points at a machine that no longer
-    // claims it. Clearing by id is safe here precisely because the
-    // machine is not running anything.
-    if (job.machine && job.machine.toString() !== machineId.toString()) {
-      await Machine.updateOne(
-        // $eq and $ne on the one field: two `_id` keys in an object
-        // literal is not a conjunction, the second silently replaces the
-        // first.
-        { _id: { $eq: job.machine, $ne: machine._id }, status: { $ne: 'maintenance' } },
-        { $set: { status: 'free', orderRunning: null, elastics: [] } }
-      );
-    }
-
-    machine.elastics     = elastics.map(e => ({ head: e.head, elastic: e.elastic ? new mongoose.Types.ObjectId(e.elastic) : null }));
-    machine.status       = 'running';
-    machine.orderRunning = job._id;
-    await machine.save();
-
-    // Assigning a machine reserves capacity; it does not make the job
-    // prepared. The status only moves once warping and covering are
-    // both completed — the same rule /update-status enforces — and the
-    // job advances on its own the moment they are.
+    // Now, as /plan-weaving does: the job is re-read inside the
+    // transaction, the machine is claimed by a conditional update that
+    // only matches while it is free (or already this job's), and every
+    // link moves together or not at all.
+    const headPlan = elastics.map(e => ({ head: e.head, elastic: e.elastic ? new mongoose.Types.ObjectId(e.elastic) : null }));
+    const session = await mongoose.startSession();
     let held = null;
-    if (job.status === 'preparatory') {
-      const readiness = await checkWeavingReadiness(job._id);
-      held = readiness.ready ? null : readiness.blockers;
+    let claimed;
+    try {
+      await session.withTransaction(async () => {
+        held = null; // a retried transaction starts again from nothing
+        const txJob = await JobOrder.findById(job._id).session(session);
+        if (!txJob || !['weaving', 'preparatory'].includes(txJob.status)) {
+          throw new ErrorHandler(
+            `Machine can only be assigned while job is preparatory or weaving (current: "${txJob?.status ?? 'deleted'}").`, 409
+          );
+        }
 
-      if (readiness.ready) {
-        job.status = 'weaving';
-        stampStage(job, 'weaving', req.user?._id);
-        // 🪪 Fingerprint: JOB_STAGE_UPDATED (preparatory → weaving)
-        stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
-          req,
-          meta: {
-            previousStage: 'preparatory',
-            newStage:      'weaving',
-            jobOrderNo:    job.jobOrderNo,
-            machineId:     machine._id.toString(),
-            machineName:   machine.ID,
+        claimed = await Machine.findOneAndUpdate(
+          {
+            _id: machine._id,
+            $or: [{ status: 'free' }, { status: 'running', orderRunning: txJob._id }],
           },
-        });
-      }
+          { $set: { status: 'running', orderRunning: txJob._id, elastics: headPlan } },
+          { new: true, session }
+        );
+        if (!claimed) {
+          const fresh = await Machine.findById(machine._id).select('ID status').session(session).lean();
+          throw new ErrorHandler(
+            `Machine "${fresh?.ID ?? machine.ID}" was just taken: it is now ${fresh?.status ?? 'gone'} on another job.`, 409
+          );
+        }
+
+        // Let go of any other machine still standing on this job, by the
+        // machine's own claim (orderRunning), whichever side of the link
+        // survived. Scoped to this job and to `running`, so someone
+        // else's machine and a machine in maintenance are untouched.
+        await Machine.updateMany(
+          { _id: { $ne: claimed._id }, orderRunning: txJob._id, status: 'running' },
+          { $set: { status: 'free', orderRunning: null, elastics: [] } },
+          { session }
+        );
+        // The mirror-image stray: the job points at a machine that no
+        // longer claims it.
+        if (txJob.machine && txJob.machine.toString() !== claimed._id.toString()) {
+          await Machine.updateOne(
+            // $eq and $ne on the one field: two `_id` keys in an object
+            // literal is not a conjunction, the second silently replaces
+            // the first.
+            { _id: { $eq: txJob.machine, $ne: claimed._id }, status: { $ne: 'maintenance' } },
+            { $set: { status: 'free', orderRunning: null, elastics: [] } },
+            { session }
+          );
+        }
+
+        // Assigning a machine reserves capacity; it does not make the job
+        // prepared. The status only moves once warping and covering are
+        // both completed, the same rule /update-status enforces. Read
+        // inside the transaction so an in-flight completion is visible.
+        if (txJob.status === 'preparatory') {
+          const readiness = await checkWeavingReadiness(txJob._id, session);
+          held = readiness.ready ? null : readiness.blockers;
+
+          if (readiness.ready) {
+            txJob.status = 'weaving';
+            stampStage(txJob, 'weaving', req.user?._id);
+            // 🪪 Fingerprint: JOB_STAGE_UPDATED (preparatory → weaving)
+            stampFingerprint(txJob, ACTION_CODES.JOB_STAGE_UPDATED, {
+              req,
+              meta: {
+                previousStage: 'preparatory',
+                newStage:      'weaving',
+                jobOrderNo:    txJob.jobOrderNo,
+                machineId:     claimed._id.toString(),
+                machineName:   claimed.ID,
+              },
+            });
+          }
+        }
+        txJob.machine = claimed._id;
+        await txJob.save({ session });
+        job.status = txJob.status;
+      });
+    } finally {
+      await session.endSession();
     }
-    job.machine = machine._id;
-    await job.save();
 
     const populatedMachine = await Machine.findById(machine._id).populate('elastics.elastic', 'name').lean();
     return res.status(200).json({
@@ -1604,6 +1650,8 @@ router.get('/:jobId', async (req, res) => {
       success: true,
       data: {
         id: job._id, jobOrderNo: job.jobOrderNo, jobNo: `J-${job.jobOrderNo}`,
+        // The version an edit sends back as expectedVersion (utils/versioning.js).
+        __v: job.__v ?? 0,
         date: fmtDate(job.date), status: job.status,
         customerName: job.customer?.name || '-', customerPhone: job.customer?.phone || '',
         orderNo: job.order?.orderNo || '',

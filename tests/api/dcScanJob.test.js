@@ -290,14 +290,22 @@ describe('when the scan does not resolve', () => {
     const o1 = await makeOrder(customer, [{ elastic: elastic._id, quantity: 900 }]);
     const o2 = await makeOrder(customer, [{ elastic: elastic._id, quantity: 100 }]);
     const j1 = await makeJob(o1, customer);
-    await makeJob(o2, customer);
-    // Force the collision the auto-increment would never produce.
-    await JobOrder.collection.updateMany({}, { $set: { jobOrderNo: j1.jobOrderNo } });
+    const j2 = await makeJob(o2, customer);
+    // Force the collision the auto-increment would never produce. The
+    // database now refuses it outright (a unique index), so this is data
+    // from before that index: it is set aside to make it, and rebuilt.
+    await JobOrder.collection.dropIndex('job_jobOrderNo_unique').catch(() => {});
+    try {
+      await JobOrder.collection.updateMany({}, { $set: { jobOrderNo: j1.jobOrderNo } });
 
-    const res = await scan({ jobNo: String(j1.jobOrderNo) });
+      const res = await scan({ jobNo: String(j1.jobOrderNo) });
 
-    expect(res.status).toBe(409);
-    expect(res.body.message).toMatch(/more than one/i);
+      expect(res.status).toBe(409);
+      expect(res.body.message).toMatch(/more than one/i);
+    } finally {
+      await JobOrder.deleteMany({ _id: j2._id });
+      await JobOrder.createIndexes();
+    }
   });
 
   it('requires a login', async () => {

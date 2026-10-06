@@ -13,7 +13,8 @@ process.env.NODE_ENV = 'test';
 const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// Approving marks attendance in the same transaction: needs a replica set.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 let mongo, app, User, Employee, LeaveRequest, admin;
 
@@ -30,7 +31,7 @@ const makeWorker = async (name, email) => {
 };
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   User = require('../../models/User.js');
@@ -140,6 +141,30 @@ describe('admin raises and reviews leave', () => {
     const stored = await LeaveRequest.findById(created.body.data.id).lean();
     expect(stored.reviewNotes).toBe('approved by HR');
     expect(stored.reviewedAt).toBeTruthy();
+  });
+
+  test('two admins deciding one request at once: one decision stands, the other is told', async () => {
+    // Both read "pending" before either wrote; the later save used to
+    // overwrite the first decision. Now exactly one applies.
+    const { emp } = await makeWorker('Contested', 'contested@t.co');
+    const created = await request(app)
+      .post('/api/v2/leave/admin-request')
+      .set('Cookie', adminCookie())
+      .send({ employeeId: String(emp._id), date: '2026-09-07', leaveType: 'casual', reason: 'family' });
+    const id = created.body.data.id;
+    const decide = (what) => request(app).put(`/api/v2/leave/${id}/${what}`).set('Cookie', adminCookie()).send({});
+
+    const [approve, reject] = await Promise.all([decide('approve'), decide('reject')]);
+    expect([approve.status, reject.status].sort()).toEqual([200, 400]);
+    const loser = approve.status === 400 ? approve : reject;
+    expect(loser.body.message).toMatch(/Request already (approved|rejected)/);
+    const stored = await LeaveRequest.findById(id).lean();
+    expect(stored.status).toBe(approve.status === 200 ? 'approved' : 'rejected');
+
+    // And a cancel after it was decided removes nothing.
+    const cancel = await request(app).delete(`/api/v2/leave/${id}`).set('Cookie', adminCookie());
+    expect(cancel.status).toBe(400);
+    expect(await LeaveRequest.countDocuments({ _id: id })).toBe(1);
   });
 
   test('rejecting records its note too', async () => {

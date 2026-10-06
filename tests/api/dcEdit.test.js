@@ -372,3 +372,20 @@ describe('the edit route', () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+describe('two people editing one challan', () => {
+  it('refuses the edit made on a stale copy with 409, and keeps the first', async () => {
+    const elastic  = await makeElastic(1000);
+    const customer = await makeCustomer();
+    const dc = await cutDc(elastic, customer, 400);
+    const opened = dc.__v ?? 0;
+
+    const first = await editDc(dc, { vehicleNo: 'TN 01 AA 1111', expectedVersion: opened });
+    expect(first.status).toBe(200);
+    const second = await editDc(dc, { vehicleNo: 'TN 02 BB 2222', expectedVersion: opened });
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe('VERSION_CONFLICT');
+    expect((await DeliveryChallan.findById(dc._id).lean()).vehicleNo).toBe('TN 01 AA 1111');
+  });
+});

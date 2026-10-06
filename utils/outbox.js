@@ -23,6 +23,10 @@ const MAX_ATTEMPTS   = 8;
 const BASE_BACKOFF_MS = 30_000;          // 30s, 60s, 2m, 4m, … capped 1h
 const MAX_BACKOFF_MS  = 60 * 60 * 1000;
 const BATCH_PER_TICK  = 20;
+// How long an event may sit in "processing" before it is taken to have
+// been abandoned (the process delivering it died) and is claimed again.
+// Far longer than any handler runs: each is a query and a message.
+const LEASE_MS        = 10 * 60 * 1000;
 
 async function enqueue(session, kind, payload) {
   const [doc] = await Outbox.create(
@@ -41,8 +45,16 @@ async function processDueEvents(now = new Date()) {
 
   for (let i = 0; i < BATCH_PER_TICK; i += 1) {
     // Atomic claim — a concurrent dispatcher pass can't grab the same event.
+    //
+    // Also reclaims one stuck in "processing" past its lease. A process
+    // that died mid-delivery (a deploy, a crash) used to leave its event
+    // there for good, never retried and never failed. `updatedAt` is
+    // stamped by the claim itself, so it is when the claim was made.
     const event = await Outbox.findOneAndUpdate(
-      { status: "pending", nextAttemptAt: { $lte: now } },
+      { $or: [
+          { status: "pending", nextAttemptAt: { $lte: now } },
+          { status: "processing", updatedAt: { $lte: new Date(now.getTime() - LEASE_MS) } },
+        ] },
       { $set: { status: "processing" }, $inc: { attempts: 1 } },
       { new: true, sort: { nextAttemptAt: 1 } }
     );
@@ -104,4 +116,5 @@ module.exports = {
   startOutboxDispatcher,
   stopOutboxDispatcher,
   MAX_ATTEMPTS,
+  LEASE_MS,
 };

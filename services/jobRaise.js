@@ -16,6 +16,7 @@
 //  and details the route used to return.
 // ══════════════════════════════════════════════════════════════════
 
+const mongoose = require('mongoose');
 const ErrorHandler = require('../utils/ErrorHandler');
 const Order = require('../models/Order');
 const JobOrder = require('../models/JobOrder');
@@ -43,7 +44,7 @@ const orderLifecycle = require('./orderLifecycle');
  * @param {*}      ctx.userId      their user id, for the order's records
  * @returns {Promise<{ job, warping, covering, jobFp }>}
  */
-async function raiseJob(body, { actor, userId }) {
+async function raiseJob(body, ctx) {
     const { orderId, date, elastics } = body;
     if (!orderId) throw new ErrorHandler('orderId is required', 400);
     if (!date)    throw new ErrorHandler('date is required', 400);
@@ -56,7 +57,35 @@ async function raiseJob(body, { actor, userId }) {
         throw new ErrorHandler('Each elastic quantity must be a positive number', 400);
     }
 
-    const order = await Order.findById(orderId);
+    // ── One transaction, start to finish ────────────────────────────
+    // The yarn draw, the job, its warping and covering programmes, the
+    // ledger rows and the order all commit together or not at all. This
+    // used to be a run of separate writes with hand-written refunds,
+    // which a crash between them could not run: yarn left stock with no
+    // job to explain it.
+    //
+    // It also closes a race. Two jobs raised on the same order at once
+    // each read the jobs already planned, and both passed the excess
+    // check that, together, they broke. Both now write the order, so the
+    // second hits a write conflict, is retried from the top, sees the
+    // first job, and is judged against it. The callback re-reads
+    // everything, so a retry starts from the database, never from what
+    // the failed attempt left in memory.
+    const session = await mongoose.startSession();
+    try {
+      let out;
+      await session.withTransaction(async () => {
+        out = await raiseJobIn(session, body, ctx);
+      });
+      return out;
+    } finally {
+      await session.endSession();
+    }
+}
+
+async function raiseJobIn(session, body, { actor, userId }) {
+    const { orderId, date, elastics } = body;
+    const order = await Order.findById(orderId).session(session);
     if (!order) throw new ErrorHandler('Order not found', 404);
     // Approved or InProgress, not Open.
     //
@@ -84,7 +113,7 @@ async function raiseJob(body, { actor, userId }) {
     // case of setting a loom for a round number of meters.
     const siblings = await JobOrder.find({
       order: order._id, status: { $ne: 'cancelled' },
-    }).select('elastics').lean();
+    }).select('elastics').session(session).lean();
 
     const rows = assessLines(elastics, order, plannedFromJobs(siblings));
 
@@ -127,7 +156,7 @@ async function raiseJob(body, { actor, userId }) {
       excessRequirement = await excessMaterialRequirement(rows);
       const materials = await RawMaterial.find({
         _id: { $in: excessRequirement.map((r) => r.rawMaterial) },
-      }).select('name stock price avgCost').lean();
+      }).select('name stock price avgCost').session(session).lean();
       const stockById = new Map(materials.map((m) => [String(m._id), m.stock]));
       // Price the draw from the same read. Writing the row at 0 and
       // correcting it afterwards leaves a window where the P&L values
@@ -151,45 +180,11 @@ async function raiseJob(body, { actor, userId }) {
       }
     }
 
-    // Deduct BEFORE the job exists, so a job can never reach the floor
-    // on yarn that was not there. Each deduction is a single atomic
-    // conditional update — `stock: { $gte: qty }` is the real guard
-    // against a concurrent draw, not the read above. This route is not
-    // transactional (it runs on a standalone mongod in test), so a
-    // failure part-way compensates the deductions already applied.
+    // Deduct before the job exists, so a job can never reach the floor
+    // on yarn that was not there. Each deduction is a conditional update,
+    // `stock: { $gte: qty }`, inside the transaction: a shortfall throws
+    // and the whole raise rolls back, draws already made included.
     const drawn = [];
-
-    // Put back everything drawn so far. Used both when a later line
-    // finds no stock and when the job itself fails to be created — the
-    // yarn must never be left down with nothing to explain it, and a
-    // half-applied draw is exactly how a stock figure becomes a number
-    // nobody can account for. Best-effort per material: one failed
-    // refund must not stop the others, but it does get said out loud,
-    // because at that point the figure IS wrong and only a person can
-    // put it right.
-    const refundDraw = async (rows) => {
-      const stranded = [];
-      for (const back of rows) {
-        try {
-          await RawMaterial.updateOne(
-            { _id: back.rawMaterial },
-            { $inc: { stock: back.quantity, totalConsumption: -back.quantity } }
-          );
-        } catch (refundErr) {
-          stranded.push(`${back.name || back.rawMaterial} ${back.quantity}`);
-          console.error(
-            `[job/create] could not refund ${back.quantity} of ${back.rawMaterial}:`,
-            refundErr.message
-          );
-        }
-      }
-      if (stranded.length > 0) {
-        console.error(
-          `[job/create] STOCK LEFT SHORT with no job to explain it: ${stranded.join('; ')}`
-        );
-      }
-    };
-
     if (excessRequirement.length > 0) {
       for (const r of excessRequirement) {
         const qty = Number(r.requiredWeight) || 0;
@@ -197,10 +192,9 @@ async function raiseJob(body, { actor, userId }) {
         const updated = await RawMaterial.findOneAndUpdate(
           { _id: r.rawMaterial, stock: { $gte: qty } },
           { $inc: { stock: -qty, totalConsumption: qty } },
-          { new: true }
+          { new: true, session }
         );
         if (!updated) {
-          await refundDraw(drawn);
           const err = new ErrorHandler(
             `Raw material ran out while raising this job (${r.name || 'material'}) — nothing was deducted. Try again.`,
             409
@@ -219,22 +213,11 @@ async function raiseJob(body, { actor, userId }) {
 
     const zeroed = elastics.map(e => ({ elastic: e.elastic, quantity: 0 }));
 
-    // The stock is already down. Until the job exists there is nothing
-    // to attribute it to, so a failure here has to put it back — the
-    // draw loop above compensates itself, but everything from this line
-    // on used to be outside that guard, and a job that failed to save
-    // took the yarn with it silently.
-    let job;
-    try {
-      job = await JobOrder.create({
-        date: new Date(date), order: order._id, customer: order.customer,
-        status: 'preparatory', elastics,
-        producedElastic: zeroed, packedElastic: zeroed, wastageElastic: zeroed,
-      });
-    } catch (err) {
-      await refundDraw(drawn);
-      throw err;
-    }
+    const [job] = await JobOrder.create([{
+      date: new Date(date), order: order._id, customer: order.customer,
+      status: 'preparatory', elastics,
+      producedElastic: zeroed, packedElastic: zeroed, wastageElastic: zeroed,
+    }], { session });
 
     // ── Book the excess draw ────────────────────────────────────
     // The stock is already down (above); these are the records that
@@ -257,7 +240,7 @@ async function raiseJob(body, { actor, userId }) {
         outwardDate: new Date(),
         unitPrice:   priceById.get(String(d.rawMaterial)) ?? 0,
         remarks:     `Excess planning on J-${job.jobOrderNo} (order #${order.orderNo})`,
-      })));
+      })), { session, ordered: true });
       for (const d of drawn) {
         await appendStockMovement(d.rawMaterial, {
           type: 'JOB_CONSUMPTION',
@@ -265,14 +248,13 @@ async function raiseJob(body, { actor, userId }) {
           quantity: -d.quantity,
           balance: d.balance,
           unitCost: priceById.get(String(d.rawMaterial)) ?? 0,
-        });
+        }, session);
       }
     }
 
-    const [warping, covering] = await Promise.all([
-      Warping.create({ date: new Date(), job: job._id, elasticOrdered: elastics }),
-      Covering.create({ date: new Date(), job: job._id, elasticPlanned: elastics }),
-    ]);
+    // One after the other: a session runs one operation at a time.
+    const [warping] = await Warping.create([{ date: new Date(), job: job._id, elasticOrdered: elastics }], { session });
+    const [covering] = await Covering.create([{ date: new Date(), job: job._id, elasticPlanned: elastics }], { session });
 
     job.warping  = warping._id;
     job.covering = covering._id;
@@ -294,7 +276,7 @@ async function raiseJob(body, { actor, userId }) {
       },
     });
     job.fingerprints.push(jobFp);
-    await job.save();
+    await job.save({ session });
 
     // ── Record the excess on the order ──────────────────────────
     // Appended, never replaced: two jobs can each over-plan the same
@@ -326,7 +308,7 @@ async function raiseJob(body, { actor, userId }) {
     // Pending = ordered − planned, recomputed from the order's live jobs
     // (now including the one just created) rather than decremented in
     // place, so every path agrees and a re-run can't double-count.
-    await recomputePending(order);
+    await recomputePending(order, session);
 
     // "Recalculate materials required": the order's requirement was
     // computed for the ordered quantity. Now that more is being made,
@@ -356,7 +338,7 @@ async function raiseJob(body, { actor, userId }) {
     orderLifecycle.jobRaised(order, {
       job, jobFp, actor, userId: userId, elasticCount: elastics.length, earmarkChanges,
     });
-    await order.save();
+    await order.save({ session });
 
     return { job, warping, covering, jobFp };
 }

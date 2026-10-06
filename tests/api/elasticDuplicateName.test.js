@@ -19,7 +19,8 @@ process.env.NODE_ENV = 'test';
 const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// Creating an elastic is one transaction, which needs a replica set.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 const { elasticNameKey } = require('../../utils/elasticName.js');
 
@@ -30,7 +31,7 @@ const adminCookie = () => [
 ];
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create({ instance: { launchTimeout: 60_000 } });
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 }, instanceOpts: [{ launchTimeout: 60_000 }] });
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   Elastic = require('../../models/Elastic');
@@ -148,6 +149,20 @@ describe('POST /elastic/create-elastic', () => {
 
     expect(await mongoose.connection.collection('costings').countDocuments()).toBe(before);
     expect(await Elastic.countDocuments()).toBe(1);
+  });
+
+  it('leaves no elastic behind when its cost sheet cannot be written', async () => {
+    // The elastic and its cost sheet are one transaction: a failure on
+    // the second used to leave an elastic with no costing, whose name
+    // then blocked the retry.
+    const Costing = require('../../models/Costing');
+    const boom = jest.spyOn(Costing, 'create').mockRejectedValueOnce(new Error('disk full'));
+    const res = await create('ROLLBACK CHECK');
+    boom.mockRestore();
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(await Elastic.countDocuments({ nameKey: 'rollback check' })).toBe(0);
+    // And the same name goes through once the fault has passed.
+    expect((await create('ROLLBACK CHECK')).status).toBe(201);
   });
 
   it('says so when the clash is an archived elastic', async () => {

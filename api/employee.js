@@ -190,6 +190,9 @@ router.get(
       success: true,
       employee: {
         id:          employee._id,
+        // The version an edit sends back as expectedVersion, so a second
+        // person's save is a 409 instead of overwriting the first.
+        __v:         employee.__v ?? 0,
         name:        employee.name,
         phoneNumber: employee.phoneNumber || "—",
         department:  employee.department,

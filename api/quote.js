@@ -25,6 +25,7 @@ const router   = express.Router();
 const mongoose = require('mongoose');
 
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
+const { assertVersion } = require('../utils/versioning');
 const ErrorHandler     = require('../utils/ErrorHandler');
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
 const { requireReason } = require('../utils/auditReason');
@@ -328,6 +329,9 @@ router.put(
 
     const quote = await Quote.findById(id);
     if (!quote) return next(new ErrorHandler('Quote not found', 404));
+    // Two people editing one quote: the second save is a 409 instead of
+    // silently replacing the first person's prices (utils/versioning.js).
+    assertVersion(quote, req);
 
     if (['accepted', 'cancelled'].includes(quote.status)) {
       return next(new ErrorHandler(
@@ -392,6 +396,7 @@ router.put(
     stamp(quote, ACTION_CODES.QUOTE_UPDATED, req, {
       auditReason, before, after: snapshotOf(quote),
     });
+    quote.increment(); // bump __v, and make the save conditional on it
     await quote.save();
 
     res.json({ success: true, quote });

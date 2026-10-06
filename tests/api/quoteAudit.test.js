@@ -270,3 +270,19 @@ describe('a quote that has outlived its valid-till date', () => {
     expect(list.body.quotes).toHaveLength(1);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+describe('two people editing one quote', () => {
+  it('refuses the edit made on a stale copy with 409, and keeps the first', async () => {
+    const q = (await create()).body.quote;
+    const opened = q.__v ?? 0;
+    const put = (marginPercent) => request(app).put('/api/v2/quote/update')
+      .set('Cookie', cookie())
+      .send({ id: q._id, auditReason: 'customer asked', marginPercent, expectedVersion: opened });
+
+    expect((await put(25)).status).toBe(200);
+    const second = await put(30);
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe('VERSION_CONFLICT');
+  });
+});

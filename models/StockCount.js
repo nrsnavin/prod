@@ -170,5 +170,20 @@ StockCountSchema.index({ status: 1, createdAt: -1 });
 StockCountSchema.index({ 'lines.rawMaterial': 1 });
 
 StockCountSchema.plugin(AutoIncrement, { inc_field: 'countNo' });
+// One count per number: the backstop behind the atomic counter, as on
+// JobOrder. sparse, for counts saved before the counter existed.
+StockCountSchema.index({ countNo: 1 }, { unique: true, sparse: true, name: 'stockcount_countNo_unique' });
 
-module.exports = mongoose.model('StockCount', StockCountSchema);
+const StockCount = mongoose.model('StockCount', StockCountSchema);
+
+// A failed build (existing duplicates) is reported, not fatal; it is
+// retried on the next boot.
+StockCount.on('index', (err) => {
+  if (!err) return;
+  console.warn(
+    `[stock-count] unique count-number index not built — ${err.message}. ` +
+    `Two counts share a number; renumber one and restart to build it.`
+  );
+});
+
+module.exports = StockCount;

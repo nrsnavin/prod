@@ -18,6 +18,24 @@ const HANDLERS = {
   // High-wastage alert: fires only when today's wastage on this elastic/
   // machine exceeds 10% of today's production. Was a fire-and-forget IIFE
   // in api/wastage.js — a crash or restart lost the alert; now it retries.
+  // A freshly verified shift: is its output far below the plant's, or
+  // the machine's own, normal? Queued by the verify transaction
+  // (services/shiftCascadeService.js) so it runs once, after commit.
+  async "shift.outputChecks"({ shiftId, machineId, perHead, actor }) {
+    const ShiftDetail = require("../models/ShiftDetail.js");
+    const Machine     = require("../models/Machine.js");
+    const { _checkLowOutputShift, _checkMachineAnomaly } = require("../services/shiftCascadeService.js");
+
+    const shift = await ShiftDetail.findById(shiftId).select("shift date status machine").lean();
+    // Only a shift that is still verified: a correction or deletion
+    // since would make the alert about figures that no longer stand.
+    if (!shift || shift.status !== "closed") return;
+    const machine = machineId ? await Machine.findById(machineId).select("ID NoOfHead").lean() : null;
+    const req = { user: { _id: actor?.id || null, name: actor?.name || "system" } };
+    await _checkLowOutputShift(shift, machine, Number(perHead) || 0, req);
+    await _checkMachineAnomaly(shift, machine, Number(perHead) || 0, req);
+  },
+
   async "wastage.highEventCheck"({ wastageId, jobId, elasticId, quantity, actor }) {
     const mongoose    = require("mongoose");
     const JobOrder    = require("../models/JobOrder.js");

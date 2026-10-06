@@ -31,6 +31,7 @@ const {
   maybeFirePoReceivedForCritical,
 } = require("../utils/inventoryAlerts");
 const { enqueue } = require("../utils/outbox");
+const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
 const {
   dailyDemand,
   demandPattern,
@@ -655,71 +656,86 @@ router.post(
       );
     }
 
-    const [material, po] = await Promise.all([
-      RawMaterial.findById(rawMaterialId),
-      PurchaseOrder.findById(purchaseOrderId),
-    ]);
+    // The same request sent twice (a double tap, a retry after a timeout)
+    // is answered as the first was, and receives nothing a second time.
+    const requestId = req.body.requestId ? String(req.body.requestId) : null;
+    if (requestId && (await isClaimed(requestId))) {
+      return res.status(200).json({ success: true, duplicate: true, message: "This receipt was already recorded" });
+    }
 
-    if (!material) return next(new ErrorHandler("Raw material not found", 404));
-    if (!po)       return next(new ErrorHandler("Purchase order not found", 404));
+    // ── One transaction ──────────────────────────────────────────────
+    // The stock credit, its ledger row, the inward record and the PO's
+    // received quantity commit together. They used to be four separate
+    // writes, and the PO's received quantity was read, added to and
+    // saved: two receipts against one PO at once both read the same
+    // figure and one of them was lost. Read inside the transaction, the
+    // second is retried after the first and adds to its total.
+    let material, po, inward, _stockBefore, unitPrice;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        if (requestId) await claimKey(session, requestId, "material-inward");
+        material = await RawMaterial.findById(rawMaterialId).session(session);
+        po = await PurchaseOrder.findById(purchaseOrderId).session(session);
+        if (!material) throw new ErrorHandler("Raw material not found", 404);
+        if (!po)       throw new ErrorHandler("Purchase order not found", 404);
 
-    const _stockBefore = Number(material.stock) || 0;
+        _stockBefore = Number(material.stock) || 0;
+        const poLine = po.items.find(
+          (i) => i.rawMaterial.toString() === String(rawMaterialId)
+        );
+        // At the price it was bought at, so the weighted average moves
+        // with what the yarn actually cost.
+        unitPrice = Math.max(0, Number(poLine?.price ?? material.price) || 0);
 
-    // What this consignment cost. The PO line is the authority — it is
-    // the price that was agreed for these goods — and the material's
-    // own latest price is the fallback for a receipt against a line
-    // that never carried one.
-    const poLine = po.items.find(
-      (i) => i.rawMaterial.toString() === String(rawMaterialId)
-    );
-    const unitPrice = Math.max(
-      0,
-      Number(poLine?.price ?? material.price) || 0
-    );
+        const credited = await receiveAtCost(material._id, qtyNum, unitPrice, session);
+        material.stock   = credited?.stock   ?? _stockBefore + qtyNum;
+        material.avgCost = credited?.avgCost ?? material.avgCost;
 
-    // Credit the stock and move the weighted average in one atomic
-    // update. This used to be `material.stock += qty; material.save()`,
-    // which loses one of two receipts landing together — and now that a
-    // receipt also moves what the stock is WORTH, a lost update would
-    // corrupt money and not just a count.
-    const credited = await receiveAtCost(material._id, qtyNum, unitPrice);
-    // Keep the in-memory document in step: the alert below and the
-    // response both read it.
-    material.stock   = credited?.stock   ?? _stockBefore + qtyNum;
-    material.avgCost = credited?.avgCost ?? material.avgCost;
+        await appendStockMovement(material._id, {
+          type:     "PO_INWARD",
+          purchaseOrder: po._id,
+          refNo:         po.poNo != null ? String(po.poNo) : "",
+          quantity: qtyNum,
+          balance:  material.stock,
+          unitCost: unitPrice,
+        }, session);
 
-    await appendStockMovement(material._id, {
-      type:     "PO_INWARD",
-      // Which purchase order these goods came in against. Without it the
-      // ledger row says only that stock went up.
-      purchaseOrder: po._id,
-      refNo:         po.poNo != null ? String(po.poNo) : "",
-      quantity: qtyNum,
-      balance:  material.stock,
-      unitCost: unitPrice,
-    });
+        const lotNo = req.body.lotNo ? String(req.body.lotNo).trim() : "";
+        [inward] = await MaterialInward.create([{
+          rawMaterial:   rawMaterialId,
+          purchaseOrder: purchaseOrderId,
+          quantity:      qtyNum,
+          inwardDate:    new Date(),
+          remarks:       remarks || "",
+          lotNo,
+          unitPrice,
+        }], { session });
 
-    const lotNo = req.body.lotNo ? String(req.body.lotNo).trim() : "";
+        if (poLine) {
+          poLine.receivedQuantity = (poLine.receivedQuantity || 0) + qtyNum;
+          const allFilled = po.items.every(
+            (i) => (i.receivedQuantity || 0) >= (i.quantity || 0)
+          );
+          po.status = allFilled ? "Completed" : "Partial";
+          await po.save({ session });
+        }
+      });
+    } catch (err) {
+      // A replay that raced the first past the fast path above.
+      if (requestId && isDuplicateKeyError(err)) {
+        return res.status(200).json({ success: true, duplicate: true, message: "This receipt was already recorded" });
+      }
+      throw err;
+    } finally {
+      await session.endSession();
+    }
 
-    const inward = await MaterialInward.create({
-      rawMaterial:   rawMaterialId,
-      purchaseOrder: purchaseOrderId,
-      quantity:      Number(quantity),
-      inwardDate:    new Date(),
-      remarks:       remarks || "",
-      lotNo,
-      unitPrice,
-    });
-
-    // Credit the dye lot, so the yarn can be issued to a warping batch
-    // by lot later. Only when a lot number was given — undyed or
-    // untracked material simply has no bucket.
-    //
-    // Deliberately not fatal. Stock has already been credited by the
-    // time we get here and this route is not transactional, so throwing
-    // would leave the operator retrying an inward that partly happened.
-    // The lot number is on the MaterialInward row either way, which is
-    // the durable record — the bucket can be rebuilt from it.
+    // Credit the dye lot after the receipt is committed, so the yarn can
+    // be issued to a warping batch by lot later. Not fatal: the lot
+    // number is on the MaterialInward row, the durable record, and the
+    // bucket can be rebuilt from it.
+    const lotNo = inward.lotNo;
     let lot = null;
     let lotError = null;
     if (lotNo) {
@@ -738,18 +754,6 @@ router.post(
         lotError = err.message;
         console.warn(`Lot credit failed for inward ${inward._id}:`, err.message);
       }
-    }
-
-    const item = po.items.find(
-      (i) => i.rawMaterial.toString() === rawMaterialId
-    );
-    if (item) {
-      item.receivedQuantity = (item.receivedQuantity || 0) + Number(quantity);
-      const allFilled = po.items.every(
-        (i) => (i.receivedQuantity || 0) >= (i.quantity || 0)
-      );
-      po.status = allFilled ? "Completed" : "Partial";
-      await po.save();
     }
 
     res.status(201).json({ success: true, inward, lot, lotError });

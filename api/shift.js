@@ -322,16 +322,25 @@ router.post('/bulk-enter-production', async (req, res) => {
         }
       }
 
-      await ShiftDetail.findByIdAndUpdate(id, {
-        $set: {
-          submittedProductionMeters: prodNum,
-          submittedTimer:            timer,
-          submittedFeedback:         feedback,
-          submittedAt:               new Date(),
-          submittedBy:               req.user?._id,
-          status:                    'pending_verification',
+      // Conditional on the status, in the same write: a shift verified
+      // between the read above and this line must stay closed. An
+      // unconditional write flipped it back to pending, and verifying it
+      // again cascaded its metres into the job a second time.
+      const written = await ShiftDetail.findOneAndUpdate(
+        { _id: id, status: { $ne: 'closed' } },
+        {
+          $set: {
+            submittedProductionMeters: prodNum,
+            submittedTimer:            timer,
+            submittedFeedback:         feedback,
+            submittedAt:               new Date(),
+            submittedBy:               req.user?._id,
+            status:                    'pending_verification',
+          },
         },
-      });
+        { projection: { _id: 1 } }
+      );
+      if (!written) { skipped.push({ id, reason: 'Already closed' }); continue; }
 
       saved.push({ id, production: prodNum, status: 'pending_verification' });
 
@@ -460,15 +469,18 @@ router.post(
     }
     await assertShiftProductionOpen(shift, { JobOrder, Machine }, "enter production");
 
-    shift.submittedProductionMeters = prodValue;
-    shift.submittedTimer            = timer    || "00:00:00";
-    shift.submittedFeedback         = feedback || "";
-    shift.submittedAt               = new Date();
-    shift.submittedBy               = req.user?._id;
-    shift.status                    = "pending_verification";
-    await shift.save();
+    // Written only while the shift is still not closed, in one step: see
+    // submitWhileOpen. A verification that lands first wins.
+    const updated = await submitWhileOpen(shift._id, { $ne: "closed" }, {
+      submittedProductionMeters: prodValue,
+      submittedTimer:            timer    || "00:00:00",
+      submittedFeedback:         feedback || "",
+      submittedAt:               new Date(),
+      submittedBy:               req.user?._id,
+    });
+    if (!updated) return next(new ErrorHandler("Shift is already closed", 400));
 
-    res.json({ success: true, shift });
+    res.json({ success: true, shift: updated });
   })
 );
 
@@ -495,21 +507,24 @@ router.post(
     }
     await assertShiftProductionOpen(shift, { JobOrder, Machine }, "update production");
 
+    const changes = {};
     if (production != null) {
       const prodValue = Number(production);
       if (isNaN(prodValue) || prodValue < 0) {
         return next(new ErrorHandler("production must be a non-negative number", 400));
       }
-      shift.submittedProductionMeters = prodValue;
+      changes.submittedProductionMeters = prodValue;
     }
-    if (timer    !== undefined) shift.submittedTimer    = timer;
-    if (feedback !== undefined) shift.submittedFeedback = feedback;
-    shift.submittedAt = new Date();
-    shift.submittedBy = req.user?._id;
-    shift.status      = "pending_verification";
+    if (timer    !== undefined) changes.submittedTimer    = timer;
+    if (feedback !== undefined) changes.submittedFeedback = feedback;
+    changes.submittedAt = new Date();
+    changes.submittedBy = req.user?._id;
 
-    await shift.save();
-    res.json({ success: true, shift });
+    const updated = await submitWhileOpen(shift._id, { $in: ["open", "pending_verification"] }, changes);
+    if (!updated) {
+      return next(new ErrorHandler("Shift cannot be updated: it was verified and closed meanwhile", 400));
+    }
+    res.json({ success: true, shift: updated });
   })
 );
 
@@ -1538,6 +1553,24 @@ router.post(
 
 // Throws when the given ShiftDetail belongs to a finalised plan — used
 // by every route that would change a locked shift's numbers.
+/**
+ * A production entry, written only while the shift's status still
+ * matches `allowed`: the check and the write in ONE operation.
+ *
+ * Read-then-save let a verification land in between: the save then
+ * wrote status back to "pending_verification" on a shift that was
+ * already closed, and verifying it again added its metres to the job
+ * and order a second time. Returns the updated shift, or null when it
+ * was closed meanwhile.
+ */
+function submitWhileOpen(shiftId, allowed, changes) {
+  return ShiftDetail.findOneAndUpdate(
+    { _id: shiftId, status: allowed },
+    { $set: { ...changes, status: "pending_verification" } },
+    { new: true }
+  );
+}
+
 async function assertPlanNotFinalized(shift, session) {
   if (!shift?.shiftPlan) return;
   const q = ShiftPlan.findById(shift.shiftPlan).select("finalized");

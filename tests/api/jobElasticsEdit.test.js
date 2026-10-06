@@ -288,3 +288,18 @@ describe('an edit that would change the over-planned quantity', () => {
     expect(res.body.code).toBe('JOB_EXCESS_WOULD_CHANGE');
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+describe('two planners editing one job', () => {
+  it('refuses the edit made on a stale copy with 409, and keeps the first', async () => {
+    const { job, elastic } = await seed({ ordered: 1000, planned: 1000 });
+    const opened = (await JobOrder.findById(job._id).lean()).__v ?? 0;
+
+    const first = await edit(job, [{ elastic: String(elastic._id), quantity: 600 }], { expectedVersion: opened });
+    expect(first.status).toBe(200);
+    const second = await edit(job, [{ elastic: String(elastic._id), quantity: 900 }], { expectedVersion: opened });
+    expect(second.status).toBe(409);
+    expect(second.body.code).toBe('VERSION_CONFLICT');
+    expect((await JobOrder.findById(job._id).lean()).elastics[0].quantity).toBe(600);
+  });
+});

@@ -24,7 +24,8 @@ const jwt = require('jsonwebtoken');
 // /cancel and /update-status all write without a session), so a
 // standalone server is enough — and it avoids the replica-set start
 // flake this suite otherwise hits.
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// Raising a job is one transaction, which needs a replica set.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 let mongo, app, Order, JobOrder, Elastic, Customer, User, admin;
 
@@ -33,7 +34,7 @@ const adminCookie = () => [
 ];
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   Order = require('../../models/Order');

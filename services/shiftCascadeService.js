@@ -23,6 +23,7 @@ const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = r
 const { updatePairPosterior } = require("../utils/etaPosterior.js");
 const { recomputePending } = require("../services/orderPending.js");
 const { notify } = require("../utils/notify");
+const { enqueue } = require("../utils/outbox");
 
 // ────────────────────────────────────────────────────────────────
 //  applyProductionCascade
@@ -166,23 +167,21 @@ async function applyProductionCascade(
     }
   }
 
-  // Low-output shift alert — owner WhatsApp when a freshly-closed
-  // shift's per-head meters fall below 50% of the plant baseline
-  // (last 30 days of closed shifts, plant-wide per-head average).
-  // Fire-and-forget; wrapped so a notification failure can't break
-  // the cascade. Idempotent because shifts can only be closed once.
-  try {
-    await _checkLowOutputShift(shift, machineDoc, prodValue, req);
-    await _checkMachineAnomaly(shift, machineDoc, prodValue, req);
-  } catch (err) {
-    if (typeof console !== "undefined" && console.warn) {
-      console.warn(
-        "[notify:shiftBelowThreshold] check failed for shift",
-        shift?._id?.toString?.(),
-        err?.message
-      );
-    }
-  }
+  // Low-output and machine-anomaly alerts (owner WhatsApp), queued in
+  // the outbox INSIDE this transaction and delivered after it commits
+  // (utils/outboxHandlers.js "shift.outputChecks").
+  //
+  // They used to be sent from right here, mid-transaction. A retried
+  // transaction sent them twice, one that rolled back had already sent
+  // them about a shift that was never verified, and the network call
+  // held the transaction open for as long as WhatsApp took to answer.
+  // Queued, they go out exactly when the verification is real.
+  await enqueue(session, "shift.outputChecks", {
+    shiftId:   String(shift._id),
+    machineId: machineDoc?._id ? String(machineDoc._id) : null,
+    perHead:   prodValue,
+    actor:     { id: req?.user?._id ? String(req.user._id) : null, name: req?.user?.name || "system" },
+  });
 
   return { job, fingerprint: fp, machine: machineDoc };
 }
@@ -194,9 +193,19 @@ async function applyProductionCascade(
 // now" signal.
 async function _checkLowOutputShift(shift, machine, prodValue, req) {
   const since = new Date(Date.now() - 30 * 86_400_000);
+  // Per head on both sides. `prodValue` is the per-head figure entered;
+  // `productionMeters` is stored as per head × the machine's heads, and
+  // averaging those totals compared a per-head figure with machine
+  // totals: an ordinary shift on a six-head loom read as ~17% of normal.
+  // This shift is left out of its own baseline (it runs after commit).
   const rows = await ShiftDetail.aggregate([
-    { $match: { status: "closed", date: { $gte: since } } },
-    { $group: { _id: null, total: { $sum: "$productionMeters" }, n: { $sum: 1 } } },
+    { $match: { status: "closed", date: { $gte: since }, _id: { $ne: shift?._id } } },
+    { $lookup: { from: Machine.collection.collectionName, localField: "machine", foreignField: "_id", as: "m" } },
+    { $project: { perHead: { $divide: [
+      "$productionMeters",
+      { $max: [1, { $ifNull: [{ $arrayElemAt: ["$m.NoOfHead", 0] }, 1] }] },
+    ] } } },
+    { $group: { _id: null, total: { $sum: "$perHead" }, n: { $sum: 1 } } },
   ]);
   const r = rows[0] || {};
   if (!r.n || r.n < 5) return; // not enough data
@@ -230,12 +239,14 @@ async function _checkMachineAnomaly(shift, machine, prodValue, req) {
   if (!machine?._id) return;
   const since = new Date(Date.now() - 30 * 86_400_000);
   const rows = await ShiftDetail.aggregate([
-    { $match: { status: "closed", machine: machine._id, date: { $gte: since } } },
+    { $match: { status: "closed", machine: machine._id, date: { $gte: since }, _id: { $ne: shift?._id } } },
     { $group: { _id: null, total: { $sum: "$productionMeters" }, n: { $sum: 1 } } },
   ]);
   const r = rows[0] || {};
   if (!r.n || r.n < 3) return; // not enough machine history
-  const avg = r.total / r.n;
+  // The stored figures are machine totals (per head × heads); this
+  // shift's figure is per head. Compared per head.
+  const avg = r.total / r.n / Math.max(1, Number(machine.NoOfHead) || 1);
   if (!(avg > 0)) return;
   const pct = (prodValue / avg) * 100;
   if (pct >= 40) return; // not an anomaly

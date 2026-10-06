@@ -12,6 +12,7 @@
 // ══════════════════════════════════════════════════════════════
 'use strict';
 const express      = require('express');
+const mongoose     = require('mongoose');
 const router       = express.Router();
 const LeaveRequest = require('../models/LeaveRequest');
 const Attendance   = require('../models/Attendence.js');
@@ -242,39 +243,65 @@ router.get('/employee/:empId', isAuthenticated, selfOrAdmin, async (req, res) =>
 // ─────────────────────────────────────────────────────────────
 // PUT /:id/approve
 // ─────────────────────────────────────────────────────────────
+/**
+ * Approve or reject a request, only while it is still pending: the
+ * check and the write in one operation. Read-then-save let two admins
+ * act on one request at once; both passed the "pending" check and the
+ * later one overwrote the first, so a leave could end up rejected with
+ * its attendance already marked as approved leave. Returns the decided
+ * request, or null when it was not pending (or does not exist).
+ */
+function decidePending(id, status, reviewer, reviewNotes, session = null) {
+  return LeaveRequest.findOneAndUpdate(
+    { _id: id, status: 'pending' },
+    { $set: { status, reviewedBy: reviewer || null, reviewedAt: new Date(), reviewNotes } },
+    { new: true, session }
+  ).populate('employee', 'name department');
+}
+
+/** Why a decision did not apply: gone, or already decided. */
+async function notPending(id, res) {
+  const existing = await LeaveRequest.findById(id).select('status').lean();
+  if (!existing) return res.status(404).json({ success:false, message:'Leave request not found.' });
+  return res.status(400).json({ success:false, message:`Request already ${existing.status}.` });
+}
+
 router.put('/:id/approve', isAuthenticated, isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     // The HR page sends this as `note`; accept either so the
     // reviewer's note is actually recorded instead of silently dropped.
     const reviewNotes = req.body?.reviewNotes ?? req.body?.note ?? '';
-    const leave = await LeaveRequest.findById(req.params.id)
-      .populate('employee','name department');
-    if (!leave) return res.status(404).json({ success:false, message:'Leave request not found.' });
-    if (leave.status !== 'pending')
-      return res.status(400).json({ success:false, message:`Request already ${leave.status}.` });
+    // The decision and the attendance it marks, together: a leave
+    // approved with its attendance left unmarked (or the reverse) is the
+    // kind of half-state a payroll run trips over.
+    let leave;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        // Server-trusted reviewer — drop the body-supplied default to prevent spoofing.
+        leave = await decidePending(req.params.id, 'approved', req.user?._id, reviewNotes, session);
+        if (!leave) return;
 
-    leave.status     = 'approved';
-    // Server-trusted reviewer — drop the body-supplied default to prevent spoofing.
-    leave.reviewedBy = req.user?._id || null;
-    leave.reviewedAt = new Date();
-    leave.reviewNotes= reviewNotes;
-    await leave.save();
-
-    // Auto-update linked Attendance record if it exists
-    const dateObj = new Date(leave.date); dateObj.setHours(0,0,0,0);
-    const shiftsToUpdate = leave.shift === 'BOTH' ? ['DAY','NIGHT'] : [leave.shift];
-    for (const s of shiftsToUpdate) {
-      await Attendance.findOneAndUpdate(
-        { employee: leave.employee._id, date: dateObj, shift: s },
-        { $set: {
-          status:          'on_leave',
-          leaveType:       leave.leaveType,
-          leaveRequestId:  leave._id,
-          isApprovedLeave: true,
-        }},
-        { upsert: false }
-      );
+        // Auto-update linked Attendance record if it exists
+        const dateObj = new Date(leave.date); dateObj.setHours(0,0,0,0);
+        const shiftsToUpdate = leave.shift === 'BOTH' ? ['DAY','NIGHT'] : [leave.shift];
+        for (const s of shiftsToUpdate) {
+          await Attendance.findOneAndUpdate(
+            { employee: leave.employee._id, date: dateObj, shift: s },
+            { $set: {
+              status:          'on_leave',
+              leaveType:       leave.leaveType,
+              leaveRequestId:  leave._id,
+              isApprovedLeave: true,
+            }},
+            { upsert: false, session }
+          );
+        }
+      });
+    } finally {
+      await session.endSession();
     }
+    if (!leave) return notPending(req.params.id, res);
 
     return res.json({ success:true, message:'Leave approved.', data:fmtLeave(leave) });
   } catch(err) {
@@ -291,17 +318,8 @@ router.put('/:id/reject', isAuthenticated, isAdmin('admin', 'accounts'), async (
     // The HR page sends this as `note`; accept either so the
     // reviewer's note is actually recorded instead of silently dropped.
     const reviewNotes = req.body?.reviewNotes ?? req.body?.note ?? '';
-    const leave = await LeaveRequest.findById(req.params.id)
-      .populate('employee','name department');
-    if (!leave) return res.status(404).json({ success:false, message:'Leave request not found.' });
-    if (leave.status !== 'pending')
-      return res.status(400).json({ success:false, message:`Request already ${leave.status}.` });
-
-    leave.status     = 'rejected';
-    leave.reviewedBy = req.user?._id || null;
-    leave.reviewedAt = new Date();
-    leave.reviewNotes= reviewNotes;
-    await leave.save();
+    const leave = await decidePending(req.params.id, 'rejected', req.user?._id, reviewNotes);
+    if (!leave) return notPending(req.params.id, res);
 
     return res.json({ success:true, message:'Leave rejected.', data:fmtLeave(leave) });
   } catch(err) {
@@ -332,9 +350,11 @@ router.delete('/:id', isAuthenticated, async (req, res) => {
       });
     }
 
-    if (leave.status !== 'pending')
+    // Deleted only while still pending, in the one operation: an approval
+    // landing between the check and the delete must not be erased.
+    const gone = await LeaveRequest.deleteOne({ _id: leave._id, status: 'pending' });
+    if (gone.deletedCount !== 1)
       return res.status(400).json({ success:false, message:'Only pending requests can be cancelled.' });
-    await leave.deleteOne();
     return res.json({ success:true, message:'Leave request cancelled.' });
   } catch(err) {
     return res.status(500).json({ success:false, message:err.message });

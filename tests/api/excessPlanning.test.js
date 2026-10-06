@@ -19,7 +19,8 @@ process.env.NODE_ENV = 'test';
 const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// Raising a job is one transaction, which needs a replica set.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const { computeMaterialRequirement } = require('../../utils/materialRequirement');
 
 let mongo, app, M = {}, admin;
@@ -29,7 +30,7 @@ const adminCookie = () => cookie(admin._id, 'admin');
 let seq = 0;
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   for (const n of ['User', 'Order', 'JobOrder', 'Customer', 'Elastic', 'RawMaterial']) {
@@ -150,6 +151,47 @@ describe('the 20% allowance', () => {
     const second = await createJob(order, elastic, 200);   // 1300 total = 30%
     expect(second.status).toBe(409);
     expect(second.body.code).toBe('EXCESS_PLANNING_REASON_REQUIRED');
+  });
+
+  test('two jobs raised at the same moment cannot each spend the allowance', async () => {
+    // Both requests read the order's planned jobs before either writes:
+    // the elastic-name lookup, which sits between that read and the
+    // writes, waits until both have reached it. Each alone is inside
+    // the allowance; together they are 30% over. Raising is one
+    // transaction that writes the order, so the second is retried, sees
+    // the first job, and is refused for want of a reason.
+    const { elastic } = await makeElastic();
+    const order = await makeOrder(elastic, 1000);
+
+    const realFind = M.Elastic.find.bind(M.Elastic);
+    let arrived = 0;
+    let release;
+    const barrier = new Promise((r) => { release = r; });
+    const spy = jest.spyOn(M.Elastic, 'find').mockImplementation((...args) => {
+      const chain = [];
+      const q = {
+        select: (...a) => { chain.push(['select', a]); return q; },
+        lean: (...a) => { chain.push(['lean', a]); return q; },
+        session: (...a) => { chain.push(['session', a]); return q; },
+        then: (ok, fail) => (async () => {
+          if (++arrived === 2) release();
+          await Promise.race([barrier, new Promise((r) => setTimeout(r, 2000))]);
+          let real = realFind(...args);
+          for (const [m, a] of chain) real = real[m](...a);
+          return real;
+        })().then(ok, fail),
+      };
+      return q;
+    });
+
+    try {
+      const [a, b] = await Promise.all([createJob(order, elastic, 1100), createJob(order, elastic, 200)]);
+      expect([a.status, b.status].sort()).toEqual([201, 409]);
+      expect((a.status === 409 ? a : b).body.code).toBe('EXCESS_PLANNING_REASON_REQUIRED');
+      expect(await M.JobOrder.countDocuments({ order: order._id })).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('an elastic that is not on the order is still refused', async () => {
@@ -403,13 +445,15 @@ describe('a job that fails after the yarn has been drawn', () => {
     boom.mockRestore();
   });
 
-  test('books the draw before the warping programme can fail', async () => {
-    // The booking used to run at the very end of the route. Moving it
-    // to directly after the job exists is what shrinks the window to
-    // nothing — so a failure this late leaves the yarn explained.
+  test('a failure as late as the warping programme rolls back the whole raise', async () => {
+    // Raising a job is one transaction now. The draw used to be refunded
+    // by hand (or, this late, left standing with the job), which a crash
+    // between the steps could not do. Now nothing of the raise survives
+    // a failure anywhere in it: no job, no outward row, stock untouched.
     const Warping = require('../../models/Warping.js');
     const { elastic, nylon } = await makeElastic(1000);
     const order = await makeOrder(elastic, 1000);
+    const before = await stockOf(nylon._id);
     const boom = jest
       .spyOn(Warping, 'create')
       .mockRejectedValueOnce(new Error('warping blew up'));
@@ -417,17 +461,9 @@ describe('a job that fails after the yarn has been drawn', () => {
     const res = await createJob(order, elastic, 1200);
     expect(res.status).toBeGreaterThanOrEqual(400);
 
-    // Stock is down — the job exists, so that is correct — and there is
-    // a row saying so on both records.
-    const rows = await M.MaterialOutward.find({
-      rawMaterial: nylon._id, type: 'JOB_CONSUMPTION',
-    }).lean();
-    expect(rows.length).toBeGreaterThan(0);
-    const doc = await M.RawMaterial.findById(nylon._id).select('+stockMovements').lean();
-    const move = doc.stockMovements.at(-1);
-    expect(move.type).toBe('JOB_CONSUMPTION');
-    expect(move.quantity).toBeLessThan(0);
-    expect(doc.stock).toBe(move.balance);
+    expect(await stockOf(nylon._id)).toBe(before);
+    expect(await M.JobOrder.countDocuments({ order: order._id })).toBe(0);
+    expect(await M.MaterialOutward.countDocuments({ rawMaterial: nylon._id, type: 'JOB_CONSUMPTION' })).toBe(0);
     boom.mockRestore();
   });
 });
