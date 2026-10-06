@@ -10,30 +10,60 @@
 // ══════════════════════════════════════════════════════════════
 
 const DocumentSettings = require("../models/DocumentSettings");
+const { currentDb } = require("../db/tenants");
 
-let _cache = null;
-let _cachedAt = 0;
+// One entry per database: with sandbox routing on (db/tenants.js), the
+// sandbox and live company profiles are different documents, and a
+// single cache would show one's letterhead on the other's PDFs.
+const _cache = new Map(); // dbName -> { doc, checkedAt }
 const TTL_MS = 60 * 1000; // 60s — settings change rarely
+
+// invalidate() only reaches the process that saved. In cluster mode
+// the other workers would keep printing the old letterhead for up to
+// the TTL, so past this age a cached copy is checked against the
+// stored updatedAt (an indexed read of one small field, not the logo).
+const CHECK_AFTER_MS = 5 * 1000;
+
+const _key = () => currentDb() ?? "";
+// Milliseconds, not String(date): that drops them, and two saves in one
+// second would look the same.
+const _time = (d) => (d ? new Date(d).getTime() : null);
 
 // Fetch-or-create the singleton. Never returns null.
 async function getDocumentSettings({ fresh = false } = {}) {
-  if (!fresh && _cache && Date.now() - _cachedAt < TTL_MS) return _cache;
+  const key = _key();
+  const hit = _cache.get(key);
+  if (!fresh && hit) {
+    const age = Date.now() - hit.checkedAt;
+    if (age < CHECK_AFTER_MS) return hit.doc;
+    if (age < TTL_MS) {
+      const stored = await DocumentSettings.findOne({ key: "document" })
+        .select("updatedAt")
+        .lean();
+      if (stored && _time(stored.updatedAt) === _time(hit.doc.updatedAt)) {
+        hit.checkedAt = Date.now();
+        return hit.doc;
+      }
+    }
+  }
 
+  // A plain read first: the upsert below stamps updatedAt even when it
+  // only reads, which every other worker would take for a fresh save.
   // upsert guarantees exactly one row (unique key:"document").
-  const doc = await DocumentSettings.findOneAndUpdate(
-    { key: "document" },
-    { $setOnInsert: { key: "document" } },
-    { new: true, upsert: true, setDefaultsOnInsert: true }
-  ).lean();
+  const doc =
+    (await DocumentSettings.findOne({ key: "document" }).lean()) ||
+    (await DocumentSettings.findOneAndUpdate(
+      { key: "document" },
+      { $setOnInsert: { key: "document" } },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    ).lean());
 
-  _cache = doc;
-  _cachedAt = Date.now();
+  _cache.set(key, { doc, checkedAt: Date.now() });
   return doc;
 }
 
 function invalidate() {
-  _cache = null;
-  _cachedAt = 0;
+  _cache.clear();
 }
 
 // Map the settings doc into the compact branding shape the PDF

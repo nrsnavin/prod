@@ -14,6 +14,7 @@ const multer           = require("multer");
 const { keepRequestContext } = require("../middleware/userContext.js");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { saveIf } = require("../utils/conditionalSave");
 const ShiftDetail      = require("../models/ShiftDetail");
 const MachineIssue     = require("../models/MachineIssue");
 const Machine          = require("../models/Machine");
@@ -902,7 +903,18 @@ router.post(
       statusChanged = true;
     }
 
-    await machine.save();
+    // Sent to maintenance only while not running a job, in the same
+    // write: a loom assigned to a job after the check above must not be
+    // marked in maintenance while it weaves.
+    if (statusChanged) {
+      if (!(await saveIf(machine, { status: { $ne: "running" } }))) {
+        return next(new ErrorHandler(
+          "This machine was just assigned to a job. Stop the job before sending it for service.", 409
+        ));
+      }
+    } else {
+      await machine.save();
+    }
 
     const saved = machine.serviceLogs[machine.serviceLogs.length - 1];
 

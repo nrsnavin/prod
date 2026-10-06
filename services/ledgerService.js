@@ -44,8 +44,8 @@ function kindForLineItem(li) {
 const PAYMENT_RECOVERY_PREFIX = 'Advance recovered at payment';
 
 /** Remove every row a source document previously posted (same txn). */
-async function clearSource(source, sourceId, session) {
-  await LedgerEntry.deleteMany({ source, sourceId }, { session });
+async function clearSource(source, sourceId, session, kind) {
+  await LedgerEntry.deleteMany({ source, sourceId, ...(kind ? { kind } : {}) }, { session });
 }
 
 /**
@@ -113,7 +113,9 @@ async function postAdvanceIssued(adv, session, { postedBy = '' } = {}) {
 
 /** The Diwali/festival bonus, dated on the festival itself. */
 async function postDiwaliBonus(rec, diwaliDate, session, { postedBy = '' } = {}) {
-  await clearSource('bonus', rec._id, session);
+  // Only the accrual is replaced. The bonus's payment row shares its
+  // source; clearing all of it wiped a payment that had been made.
+  await clearSource('bonus', rec._id, session, 'diwali_bonus');
   await LedgerEntry.create([{
     employee: rec.employee,
     date:     diwaliDate || rec.createdAt || new Date(),

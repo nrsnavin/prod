@@ -33,6 +33,7 @@ const { escapeRegex } = require("../utils/escapeRegex");
 const { isAuthenticated } = require("../middleware/auth");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { nextNumber } = require("../utils/sequence");
+const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
 const { creditLot } = require("../services/yarnLotService");
 const { appendStockMovement } = require("../utils/stockLedger");
@@ -303,12 +304,17 @@ router.delete(
 
     const previousStatus = po.status;
     po.status = "Cancelled";
+    // Cancelled only while still uncancelled with nothing received, in
+    // the same write: a receipt landing after the check above must not
+    // be left on a cancelled PO.
     stampFingerprint(po, ACTION_CODES.PO_DELETED, {
       req,
       meta: { auditReason, poNo: po.poNo, previousStatus },
     });
     po.markModified("fingerprints");
-    await po.save();
+    if (!(await saveIf(po, { status: { $ne: "Cancelled" }, "items.receivedQuantity": { $not: { $gt: 0 } } }))) {
+      return next(changedMeanwhile(`PO ${po.poNo ?? ""}`.trim(), "received against or cancelled"));
+    }
 
     res.status(200).json({ success: true, message: "Purchase order deleted", id: po._id });
   })
@@ -748,6 +754,12 @@ router.post(
           // it — a retry replays it from the top.
           po = await PurchaseOrder.findById(poId).session(session);
           if (!po) throw new ErrorHandler("Purchase Order not found", 404);
+          // Re-checked here, on the copy this transaction writes: a PO
+          // cancelled after the check above would otherwise be received
+          // into and flipped back to Partial by deriveStatus below.
+          if (po.status === "Cancelled") {
+            throw new ErrorHandler("This purchase order was cancelled just now, so nothing was received against it.", 409);
+          }
 
           for (const inItem of activeItems) {
             const poItem = po.items.find(
@@ -763,6 +775,11 @@ router.post(
           }
 
           po.status = deriveStatus(po.items);
+          // Bump the version: an edit to this PO opened before the
+          // receipt must not then save its lines (received quantity 0)
+          // over what was just received. Setting receivedQuantity on a
+          // line does not move the version on its own.
+          po.increment();
           // Audit: who received what against this PO, when.
           stampFingerprint(po, ACTION_CODES.PO_STOCK_INWARD, {
             req,
@@ -855,7 +872,9 @@ router.post(
       });
     } catch (error) {
       console.error("[inward-stock]", error.message);
-      return next(new ErrorHandler(error.message, 400));
+      // A refusal the route raised keeps its own status (409 for a PO
+      // cancelled meanwhile); anything else is reported as before.
+      return next(error instanceof ErrorHandler ? error : new ErrorHandler(error.message, 400));
     }
   })
 );

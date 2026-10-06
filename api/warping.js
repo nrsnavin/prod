@@ -634,14 +634,33 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
     tapeNo: tapeOf(b.tapeNo),
   }));
 
+  // The plan and the warping's link to it are written together, and
+  // only while the warping is still open with no plan. Checked above on
+  // a copy read earlier: if the run was started meanwhile, the sheet
+  // would describe beams built from something else; and a plan created
+  // without its link (the second write failing) blocked any re-create
+  // through the unique index while the warping said it had none.
   let plan;
+  const session = await mongoose.startSession();
   try {
-    plan = await WarpingPlan.create({
-      warping:   warping._id,
-      job:       warping.job,
-      noOfBeams: resolvedBeams.length,
-      beams:     resolvedBeams,
-      remarks:   remarks || "",
+    await session.withTransaction(async () => {
+      [plan] = await WarpingPlan.create([{
+        warping:   warping._id,
+        job:       warping.job,
+        noOfBeams: resolvedBeams.length,
+        beams:     resolvedBeams,
+        remarks:   remarks || "",
+      }], { session });
+      const linked = await Warping.updateOne(
+        { _id: warping._id, status: "open", warpingPlan: null },
+        { $set: { warpingPlan: plan._id } },
+        { session }
+      );
+      if (linked.matchedCount === 0) {
+        throw new ErrorHandler(
+          "This warping was started or given a plan by someone else just now. Reload to see it.", 409
+        );
+      }
     });
   } catch (err) {
     // `WarpingPlan.warping` is unique, so a second create for the same
@@ -653,10 +672,9 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
       return next(new ErrorHandler("Warping plan already exists", 409));
     }
     return next(err);
+  } finally {
+    session.endSession();
   }
-
-  warping.warpingPlan = plan._id;
-  await warping.save();
 
   const populated = await WarpingPlan.findById(plan._id)
     .populate("job", "jobOrderNo status")
@@ -680,37 +698,71 @@ router.put("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErrors(
   if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
 
   const { remarks, beams } = req.body;
-  const plan = await WarpingPlan.findById(req.params.id);
-  if (!plan) return next(new ErrorHandler("Warping plan not found", 404));
+  const found = await WarpingPlan.findById(req.params.id);
+  if (!found) return next(new ErrorHandler("Warping plan not found", 404));
   // Optimistic lock: reject the edit if another user saved since this
   // client loaded the plan (409 → client reloads).
-  assertVersion(plan, req);
+  assertVersion(found, req);
 
-  const warping = await Warping.findById(plan.warping);
+  const warping = await Warping.findById(found.warping);
   if (warping && warping.status !== "open") {
     return next(new ErrorHandler(`Plan can only be edited while warping is open (current: "${warping.status}").`, 400));
   }
 
-  const before = { remarks: plan.remarks, noOfBeams: plan.noOfBeams };
-  if (remarks !== undefined) plan.remarks = String(remarks);
+  let newBeams = null;
   if (Array.isArray(beams) && beams.length > 0) {
     try {
-      plan.beams = await resolveSectionLots(beams);
+      newBeams = await resolveSectionLots(beams);
     } catch (err) {
       return next(err);
     }
-    plan.noOfBeams = beams.length;
   }
-  plan.increment(); // bump __v so concurrent editors get a 409
-  await plan.save();
 
-  const job = await JobOrder.findById(plan.job);
-  if (job) {
-    stampFingerprint(job, ACTION_CODES.WARPING_PLAN_UPDATED, {
-      req,
-      meta: { planId: plan._id.toString(), auditReason, before, after: { remarks: plan.remarks, noOfBeams: plan.noOfBeams } },
+  // The plan, the job's trail and the open-warping check in one
+  // transaction. Touching the warping makes a start, or a batch raised
+  // against the old beam numbers (both write it), conflict with this
+  // edit instead of passing it. Everything is re-read inside: a retry
+  // must not re-save documents an aborted attempt already changed.
+  let plan;
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      plan = await WarpingPlan.findById(found._id).session(session);
+      if (!plan) throw new ErrorHandler("Warping plan not found", 404);
+      assertVersion(plan, req);
+      if (warping) {
+        const stillOpen = await Warping.updateOne(
+          { _id: warping._id, status: "open" },
+          { $currentDate: { updatedAt: true } },
+          { session }
+        );
+        if (stillOpen.matchedCount === 0) {
+          throw new ErrorHandler("Plan can only be edited while warping is open. It was started just now.", 409);
+        }
+      }
+
+      const before = { remarks: plan.remarks, noOfBeams: plan.noOfBeams };
+      if (remarks !== undefined) plan.remarks = String(remarks);
+      if (newBeams) {
+        plan.beams = newBeams;
+        plan.noOfBeams = beams.length;
+      }
+      plan.increment(); // bump __v so concurrent editors get a 409
+      await plan.save({ session });
+
+      const job = await JobOrder.findById(plan.job).session(session);
+      if (job) {
+        stampFingerprint(job, ACTION_CODES.WARPING_PLAN_UPDATED, {
+          req,
+          meta: { planId: plan._id.toString(), auditReason, before, after: { remarks: plan.remarks, noOfBeams: plan.noOfBeams } },
+        });
+        await job.save({ session });
+      }
     });
-    await job.save();
+  } catch (err) {
+    return next(err);
+  } finally {
+    session.endSession();
   }
 
   const populated = await WarpingPlan.findById(plan._id)
@@ -765,17 +817,56 @@ router.delete("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErro
     return next(err);
   }
 
-  const job = await JobOrder.findById(plan.job);
-  if (job) {
-    stampFingerprint(job, ACTION_CODES.WARPING_PLAN_DELETED, {
-      req,
-      meta: { planId: plan._id.toString(), auditReason, noOfBeams: plan.noOfBeams },
-    });
-    await job.save();
-  }
+  // The checks above ran on copies read earlier. Inside: the warping
+  // must still be open and still point at this plan, and no batch may
+  // have been raised meanwhile. A batch create writes the warping in its
+  // own transaction, so the two conflict and the loser re-reads.
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      if (warping) {
+        const unlinked = await Warping.updateOne(
+          // null: a warping whose link was never written (the old
+          // two-step create could fail between its writes).
+          { _id: warping._id, status: "open", warpingPlan: { $in: [plan._id, null] } },
+          { $unset: { warpingPlan: "" } },
+          { session }
+        );
+        if (unlinked.matchedCount === 0) {
+          throw new ErrorHandler(
+            "This warping was started or its plan changed just now. Reload to see it.", 409
+          );
+        }
+      }
+      const raised = await WarpingBatch.find({
+        warping: plan.warping,
+        status: { $ne: "cancelled" },
+      }).select("batchNo").session(session).lean();
+      if (raised.length > 0) {
+        const err = new ErrorHandler(
+          `${raised.map((b) => b.batchNo).join(", ")} was raised against this plan's beams just now. ` +
+          `Cancel it before deleting the plan.`,
+          409
+        );
+        err.code = "PLAN_HAS_BATCHES";
+        throw err;
+      }
 
-  if (warping) { warping.warpingPlan = undefined; await warping.save(); }
-  await plan.deleteOne();
+      const job = await JobOrder.findById(plan.job).session(session);
+      if (job) {
+        stampFingerprint(job, ACTION_CODES.WARPING_PLAN_DELETED, {
+          req,
+          meta: { planId: plan._id.toString(), auditReason, noOfBeams: plan.noOfBeams },
+        });
+        await job.save({ session });
+      }
+      await WarpingPlan.deleteOne({ _id: plan._id }, { session });
+    });
+  } catch (err) {
+    return next(err);
+  } finally {
+    session.endSession();
+  }
 
   res.status(200).json({ success: true, message: "Warping plan deleted", id: plan._id });
 }));
@@ -1363,11 +1454,21 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
         }
       }
 
-      await Warping.updateOne(
-        { _id: warping._id },
+      // Also confirms the plan the beam numbers were checked against
+      // is still this warping's plan, and the warping still takes
+      // batches: both could have changed since they were read above.
+      // (null: an older warping whose link to its plan was never
+      // written; the plan itself is looked for below.)
+      const claimed = await Warping.updateOne(
+        { _id: warping._id, warpingPlan: { $in: [plan._id, null] }, status: { $in: ["open", "in_progress"] } },
         { $inc: { batchSeq: 1 } },
         { session }
       );
+      if (claimed.matchedCount === 0 || !(await WarpingPlan.exists({ _id: plan._id }).session(session))) {
+        throw new ErrorHandler(
+          "This warping's plan or status changed just now, so the batch was not raised. Reload and try again.", 409
+        );
+      }
 
       const [created] = await WarpingBatch.create([{
         batchNo: `WB-${String(seq).padStart(4, "0")}`,

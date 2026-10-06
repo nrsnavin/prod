@@ -90,10 +90,11 @@ router.post(
     try {
       let wastageId;
       await session.withTransaction(async () => {
-        const [job, employee] = await Promise.all([
-          JobOrder.findById(jobId).session(session),
-          Employee.findById(employeeId).session(session),
-        ]);
+        // One after the other: a transaction's session runs one operation at a
+        // time (parallel operations in one transaction are not supported, and
+        // the first two racing to start it can fail).
+        const job      = await JobOrder.findById(jobId).session(session);
+        const employee = await Employee.findById(employeeId).session(session);
 
         if (!job)      throw new ErrorHandler("Job not found", 404);
         if (!employee) throw new ErrorHandler("Employee not found", 404);

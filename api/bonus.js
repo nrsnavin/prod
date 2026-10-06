@@ -340,12 +340,25 @@ router.post(
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
+        // Paid records, read again INSIDE the transaction. The list read
+        // above is from before it: a bonus paid in between was reset to
+        // pending with a recomputed amount, and re-posting it deleted its
+        // payment from the ledger. A payment that commits while this
+        // runs collides with the write below, so this is retried and
+        // sees it.
+        const paidNow = new Set(
+          (await BonusRecord.find({ year, status: "paid" }).select("employee").session(session).lean())
+            .map((r) => String(r.employee))
+        );
+        const live = records.filter((r) => !paidNow.has(String(r.employee)));
+        const liveOps = ops.filter((o) => !paidNow.has(String(o.updateOne.filter.employee)));
+
         // Drop pending rows for employees who no longer qualify/exist.
         await BonusRecord.deleteMany(
-          { year, status: "pending", employee: { $nin: records.map((r) => r.employee) } },
+          { year, status: "pending", employee: { $nin: live.map((r) => r.employee) } },
           { session }
         );
-        if (ops.length) await BonusRecord.bulkWrite(ops, { session });
+        if (liveOps.length) await BonusRecord.bulkWrite(liveOps, { session });
         cfg.status      = "triggered";
         cfg.triggeredAt = new Date();
         await cfg.save({ session });
@@ -357,7 +370,7 @@ router.post(
         // Only (re)post the records this run touched — a paid record's
         // ledger rows must not be rewritten.
         const posted = await BonusRecord.find({
-          year, employee: { $in: records.map((r) => r.employee) },
+          year, status: { $ne: "paid" }, employee: { $in: live.map((r) => r.employee) },
         }).session(session);
         for (const rec of posted) {
           await ledger.postDiwaliBonus(rec, diwaliDate, session, {
@@ -627,19 +640,26 @@ router.put(
   "/records/:id/pay",
   isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
-    const record = await BonusRecord.findById(req.params.id);
-    if (!record) return next(new ErrorHandler("Bonus record not found", 404));
-    if (record.status === "paid") {
+    const existing = await BonusRecord.findById(req.params.id).select("status").lean();
+    if (!existing) return next(new ErrorHandler("Bonus record not found", 404));
+    if (existing.status === "paid") {
       return next(new ErrorHandler("Already marked as paid", 400));
     }
 
-    // Marking paid + the ledger payment row are one atomic step.
+    // Marking paid + the ledger payment row are one atomic step, and the
+    // "not yet paid" check is IN the write. Checked beforehand only, two
+    // clicks both passed it; the second transaction collided, was
+    // retried, and posted the payment to the ledger a second time.
+    let record;
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
-        record.status = "paid";
-        record.paidAt = new Date();
-        await record.save({ session });
+        record = await BonusRecord.findOneAndUpdate(
+          { _id: req.params.id, status: { $ne: "paid" } },
+          { $set: { status: "paid", paidAt: new Date() } },
+          { new: true, session }
+        );
+        if (!record) throw new ErrorHandler("Already marked as paid", 400);
         await ledger.postBonusPaid(record, session, { postedBy: req.user?.name || 'admin' });
       });
     } finally { await session.endSession(); }

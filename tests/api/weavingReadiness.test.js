@@ -26,12 +26,13 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const request = require('supertest');
 const mongoose = require('mongoose');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// Status changes are transactions now, which need a replica set.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 let app, mongo, JobOrder, Warping, Covering;
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(mongo.getUri());
   JobOrder = require('../../models/JobOrder');
   Warping  = require('../../models/Warping');

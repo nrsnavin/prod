@@ -35,6 +35,7 @@ const ErrorHandler     = require('../utils/ErrorHandler');
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const { isAdmin }      = require('../middleware/auth');
 const { appendStockMovement } = require('../utils/stockLedger');
+const { saveIf, changedMeanwhile } = require('../utils/conditionalSave');
 const { costOf }       = require('../utils/materialValuation');
 const {
   buildFingerprint, actorFromRequest, ACTION_CODES,
@@ -480,7 +481,13 @@ router.patch(
     if (allCounted && count.status === 'counting') count.status = 'review';
     if (!allCounted && count.status === 'review')  count.status = 'counting';
 
-    await count.save();
+    // Saved only while the count is still open, in the same write: a
+    // count posted (or cancelled) after the check above must not be
+    // switched back to "counting", which let it be posted, and its stock
+    // adjusted, a second time.
+    if (!(await saveIf(count, { status: { $nin: ['posted', 'cancelled'] } }))) {
+      return next(changedMeanwhile(`Count #${count.countNo}`, 'posted or cancelled'));
+    }
 
     // Nothing landed and everything was rejected: that is a failed
     // request, not a successful one with notes attached. Reported as
@@ -774,7 +781,11 @@ router.post(
       actor: actorFromRequest(req),
       meta: { countNo: count.countNo, reason },
     }));
-    await count.save();
+    // Only while not posted, in the same write: a count posted after the
+    // check above has moved stock, and cancelling it would hide that.
+    if (!(await saveIf(count, { status: { $nin: ['posted', 'cancelled'] } }))) {
+      return next(changedMeanwhile(`Count #${count.countNo}`, 'posted or cancelled'));
+    }
 
     res.json({ success: true, count: shape(count.toObject()) });
   })

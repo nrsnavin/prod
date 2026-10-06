@@ -16,6 +16,7 @@
 
 const NotificationSettings = require("../models/NotificationSettings.js");
 const Notification         = require("../models/Notification.js");
+const NotifyThrottle       = require("../models/NotifyThrottle.js");
 const { sendWhatsApp }     = require("./whatsapp.js");
 
 // ── Pure formatters ──────────────────────────────────────────────
@@ -460,26 +461,47 @@ async function notify(eventType, payload = {}) {
       return { skipped: `no formatter for ${eventType}` };
     }
 
+    // The check above reads, then sends; two workers can both read
+    // "nothing recent". Claiming the window is the atomic part, and
+    // whoever loses it is throttled. Given back below if nothing was
+    // actually sent, so a dry run or a provider error does not mute
+    // the next attempt (the check above only counts "sent" rows).
+    const claim = cfg.throttleSeconds > 0 && auditEntity?.id
+      ? await _claimThrottle(eventType, auditEntity.id, cfg.throttleSeconds)
+      : null;
+    if (claim === false) {
+      await _audit({
+        event: eventType, status: "skipped",
+        reason: `throttled (another send is in its ${cfg.throttleSeconds}s window)`,
+        entity: auditEntity, actor: auditActor,
+      });
+      return { skipped: "throttled" };
+    }
+
     const mediaUrl = payload?._mediaUrl || null;
     const results = [];
-    for (const to of recipients) {
-      const r = await sendWhatsApp(to, body, mediaUrl ? { mediaUrl } : {});
-      results.push(r);
-      const status = r.sent
-        ? "sent"
-        : r.dryRun
-          ? "dry_run"
-          : "error";
-      await _audit({
-        event:      eventType,
-        recipient:  to,
-        body,
-        status,
-        reason:     r.error || (r.dryRun ? "provider not configured" : undefined),
-        providerId: r.providerId,
-        entity:     auditEntity,
-        actor:      auditActor,
-      });
+    try {
+      for (const to of recipients) {
+        const r = await sendWhatsApp(to, body, mediaUrl ? { mediaUrl } : {});
+        results.push(r);
+        const status = r.sent
+          ? "sent"
+          : r.dryRun
+            ? "dry_run"
+            : "error";
+        await _audit({
+          event:      eventType,
+          recipient:  to,
+          body,
+          status,
+          reason:     r.error || (r.dryRun ? "provider not configured" : undefined),
+          providerId: r.providerId,
+          entity:     auditEntity,
+          actor:      auditActor,
+        });
+      }
+    } finally {
+      if (claim && !results.some((r) => r.sent)) await _releaseThrottle(claim);
     }
     return { sent: results.filter((r) => r.sent).length, results };
   } catch (err) {
@@ -491,6 +513,36 @@ async function notify(eventType, payload = {}) {
       });
     } catch (_) { /* swallow — audit must not throw */ }
     return { error: err?.message };
+  }
+}
+
+// Open the throttle window for (event, entity), or false if it is
+// already open. The upsert only matches a window opened more than
+// `seconds` ago; an open one makes it try an insert, which the unique
+// key refuses. Keyed on when it opened, not when it closes, so
+// shortening the throttle in settings takes effect at once.
+async function _claimThrottle(eventType, entityId, seconds) {
+  const key = `${eventType}:${entityId}`;
+  const at = new Date();
+  const since = new Date(at.getTime() - seconds * 1000);
+  try {
+    await NotifyThrottle.updateOne(
+      { key, at: { $lte: since } },
+      { $set: { at, until: new Date(at.getTime() + seconds * 1000) } },
+      { upsert: true }
+    );
+    return { key, at };
+  } catch (err) {
+    if (err?.code === 11000) return false;
+    throw err;
+  }
+}
+
+async function _releaseThrottle({ key, at }) {
+  try {
+    await NotifyThrottle.deleteOne({ key, at });
+  } catch (err) {
+    console.warn(`[notify] could not reopen throttle ${key}: ${err?.message}`);
   }
 }
 

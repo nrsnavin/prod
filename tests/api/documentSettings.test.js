@@ -121,3 +121,42 @@ describe('PDF generators consume the branding', () => {
     expect(buf.slice(0, 4).toString()).toBe('%PDF');
   });
 });
+
+describe('the cache, with more than one server process', () => {
+  // invalidate() runs only in the process that saved. Another worker
+  // finds out by checking updatedAt once its copy is a few seconds old.
+  test('a change saved by another process shows within seconds, not after the full minute', async () => {
+    await service.getDocumentSettings({ fresh: true });
+    const before = await service.getDocumentSettings();
+
+    // Saved elsewhere: the stored row changes, this process is not told.
+    await DocumentSettings.updateOne({ key: 'document' }, { $set: { tagline: 'Saved by worker 2' } });
+    expect((await service.getDocumentSettings()).tagline).toBe(before.tagline);
+
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now + 6_000);
+    try {
+      expect((await service.getDocumentSettings()).tagline).toBe('Saved by worker 2');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test('the sandbox and live databases keep separate copies', async () => {
+    const { runInDb } = require('../../db/tenants.js');
+    service.invalidate();
+    const live = await service.getDocumentSettings();
+    const sandbox = await runInDb('settings_sandbox_test', () => service.getDocumentSettings());
+    // The models only route when sandboxing is installed; what matters
+    // here is that the cache does not hand one database's copy to the other.
+    expect(sandbox).not.toBe(live);
+  });
+});
+
+test('reading the settings does not look like a save to the other workers', async () => {
+  await service.getDocumentSettings({ fresh: true });
+  const stamped = (await DocumentSettings.findOne({ key: 'document' }).lean()).updatedAt;
+  await new Promise((r) => setTimeout(r, 15));
+  await service.getDocumentSettings({ fresh: true });
+  expect((await DocumentSettings.findOne({ key: 'document' }).lean()).updatedAt).toEqual(stamped);
+});

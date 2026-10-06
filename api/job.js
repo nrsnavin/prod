@@ -127,12 +127,13 @@ function fullJobPopulate(query) {
  * Never touches a machine in maintenance — that is not a job holding it,
  * and "free" would put a machine back in the picker that is in pieces.
  */
-async function releaseMachinesForJob(job) {
+async function releaseMachinesForJob(job, session = null) {
   if (!job?._id) return;
 
   await Machine.updateMany(
     { orderRunning: job._id, status: 'running' },
-    { $set: { status: 'free', orderRunning: null, elastics: [] } }
+    { $set: { status: 'free', orderRunning: null, elastics: [] } },
+    { session }
   );
 
   // The mirror-image stray: the job points at a machine that no longer
@@ -140,7 +141,8 @@ async function releaseMachinesForJob(job) {
   if (job.machine) {
     await Machine.updateOne(
       { _id: job.machine, status: { $ne: 'maintenance' } },
-      { $set: { status: 'free', orderRunning: null, elastics: [] } }
+      { $set: { status: 'free', orderRunning: null, elastics: [] } },
+      { session }
     );
   }
 }
@@ -285,7 +287,9 @@ router.post(
     if (Object.values(headElasticMap).some(v => !v))
       return next(new ErrorHandler('All machine heads must have an elastic assigned', 400));
 
-    const job = await JobOrder.findById(jobId);
+    // `let`: re-read inside the transaction below, which is the copy that
+    // is judged and written. This one only fails fast on the common case.
+    let job = await JobOrder.findById(jobId);
     if (!job) return next(new ErrorHandler('Job not found', 404));
     if (!['preparatory', 'weaving'].includes(job.status))
       return next(new ErrorHandler(`Job must be preparatory or weaving (current: "${job.status}")`, 400));
@@ -309,11 +313,11 @@ router.post(
       return next(hookFitError(machineForFit, fit, ErrorHandler));
     }
 
-    const movingWhileRunning =
+    let movingWhileRunning =
       job.status === 'weaving' &&
       job.machine &&
       job.machine.toString() !== String(machineId);
-    const previousMachineId = job.machine ? job.machine.toString() : null;
+    let previousMachineId = job.machine ? job.machine.toString() : null;
 
     // Machine claim + job status flip must be atomic. Without a
     // transaction two concurrent /plan-weaving requests could both
@@ -325,6 +329,20 @@ router.post(
     let held = null;
     try {
       await session.withTransaction(async () => {
+        // The job as it is now, not as it was before the transaction: a
+        // job cancelled meanwhile must not be flipped back to weaving,
+        // and a retried attempt must not stamp its audit entries twice
+        // on a copy it already changed.
+        held = null;
+        job = await JobOrder.findById(jobId).session(session);
+        if (!job) throw new ErrorHandler('Job not found', 404);
+        if (!['preparatory', 'weaving'].includes(job.status)) {
+          throw new ErrorHandler(`Job must be preparatory or weaving (current: "${job.status}")`, 409);
+        }
+        movingWhileRunning =
+          job.status === 'weaving' && job.machine && job.machine.toString() !== String(machineId);
+        previousMachineId = job.machine ? job.machine.toString() : null;
+
         // Atomic claim: only flip free → running, so the second
         // racing request gets null and bails cleanly.
         // Claim only a free machine, OR the one this job is already on —
@@ -701,141 +719,119 @@ router.post(
     if (!jobId)      return next(new ErrorHandler('jobId is required', 400));
     if (!nextStatus) return next(new ErrorHandler('nextStatus is required', 400));
 
-    const job = await JobOrder.findById(jobId);
-    if (!job) return next(new ErrorHandler('Job not found', 404));
-
-    const check = validateTransition(job.status, nextStatus);
-    if (!check.ok) return next(new ErrorHandler(check.message, 400));
-
-    // preparatory → weaving is the one transition the state machine
-    // cannot decide alone: the job only counts as prepared once BOTH
-    // its warping and its covering are completed. If either is still
-    // open the job keeps its status and the caller is told which one —
-    // no partial move, no silent no-op.
-    if (check.gate === 'weaving-readiness') {
-      const readiness = await checkWeavingReadiness(job._id);
-      if (!readiness.ready) {
-        const err = new ErrorHandler(
-          `Job cannot move to weaving yet — ${readiness.blockers.join('; ')}`,
-          409
-        );
-        err.code = 'WEAVING_NOT_READY';
-        err.details = { status: job.status, stages: readiness.stages, blockers: readiness.blockers };
-        return next(err);
-      }
-    }
-
-    // An outsourced job has no shift trail, so its vendor record IS the
-    // production record — and `finishing` is where production and the
-    // outsource toggle both close (utils/productionLock.js). A record
-    // left blank at this moment stays blank for good, so the move is
-    // refused until it reconciles. Same shape as the weaving gate above:
-    // the job keeps its status and the caller is told what is missing.
-    if (nextStatus === 'finishing' && job.productionMode === 'outsource') {
-      const blockers = outsourcingBlockers(job.outsourcing);
-      if (blockers.length > 0) {
-        const err = new ErrorHandler(
-          `Job cannot move to finishing yet — complete the vendor record: ${blockers.join('; ')}`,
-          409
-        );
-        err.code = 'OUTSOURCING_INCOMPLETE';
-        err.details = { status: job.status, vendor: job.outsourceVendor || '', blockers };
-        return next(err);
-      }
-    }
-
-    // Weaving is over, so the machine goes back in the pool.
-    if (nextStatus === 'finishing') {
-      await releaseMachinesForJob(job);
-      job.machine = undefined;
-    }
-
-    const previousStage = job.status;
-    const actor = actorFromRequest(req);
-
-    // 🪪 Stage update fingerprint (every transition)
-    const stageFp = buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
-      entityId: job._id,
-      actor,
-      meta: {
-        previousStage,
-        newStage:        nextStatus,
-        jobOrderNo:      job.jobOrderNo,
-        machineReleased: nextStatus === 'finishing',
-      },
-    });
-    job.fingerprints.push(stageFp);
-
+    // ── One transaction, on the job as it is now ──────────────────
+    // The transition used to be judged on a copy read before anything
+    // was written, then saved: a cancellation (or another status move)
+    // landing in between was overwritten, and the looms were released
+    // before the save that could still fail. Now the job is read, judged
+    // and written inside one transaction; a write that collides with
+    // another is retried from the read.
+    //
+    // Completing a job also writes its ORDER. Two last jobs completing
+    // at the same moment each saw the other still running, so neither
+    // closed the order, which then stayed in progress with every job
+    // done. Both now write the order, so the second is retried, sees
+    // the first done, and closes it.
+    let job;
+    let stageFp;
     let completionFp = null;
-    // Set when the completion transaction below has already saved the
-    // job, so the ordinary save at the end does not repeat it.
-    let jobSavedInTxn = false;
-    if (nextStatus === 'completed') {
-      const siblingJobs = await JobOrder.find({ order: job.order, _id: { $ne: job._id } }).select('status');
-      const allDone = siblingJobs.every(j => ['completed', 'cancelled'].includes(j.status));
+    const actor = actorFromRequest(req);
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        completionFp = null;
+        job = await JobOrder.findById(jobId).session(session);
+        if (!job) throw new ErrorHandler('Job not found', 404);
 
-      // 🪪 Job completion milestone fingerprint
-      completionFp = buildFingerprint(ACTION_CODES.JOB_COMPLETED, {
-        entityId: job._id,
-        actor,
-        meta: {
-          jobOrderNo:        job.jobOrderNo,
-          orderId:           job.order.toString(),
-          allSiblingsDone:   allDone,
-          orderClosedByThis: allDone,
-        },
-      });
-      job.fingerprints.push(completionFp);
+        const check = validateTransition(job.status, nextStatus);
+        if (!check.ok) throw new ErrorHandler(check.message, 400);
 
-      if (allDone) {
-        // ── Closing the order gives its reserved stock back ─────────
-        //
-        // This cascade used to flip the status and nothing else, while
-        // POST /order/complete released every remaining reservation
-        // first. Two doors into one state, and only one of them tidied
-        // up — so an order finished by its last job kept holding
-        // `Elastic.reservedStock` forever. Completed is terminal, so
-        // /order/complete could never be run on it afterwards to
-        // recover: every later order simply saw less available than
-        // there was, permanently, with nothing on any screen to say so.
-        //
-        // In a transaction because it now moves stock: the release, the
-        // order's status and the job's own status have to land together
-        // or not at all. Releasing stock and then failing to record the
-        // completion would hand the same units out twice.
-        const session = await mongoose.startSession();
-        try {
-          await session.withTransaction(async () => {
-            // Completes the order and releases its reservations
-            // (services/orderLifecycle.js) — unless it was cancelled or
-            // deleted, which its jobs finishing must never undo.
-            const closed = await orderLifecycle.lastJobCompleted(session, job, {
+        if (check.gate === 'weaving-readiness') {
+          const readiness = await checkWeavingReadiness(job._id, session);
+          if (!readiness.ready) {
+            const err = new ErrorHandler(
+              `Job cannot move to weaving yet — ${readiness.blockers.join('; ')}`,
+              409
+            );
+            err.code = 'WEAVING_NOT_READY';
+            err.details = { status: job.status, stages: readiness.stages, blockers: readiness.blockers };
+            throw err;
+          }
+        }
+
+        // An outsourced job's vendor record must be complete before it
+        // comes back for finishing.
+        if (nextStatus === 'finishing' && job.productionMode === 'outsource') {
+          const blockers = outsourcingBlockers(job.outsourcing);
+          if (blockers.length > 0) {
+            const err = new ErrorHandler(
+              `Job cannot move to finishing yet — complete the vendor record: ${blockers.join('; ')}`,
+              409
+            );
+            err.code = 'OUTSOURCING_INCOMPLETE';
+            err.details = { status: job.status, vendor: job.outsourceVendor || '', blockers };
+            throw err;
+          }
+        }
+
+        // Off the loom: let the machines go, in the same transaction as
+        // the status, so a failed save does not leave them released.
+        if (nextStatus === 'finishing') {
+          await releaseMachinesForJob(job, session);
+          job.machine = undefined;
+        }
+
+        const previousStage = job.status;
+        stageFp = buildFingerprint(ACTION_CODES.JOB_STAGE_UPDATED, {
+          entityId: job._id,
+          actor,
+          meta: {
+            previousStage,
+            newStage:        nextStatus,
+            jobOrderNo:      job.jobOrderNo,
+            machineReleased: nextStatus === 'finishing',
+          },
+        });
+        job.fingerprints.push(stageFp);
+
+        if (nextStatus === 'completed') {
+          // Touch the order first: see above. Any two completions on one
+          // order now write the same document and cannot both read stale.
+          await Order.updateOne({ _id: job.order }, { $currentDate: { updatedAt: true } }, { session });
+
+          const siblingJobs = await JobOrder.find({ order: job.order, _id: { $ne: job._id } })
+            .select('status').session(session);
+          const allDone = siblingJobs.every(j => ['completed', 'cancelled'].includes(j.status));
+
+          // 🪪 Job completion milestone fingerprint
+          completionFp = buildFingerprint(ACTION_CODES.JOB_COMPLETED, {
+            entityId: job._id,
+            actor,
+            meta: {
+              jobOrderNo:        job.jobOrderNo,
+              orderId:           job.order.toString(),
+              allSiblingsDone:   allDone,
+              orderClosedByThis: allDone,
+            },
+          });
+          job.fingerprints.push(completionFp);
+
+          // The last job done closes the order and gives its reserved
+          // stock back (services/orderLifecycle.js), unless the order was
+          // cancelled or deleted, which its jobs finishing never undoes.
+          if (allDone) {
+            await orderLifecycle.lastJobCompleted(session, job, {
               actor, userId: req.user?._id, completionFp,
             });
-            if (closed) {
-              // Saved inside the same transaction as the release. The
-              // job's own status is what made this happen, and a
-              // release that committed without it would leave the order
-              // closed against a job still reading as packing.
-              stampStage(job, nextStatus, req.user?._id);
-              job.status = nextStatus;
-              await job.save({ session });
-              jobSavedInTxn = true;
-            }
-          });
-        } finally {
-          session.endSession();
+          }
         }
-      }
-    }
 
-    // Already written inside the completion transaction above, when the
-    // order closed with it. Saving again here would bump the document a
-    // second time for one transition.
-    if (!jobSavedInTxn) {
-      stampStage(job, nextStatus, req.user?._id);
-      job.status = nextStatus;
-      await job.save();
+        stampStage(job, nextStatus, req.user?._id);
+        job.status = nextStatus;
+        await job.save({ session });
+      });
+    } finally {
+      await session.endSession();
     }
 
     res.json({
@@ -876,45 +872,59 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const { jobId, reason } = req.body;
     if (!jobId) return next(new ErrorHandler('jobId is required', 400));
-    const job = await JobOrder.findById(jobId);
-    if (!job) return next(new ErrorHandler('Job not found', 404));
-    if (job.status === 'cancelled') return next(new ErrorHandler('Job is already cancelled', 400));
-    if (job.status === 'completed') return next(new ErrorHandler('A completed job cannot be cancelled', 400));
+    // One transaction, on the job as it is now. This was a run of
+    // separate writes on a copy read first: the looms released, the job
+    // saved, then the order. A failure part-way left the order still
+    // counting a cancelled job's quantity, and a completion or another
+    // cancel landing in between was overwritten. Re-read and judged
+    // inside the transaction; anything colliding with it is retried.
+    let job;
+    let fp;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        job = await JobOrder.findById(jobId).session(session);
+        if (!job) throw new ErrorHandler('Job not found', 404);
+        if (job.status === 'cancelled') throw new ErrorHandler('Job is already cancelled', 400);
+        if (job.status === 'completed') throw new ErrorHandler('A completed job cannot be cancelled', 400);
 
-    // Whatever the job was standing on, it is not standing on it now.
-    //
-    // This used to run only for a job in WEAVING that pointed at a
-    // machine. A machine can be claimed while the job is still
-    // preparatory — the system offers that deliberately, to reserve
-    // capacity — so cancelling such a job left its machine running
-    // forever on a job that no longer exists to release it.
-    await releaseMachinesForJob(job);
-    job.machine = undefined;
+        // Whatever the job was standing on, it is not standing on it now.
+        //
+        // This used to run only for a job in WEAVING that pointed at a
+        // machine. A machine can be claimed while the job is still
+        // preparatory — the system offers that deliberately, to reserve
+        // capacity — so cancelling such a job left its machine running
+        // forever on a job that no longer exists to release it.
+        await releaseMachinesForJob(job, session);
+        job.machine = undefined;
 
-    const previousStatus = job.status;
-    stampStage(job, 'cancelled', req.user?._id);
-    job.status = 'cancelled';
-    if (reason) job.cancelReason = reason;
+        const previousStatus = job.status;
+        stampStage(job, 'cancelled', req.user?._id);
+        job.status = 'cancelled';
+        if (reason) job.cancelReason = reason;
 
-    // 🪪 Fingerprint: JOB_CANCELLED
-    const fp = buildFingerprint(ACTION_CODES.JOB_CANCELLED, {
-      entityId: job._id,
-      actor:    actorFromRequest(req),
-      meta: {
-        previousStatus,
-        reason:     reason || null,
-        jobOrderNo: job.jobOrderNo,
-      },
-    });
-    job.fingerprints.push(fp);
-    await job.save();
+        // 🪪 Fingerprint: JOB_CANCELLED
+        fp = buildFingerprint(ACTION_CODES.JOB_CANCELLED, {
+          entityId: job._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            previousStatus,
+            reason:     reason || null,
+            jobOrderNo: job.jobOrderNo,
+          },
+        });
+        job.fingerprints.push(fp);
+        await job.save({ session });
 
-    // Only now that the job is actually marked 'cancelled' does its planned
-    // quantity return to pending — recompute AFTER the save, or the job
-    // would still be counted as holding the quantity.
-    // Pending goes back up; with nothing live left, a running order
-    // goes back to waiting (services/orderLifecycle.js).
-    await orderLifecycle.jobCancelled(job, { userId: req.user?._id });
+        // Only now that the job is marked 'cancelled' does its planned
+        // quantity return to pending: recomputed after the save, in the
+        // same transaction. With nothing live left, a running order goes
+        // back to waiting (services/orderLifecycle.js).
+        await orderLifecycle.jobCancelled(job, { userId: req.user?._id, session });
+      });
+    } finally {
+      await session.endSession();
+    }
 
     res.json({
       success: true,

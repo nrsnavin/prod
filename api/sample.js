@@ -37,6 +37,7 @@ const ErrorHandler = require('../utils/ErrorHandler.js');
 const { isAdmin } = require('../middleware/auth.js');
 const { escapeRegex } = require('../utils/escapeRegex.js');
 const { requireReason } = require('../utils/auditReason.js');
+const { saveIf, changedMeanwhile } = require('../utils/conditionalSave.js');
 const { nextNumber } = require('../utils/sequence.js');
 const Customer = require('../models/Customer.js');
 const SampleRequest = require('../models/SampleRequest.js');
@@ -649,7 +650,12 @@ router.put(
       byName: who.byName,
       at: new Date(),
     });
-    await doc.save();
+    // Saved only if nobody moved it meanwhile: otherwise a close and a
+    // reopen at the same moment both "succeed", and the log says the
+    // second came from a status the sample had already left.
+    if (!(await saveIf(doc, { status: from }))) {
+      return next(changedMeanwhile('This sample', 'updated'));
+    }
 
     const fresh = await SampleRequest.findById(doc._id).populate('customer', 'name').lean();
     res.status(200).json({ success: true, sample: shapeDetail(fresh, await photosOf(doc._id)) });

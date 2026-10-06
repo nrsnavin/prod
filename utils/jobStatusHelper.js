@@ -66,12 +66,11 @@ async function checkAndAdvanceToWeaving(jobId, session = null) {
     return { advanced: false, jobStatus: job.status };
   }
 
-  // Fetch both docs in parallel — share the session so we read
-  // the latest in-transaction state.
-  const [warping, covering] = await Promise.all([
-    withSession(Warping.findById(job.warping).select("status")).lean(),
-    withSession(Covering.findById(job.covering).select("status")).lean(),
-  ]);
+  // Both docs, in the same session so we read the latest
+  // in-transaction state, and one after the other: a session runs one
+  // operation at a time inside a transaction.
+  const warping  = await withSession(Warping.findById(job.warping).select("status")).lean();
+  const covering = await withSession(Covering.findById(job.covering).select("status")).lean();
 
   const warpingDone  = warping?.status  === "completed";
   const coveringDone = covering?.status === "completed";

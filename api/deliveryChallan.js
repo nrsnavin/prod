@@ -487,7 +487,16 @@ router.get(
  * Writes `consumedFromReservation` / `consumedFromStock` back onto each
  * item, so a later reversal can read what this despatch actually did.
  */
-async function _applyDcItems(session, dc, userId) {
+/** Shipping more than is on hand needs a reason at least this long. */
+const MIN_SHORTFALL_REASON = 8;
+
+async function _applyDcItems(session, dc, userId, { shortfallReason } = {}) {
+    // What each line asked to take out, against what the shelf held at
+    // that moment. Stock stops at zero, so without this check a challan
+    // could say 500 m left while stock fell by 300 (including when two
+    // challans take the last stock at the same time: the second finds
+    // it gone). Collected here, decided after the loop.
+    const shortfalls = [];
   if (dc.type !== "elastic") return;
     // Resolve the parent order once. Only Approved/InProgress
     // orders participate in reservation consumption — per
@@ -533,7 +542,7 @@ async function _applyDcItems(session, dc, userId) {
       // `reservedQuantity` settles the promise on the same row:
       // goods out, claim discharged, both balances stated.
       if (shipped > 0) {
-        await applyMovement(session, {
+        const { movement } = await applyMovement(session, {
           elasticId:        item.elastic,
           type:             "DC_OUT",
           quantity:         -shipped,
@@ -545,6 +554,16 @@ async function _applyDcItems(session, dc, userId) {
             : `DC ${dc.dcNumber}`,
           by:               userId,
         });
+        const moved = Math.abs(Number(movement?.applied) || 0);
+        if (moved < shipped) {
+          shortfalls.push({
+            elastic: item.elastic,
+            name: item.elasticName || "",
+            shipping: shipped,
+            onHand: moved,
+            short: Math.round((shipped - moved) * 1000) / 1000,
+          });
+        }
       }
 
       // The order's own reservation entry shrinks by what this
@@ -562,6 +581,27 @@ async function _applyDcItems(session, dc, userId) {
       // Persist the split on the item.
       dc.items[i].consumedFromReservation = consumeFromReservation;
       dc.items[i].consumedFromStock       = consumeFromStock;
+    }
+
+    // More out than in stock: refused unless someone says why (the same
+    // rule as approving an order short of yarn). Thrown inside the
+    // caller's transaction, so nothing of this challan is kept.
+    if (shortfalls.length > 0) {
+      const reason = String(shortfallReason || "").trim();
+      if (reason.length < MIN_SHORTFALL_REASON) {
+        const err = new ErrorHandler(
+          "Not enough in stock for this challan — " +
+            shortfalls.map((s) => `${s.name || "an elastic"}: shipping ${s.shipping}, ${s.onHand} in stock`).join("; ") +
+            `. To send it anyway, give a reason (at least ${MIN_SHORTFALL_REASON} characters).`,
+          409
+        );
+        err.code = "DC_STOCK_SHORT";
+        err.details = { shortfalls, minReasonLength: MIN_SHORTFALL_REASON };
+        throw err;
+      }
+      dc.stockShortfall = { reason, lines: shortfalls, at: new Date(), by: userId || undefined };
+    } else {
+      dc.stockShortfall = undefined;
     }
 
     if (orderDoc) {
@@ -684,7 +724,7 @@ router.post(
         dc.fingerprints.push(fp);
 
         if (dc.type === "elastic") {
-          await _applyDcItems(session, dc, req.user?._id);
+          await _applyDcItems(session, dc, req.user?._id, { shortfallReason: req.body?.stockShortfallReason });
         }
 
         // Outbox: the late-dispatch alert commits WITH the challan —
@@ -827,7 +867,7 @@ router.put(
 
           // 3. Take the new lines out again, through the same helper
           //    /create uses.
-          await _applyDcItems(session, dc, req.user?._id);
+          await _applyDcItems(session, dc, req.user?._id, { shortfallReason: req.body?.stockShortfallReason });
         }
 
         // ── The despatch detail ─────────────────────────────────────

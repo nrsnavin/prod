@@ -122,6 +122,27 @@ const DeliveryChallanSchema = new mongoose.Schema(
 
     remarks: { type: String, default: "" },
 
+    // Shipped more than was in stock, on purpose and with a reason
+    // (api/deliveryChallan.js _applyDcItems). Stock never goes below
+    // zero, so `short` is what the challan says left beyond what the
+    // shelf held; the reason says why that was right.
+    stockShortfall: {
+      type: new mongoose.Schema({
+        reason: { type: String, trim: true },
+        lines: [{
+          _id: false,
+          elastic: { type: mongoose.Types.ObjectId, ref: "Elastic" },
+          name: String,
+          shipping: Number,
+          onHand: Number,
+          short: Number,
+        }],
+        at: Date,
+        by: { type: mongoose.Types.ObjectId, ref: "User" },
+      }, { _id: false }),
+      default: undefined,
+    },
+
     fingerprints: {
       type:    [FingerprintSchema],
       default: [],

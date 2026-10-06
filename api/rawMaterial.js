@@ -679,6 +679,9 @@ router.post(
         po = await PurchaseOrder.findById(purchaseOrderId).session(session);
         if (!material) throw new ErrorHandler("Raw material not found", 404);
         if (!po)       throw new ErrorHandler("Purchase order not found", 404);
+        if (po.status === "Cancelled") {
+          throw new ErrorHandler("This purchase order is cancelled, so nothing was received against it.", 409);
+        }
 
         _stockBefore = Number(material.stock) || 0;
         const poLine = po.items.find(
@@ -718,6 +721,7 @@ router.post(
             (i) => (i.receivedQuantity || 0) >= (i.quantity || 0)
           );
           po.status = allFilled ? "Completed" : "Partial";
+          po.increment(); // an edit opened before this receipt gets a 409, not an overwrite
           await po.save({ session });
         }
       });

@@ -310,3 +310,69 @@ describe('reset unlocks the settings', () => {
     expect((await BonusConfig.findOne({ year: curYear })).bonusLabel).toBe('Diwali X');
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  RACES: a bonus is paid once, and generating cannot undo a payment
+// ══════════════════════════════════════════════════════════════════
+describe('two things happening to one bonus at once', () => {
+  async function generated() {
+    const emp = await makeEmp('Racer');
+    await paidMonth(emp);
+    await marked(emp, [3, 4], 'present');
+    // A second, unpaid employee keeps the year open for regeneration.
+    const other = await makeEmp('Other');
+    await paidMonth(other);
+    await marked(other, [3, 4], 'present');
+    await makeCfg();
+    await request(app).post('/api/v2/bonus/trigger').set('Cookie', cookie()).send({ year: curYear });
+    return BonusRecord.findOne({ employee: emp._id });
+  }
+
+  test('paid twice at the same moment: one payment, on the record and on the ledger', async () => {
+    const rec = await generated();
+    // Both requests read "not paid" before either writes.
+    const realFindById = BonusRecord.findById.bind(BonusRecord);
+    let arrived = 0; let release;
+    const barrier = new Promise((r) => { release = r; });
+    const spy = jest.spyOn(BonusRecord, 'findById').mockImplementation((...a) => {
+      const q = realFindById(...a);
+      const then = q.then.bind(q);
+      q.then = (ok, fail) => (async () => {
+        if (++arrived === 2) release();
+        await Promise.race([barrier, new Promise((r) => setTimeout(r, 2000))]);
+        return then(ok, fail);
+      })();
+      return q;
+    });
+    try {
+      const pay = () => request(app).put(`/api/v2/bonus/records/${rec._id}/pay`).set('Cookie', cookie());
+      const [a, b] = await Promise.all([pay(), pay()]);
+      expect([a.status, b.status].sort()).toEqual([200, 400]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await LedgerEntry.countDocuments({ sourceId: rec._id, kind: 'payment' })).toBe(1);
+  });
+
+  test('a bonus paid while the year is being regenerated stays paid, payment and all', async () => {
+    const rec = await generated();
+    // Regeneration reads the paid list before its transaction; the
+    // payment lands in that gap. Served here as the stale empty list.
+    const realFind = BonusRecord.find.bind(BonusRecord);
+    const spy = jest.spyOn(BonusRecord, 'find').mockImplementationOnce((filter, ...rest) => {
+      const q = realFind(filter, ...rest);
+      q.lean = () => Promise.resolve([]); // "nobody is paid yet"
+      return q;
+    });
+    await request(app).put(`/api/v2/bonus/records/${rec._id}/pay`).set('Cookie', cookie());
+    try {
+      const again = await request(app).post('/api/v2/bonus/trigger').set('Cookie', cookie()).send({ year: curYear });
+      expect(again.status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = await BonusRecord.findById(rec._id).lean();
+    expect(after.status).toBe('paid');
+    expect(await LedgerEntry.countDocuments({ sourceId: rec._id, kind: 'payment' })).toBe(1);
+  });
+});

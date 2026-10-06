@@ -19,6 +19,12 @@ module.exports = (err, req, res, next) => {
   if (err.name === "VersionError") {
     err = new ErrorHandler(CONFLICT_MESSAGE, 409);
   }
+  // A save made conditional (utils/conditionalSave.js, or a document
+  // whose $where no longer matched) found the record changed: the same
+  // meaning, so the same answer, rather than a 500.
+  if (err.name === "DocumentNotFoundError") {
+    err = new ErrorHandler(CONFLICT_MESSAGE, 409);
+  }
 
   // Preserve route-supplied diagnostic fields so the frontend can
   // branch on them (e.g. INSUFFICIENT_STOCK → show force-approve

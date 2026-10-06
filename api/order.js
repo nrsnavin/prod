@@ -10,6 +10,7 @@ const Job = require("../models/JobOrder.js");
 const Elastic = require("../models/Elastic.js");
 const { computeMaterialRequirement } = require("../utils/materialRequirement.js");
 const ErrorHandler = require("../utils/ErrorHandler.js");
+const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 const { buildOrderStatusReport } = require("../services/orderStatusReport.js");
 const PurchaseOrder = require("../models/PurchaseOrder.js");
 const { triageShortfall, createShortfallPos, skipReasons } = require("../services/shortfallPo.js");
@@ -1000,7 +1001,11 @@ router.post(
       meta:     { previousStatus: "Approved", newStatus: "InProgress" },
     });
     order.fingerprints.push(fp);
-    await order.save();
+    // Only while still Approved, in the same write: an order cancelled
+    // (or completed) after the check above must not be revived.
+    if (!(await saveIf(order, { status: "Approved" }))) {
+      return next(changedMeanwhile(`Order #${order.orderNo ?? ""}`.trim(), "changed"));
+    }
 
     res.status(200).json({
       success: true,

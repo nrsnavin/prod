@@ -136,3 +136,52 @@ describe('a receipt whose transaction is retried', () => {
     expect(after.items[0].receivedQuantity).toBe(40);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  A PO CHANGED BY TWO PEOPLE AT ONCE: one receiving, one editing or
+//  cancelling. Each test serves the second person the copy they read
+//  just before the other's change committed.
+// ══════════════════════════════════════════════════════════════════
+describe('a receipt and an edit or cancel of the same PO at once', () => {
+  const staleNext = (doc) =>
+    jest.spyOn(PurchaseOrder, 'findById').mockImplementationOnce(() => Promise.resolve(doc));
+
+  it('an edit opened before a receipt cannot save over what was received', async () => {
+    const { yarn, po } = await seedPo({ ordered: 100 });
+    const stale = await PurchaseOrder.findById(po._id);
+    expect((await receive(po, yarn, 40)).status).toBe(201);
+
+    staleNext(stale);
+    const res = await request(app).put('/api/v2/supplier/edit-po').set('Cookie', adminCookie()).send({
+      poId: String(po._id), auditReason: 'supplier revised',
+      items: [{ rawMaterial: String(yarn._id), quantity: 150, price: 310 }],
+    });
+    expect(res.status).toBe(409);
+    const after = await PurchaseOrder.findById(po._id).lean();
+    expect(after.items[0]).toMatchObject({ quantity: 100, receivedQuantity: 40 });
+  });
+
+  it('a cancel opened before a receipt cannot cancel a PO with goods received', async () => {
+    const { yarn, po } = await seedPo({ ordered: 100 });
+    const stale = await PurchaseOrder.findById(po._id);
+    expect((await receive(po, yarn, 40)).status).toBe(201);
+
+    staleNext(stale);
+    const res = await request(app).delete(`/api/v2/supplier/delete-po?poId=${po._id}`)
+      .set('Cookie', adminCookie()).send({ auditReason: 'not needed' });
+    expect(res.status).toBe(409);
+    expect((await PurchaseOrder.findById(po._id).lean()).status).toBe('Partial');
+  });
+
+  it('a receipt against a PO cancelled just now is refused, and stock does not move', async () => {
+    const { yarn, po } = await seedPo({ ordered: 100, stock: 5 });
+    const stale = await PurchaseOrder.findById(po._id);
+    await PurchaseOrder.updateOne({ _id: po._id }, { $set: { status: 'Cancelled' } });
+
+    staleNext(stale); // the route's first read still sees it Open
+    const res = await receive(po, yarn, 40);
+    expect(res.status).toBe(409);
+    expect((await PurchaseOrder.findById(po._id).lean()).status).toBe('Cancelled');
+    expect((await RawMaterial.findById(yarn._id).lean()).stock).toBe(5);
+  });
+});

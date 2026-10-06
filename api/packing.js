@@ -243,10 +243,11 @@ router.post(
     try {
       let resp;
       await session.withTransaction(async () => {
-        const [jobDoc, elasticDoc] = await Promise.all([
-          JobOrder.findById(job).session(session),
-          Elastic.findById(elastic).session(session),
-        ]);
+        // One after the other: a transaction's session runs one operation at a
+        // time (parallel operations in one transaction are not supported, and
+        // the first two racing to start it can fail).
+        const jobDoc     = await JobOrder.findById(job).session(session);
+        const elasticDoc = await Elastic.findById(elastic).session(session);
         if (!jobDoc)     throw new ErrorHandler("Job not found",     404);
         if (!elasticDoc) throw new ErrorHandler("Elastic not found", 404);
 

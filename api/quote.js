@@ -26,6 +26,7 @@ const mongoose = require('mongoose');
 
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const { assertVersion } = require('../utils/versioning');
+const { saveIf, changedMeanwhile } = require('../utils/conditionalSave');
 const ErrorHandler     = require('../utils/ErrorHandler');
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
 const { requireReason } = require('../utils/auditReason');
@@ -397,7 +398,11 @@ router.put(
       auditReason, before, after: snapshotOf(quote),
     });
     quote.increment(); // bump __v, and make the save conditional on it
-    await quote.save();
+    // A status change does not bump __v, so the version alone would let
+    // this reprice land on a quote accepted a moment ago.
+    if (!(await saveIf(quote, { status: { $nin: ['accepted', 'cancelled'] } }))) {
+      return next(changedMeanwhile(`Quote ${quote.quoteNo}`, 'accepted or cancelled'));
+    }
 
     res.json({ success: true, quote });
   })
@@ -425,7 +430,13 @@ router.patch(
     const from = quote.status;
     quote.status = status;
     stamp(quote, ACTION_CODES.QUOTE_UPDATED, req, { change: 'status', from, to: status });
-    await quote.save();
+    // An edit form open on the old status then gets a 409 on save.
+    quote.increment();
+    // Two status changes at once: the second is told, rather than its
+    // "from" in the trail being a status the quote had already left.
+    if (!(await saveIf(quote, { status: from }))) {
+      return next(changedMeanwhile(`Quote ${quote.quoteNo}`, 'changed'));
+    }
 
     res.json({ success: true, quote });
   })

@@ -697,3 +697,44 @@ describe('listing counts', () => {
     expect(res.body.counts).toHaveLength(1);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  A COUNT POSTED WHILE SOMEONE ELSE STILL HAS IT OPEN
+//
+//  The edit and the cancel read the count, check "not posted", then
+//  save. A post landing in between was overwritten: lines changed on a
+//  count whose stock had already moved, or it was switched back to
+//  "counting" and could be posted (stock adjusted) a second time, or a
+//  posted count was marked cancelled. Reproduced by serving the route
+//  the copy it read just before the post.
+// ══════════════════════════════════════════════════════════════════
+describe('a count posted between another person\'s read and their save', () => {
+  async function postedBehindTheirBack() {
+    const m = await makeMaterial({ stock: 100 });
+    const opened = (await open()).body.count;
+    await enter(opened._id, [{ rawMaterial: String(m._id), countedQty: 90 }]);
+    const stale = await StockCount.findById(opened._id); // what they had open
+    expect((await post(opened._id, { reason: 'monthly count' })).status).toBe(200);
+    const realFindById = StockCount.findById.bind(StockCount);
+    jest.spyOn(StockCount, 'findById').mockImplementationOnce(() => Promise.resolve(stale));
+    return { m, id: opened._id, realFindById };
+  }
+  afterEach(() => jest.restoreAllMocks());
+
+  it('refuses a line edit, and the posted count is left exactly as posted', async () => {
+    const { m, id } = await postedBehindTheirBack();
+    const res = await enter(id, [{ rawMaterial: String(m._id), countedQty: 70 }]);
+    expect(res.status).toBe(409);
+    const stored = await StockCount.findById(id).lean();
+    expect(stored.status).toBe('posted');
+    expect(stored.lines[0].countedQty).toBe(90);
+  });
+
+  it('refuses a cancel', async () => {
+    const { id } = await postedBehindTheirBack();
+    const res = await request(app).post(`/api/v2/stock-counts/${id}/cancel`)
+      .set('Cookie', adminCookie()).send({ reason: 'wrong sheet' });
+    expect(res.status).toBe(409);
+    expect((await StockCount.findById(id).lean()).status).toBe('posted');
+  });
+});

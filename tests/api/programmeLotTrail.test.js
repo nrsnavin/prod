@@ -21,7 +21,7 @@ process.env.NODE_ENV = 'test';
 const request = require('supertest');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 let mongo, app;
 let RawMaterial, YarnLot, Elastic, Customer, Order, JobOrder, Warping, WarpingPlan, WarpingBatch, User, admin;
@@ -31,7 +31,7 @@ const adminCookie = () => [
 ];
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create({ instance: { launchTimeout: 60_000 } });
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 }, instanceOpts: [{ launchTimeout: 60_000 }] });
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   RawMaterial  = require('../../models/RawMaterial');

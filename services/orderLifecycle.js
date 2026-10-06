@@ -101,15 +101,15 @@ async function lastJobCompleted(session, job, { actor, userId, completionFp }) {
  * running order goes back to waiting. Only from InProgress: a completed
  * or cancelled order stays where it is.
  */
-async function jobCancelled(job, { userId }) {
-  const order = await Order.findById(job.order);
+async function jobCancelled(job, { userId, session = null }) {
+  const order = await Order.findById(job.order).session(session);
   if (!order) return null;
-  await recomputePending(order);
+  await recomputePending(order, session);
   const remainingJobs = await JobOrder.countDocuments({
     order: job.order, _id: { $ne: job._id }, status: liveJobStatus(),
-  });
+  }).session(session);
   if (remainingJobs === 0) applyOrderStatus(order, 'Approved', userId);
-  await order.save();
+  await order.save({ session });
   return order;
 }
 

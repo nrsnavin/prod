@@ -54,14 +54,15 @@ async function checkWeavingReadiness(jobId, session = null) {
     };
   }
 
-  const [warping, covering] = await Promise.all([
-    job.warping
-      ? withSession(Warping.findById(job.warping).select('status')).lean()
-      : null,
-    job.covering
-      ? withSession(Covering.findById(job.covering).select('status')).lean()
-      : null,
-  ]);
+  // One after the other: a transaction's session runs one operation at a
+  // time (parallel operations in one transaction are not supported, and
+  // the first two racing to start it can fail).
+  const warping = job.warping
+    ? await withSession(Warping.findById(job.warping).select('status')).lean()
+    : null;
+  const covering = job.covering
+    ? await withSession(Covering.findById(job.covering).select('status')).lean()
+    : null;
 
   const stages = [
     { stage: 'warping', doc: warping, linked: Boolean(job.warping) },

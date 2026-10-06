@@ -389,3 +389,56 @@ describe('two people editing one challan', () => {
     expect((await DeliveryChallan.findById(dc._id).lean()).vehicleNo).toBe('TN 01 AA 1111');
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  SHIPPING MORE THAN IS IN STOCK
+//
+//  Stock stops at zero, so a challan for more than the shelf held said
+//  500 m left while stock fell by 300. Now it is refused unless someone
+//  gives a reason, which is kept on the challan with the shortfall.
+// ══════════════════════════════════════════════════════════════════
+describe('a challan for more than is in stock', () => {
+  const create = (elastic, customer, quantity, extra = {}) =>
+    request(app).post('/api/v2/dc/create').set('Cookie', adminCookie()).send({
+      type: 'elastic', customerName: customer.name,
+      items: [{ elastic: String(elastic._id), quantity, rate: 12 }], ...extra,
+    });
+
+  it('is refused without a reason, and nothing of it is kept', async () => {
+    const elastic = await makeElastic(300);
+    const customer = await makeCustomer();
+    const res = await create(elastic, customer, 500);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('DC_STOCK_SHORT');
+    expect(res.body.details.shortfalls[0]).toMatchObject({ shipping: 500, onHand: 300, short: 200 });
+    expect(await stockOf(elastic)).toBe(300);
+    expect(await DeliveryChallan.countDocuments({ customerName: customer.name })).toBe(0);
+  });
+
+  it('goes through with a reason, which is kept with the shortfall', async () => {
+    const elastic = await makeElastic(300);
+    const customer = await makeCustomer();
+    const res = await create(elastic, customer, 500, { stockShortfallReason: 'Balance packed, not yet entered' });
+    expect(res.status).toBe(201);
+    expect(await stockOf(elastic)).toBe(0);
+    const dc = await DeliveryChallan.findById(res.body.dc._id).lean();
+    expect(dc.stockShortfall).toMatchObject({ reason: 'Balance packed, not yet entered' });
+    expect(dc.stockShortfall.lines[0]).toMatchObject({ shipping: 500, onHand: 300, short: 200 });
+  });
+
+  it('two challans taking the last stock at once: one goes, the other is asked for a reason', async () => {
+    const elastic = await makeElastic(400);
+    const customer = await makeCustomer();
+    const [a, b] = await Promise.all([create(elastic, customer, 300), create(elastic, customer, 300)]);
+    expect([a.status, b.status].sort()).toEqual([201, 409]);
+    expect(await stockOf(elastic)).toBe(100);
+  });
+
+  it('within stock is unchanged', async () => {
+    const elastic = await makeElastic(300);
+    const customer = await makeCustomer();
+    const res = await create(elastic, customer, 300);
+    expect(res.status).toBe(201);
+    expect((await DeliveryChallan.findById(res.body.dc._id).lean()).stockShortfall).toBeUndefined();
+  });
+});
