@@ -36,6 +36,7 @@ const { keepRequestContext } = require("../middleware/userContext.js");
 const { shortCode } = require("../utils/shiftSheetPdf");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
+const { submitProduction } = require("../services/shiftSubmit");
 const { VISION_MODEL } = require("../utils/anthropicClient");
 const { promptVersion } = require("../utils/aiPrompts");
 const ledger = require("../services/aiLedger");
@@ -291,89 +292,11 @@ router.post('/bulk-enter-production', async (req, res) => {
       }
     }
 
-    const saved   = [];
-    const skipped = [];
-    const settledRows = {};
-
-    for (const entry of entries) {
-      const { id, production, timer = '00:00:00', feedback = '' } = entry;
-      const prodNum = Number(production);
-
-      const sd = await ShiftDetail.findById(id).select('_id status shiftPlan').lean();
-
-      if (!sd) { skipped.push({ id, reason: 'ShiftDetail not found' }); continue; }
-      if (sd.status === 'closed') { skipped.push({ id, reason: 'Already closed' }); continue; }
-
-      // A finalised plan is frozen for payroll and reporting.
-      //
-      // assertPlanNotFinalized sits below under a comment saying it is
-      // "used by every route that would change a locked shift's
-      // numbers" — and this route, which writes production figures in
-      // batches of up to 200, never called it. The single-entry path,
-      // the correction path and the delete path all did, so the lock
-      // held everywhere except the highest-volume door into the same
-      // field. Skipped rather than thrown so one locked shift in a
-      // batch does not reject the other 199.
-      if (sd.shiftPlan) {
-        const plan = await ShiftPlan.findById(sd.shiftPlan).select('finalized').lean();
-        if (plan?.finalized) {
-          skipped.push({ id, reason: 'Shift is finalised — an admin must reopen it first' });
-          continue;
-        }
-      }
-
-      // Conditional on the status, in the same write: a shift verified
-      // between the read above and this line must stay closed. An
-      // unconditional write flipped it back to pending, and verifying it
-      // again cascaded its metres into the job a second time.
-      const written = await ShiftDetail.findOneAndUpdate(
-        { _id: id, status: { $ne: 'closed' } },
-        {
-          $set: {
-            submittedProductionMeters: prodNum,
-            submittedTimer:            timer,
-            submittedFeedback:         feedback,
-            submittedAt:               new Date(),
-            submittedBy:               req.user?._id,
-            status:                    'pending_verification',
-          },
-        },
-        { projection: { _id: 1 } }
-      );
-      if (!written) { skipped.push({ id, reason: 'Already closed' }); continue; }
-
-      saved.push({ id, production: prodNum, status: 'pending_verification' });
-
-      // What the OPERATOR supplied, not what gets stored. `timer`
-      // above defaults to '00:00:00' so the ShiftDetail always has a
-      // value; recording that default as the human's answer compares it
-      // against the OCR's null and calls it a correction — on every row
-      // where the timer cell was blank, which on a quiet shift is most
-      // of them. The weakest-field report would then name the timer
-      // column as this model's biggest problem when nobody had
-      // disagreed with it once.
-      settledRows[id] = {
-        production: prodNum,
-        timer: entry.timer ?? null,
-        remarks: feedback,
-      };
-    }
-
-    // If these figures came from an OCR'd sheet, close that suggestion
-    // out against what was actually saved. `ignoreMissing` matters here:
-    // a row the OCR read but this batch never submitted is undecided,
-    // not disagreed with, and counting it either way would be a lie
-    // about the reading. Rows the operator DID submit are compared
-    // field by field, which is where "the timer column needs fixing on
-    // a third of sheets" comes from.
-    if (aiSuggestionId) {
-      await ledger.settle(aiSuggestionId, {
-        expectSurface: 'shift-sheet-ocr',
-        accepted: { rows: settledRows },
-        decidedBy: req.user?._id,
-        ignoreMissing: true,
-      });
-    }
+    const { saved, skipped } = await submitProduction(entries, {
+      userId: req.user?._id,
+      aiSuggestionId,
+      surface: 'shift-sheet-ocr',
+    });
 
     return res.json({
       success: true, saved: saved.length, skipped: skipped.length,

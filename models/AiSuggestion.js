@@ -57,6 +57,7 @@ const AI_SURFACES = Object.freeze([
   // entry. The person confirms (or answers questions about) the value
   // before it fills the field; settle() records what they used.
   'timer-ocr',
+  'production-slip-ocr',
   // Grouping complaint prose into recurring themes. The odd one out in
   // this list: it proposes no value a human then accepts or edits, so it
   // is never settled and its rows stay 'proposed' for ever. It is here

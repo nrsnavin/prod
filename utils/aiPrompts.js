@@ -81,6 +81,12 @@ const PROMPTS = Object.freeze({
       'Plain text, no preamble.',
   },
 
+  'production-slip-ocr': {
+    version: 'v1.0',
+    notes: 'Photos of a production record sent over WhatsApp or uploaded: the printed shift sheet or the factory\'s own slip. Reads only; matching is done against the database. Prompt lives in utils/slipOcr.js.',
+    system: null,
+  },
+
   'inbound-po-ocr': {
     version: 'v1.0',
     notes: "Vision extract of a CUSTOMER's purchase order. Prompt lives in utils/inboundPoOcr.js.",

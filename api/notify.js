@@ -26,6 +26,7 @@ const {
 const NotifSettings = NotificationSettings;
 const axios         = require("axios");
 const Order         = require("../models/Order.js");
+const slips         = require("../services/slipIngest.js");
 
 // Build a normalized events map so the admin app always sees
 // {enabled,recipients,tier,throttleSeconds} per event regardless of
@@ -315,8 +316,16 @@ async function handleIncoming(req) {
     }
   }
 
-  // 2. Allow-list: sender's E.164 must be in NotificationSettings.recipients.
   const senderE164 = from.replace(/^whatsapp:/i, "").trim();
+
+  // 1b. A production slip: a photo, or a reply about one. Its own
+  //     sender check (production logins by phone, plus the owner list).
+  const slipCmd = slips.parseSlipCommand(body);
+  if (Number(req.body?.NumMedia || 0) > 0 || slipCmd) {
+    return handleSlipMessage(req, senderE164, slipCmd);
+  }
+
+  // 2. Allow-list: sender's E.164 must be in NotificationSettings.recipients.
   const settings = await NotifSettings.load();
   if (!(settings.recipients || []).includes(senderE164)) {
     console.warn(`[whatsapp:incoming] sender ${senderE164} not on allow-list`);
@@ -334,7 +343,8 @@ async function handleIncoming(req) {
       body: twimlReply(
         "Sorry, I didn't recognize that command. Reply with:\n" +
         "  APPROVE <orderNo>\n" +
-        "  APPROVE <orderNo> force: <reason>"
+        "  APPROVE <orderNo> force: <reason>\n" +
+        "Or send a photo of a production slip."
       ),
     };
   }
@@ -404,6 +414,94 @@ async function handleIncoming(req) {
       status: 200,
       body:   twimlReply(`✗ Could not approve #${cmd.orderNo} — server error.`),
     };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Production slips over WhatsApp (services/slipIngest.js).
+//
+//   a photo (caption optional, e.g. "DAY 06-10")  → read in the background,
+//                                                   summary sent back
+//   OK 4821                                       → save the clear rows
+//   NO 4821                                       → drop the slip
+//   4821 DAY 06-10                                → it is this date and shift
+// ─────────────────────────────────────────────────────────────────
+async function handleSlipMessage(req, senderE164, cmd) {
+  const sender = await slips.slipSender(senderE164);
+  if (!sender) {
+    return {
+      status: 200,
+      body: twimlReply(
+        `Your number (${senderE164}) is not set up to send production slips. ` +
+        "Ask an admin to put this phone on your employee record and give your login production access."
+      ),
+    };
+  }
+
+  try {
+    if (!cmd) {
+      const count = Math.min(Number(req.body.NumMedia) || 0, 10);
+      const media = [];
+      for (let i = 0; i < count; i++) {
+        media.push({ url: req.body[`MediaUrl${i}`], contentType: req.body[`MediaContentType${i}`] });
+      }
+      const { slip } = await slips.receiveFromWhatsApp({
+        messageSid: req.body.MessageSid,
+        from: senderE164,
+        caption: req.body.Body || "",
+        media,
+        sender,
+      });
+      return {
+        status: 200,
+        body: twimlReply(`Got it, reading slip ${slip.confirmCode}. I'll reply with what I read in a minute or two.`),
+      };
+    }
+
+    const slip = await slips.slipByCode(cmd.code, senderE164);
+    if (!slip) {
+      return { status: 200, body: twimlReply(`There is no open slip numbered ${cmd.code}.`) };
+    }
+    const user = { _id: sender.userId, name: sender.name };
+
+    if (cmd.action === "no") {
+      await slips.discardSlip(slip._id, { user });
+      return { status: 200, body: twimlReply(`Slip ${cmd.code} dropped. Nothing was saved from it.`) };
+    }
+    if (cmd.action === "set") {
+      const updated = await slips.setShift(slip._id, { dateKey: cmd.dateKey, shift: cmd.shift });
+      return { status: 200, body: twimlReply(slips.summaryText(updated)) };
+    }
+
+    // OK
+    if (slip.status !== "ready") {
+      return { status: 200, body: twimlReply(slips.summaryText(slip)) };
+    }
+    const out = await slips.applySlip(slip._id, { user });
+    const lines = [];
+    if (out.saved) {
+      lines.push(
+        `Saved ${out.saved} loom${out.saved === 1 ? "" : "s"} from slip ${cmd.code} as submitted. ` +
+        "A supervisor verifies them next."
+      );
+    } else {
+      lines.push(`Nothing from slip ${cmd.code} was clear enough to save without a check.`);
+    }
+    if (out.skipped.length) lines.push(`Skipped ${out.skipped.length}: ${out.skipped.map((s) => s.reason).join("; ")}`);
+    if (out.remaining) {
+      const base = (process.env.WEB_URL || "").replace(/\/+$/, "");
+      lines.push(
+        `${out.remaining} still to check` +
+        (base ? `: ${base}/production-slips/${slip._id}` : " on the web, under Production slips.")
+      );
+    }
+    return { status: 200, body: twimlReply(lines.join("\n")) };
+  } catch (err) {
+    if (err?.statusCode && err.statusCode < 500) {
+      return { status: 200, body: twimlReply(err.message) };
+    }
+    console.warn(`[whatsapp:slip] ${err?.message}`);
+    return { status: 200, body: twimlReply("Sorry, something went wrong with that slip. Please try again.") };
   }
 }
 

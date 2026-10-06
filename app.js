@@ -738,6 +738,14 @@ app.use("/api/v2/ocr",         gate('production', 'accounts'),
   // a shift's kept timer photos while verifying is not.
   (req, res, next) => (req.method === 'POST' && req.path === '/timer' ? photoOcrLimiter(req, res, next) : next()),
   require("./api/timerOcr.js"));
+// Production slips read from photos (WhatsApp or uploaded here): held
+// for a person to check, then submitted for verification. Uploading is
+// an AI read, so it is limited like the timer photos.
+app.use("/api/v2/slips",       gate('production'),
+  requireFeature('/shift-verification', '/shift-plans'),
+  requireFeatureRead('/shift-verification', '/shift-plans'),
+  (req, res, next) => (req.method === 'POST' && req.path === '/upload' ? photoOcrLimiter(req, res, next) : next()),
+  require("./api/slips.js"));
 // Predicted production (services/productionModel.js): read-only, for the
 // machine page and the production entry screens.
 app.use("/api/v2/production-model", gate('production'),

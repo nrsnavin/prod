@@ -126,6 +126,14 @@ const HANDLERS = {
     if (!material) return;
     await maybeFireCriticalStockout({ material, oldStock, newStock, reason });
   },
+
+  // A production slip photo, sent on WhatsApp or uploaded: read it,
+  // match it to its shift and tell the sender (services/slipIngest.js).
+  // Queued so the webhook answers inside Twilio's time limit.
+  async "slip.read"({ slipId }) {
+    const { readSlipJob } = require("../services/slipIngest.js");
+    await readSlipJob(slipId);
+  },
 };
 
 function getHandler(kind) {
