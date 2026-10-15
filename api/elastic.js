@@ -669,6 +669,145 @@ router.post(
 );
 
 
+// ═════════════════════════════════════════════════════════════
+//  BULK ACTIONS FROM THE ELASTIC LIST
+//
+//    POST /api/v2/elastic/bulk/archive    { ids, archived: true|false }
+//    POST /api/v2/elastic/bulk/costing    { ids, conversionCost? | changePercent? }
+//    POST /api/v2/elastic/bulk/min-stock  { ids, minStock }
+//
+//  Each elastic is done on its own, with the same rules as its
+//  single-item route, and reported on its own: one that cannot be
+//  archived (stock reserved against an order) does not stop the rest,
+//  and the answer says which and why.
+// ═════════════════════════════════════════════════════════════
+const BULK_MAX = 200;
+
+/** The ids to act on, or the 400 to send. */
+function bulkIds(body) {
+  const ids = Array.isArray(body?.ids) ? [...new Set(body.ids.map(String))] : [];
+  if (ids.length === 0) return { error: new ErrorHandler("Select at least one elastic", 400) };
+  if (ids.length > BULK_MAX) return { error: new ErrorHandler(`At most ${BULK_MAX} elastics at a time`, 400) };
+  if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+    return { error: new ErrorHandler("Invalid elastic id", 400) };
+  }
+  return { ids };
+}
+
+const bulkSummary = (results) => ({
+  done: results.filter((r) => r.ok).length,
+  refused: results.filter((r) => !r.ok).length,
+  results,
+});
+
+router.post(
+  "/bulk/archive",
+  isAdmin('admin', 'accounts'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const wantArchived = req.body?.archived !== false;
+
+    const found = await Elastic.find({ _id: { $in: ids } }).select("_id name archived reservedStock");
+    const byId = new Map(found.map((e) => [String(e._id), e]));
+    const results = [];
+    for (const id of ids) {
+      const elastic = byId.get(id);
+      if (!elastic) { results.push({ id, ok: false, reason: "Not found" }); continue; }
+      const name = elastic.name;
+      if (!!elastic.archived === wantArchived) {
+        results.push({ id, name, ok: true, unchanged: true });
+        continue;
+      }
+      if (wantArchived && (Number(elastic.reservedStock) || 0) > 0) {
+        results.push({ id, name, ok: false, reason: `${elastic.reservedStock} m reserved against approved orders` });
+        continue;
+      }
+      elastic.archived = wantArchived;
+      elastic.archivedAt = wantArchived ? new Date() : undefined;
+      if (wantArchived) {
+        // As the single route: the no-reservation check is in the write.
+        if (!(await saveIf(elastic, { reservedStock: { $not: { $gt: 0 } } }))) {
+          results.push({ id, name, ok: false, reason: "An order reserved stock on it just now" });
+          continue;
+        }
+      } else {
+        await elastic.save();
+      }
+      results.push({ id, name, ok: true });
+    }
+    res.json({ success: true, ...bulkSummary(results) });
+  })
+);
+
+router.post(
+  "/bulk/costing",
+  isAdmin('admin', 'accounts'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+
+    const hasSet = req.body?.conversionCost != null && req.body.conversionCost !== "";
+    const hasPct = req.body?.changePercent != null && req.body.changePercent !== "";
+    if (hasSet && hasPct) {
+      return next(new ErrorHandler("Give a new conversion cost or a % change, not both", 400));
+    }
+    const setTo = hasSet ? Number(req.body.conversionCost) : null;
+    const pct = hasPct ? Number(req.body.changePercent) : null;
+    if (hasSet && !(Number.isFinite(setTo) && setTo >= 0 && setTo <= 10000)) {
+      return next(new ErrorHandler("Conversion cost must be between ₹0 and ₹10,000 a metre", 400));
+    }
+    if (hasPct && !(Number.isFinite(pct) && pct >= -90 && pct <= 500)) {
+      return next(new ErrorHandler("The % change must be between -90 and +500", 400));
+    }
+
+    const results = [];
+    for (const id of ids) {
+      const elastic = await _populate(Elastic.findById(id));
+      if (!elastic) { results.push({ id, ok: false, reason: "Not found" }); continue; }
+      const name = elastic.name;
+      const before = elastic.costing && typeof elastic.costing === "object" ? elastic.costing : null;
+      const oldConversion = before?.conversionCost ?? 1.25;
+      const conversion = setTo != null
+        ? setTo
+        : pct != null
+          ? Math.round(oldConversion * (1 + pct / 100) * 100) / 100
+          : undefined; // neither: re-cost on today's material prices only
+      try {
+        const after = await recostElastic(elastic, conversion);
+        results.push({
+          id, name, ok: true,
+          before: { conversionCost: oldConversion, totalCost: before?.totalCost ?? null },
+          after: { conversionCost: after.conversionCost, totalCost: after.totalCost },
+        });
+      } catch (err) {
+        results.push({ id, name, ok: false, reason: err.message });
+      }
+    }
+    res.json({ success: true, ...bulkSummary(results) });
+  })
+);
+
+router.post(
+  "/bulk/min-stock",
+  isAdmin('admin', 'accounts'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const v = Number(req.body?.minStock);
+    if (!Number.isFinite(v) || v < 0) {
+      return next(new ErrorHandler("minStock must be a non-negative number", 400));
+    }
+    const found = await Elastic.find({ _id: { $in: ids } }).select("_id name").lean();
+    const names = new Map(found.map((e) => [String(e._id), e.name]));
+    await Elastic.updateMany({ _id: { $in: [...names.keys()] } }, { $set: { minStock: v } });
+    const results = ids.map((id) => (names.has(id)
+      ? { id, name: names.get(id), ok: true }
+      : { id, ok: false, reason: "Not found" }));
+    res.json({ success: true, ...bulkSummary(results) });
+  })
+);
+
 // ─────────────────────────────────────────────────────────────
 //  SET MIN STOCK (lightweight)
 //  PATCH /api/v2/elastic/:id/min-stock   { minStock }
@@ -909,6 +1048,60 @@ router.put(
 );
 
 
+/**
+ * Re-cost an elastic from today's material prices, optionally with a new
+ * conversion cost; the conversion cost it already has otherwise. Creates
+ * the cost sheet if it has none. `elastic` must be loaded through
+ * _populate (the costing reads the populated materials).
+ */
+async function recostElastic(elastic, convCostOverride) {
+  const { materialCost, details } =
+    await calculateElasticCosting(elastic.toObject());
+
+  const existingCosting = elastic.costing
+    ? await Costing.findById(
+        typeof elastic.costing === "object"
+          ? elastic.costing._id
+          : elastic.costing
+      )
+    : null;
+
+  const conversionCost =
+    convCostOverride != null
+      ? Number(convCostOverride)
+      : (existingCosting?.conversionCost ?? 1.25);
+
+  const totalCost = materialCost + conversionCost;
+
+  if (existingCosting) {
+    return Costing.findByIdAndUpdate(
+      existingCosting._id,
+      {
+        $set: {
+          materialCost,
+          conversionCost,
+          details,
+          totalCost,
+          date: new Date(),
+        },
+      },
+      { new: true }
+    );
+  }
+  const created = await Costing.create({
+    date: new Date(),
+    elastic: elastic._id,
+    conversionCost,
+    materialCost,
+    details,
+    totalCost,
+    status: "Draft",
+  });
+  elastic.costing = created._id;
+  await elastic.save();
+  return created;
+}
+
 router.post(
   "/recalculate-elastic-cost",
   isAdmin('admin', 'accounts'),
@@ -928,54 +1121,7 @@ router.post(
     }
 
     try {
-      const { materialCost, details } =
-        await calculateElasticCosting(elastic.toObject());
-
-      const existingCosting = elastic.costing
-        ? await Costing.findById(
-            typeof elastic.costing === "object"
-              ? elastic.costing._id
-              : elastic.costing
-          )
-        : null;
-
-      const conversionCost =
-        convCostOverride != null
-          ? Number(convCostOverride)
-          : (existingCosting?.conversionCost ?? 1.25);
-
-      const totalCost = materialCost + conversionCost;
-
-      let updatedCosting;
-
-      if (existingCosting) {
-        updatedCosting = await Costing.findByIdAndUpdate(
-          existingCosting._id,
-          {
-            $set: {
-              materialCost,
-              conversionCost,
-              details,
-              totalCost,
-              date: new Date(),
-            },
-          },
-          { new: true }
-        );
-      } else {
-        updatedCosting = await Costing.create({
-          date: new Date(),
-          elastic: elastic._id,
-          conversionCost,
-          materialCost,
-          details,
-          totalCost,
-          status: "Draft",
-        });
-        elastic.costing = updatedCosting._id;
-        await elastic.save();
-      }
-
+      const updatedCosting = await recostElastic(elastic, convCostOverride);
       res.json({ success: true, costing: updatedCosting });
     } catch (err) {
       console.error("[recalculate-elastic-cost]", err.message);
