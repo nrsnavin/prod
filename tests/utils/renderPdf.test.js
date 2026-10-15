@@ -45,9 +45,20 @@ async function longestStall(work) {
 describe('renderPdf', () => {
   it('knows every renderer the routes ask for', () => {
     expect(PDF_NAMES.sort()).toEqual(
-      ['eveningReport', 'materialLedger', 'morningDigest', 'mrp', 'orderPnl', 'orderStatus', 'shiftSheet', 'template'].sort()
+      ['elasticPrices', 'elasticSpec', 'eveningReport', 'materialLedger', 'morningDigest', 'mrp',
+        'orderPnl', 'orderStatus', 'shiftSheet', 'template'].sort()
     );
   });
+
+  it("renders the elastic spec sheets and price list in the worker", async () => {
+    const spec = await renderPdf('elasticSpec', {
+      branding: {}, elastics: [{ name: '20mm Knitted', weaveType: '8', composition: [{ role: 'Warp yarn', material: 'Poly 150D', weight: 1.2 }] }],
+    });
+    const prices = await renderPdf('elasticPrices', {
+      branding: {}, rows: [{ name: '20mm Knitted', width: 20, weight: 2.4, rate: 4.2 }], customerName: 'Acme', gstPercent: 5,
+    });
+    for (const pdf of [spec, prices]) expect(Buffer.from(pdf).subarray(0, 5).toString()).toBe('%PDF-');
+  }, 60_000);
 
   it('refuses a name it does not know', async () => {
     await expect(renderPdf('nope', {})).rejects.toThrow(/Unknown PDF/);
