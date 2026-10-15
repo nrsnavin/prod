@@ -237,6 +237,11 @@ router.get(
     // Soft-deleted SKUs hidden by default; `$ne: true` keeps legacy
     // docs without the key visible.
     if (includeArchived !== "true") filter.archived = { $ne: true };
+    // Just these (comma-separated) — the list's "select from a group".
+    if (typeof req.query.ids === "string" && req.query.ids) {
+      const ids = req.query.ids.split(",").filter((id) => mongoose.Types.ObjectId.isValid(id)).slice(0, 200);
+      filter._id = { $in: ids };
+    }
     // At or under its reorder level, on what is free to sell (stock less
     // what approved orders hold) — the list the restock action works from.
     if (req.query.lowStock === "true") {

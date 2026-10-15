@@ -190,6 +190,16 @@ describe('the low stock list', () => {
     expect(ids).not.toContain(String(fine._id));
     expect(ids).not.toContain(String(noMin._id));
   });
+
+  it('lists just the ids asked for, ignoring malformed ones', async () => {
+    const a = await elastic();
+    const b = await elastic();
+    await elastic();
+    const res = await request(app).get('/api/v2/elastic/get-elastics').set('Cookie', cookie(admin))
+      .query({ ids: `${a._id},nonsense,${b._id}`, limit: 200 });
+    expect(res.status).toBe(200);
+    expect(res.body.elastics.map((e) => e._id).sort()).toEqual([String(a._id), String(b._id)].sort());
+  });
 });
 
 describe('PDFs for a customer', () => {
