@@ -31,6 +31,10 @@ const CustomerSchema = new mongoose.Schema(
         // Mirrors Elastic.archived, deliberately: two soft deletes with
         // different shapes is how one of them ends up forgotten.
         archived:   { type: Boolean, default: false, index: true },
+        // The factory itself, as the customer of a restock order
+        // (POST /order/restock): making an elastic for its own stock goes
+        // through the same order → job flow as making it for a buyer.
+        houseStock: { type: Boolean, default: false, index: true },
         archivedAt: { type: Date },
         status: {
             type: String,

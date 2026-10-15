@@ -433,6 +433,105 @@ router.delete(
 //  at the moment somebody has to buy it — the same reason a customer
 //  with live orders is protected.
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  BULK, FROM THE LIST'S SELECTION
+//    POST /materials/bulk/update   { ids, supplier?, minStock?, group? }
+//    POST /materials/bulk/archive  { ids, archived }
+//
+//  Each material is done on its own, under the same rules as its own
+//  edit / archive, and reported on its own. The version is bumped on
+//  every change, so an edit form open on one of them gets a 409 rather
+//  than writing back what it loaded.
+// ══════════════════════════════════════════════════════════════
+const BULK_MAX = 200;
+function bulkIds(body) {
+  const ids = Array.isArray(body?.ids) ? [...new Set(body.ids.map(String))] : [];
+  if (ids.length === 0) return { error: new ErrorHandler("Select at least one material", 400) };
+  if (ids.length > BULK_MAX) return { error: new ErrorHandler(`At most ${BULK_MAX} materials at a time`, 400) };
+  if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) return { error: new ErrorHandler("Invalid material id", 400) };
+  return { ids };
+}
+const bulkSummary = (results) => ({
+  done: results.filter((r) => r.ok).length,
+  refused: results.filter((r) => !r.ok).length,
+  results,
+});
+
+router.post(
+  "/bulk/update",
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const set = {};
+    if (req.body.supplier !== undefined) {
+      const sup = String(req.body.supplier || "");
+      if (!mongoose.Types.ObjectId.isValid(sup) || !(await Supplier.exists({ _id: sup }))) {
+        return next(new ErrorHandler("Choose a supplier that exists", 400));
+      }
+      set.supplier = sup;
+    }
+    if (req.body.minStock !== undefined && req.body.minStock !== "") {
+      const v = Number(req.body.minStock);
+      if (!Number.isFinite(v) || v < 0) return next(new ErrorHandler("Min stock must be 0 or more", 400));
+      set.minStock = v;
+    }
+    const changeGroup = req.body.group !== undefined;
+    if (!changeGroup && Object.keys(set).length === 0) {
+      return next(new ErrorHandler("Nothing to change: give a supplier, a min stock or a group", 400));
+    }
+
+    const results = [];
+    for (const id of ids) {
+      const m = await RawMaterial.findById(id).select("_id name category group");
+      if (!m) { results.push({ id, ok: false, reason: "Not found" }); continue; }
+      const update = { ...set };
+      if (changeGroup) {
+        // Through the same resolver as an edit; the category stays as it is.
+        const resolved = await resolveClassification({ group: req.body.group || null, category: m.category });
+        if (resolved.error) { results.push({ id, name: m.name, ok: false, reason: resolved.error }); continue; }
+        update.category = resolved.category;
+        update.group = resolved.group;
+      }
+      await RawMaterial.updateOne({ _id: m._id }, { $set: update, $inc: { __v: 1 } });
+      results.push({ id, name: m.name, ok: true });
+    }
+    res.json({ success: true, ...bulkSummary(results) });
+  })
+);
+
+router.post(
+  "/bulk/archive",
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const wantArchived = req.body?.archived !== false;
+    const results = [];
+    for (const id of ids) {
+      const m = await RawMaterial.findById(id).select("_id name archived");
+      if (!m) { results.push({ id, ok: false, reason: "Not found" }); continue; }
+      if (!!m.archived === wantArchived) { results.push({ id, name: m.name, ok: true, unchanged: true }); continue; }
+      if (wantArchived) {
+        const live = await Order.countDocuments({
+          "rawMaterialRequired.rawMaterial": m._id,
+          status: { $nin: ["Completed", "Cancelled"] },
+        });
+        if (live > 0) {
+          results.push({ id, name: m.name, ok: false, reason: `${live} open order${live === 1 ? "" : "s"} still need it` });
+          continue;
+        }
+      }
+      await RawMaterial.updateOne(
+        { _id: m._id },
+        wantArchived
+          ? { $set: { archived: true, archivedAt: new Date() }, $inc: { __v: 1 } }
+          : { $set: { archived: false }, $unset: { archivedAt: 1 }, $inc: { __v: 1 } }
+      );
+      results.push({ id, name: m.name, ok: true });
+    }
+    res.json({ success: true, ...bulkSummary(results) });
+  })
+);
+
 router.patch(
   "/:id/archive",
   catchAsyncErrors(async (req, res, next) => {

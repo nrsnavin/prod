@@ -15,6 +15,8 @@ const StockMovement = require("../models/StockMovement");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { applyMovement } = require("../utils/elasticStock");
+const { renderPdf } = require("../utils/renderPdf");
+const { getPdfBranding } = require("../services/documentSettings");
 const { saveIf } = require("../utils/conditionalSave");
 const { countUsage } = require("../utils/masterUsage");
 const { elasticNameKey } = require("../utils/elasticName.js");
@@ -235,6 +237,17 @@ router.get(
     // Soft-deleted SKUs hidden by default; `$ne: true` keeps legacy
     // docs without the key visible.
     if (includeArchived !== "true") filter.archived = { $ne: true };
+    // At or under its reorder level, on what is free to sell (stock less
+    // what approved orders hold) — the list the restock action works from.
+    if (req.query.lowStock === "true") {
+      filter.minStock = { $gt: 0 };
+      filter.$expr = {
+        $lte: [
+          { $subtract: [{ $ifNull: ["$stock", 0] }, { $ifNull: ["$reservedStock", 0] }] },
+          "$minStock",
+        ],
+      };
+    }
     const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 200);
     const elastics = await Elastic.find(filter)
       .skip((page - 1) * safeLimit)
@@ -805,6 +818,166 @@ router.post(
       ? { id, name: names.get(id), ok: true }
       : { id, ok: false, reason: "Not found" }));
     res.json({ success: true, ...bulkSummary(results) });
+  })
+);
+
+// POST /api/v2/elastic/bulk/copy-template  { sourceId, ids, replace? }
+//
+// One elastic's warping template onto others. Each target must list
+// every warp yarn the template uses (the same rule as saving a template
+// by hand); one that does not is named and skipped. A target that has
+// a template of its own keeps it unless `replace` is set.
+router.post(
+  "/bulk/copy-template",
+  isAdmin('admin', 'accounts'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const sourceId = String(req.body?.sourceId || "");
+    if (!mongoose.Types.ObjectId.isValid(sourceId)) return next(new ErrorHandler("Choose the elastic to copy from", 400));
+    const source = await Elastic.findById(sourceId).select("name warpingPlanTemplate").lean();
+    if (!source) return next(new ErrorHandler("Elastic to copy from not found", 404));
+    const template = source.warpingPlanTemplate;
+    if (!template?.beams?.length) {
+      return next(new ErrorHandler(`"${source.name}" has no warping template to copy`, 400));
+    }
+    const replace = req.body?.replace === true;
+
+    const results = [];
+    for (const id of ids.filter((x) => x !== sourceId)) {
+      const target = await Elastic.findById(id).select("name warpYarn warpingPlanTemplate");
+      if (!target) { results.push({ id, ok: false, reason: "Not found" }); continue; }
+      const name = target.name;
+      if (target.warpingPlanTemplate?.beams?.length && !replace) {
+        results.push({ id, name, ok: false, reason: "Already has a template (tick replace to overwrite)" });
+        continue;
+      }
+      const stray = await templateYarnProblem(template, target.warpYarn);
+      if (stray) {
+        results.push({ id, name, ok: false, reason: "Does not use every warp yarn the template uses" });
+        continue;
+      }
+      target.warpingPlanTemplate = _normalisePlan(template);
+      await target.save();
+      results.push({ id, name, ok: true });
+    }
+    res.json({ success: true, ...bulkSummary(results) });
+  })
+);
+
+// POST /api/v2/elastic/bulk/testing  { ids, width?, elongation?, recovery?, strech? }
+//
+// Testing parameters for a family of elastics. Only the fields sent are
+// set; the rest of each elastic's parameters stay as they were.
+router.post(
+  "/bulk/testing",
+  isAdmin('admin', 'accounts'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const set = {};
+    for (const [key, max] of [["width", 1000], ["elongation", 1000], ["recovery", 100]]) {
+      const raw = req.body?.[key];
+      if (raw === undefined || raw === null || raw === "") continue;
+      const v = Number(raw);
+      if (!Number.isFinite(v) || v < 0 || v > max) {
+        return next(new ErrorHandler(`${key} must be between 0 and ${max}`, 400));
+      }
+      set[`testingParameters.${key}`] = v;
+    }
+    if (req.body?.strech !== undefined && req.body.strech !== null && String(req.body.strech).trim() !== "") {
+      set["testingParameters.strech"] = String(req.body.strech).trim().slice(0, 100);
+    }
+    if (Object.keys(set).length === 0) return next(new ErrorHandler("Give at least one testing parameter", 400));
+
+    const found = await Elastic.find({ _id: { $in: ids } }).select("_id name").lean();
+    const names = new Map(found.map((e) => [String(e._id), e.name]));
+    await Elastic.updateMany({ _id: { $in: [...names.keys()] } }, { $set: set });
+    const results = ids.map((id) => (names.has(id)
+      ? { id, name: names.get(id), ok: true }
+      : { id, ok: false, reason: "Not found" }));
+    res.json({ success: true, ...bulkSummary(results) });
+  })
+);
+
+// POST /api/v2/elastic/bulk/spec-sheet  { ids }          → PDF, a page each
+// POST /api/v2/elastic/bulk/price-list  { ids, marginPercent, customerName?,
+//                                         gstPercent?, validDays? }  → PDF
+//
+// For sending to a customer. The spec sheet prints what each elastic is;
+// the price list prints a rate per metre — the cost sheet's total plus
+// the margin asked for. No cost is printed on either.
+async function _sheetElastics(ids) {
+  const found = await _populate(Elastic.find({ _id: { $in: ids } }));
+  const order = new Map(ids.map((id, i) => [id, i]));
+  return found.sort((a, b) => order.get(String(a._id)) - order.get(String(b._id)));
+}
+const _part = (role, mw) => (mw?.id ? { role, material: mw.id.name ?? "—", weight: mw.weight } : null);
+
+router.post(
+  "/bulk/spec-sheet",
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const elastics = (await _sheetElastics(ids)).map((e) => ({
+      name: e.name, weaveType: e.weaveType, weight: e.weight, pick: e.pick, noOfHook: e.noOfHook,
+      spandexEnds: e.spandexEnds, yarnEnds: e.yarnEnds,
+      testingParameters: e.testingParameters ? e.testingParameters.toObject?.() ?? e.testingParameters : {},
+      composition: [
+        _part("Warp spandex", e.warpSpandex),
+        _part("Spandex covering", e.spandexCovering),
+        _part("Weft yarn", e.weftYarn),
+        ...(e.warpYarn || []).map((w) => _part("Warp yarn", w)),
+      ].filter(Boolean),
+    }));
+    const pdf = await renderPdf("elasticSpec", { branding: await getPdfBranding(), elastics });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'attachment; filename="elastic-specifications.pdf"');
+    res.send(pdf);
+  })
+);
+
+router.post(
+  "/bulk/price-list",
+  isAdmin('admin', 'accounts'),
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const margin = Number(req.body?.marginPercent ?? 0);
+    if (!Number.isFinite(margin) || margin < 0 || margin > 500) {
+      return next(new ErrorHandler("Margin must be between 0 and 500 %", 400));
+    }
+    const gst = req.body?.gstPercent == null || req.body.gstPercent === "" ? null : Number(req.body.gstPercent);
+    if (gst != null && !(Number.isFinite(gst) && gst >= 0 && gst <= 28)) {
+      return next(new ErrorHandler("GST must be between 0 and 28 %", 400));
+    }
+    const validDays = Math.min(Math.max(Number(req.body?.validDays) || 30, 1), 365);
+    const elastics = await _sheetElastics(ids);
+    const missing = elastics.filter((e) => !(Number(e.costing?.totalCost) > 0)).map((e) => e.name);
+    if (missing.length) {
+      return next(new ErrorHandler(
+        `No cost sheet yet for ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? " …" : ""}. Update their price first.`,
+        400
+      ));
+    }
+    const rows = elastics.map((e) => ({
+      name: e.name,
+      width: e.testingParameters?.width,
+      weight: e.weight,
+      rate: Math.round(Number(e.costing.totalCost) * (1 + margin / 100) * 100) / 100,
+    }));
+    const today = new Date();
+    const pdf = await renderPdf("elasticPrices", {
+      branding: await getPdfBranding(),
+      rows,
+      customerName: String(req.body?.customerName || "").slice(0, 120),
+      gstPercent: gst,
+      date: today,
+      validTill: new Date(today.getTime() + validDays * 86_400_000),
+    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'attachment; filename="price-list.pdf"');
+    res.send(pdf);
   })
 );
 

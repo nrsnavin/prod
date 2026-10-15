@@ -387,6 +387,63 @@ router.post(
 
 
 // ════════════════════════════════════════════════════════════════
+//  RESTOCK  —  POST /order/restock  { lines: [{ elastic, quantity }], supplyDate? }
+//
+//  Elastics at or under their reorder level are made for stock through
+//  the ordinary order → job flow, on an order for the factory's own
+//  house customer ("Own stock"). It is created Open, like any order:
+//  someone approves it (which draws the raw material) and raises its job.
+//  Its reservation holds the new production until the order completes;
+//  completion releases it, and the metres become free stock.
+// ════════════════════════════════════════════════════════════════
+async function houseCustomer() {
+  return Customer.findOneAndUpdate(
+    { houseStock: true },
+    { $setOnInsert: { houseStock: true, name: "Own stock (restock)", contactName: "", phoneNumber: "" } },
+    { new: true, upsert: true, setDefaultsOnInsert: true }
+  );
+}
+
+router.post(
+  "/restock",
+  catchAsyncErrors(async (req, res, next) => {
+    const parsed = readOrderLines(req.body?.lines);
+    if (parsed.error) return next(new ErrorHandler(parsed.error, 400));
+    const elasticError = await assertElasticsExist(parsed.lines, Elastic);
+    if (elasticError) return next(new ErrorHandler(elasticError, 400));
+
+    const customer = await houseCustomer();
+    const today = new Date();
+    const supplyDate = req.body?.supplyDate ? new Date(req.body.supplyDate) : new Date(today.getTime() + 14 * 86_400_000);
+    if (Number.isNaN(supplyDate.getTime())) return next(new ErrorHandler("supplyDate is not a date", 400));
+
+    const rawMaterialRequired = await computeRawMaterialRequired(parsed.lines);
+    const zeroes = parsed.lines.map((e) => ({ elastic: e.elastic, quantity: 0 }));
+    const order = await Order.create({
+      date: today,
+      po: `STOCK-${today.toISOString().slice(0, 10).replace(/-/g, "")}`,
+      customer: customer._id,
+      supplyDate,
+      description: String(req.body?.description || "Restock: elastics at or under their reorder level").slice(0, 500),
+      elasticOrdered: parsed.lines,
+      producedElastic: zeroes,
+      packedElastic: zeroes.map((z) => ({ ...z })),
+      pendingElastic: parsed.lines.map((e) => ({ elastic: e.elastic, quantity: e.quantity })),
+      rawMaterialRequired,
+      status: "Open",
+    });
+    order.fingerprints.push(buildFingerprint(ACTION_CODES.ORDER_CREATED, {
+      entityId: order._id,
+      actor: actorFromRequest(req),
+      meta: { po: order.po, customer: String(customer._id), restock: true, totalElastics: parsed.lines.length },
+    }));
+    await order.save();
+    res.status(201).json({ success: true, orderId: order._id, orderNo: order.orderNo });
+  })
+);
+
+
+// ════════════════════════════════════════════════════════════════
 //  GET ORDER DETAIL
 // ════════════════════════════════════════════════════════════════
 router.get(
@@ -1751,6 +1808,31 @@ function _draftCustomerUpdate({ customerName, orderNo, expectedDate, promised, l
 //  Both are fed by services/orderStatusReport.js, so the screen and the
 //  paper can never tell different stories.
 // ══════════════════════════════════════════════════════════════
+// POST /order/bulk/status-report.pdf  { ids }  — the selection's status
+// reports as one PDF, an order after another.
+router.post(
+  '/bulk/status-report.pdf',
+  catchAsyncErrors(async (req, res, next) => {
+    const ids = Array.isArray(req.body?.ids) ? [...new Set(req.body.ids.map(String))] : [];
+    if (ids.length === 0) return next(new ErrorHandler('Select at least one order', 400));
+    if (ids.length > 50) return next(new ErrorHandler('At most 50 orders at a time', 400));
+    if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) return next(new ErrorHandler('Invalid order id', 400));
+    const branding = await getPdfBranding();
+    const pdfs = [];
+    for (const id of ids) {
+      const data = await buildOrderStatusReport(id);
+      if (!data) continue;
+      data.branding = branding;
+      pdfs.push(await renderPdf('orderStatus', data));
+    }
+    if (!pdfs.length) return next(new ErrorHandler('None of those orders were found', 404));
+    const { mergePdfs } = require('../utils/mergePdfs');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="order-status-${pdfs.length}.pdf"`);
+    res.send(await mergePdfs(pdfs));
+  })
+);
+
 router.get(
   '/:id/status-report',
   catchAsyncErrors(async (req, res, next) => {

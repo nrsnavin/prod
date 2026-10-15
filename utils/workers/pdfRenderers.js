@@ -13,6 +13,8 @@ const RENDERERS = Object.freeze({
   morningDigest:  ['../reportPdf', 'buildMorningDigestPdf'],
   eveningReport:  ['../reportPdf', 'buildEveningReportPdf'],
   template:       ['../../services/pdf/templateRenderer', 'renderTemplatePdf'],
+  elasticSpec:    ['../elasticSheetsPdf', 'buildElasticSpecPdf'],
+  elasticPrices:  ['../elasticSheetsPdf', 'buildElasticPriceListPdf'],
 });
 
 async function render(name, args) {

@@ -23,6 +23,7 @@ const { currentFinancialYear } = require("../utils/financialYear");
 const PdfTemplate       = require("../models/PdfTemplate");
 const { starterTemplate }   = require("../services/pdf/docTypes");
 const { getPdfBranding }     = require("../services/documentSettings");
+const { mergePdfs }          = require("../utils/mergePdfs");
 const { dcToContext }        = require("../services/pdf/dcContext");
 
 // The whole router is already behind `gate('accounts')` where it is
@@ -1007,14 +1008,7 @@ router.get(
       .lean();
     if (!dc) return next(new ErrorHandler("Delivery Challan not found", 404));
 
-    const [branding, saved] = await Promise.all([
-      getPdfBranding(),
-      PdfTemplate.findOne({ docType: "delivery-challan" }).lean(),
-    ]);
-    const template = saved && saved.enabled ? saved : starterTemplate("delivery-challan");
-
-    const context = dcToContext(dc, branding);
-    const pdf = await renderPdf('template', template, context);
+    const pdf = await dcPdf(dc);
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
@@ -1025,87 +1019,176 @@ router.get(
   })
 );
 
+/**
+ * One challan to a new status, in its own transaction: the transition
+ * rules, the fingerprint, and (on cancel) the goods and the order's
+ * promise put back. Used by /update-status and /bulk/status. Throws
+ * ErrorHandler for anything refused.
+ */
+async function changeDcStatus(id, status, req) {
+  if (!DC_STATUSES.includes(status)) {
+    throw new ErrorHandler("Invalid status", 400);
+  }
+  if (!mongoose.Types.ObjectId.isValid(String(id))) {
+    throw new ErrorHandler("Delivery Challan not found", 404);
+  }
+
+  const actionCode = {
+    dispatched: ACTION_CODES.DC_DISPATCHED,
+    delivered:  ACTION_CODES.DC_DELIVERED,
+    cancelled:  ACTION_CODES.DC_CANCELLED,
+  }[status] || ACTION_CODES.DC_STATUS_UPDATED;
+
+  const session = await mongoose.startSession();
+  try {
+    let resp;
+    await session.withTransaction(async () => {
+      const dc = await DeliveryChallan.findById(id).session(session);
+      if (!dc) throw new ErrorHandler("Delivery Challan not found", 404);
+
+      const previousStatus = dc.status;
+      if (previousStatus === status) {
+        throw new ErrorHandler(`DC is already ${status}`, 400);
+      }
+
+      const allowed = DC_TRANSITIONS[previousStatus] || [];
+      if (!allowed.includes(status)) {
+        const err = new ErrorHandler(
+          allowed.length === 0
+            ? `DC ${dc.dcNumber} is ${previousStatus} and cannot change again. ` +
+              `Raise a fresh challan for a correction.`
+            : `A ${previousStatus} challan can only become ` +
+              `${allowed.join(" or ")} — not ${status}.`,
+          409
+        );
+        err.code = "DC_BAD_TRANSITION";
+        err.details = { from: previousStatus, to: status, allowed };
+        throw err;
+      }
+
+      dc.status = status;
+
+      const fp = buildFingerprint(actionCode, {
+        entityId: dc._id,
+        actor:    actorFromRequest(req),
+        meta: {
+          dcNumber:       dc.dcNumber,
+          previousStatus,
+          newStatus:      status,
+        },
+      });
+      dc.fingerprints.push(fp);
+      await dc.save({ session });
+
+      if (
+        status === "cancelled" &&
+        previousStatus !== "cancelled" &&
+        dc.type === "elastic"
+      ) {
+        for (const item of (dc.items || [])) {
+          // Goods back on the shelf and the order's promise with
+          // them, off the DC_OUT rows this challan wrote.
+          await _reverseDcItem(
+            session,
+            dc,
+            item,
+            `DC ${dc.dcNumber} cancelled`,
+            req.user?._id
+          );
+        }
+      }
+
+      resp = { dc, fingerprint: fp };
+    });
+    return resp;
+  } finally {
+    session.endSession();
+  }
+}
+
+/** A challan as its PDF, from the saved template (or the starter one). */
+async function dcPdf(dc) {
+  const [branding, saved] = await Promise.all([
+    getPdfBranding(),
+    PdfTemplate.findOne({ docType: "delivery-challan" }).lean(),
+  ]);
+  const template = saved && saved.enabled ? saved : starterTemplate("delivery-challan");
+  return renderPdf('template', template, dcToContext(dc, branding));
+}
+
 router.patch(
   "/update-status",
   catchAsyncErrors(async (req, res, next) => {
     const { id, status } = req.body;
-    if (!DC_STATUSES.includes(status)) {
-      return next(new ErrorHandler("Invalid status", 400));
-    }
-
-    const actionCode = {
-      dispatched: ACTION_CODES.DC_DISPATCHED,
-      delivered:  ACTION_CODES.DC_DELIVERED,
-      cancelled:  ACTION_CODES.DC_CANCELLED,
-    }[status] || ACTION_CODES.DC_STATUS_UPDATED;
-
-    const session = await mongoose.startSession();
     try {
-      let resp;
-      await session.withTransaction(async () => {
-        const dc = await DeliveryChallan.findById(id).session(session);
-        if (!dc) throw new ErrorHandler("Delivery Challan not found", 404);
-
-        const previousStatus = dc.status;
-        if (previousStatus === status) {
-          throw new ErrorHandler(`DC is already ${status}`, 400);
-        }
-
-        const allowed = DC_TRANSITIONS[previousStatus] || [];
-        if (!allowed.includes(status)) {
-          const err = new ErrorHandler(
-            allowed.length === 0
-              ? `DC ${dc.dcNumber} is ${previousStatus} and cannot change again. ` +
-                `Raise a fresh challan for a correction.`
-              : `A ${previousStatus} challan can only become ` +
-                `${allowed.join(" or ")} — not ${status}.`,
-            409
-          );
-          err.code = "DC_BAD_TRANSITION";
-          err.details = { from: previousStatus, to: status, allowed };
-          throw err;
-        }
-
-        dc.status = status;
-
-        const fp = buildFingerprint(actionCode, {
-          entityId: dc._id,
-          actor:    actorFromRequest(req),
-          meta: {
-            dcNumber:       dc.dcNumber,
-            previousStatus,
-            newStatus:      status,
-          },
-        });
-        dc.fingerprints.push(fp);
-        await dc.save({ session });
-
-        if (
-          status === "cancelled" &&
-          previousStatus !== "cancelled" &&
-          dc.type === "elastic"
-        ) {
-          for (const item of (dc.items || [])) {
-            // Goods back on the shelf and the order's promise with
-            // them, off the DC_OUT rows this challan wrote.
-            await _reverseDcItem(
-              session,
-              dc,
-              item,
-              `DC ${dc.dcNumber} cancelled`,
-              req.user?._id
-            );
-          }
-        }
-
-        resp = { dc, fingerprint: fp };
-      });
+      const resp = await changeDcStatus(id, status, req);
       res.json({ success: true, ...resp });
     } catch (err) {
       return next(err);
-    } finally {
-      session.endSession();
     }
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  BULK, FROM THE LIST'S SELECTION
+//    POST /dc/bulk/status  { ids, status }   each in its own transaction
+//    POST /dc/bulk/pdf     { ids }           one PDF, a challan after another
+//
+//  A challan whose status cannot change that way (already delivered, a
+//  draft marked delivered) is reported with the reason; the rest go on.
+// ─────────────────────────────────────────────────────────────
+const BULK_MAX = 100;
+function bulkIds(body) {
+  const ids = Array.isArray(body?.ids) ? [...new Set(body.ids.map(String))] : [];
+  if (ids.length === 0) return { error: new ErrorHandler("Select at least one challan", 400) };
+  if (ids.length > BULK_MAX) return { error: new ErrorHandler(`At most ${BULK_MAX} challans at a time`, 400) };
+  if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) return { error: new ErrorHandler("Invalid challan id", 400) };
+  return { ids };
+}
+
+router.post(
+  "/bulk/status",
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const { status } = req.body;
+    // Cancelling puts stock back and is a decision per challan; it stays
+    // on the challan's own page.
+    if (!["dispatched", "delivered"].includes(status)) {
+      return next(new ErrorHandler("Bulk status can only mark challans dispatched or delivered", 400));
+    }
+    const results = [];
+    for (const id of ids) {
+      try {
+        const { dc } = await changeDcStatus(id, status, req);
+        results.push({ id, name: dc.dcNumber, ok: true });
+      } catch (err) {
+        const dc = await DeliveryChallan.findById(id).select("dcNumber").lean().catch(() => null);
+        results.push({ id, name: dc?.dcNumber, ok: false, reason: err.message });
+      }
+    }
+    res.json({
+      success: true,
+      done: results.filter((r) => r.ok).length,
+      refused: results.filter((r) => !r.ok).length,
+      results,
+    });
+  })
+);
+
+router.post(
+  "/bulk/pdf",
+  catchAsyncErrors(async (req, res, next) => {
+    const { ids, error } = bulkIds(req.body);
+    if (error) return next(error);
+    const dcs = await DeliveryChallan.find({ _id: { $in: ids } }).populate("items.elastic", "name").lean();
+    if (!dcs.length) return next(new ErrorHandler("None of those challans were found", 404));
+    const order = new Map(ids.map((id, i) => [id, i]));
+    dcs.sort((a, b) => order.get(String(a._id)) - order.get(String(b._id)));
+    const pdf = await mergePdfs(await Promise.all(dcs.map((dc) => dcPdf(dc))));
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="challans-${dcs.length}.pdf"`);
+    res.send(pdf);
   })
 );
 

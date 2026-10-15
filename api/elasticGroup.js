@@ -101,6 +101,43 @@ router.post(
 );
 
 // ─────────────────────────────────────────────────────────────
+//  POST /elastic-group/:id/add-elastics   { elastics: [id, …] }
+//
+//  Adds elastics to a group from the elastic list's selection, keeping
+//  the ones it has (and their default quantities). One conditional push
+//  per elastic, so two people adding the same one at once add it once.
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/:id/add-elastics",
+  isAdmin("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return next(new ErrorHandler("Invalid group id", 400));
+    }
+    const ids = Array.isArray(req.body?.elastics) ? [...new Set(req.body.elastics.map(String))] : [];
+    if (ids.length === 0) return next(new ErrorHandler("Select at least one elastic", 400));
+    if (ids.length > 200) return next(new ErrorHandler("At most 200 elastics at a time", 400));
+    if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+      return next(new ErrorHandler("Invalid elastic id", 400));
+    }
+    if (!(await ElasticGroup.exists({ _id: req.params.id }))) {
+      return next(new ErrorHandler("Group not found", 404));
+    }
+
+    let added = 0;
+    for (const id of ids) {
+      const r = await ElasticGroup.updateOne(
+        { _id: req.params.id, "items.elastic": { $ne: new mongoose.Types.ObjectId(id) } },
+        { $push: { items: { elastic: id, defaultQuantity: 0 } } }
+      );
+      added += r.modifiedCount;
+    }
+    const group = await populate(ElasticGroup.findById(req.params.id)).lean();
+    res.json({ success: true, added, alreadyThere: ids.length - added, group });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
 //  PUT /elastic-group/:id
 // ─────────────────────────────────────────────────────────────
 router.put(
