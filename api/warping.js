@@ -583,6 +583,46 @@ async function resolveSectionLots(beams) {
   }));
 }
 
+/**
+ * A beam may name the elastic it is warping — the form carries it through
+ * when the plan was filled from a template, so a hand-saved plan keeps the
+ * same attribution an auto-created one gets. Only the job's own elastics
+ * are accepted; anything else is dropped rather than stored, since it
+ * would be a claim nobody could act on. Shared by create and edit.
+ */
+async function attributeBeams(beams, jobId) {
+  const jobDoc = await JobOrder.findById(jobId).select("elastics.elastic").lean();
+  const jobElastics = new Set(
+    (jobDoc?.elastics || []).map((e) => String(e.elastic)).filter(Boolean)
+  );
+  const tapeOf = (v) => {
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  };
+  return beams.map((b) => ({
+    ...b,
+    elastic: b.elastic && jobElastics.has(String(b.elastic)) ? b.elastic : null,
+    tapeNo: tapeOf(b.tapeNo),
+  }));
+}
+
+/** Batches still live against a warping's plan: they name its beam numbers. */
+const liveBatches = (warpingId, session = null) =>
+  WarpingBatch.find({ warping: warpingId, status: { $ne: "cancelled" } })
+    .select("batchNo status").session(session).lean();
+
+function planHasBatchesError(batches, verb) {
+  const err = new ErrorHandler(
+    `${batches.map((b) => b.batchNo).join(", ")} ${batches.length === 1 ? "is" : "are"} ` +
+    `raised against this plan's beams. Cancel ${batches.length === 1 ? "it" : "them"} ` +
+    `before ${verb} the plan.`,
+    409
+  );
+  err.code = "PLAN_HAS_BATCHES";
+  err.details = { batches: batches.map((b) => ({ batchNo: b.batchNo, status: b.status })) };
+  return err;
+}
+
 router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErrors(async (req, res, next) => {
   const { warpingId, beams, remarks } = req.body;
   if (!warpingId)     return next(new ErrorHandler("warpingId is required", 400));
@@ -614,25 +654,7 @@ router.post("/warpingPlan/create", isAdmin('admin', 'production'), catchAsyncErr
     return next(err);
   }
 
-  // A beam may name the elastic it is warping — the form carries it
-  // through when the plan was filled from a template, so a hand-saved
-  // plan keeps the same attribution an auto-created one gets. Only the
-  // job's own elastics are accepted; anything else is dropped rather
-  // than stored, since it would be a claim nobody could act on.
-  const jobDoc = await JobOrder.findById(warping.job).select("elastics.elastic").lean();
-  const jobElastics = new Set(
-    (jobDoc?.elastics || []).map((e) => String(e.elastic)).filter(Boolean)
-  );
-  const tapeOf = (v) => {
-    const n = Number(v);
-    return Number.isInteger(n) && n > 0 ? n : null;
-  };
-
-  resolvedBeams = resolvedBeams.map((b) => ({
-    ...b,
-    elastic: b.elastic && jobElastics.has(String(b.elastic)) ? b.elastic : null,
-    tapeNo: tapeOf(b.tapeNo),
-  }));
+  resolvedBeams = await attributeBeams(resolvedBeams, warping.job);
 
   // The plan and the warping's link to it are written together, and
   // only while the warping is still open with no plan. Checked above on
@@ -711,8 +733,13 @@ router.put("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErrors(
 
   let newBeams = null;
   if (Array.isArray(beams) && beams.length > 0) {
+    // Batches are raised against the beam numbers; changing the beams
+    // under one leaves it naming beams that are no longer what it says.
+    // The same rule as deleting the plan. Remarks alone stay editable.
+    const batches = await liveBatches(found.warping);
+    if (batches.length > 0) return next(planHasBatchesError(batches, "changing the beams of"));
     try {
-      newBeams = await resolveSectionLots(beams);
+      newBeams = await attributeBeams(await resolveSectionLots(beams), found.job);
     } catch (err) {
       return next(err);
     }
@@ -739,6 +766,13 @@ router.put("/warpingPlan/:id", isAdmin('admin', 'production'), catchAsyncErrors(
         if (stillOpen.matchedCount === 0) {
           throw new ErrorHandler("Plan can only be edited while warping is open. It was started just now.", 409);
         }
+      }
+
+      if (newBeams) {
+        // Re-checked inside: a batch create writes the warping too, so a
+        // batch raised since the check above conflicts with this edit.
+        const raised = await liveBatches(plan.warping, session);
+        if (raised.length > 0) throw planHasBatchesError(raised, "changing the beams of");
       }
 
       const before = { remarks: plan.remarks, noOfBeams: plan.noOfBeams };

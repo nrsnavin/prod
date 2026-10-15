@@ -221,3 +221,64 @@ describe('a plan edited as the warping is started', () => {
     expect((await WarpingPlan.findById(plan._id).lean()).remarks).toBe('changed');
   });
 });
+
+describe("editing a plan's beams", () => {
+  const put = (plan, body) => request(app).put(`/api/v2/warping/warpingPlan/${plan._id}`)
+    .set('Cookie', cookie()).send({ auditReason: 'more ends on beam 1', ...body });
+
+  it('replaces the beams of an open warping, keeping only the job\'s own elastics', async () => {
+    const { plan } = await seed({ status: 'open' });
+    const stranger = await Elastic.create({
+      name: 'Not on this job', weaveType: '8', spandexEnds: 40, yarnEnds: 120, pick: 12, noOfHook: 8, weight: 2.4,
+    });
+    const res = await put(plan, {
+      expectedVersion: plan.__v,
+      beams: [
+        { beamNo: 1, elastic: String(elastic._id), tapeNo: 1, sections: [{ warpYarn: String(yarn._id), ends: 140 }] },
+        { beamNo: 2, elastic: String(stranger._id), tapeNo: 'x', sections: [{ warpYarn: String(yarn._id), ends: 100, yarnLot: '' }] },
+        { beamNo: 3, sections: [{ warpYarn: String(yarn._id), ends: 60 }] },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const saved = await WarpingPlan.findById(plan._id).lean();
+    expect(saved.noOfBeams).toBe(3);
+    expect(saved.beams.map((b) => b.sections[0].ends)).toEqual([140, 100, 60]);
+    expect(saved.beams.map((b) => (b.elastic ? String(b.elastic) : null))).toEqual([String(elastic._id), null, null]);
+    expect(saved.beams.map((b) => b.tapeNo ?? null)).toEqual([1, null, null]);
+  });
+
+  it('is refused while a batch is raised against them, and the plan is unchanged', async () => {
+    const { warping, plan, lot } = await seed({ status: 'open', withLot: true });
+    const made = await post('/api/v2/warping/batch/create', {
+      warpingId: String(warping._id), beamNos: [1],
+      allocations: [{ rawMaterial: yarn._id, yarnLot: lot._id, quantity: 30 }],
+    });
+    expect(made.status).toBe(201);
+
+    const res = await put(plan, { beams: beamsBody() });
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/Cancel it before changing the beams/);
+    expect((await WarpingPlan.findById(plan._id).lean()).noOfBeams).toBe(2);
+
+    // Remarks name no beam, so they stay editable.
+    const remarks = await put(plan, { remarks: 'use the red creel' });
+    expect(remarks.status).toBe(200);
+  });
+
+  it('is refused for a batch raised after the first check', async () => {
+    const { warping, plan, lot } = await seed({ status: 'open', withLot: true });
+    await post('/api/v2/warping/batch/create', {
+      warpingId: String(warping._id), beamNos: [1],
+      allocations: [{ rawMaterial: yarn._id, yarnLot: lot._id, quantity: 30 }],
+    });
+    // The check outside the transaction finds none...
+    jest.spyOn(WarpingBatch, 'find').mockImplementationOnce(() => ({
+      select: () => ({ session: () => ({ lean: () => Promise.resolve([]) }) }),
+    }));
+    const res = await put(plan, { beams: beamsBody() });
+    jest.restoreAllMocks();
+    // ...the one inside does.
+    expect(res.status).toBe(409);
+    expect((await WarpingPlan.findById(plan._id).lean()).noOfBeams).toBe(2);
+  });
+});
