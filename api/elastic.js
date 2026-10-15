@@ -65,6 +65,47 @@ const _populate = (q) =>
     .populate("costing")
     .populate("warpingPlanTemplate.beams.sections.warpYarn", "name category");
 
+/** The id in a warp yarn entry, populated or not. */
+const _idOf = (v) => String(v?._id ?? v ?? "");
+
+/**
+ * A template may only use the elastic's own warp yarns.
+ *
+ * The template is how the elastic is warped, and the warp yarn list is
+ * what it is made of — the costing and every order's material draw come
+ * from that list. A beam section on a yarn the list does not name builds
+ * a different product from the one costed and issued for.
+ *
+ * Returns the 400 to send, or null. Only sections that would be kept
+ * (a yarn and ends > 0, as _normalisePlan keeps) are checked.
+ */
+async function templateYarnProblem(template, warpYarnList) {
+  const allowed = new Set((warpYarnList || []).map((w) => _idOf(w?.id)).filter(Boolean));
+  const stray = [];
+  (template?.beams || []).forEach((b, i) => {
+    for (const sec of b.sections || []) {
+      if (!sec.warpYarn || !(Number(sec.ends) > 0)) continue;
+      const id = _idOf(sec.warpYarn);
+      if (!allowed.has(id)) stray.push({ beam: b.beamNo ?? i + 1, id });
+    }
+  });
+  if (!stray.length) return null;
+  const RawMaterial = require("../models/RawMaterial");
+  const ids = [...new Set(stray.map((x) => x.id))].filter((id) => mongoose.Types.ObjectId.isValid(id));
+  const names = new Map((await RawMaterial.find({ _id: { $in: ids } }).select("name").lean())
+    .map((m) => [String(m._id), m.name]));
+  const first = stray[0];
+  const what = names.get(first.id) ? `"${names.get(first.id)}"` : "a warp yarn";
+  const err = new ErrorHandler(
+    `Beam ${first.beam} uses ${what}, which is not one of this elastic's warp yarns. ` +
+    "A warping template can only use the warp yarns listed on the elastic — pick one of those, " +
+    "or add the yarn to the elastic first.",
+    400
+  );
+  err.code = "TEMPLATE_YARN_NOT_ON_ELASTIC";
+  return err;
+}
+
 function _normalisePlan(template) {
   const beams = (template.beams || []).map((b, i) => {
     const sections = (b.sections || [])
@@ -100,6 +141,10 @@ router.post(
 
       const planTemplate = elasticData.warpingPlanTemplate ?? null;
       delete elasticData.warpingPlanTemplate;
+      if (planTemplate) {
+        const stray = await templateYarnProblem(planTemplate, elasticData.warpYarn);
+        if (stray) return next(stray);
+      }
 
       // Derived from `name` by the model. Accepting it from the body
       // would let a caller point a new elastic's key at another name
@@ -767,6 +812,9 @@ router.put(
       if ("warpingPlanTemplate" in elasticData) {
         const tpl = elasticData.warpingPlanTemplate;
         if (tpl && Array.isArray(tpl.beams) && tpl.beams.length > 0) {
+          // Against the warp yarns as edited here, not as they were.
+          const stray = await templateYarnProblem(tpl, elastic.warpYarn);
+          if (stray) return next(stray);
           elastic.warpingPlanTemplate = _normalisePlan(tpl);
         } else {
           elastic.warpingPlanTemplate = undefined;
@@ -847,6 +895,8 @@ router.put(
     if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
 
     if (template && Array.isArray(template.beams) && template.beams.length > 0) {
+      const stray = await templateYarnProblem(template, elastic.warpYarn);
+      if (stray) return next(stray);
       elastic.warpingPlanTemplate = _normalisePlan(template);
     } else {
       elastic.warpingPlanTemplate = undefined;
