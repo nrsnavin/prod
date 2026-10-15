@@ -49,7 +49,9 @@ const dayKey = (d, sh) => `${ymd(d)}|${sh}`;
 // full shift, keeping legacy data unchanged).
 function resolveWorkedMinutes(rec) {
   if (rec.clockInAt && rec.clockOutAt) {
-    const mins = (new Date(rec.clockOutAt) - new Date(rec.clockInAt)) / 60000;
+    // The last stint, plus any clocked out of earlier in the shift.
+    const mins = (new Date(rec.clockOutAt) - new Date(rec.clockInAt)) / 60000
+      + (Number(rec.priorMinutes) || 0);
     if (mins > 0) return mins;
   }
   if (Number.isFinite(rec.workedMinutes) && rec.workedMinutes > 0) return rec.workedMinutes;

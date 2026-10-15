@@ -81,6 +81,66 @@ describe('clock-in / clock-out endpoints', () => {
   });
 });
 
+describe('clocking back in after clocking out', () => {
+  const clock = (emp, way) => request(app).post(`/api/v2/attendance/clock-${way}`).set('Cookie', adminCookie())
+    .send({ employeeId: emp._id, shift: 'DAY', date: dstr(3) });
+  const backdate = (emp, hours) => Attendance.updateOne(
+    { employee: emp._id, shift: 'DAY' },
+    { $set: { clockInAt: new Date(Date.now() - hours * 60 * 60 * 1000) } }
+  );
+
+  test('is allowed, and the shift keeps the time worked before it', async () => {
+    const emp = await makeEmp();
+    await clock(emp, 'in');
+    await backdate(emp, 4);
+    expect((await clock(emp, 'out')).body.data.workedMinutes).toBeCloseTo(240, -1);
+
+    // Back from a break: a new stint, the morning's 4h carried.
+    const back = await clock(emp, 'in');
+    expect(back.status).toBe(200);
+    expect(back.body.data.clockOutAt).toBeNull();
+    expect(back.body.data.priorMinutes).toBeCloseTo(240, -1);
+    await backdate(emp, 3);
+    const out = await clock(emp, 'out');
+    expect(out.body.data.workedMinutes).toBeGreaterThanOrEqual(419);
+    expect(out.body.data.workedMinutes).toBeLessThanOrEqual(421);
+  });
+
+  test('payroll pays every stint, not just the last', async () => {
+    const emp = await makeEmp();
+    // 4h before a break, then 13:00–16:00.
+    await Attendance.create({
+      employee: emp._id, date: new Date(YEAR, MONTH - 1, 2), shift: 'DAY', status: 'present',
+      clockInAt: new Date(YEAR, MONTH - 1, 2, 13, 0), clockOutAt: new Date(YEAR, MONTH - 1, 2, 16, 0),
+      priorMinutes: 240,
+    });
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.grossEarnings).toBe(700); // 7h × ₹100, not 3h
+  });
+
+  test('two taps resuming at once carry the minutes once', async () => {
+    const emp = await makeEmp();
+    await clock(emp, 'in');
+    await backdate(emp, 2);
+    await clock(emp, 'out');
+    const [a, b] = await Promise.all([clock(emp, 'in'), clock(emp, 'in')]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    const rec = await Attendance.findOne({ employee: emp._id }).lean();
+    expect(rec.priorMinutes).toBeCloseTo(120, -1);
+    expect(rec.clockOutAt).toBeNull();
+  });
+
+  test('a shift with one stint pays as before', async () => {
+    const emp = await makeEmp();
+    await clock(emp, 'in');
+    await backdate(emp, 5);
+    const out = await clock(emp, 'out');
+    expect(out.body.data.priorMinutes).toBe(0);
+    expect(out.body.data.workedMinutes).toBeGreaterThanOrEqual(299);
+    expect(out.body.data.workedMinutes).toBeLessThanOrEqual(301);
+  });
+});
+
 describe('actual-hours pay (capped at 12h)', () => {
   test('a 3h worked shift pays 3h, not a full 12h shift', async () => {
     const emp = await makeEmp();

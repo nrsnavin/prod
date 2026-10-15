@@ -111,6 +111,7 @@ function fmtRecord(a) {
     clockInAt:    a.clockInAt ?? null,
     clockOutAt:   a.clockOutAt ?? null,
     workedMinutes: a.workedMinutes ?? 0,
+    priorMinutes: a.priorMinutes ?? 0,
     lateMinutes:  a.lateMinutes,
     overtimeMinutes: a.overtimeMinutes ?? 0,
     leaveType:    a.leaveType,
@@ -235,23 +236,34 @@ router.post('/clock-in', isAdmin('admin', 'accounts'), async (req, res) => {
       return res.status(409).json({ success: false, message: 'Already clocked in for this shift.' });
     }
 
+    // Back after clocking out (a break, an errand): a new stint starts,
+    // and the minutes already worked this shift are carried, not reset —
+    // resetting them paid only the last stint.
+    const resuming = !!(existing?.clockInAt && existing?.clockOutAt);
+    const carried = resuming ? Math.max(0, Number(existing.workedMinutes) || 0) : 0;
+
     // The check above, repeated in the write: only a shift not already
     // running is (re)started. A double tap read "not clocked in" twice
     // and the second moved the start time later, cutting the paid
     // minutes. A running one does not match, the upsert tries to insert,
-    // and the unique (employee, date, shift) index refuses it.
+    // and the unique (employee, date, shift) index refuses it. Resuming
+    // matches only the stint read above, so two taps cannot both carry
+    // the same minutes forward.
     let doc;
     try {
       doc = await Attendance.findOneAndUpdate(
-        {
-          employee: employeeId, date: dateObj, shift: shiftUp,
-          $or: [{ clockInAt: null }, { clockOutAt: { $ne: null } }],
-        },
+        resuming
+          ? { _id: existing._id, clockOutAt: existing.clockOutAt }
+          : {
+              employee: employeeId, date: dateObj, shift: shiftUp,
+              $or: [{ clockInAt: null }, { clockOutAt: { $ne: null } }],
+            },
         { $set: {
             status: 'present',
             clockInAt: new Date(),
             clockOutAt: null,
-            workedMinutes: 0,
+            workedMinutes: carried,
+            priorMinutes: carried,
             markedBy: req.user?.name || 'admin',
           } },
         { new: true, upsert: true, setDefaultsOnInsert: true }
@@ -288,7 +300,8 @@ router.post('/clock-out', isAdmin('admin', 'accounts'), async (req, res) => {
     const now = new Date();
     const clockedInAt = doc.clockInAt;
     doc.clockOutAt = now;
-    doc.workedMinutes = Math.max(0, Math.round((now - doc.clockInAt) / 60000));
+    // This stint plus any before it on the same shift.
+    doc.workedMinutes = Math.max(0, Math.round((now - doc.clockInAt) / 60000)) + (Number(doc.priorMinutes) || 0);
     // pre-save recomputes hoursWorked from the worked duration. Saved
     // only if this is still the same open shift: a double tap would
     // otherwise move the clock-out later, and a clock-in landing in

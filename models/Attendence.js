@@ -37,6 +37,11 @@ const AttendanceSchema = new mongoose.Schema({
   // in/out. Payroll pays these (capped at the 12h shift); minutes beyond
   // the shift become overtime.
   workedMinutes: { type: Number, default: 0, min: 0 },
+  // Minutes from stints already clocked out of, before the running one.
+  // Clocking out and back in (a break, an errand) starts a new stint at
+  // clockInAt; this keeps the time before it, so the shift's total is
+  // priorMinutes + (clockOutAt − clockInAt) and nothing earlier is lost.
+  priorMinutes: { type: Number, default: 0, min: 0 },
   lateMinutes: { type: Number, default: 0 },
   // Minutes worked BEYOND the shift's scheduled hours. Payroll pays these
   // (past an optional grace window) at PayrollSettings.overtimeMultiplier.
