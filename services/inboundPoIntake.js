@@ -92,7 +92,7 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
   // was saved under, which is often not the name on the master, but the
   // number is the number. Any of a customer's numbers counts. Only a
   // number that belongs to exactly one customer is taken as a match.
-  const key = phoneKey(draft.customerPhone);
+  const key = phoneKey(draft.customerMobile);
   const byPhone = key
     ? customers.filter((c) =>
         [c.phoneNumber, c.purchase?.mobile, c.accountant?.mobile, c.merchandiser?.mobile]
@@ -140,7 +140,8 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
     promptVersion: promptVersion('inbound-po-ocr'),
     proposed: {
       customerName: draft.customerName,
-      customerPhone: draft.customerPhone,
+      customerMobile: draft.customerMobile,
+      phoneSource: draft.phoneSource,
       poNumber: draft.poNumber,
       matchedCustomer: customerMatch.confident ? customerMatch.best.label : null,
       lines: lines.map((l) => ({
