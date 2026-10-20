@@ -82,7 +82,8 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
   // ── Match against the masters ──
   const [customers, elastics] = await Promise.all([
     Customer.find({})
-      .select('name phoneNumber purchase.mobile accountant.mobile merchandiser.mobile').lean(),
+      .select('name phoneNumber purchase.mobile accountant.mobile merchandiser.mobile ' +
+        'email purchase.email accountant.email merchandiser.email').lean(),
     // Archived products are deliberately excluded: offering one would
     // draft an order for something the plant has stopped making.
     Elastic.find({ archived: { $ne: true } }).select('name').lean(),
@@ -99,6 +100,14 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
           .some((p) => phoneKey(p) === key))
     : [];
 
+  // Then the email address — from an email screenshot or a visiting card.
+  const mail = draft.customerEmail ? draft.customerEmail.toLowerCase() : null;
+  const byEmail = mail
+    ? customers.filter((c) =>
+        [c.email, c.purchase?.email, c.accountant?.email, c.merchandiser?.email]
+          .some((e) => e && String(e).trim().toLowerCase() === mail))
+    : [];
+
   const byName = draft.customerName
     ? rank(draft.customerName, customers.map((c) => ({ id: String(c._id), label: c.name })))
     : { best: null, candidates: [], confident: false, blocked: [] };
@@ -110,7 +119,14 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
         confident: true,
         matchedBy: 'phone',
       }
-    : { ...byName, matchedBy: byName.confident ? 'name' : null };
+    : byEmail.length === 1
+      ? {
+          best: { id: String(byEmail[0]._id), label: byEmail[0].name },
+          candidates: [{ id: String(byEmail[0]._id), label: byEmail[0].name, score: 1 }],
+          confident: true,
+          matchedBy: 'email',
+        }
+      : { ...byName, matchedBy: byName.confident ? 'name' : null };
 
   const elasticChoices = elastics.map((e) => ({ id: String(e._id), label: e.name }));
 
@@ -142,6 +158,8 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
       customerName: draft.customerName,
       customerMobile: draft.customerMobile,
       phoneSource: draft.phoneSource,
+      customerEmail: draft.customerEmail,
+      sourceType: draft.sourceType,
       poNumber: draft.poNumber,
       matchedCustomer: customerMatch.confident ? customerMatch.best.label : null,
       lines: lines.map((l) => ({
@@ -168,7 +186,7 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
         customerName: customerMatch.confident ? customerMatch.best.label : null,
         candidates: customerMatch.candidates.map((c) => ({ id: c.id, name: c.label, score: c.score })),
         confident: customerMatch.confident,
-        /** 'phone' or 'name' — what the match rests on; null when none. */
+        /** 'phone', 'email' or 'name' — what the match rests on; null when none. */
         matchedBy: customerMatch.matchedBy,
       },
     },

@@ -17,7 +17,9 @@ jest.mock('../../utils/anthropicClient', () => ({
   VISION_MODEL: 'vision-x',
 }));
 
-const { normaliseDraft, phoneIn, phoneKey, extractPurchaseOrder, OUTPUT_SCHEMA } = require('../../utils/inboundPoOcr');
+const {
+  normaliseDraft, phoneIn, phoneKey, isMobile, extractPurchaseOrder, OUTPUT_SCHEMA, SOURCE_TYPES,
+} = require('../../utils/inboundPoOcr');
 
 const chat = (over = {}) => ({
   sourceType: 'whatsapp_chat',
@@ -81,6 +83,73 @@ describe('where the number comes from', () => {
   });
 });
 
+describe('an email screenshot or a visiting card', () => {
+  const card = (over = {}) => chat({
+    sourceType: 'visiting_card', messageBoxText: null, chatHeaderTitle: null,
+    customerName: 'Fellows Fashion Ventures', contactPerson: 'Mohan Raj',
+    customerEmail: 'Mohan@FellowsFashion.in', customerPhone: null, lines: [],
+    phoneNumbers: [
+      { number: '0421-2345678', label: 'Off' },
+      { number: '+91 97874 98412', label: 'Mob' },
+    ],
+    ...over,
+  });
+
+  test('a card gives its mobile as the mobile and WhatsApp number, not the office line', () => {
+    const d = normaliseDraft(card());
+    expect(d).toMatchObject({
+      sourceType: 'visiting_card', contactPerson: 'Mohan Raj', customerEmail: 'mohan@fellowsfashion.in',
+      customerMobile: '+91 97874 98412', customerWhatsapp: '+91 97874 98412', phoneSource: 'visiting_card',
+    });
+    expect(d.phoneNumbers).toHaveLength(2);
+    expect(d.lines).toEqual([]);
+  });
+
+  test('a number marked WhatsApp wins over one marked mobile', () => {
+    const d = normaliseDraft(card({ phoneNumbers: [
+      { number: '98432 10987', label: 'Mob' }, { number: '97874 98412', label: 'WhatsApp' },
+    ] }));
+    expect(d.customerWhatsapp).toBe('97874 98412');
+    expect(d.customerMobile).toBe('97874 98412');
+  });
+
+  test('unlabelled, a mobile-looking number wins over a landline', () => {
+    const d = normaliseDraft(card({ phoneNumbers: [
+      { number: '0421 2345678', label: null }, { number: '9787498412', label: null },
+    ] }));
+    expect(d.customerMobile).toBe('9787498412');
+  });
+
+  test("the reading's own pick stands, unless it is a landline and a mobile was listed", () => {
+    expect(normaliseDraft(card({ customerPhone: '98432 10987' })).customerMobile).toBe('98432 10987');
+    expect(normaliseDraft(card({ customerPhone: '0421-2345678' })).customerMobile).toBe('+91 97874 98412');
+  });
+
+  test("an email's sender address and signature number are taken", () => {
+    const d = normaliseDraft(card({
+      sourceType: 'email', customerEmail: 'Purchase <purchase@fellows.in>',
+      phoneNumbers: [{ number: 'M: 97874 98412', label: 'M' }],
+    }));
+    expect(d).toMatchObject({ sourceType: 'email', customerEmail: 'purchase@fellows.in', customerMobile: '97874 98412', phoneSource: 'email' });
+  });
+
+  test('an unknown kind is read as a document', () => {
+    expect(normaliseDraft(card({ sourceType: 'fax' })).sourceType).toBe('document');
+  });
+
+  test('a card or an email gets no second look at a message box', async () => {
+    mockCreate.mockResolvedValueOnce(reply(card({ phoneNumbers: [] })));
+    await extractPurchaseOrder(Buffer.from('x'), 'image/png');
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+});
+
+test('the prompt and schema name all four kinds', () => {
+  expect(SOURCE_TYPES).toEqual(['whatsapp_chat', 'email', 'visiting_card', 'document']);
+  expect(OUTPUT_SCHEMA.properties.sourceType.enum).toEqual(SOURCE_TYPES);
+  expect(OUTPUT_SCHEMA.required).toEqual(expect.arrayContaining(['customerEmail', 'phoneNumbers', 'contactPerson']));
+});
+
 test('numbers are found in text and compared on their last ten digits', () => {
   expect(phoneIn('call +91 97874 98412 today')).toBe('+91 97874 98412');
   expect(phoneIn('Jogger-2350, Boys - 5810')).toBeNull();
@@ -89,6 +158,8 @@ test('numbers are found in text and compared on their last ten digits', () => {
   expect(phoneKey('+91 97874 98412')).toBe(k);
   expect(phoneKey('097874 98412')).toBe(k);
   expect(phoneKey('12345')).toBeNull();
+  expect(isMobile('+91 97874 98412')).toBe(true);
+  expect(isMobile('0421 2345678')).toBe(false);
 });
 
 describe('asking the model', () => {

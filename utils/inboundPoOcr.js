@@ -36,14 +36,30 @@ function parseJsonReply(text) {
 }
 
 const PROMPT = [
-  'This is a purchase order or an enquiry sent to us by a customer. It is one of:',
-  '- a document: a PDF, a letterhead, a typed or handwritten page, a photo of one;',
-  '- a WhatsApp chat screenshot: a contact name (or number) in the header at the top,',
-  '  message bubbles, and the message input box at the very bottom (between the "+"',
-  '  and the send / sticker buttons).',
-  'Read it and return what it says.',
+  'This is a purchase order or an enquiry from a customer. It is one of:',
+  '- "whatsapp_chat": a WhatsApp chat screenshot — a contact name (or number) in the',
+  '  header at the top, message bubbles, and the message input box at the very bottom',
+  '  (between the "+" and the send / sticker buttons);',
+  '- "email": a screenshot of an email — From / To / Subject, the body, a signature;',
+  '- "visiting_card": a photo or scan of a business card (front or back);',
+  '- "document": anything else — a PDF, a letterhead, a typed or handwritten page.',
+  'Decide sourceType first, then read it and return what it says.',
   '',
-  'First decide sourceType: "whatsapp_chat" for a chat screenshot, otherwise "document".',
+  'Who the customer is, and how to reach them:',
+  '- customerName: their company (or their own name when no company shows).',
+  '  whatsapp_chat: the header title, unless a message names the company more fully.',
+  '  email: the sender\'s company from the signature or the address domain; else the sender.',
+  '  visiting_card: the company printed on the card.',
+  '- contactPerson: the person — the email sender, the name on the card, or null.',
+  '- customerEmail: their email address — the email\'s From address, or the one on the card',
+  '  or letterhead. Never our own address (the To address of an email sent to us).',
+  '- phoneNumbers: EVERY phone number of theirs that shows, each copied as written, with',
+  '  its label as printed ("Mob", "Cell", "WhatsApp", "Tel", "Off", "Fax") or null. A',
+  '  WhatsApp icon beside a number counts as the label "WhatsApp".',
+  '- customerPhone: their mobile / WhatsApp number — the one they can be messaged on.',
+  '  Prefer a number labelled WhatsApp, then one labelled mobile, then a mobile-looking',
+  '  number over a landline. In a WhatsApp chat it is the number typed in the message box.',
+  'Never give a number or address that is ours.',
   '',
   'For a WhatsApp chat screenshot — the phone number matters most here:',
   '- messageBoxText: copy EXACTLY whatever is typed in the message input box at the',
@@ -52,15 +68,10 @@ const PROMPT = [
   '  screenshot, so never skip it. null only if the box is empty or shows only the grey',
   '  placeholder ("Message").',
   '- chatHeaderTitle: the contact name or number exactly as shown in the header.',
-  '- customerName: the chat header title (the customer is the other party, not us),',
-  '  unless a message gives their company name more fully.',
-  '- customerPhone: the number typed in the message box; failing that, a number in the',
-  '  header; failing that, a number the customer wrote in a message.',
-  'For a document, messageBoxText and chatHeaderTitle are null, and customerPhone is',
-  'the customer\'s phone or mobile number from their letterhead, signature or address.',
-  'Copy phone numbers as written. Never use a number that is ours.',
+  'For anything that is not a WhatsApp chat, messageBoxText and chatHeaderTitle are null.',
   '',
-  'Rules for the order itself, and these matter more than completeness:',
+  'What they want: a visiting card usually has no order on it — return no lines rather',
+  'than inventing any. For the rest, and these rules matter more than completeness:',
   '- NEVER invent a line, a quantity or a rate. If a cell is blank or you cannot read',
   '  it, return null. A plausible-looking number in a price column is far worse than an',
   '  empty one: an empty cell gets filled in, a wrong one gets confirmed and shipped.',
@@ -70,8 +81,12 @@ const PROMPT = [
   '- Lower a line\'s confidence when the text is unclear. Be honest; a low number is',
   '  useful and a falsely high one is not.',
   '- Ignore our own letterhead if the document quotes it back. We want what THEY ordered.',
-  '- Dates as YYYY-MM-DD; confidences from 0 to 1.',
+  '- Dates as YYYY-MM-DD; confidences from 0 to 1. Anything else worth knowing (an email',
+  '  subject, a card\'s address or GSTIN, a question asked) goes in notes.',
 ].join('\n');
+
+/** What an enquiry can arrive as. */
+const SOURCE_TYPES = ['whatsapp_chat', 'email', 'visiting_card', 'document'];
 
 const str = { type: 'string' };
 const nullable = (schema) => ({ anyOf: [schema, { type: 'null' }] });
@@ -85,14 +100,25 @@ const OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: [
-    'sourceType', 'messageBoxText', 'chatHeaderTitle', 'customerName', 'customerPhone',
-    'poNumber', 'poDate', 'deliveryDate', 'currency', 'lines', 'notes', 'confidence',
+    'sourceType', 'messageBoxText', 'chatHeaderTitle', 'customerName', 'contactPerson',
+    'customerEmail', 'phoneNumbers', 'customerPhone', 'poNumber', 'poDate', 'deliveryDate', 'currency', 'lines', 'notes', 'confidence',
   ],
   properties: {
-    sourceType:      { type: 'string', enum: ['whatsapp_chat', 'document'] },
+    sourceType:      { type: 'string', enum: SOURCE_TYPES },
     messageBoxText:  nullable(str),
     chatHeaderTitle: nullable(str),
     customerName:    nullable(str),
+    contactPerson:   nullable(str),
+    customerEmail:   nullable(str),
+    phoneNumbers: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['number', 'label'],
+        properties: { number: str, label: nullable(str) },
+      },
+    },
     customerPhone:   nullable(str),
     poNumber:        nullable(str),
     poDate:          nullable(str),
@@ -238,20 +264,59 @@ function phoneKey(v) {
   return digits.length >= 10 ? digits.slice(-10) : null;
 }
 
+/** An Indian mobile: ten digits starting 6–9, after any 91 / 0 prefix. */
+function isMobile(n) {
+  const d = String(n || '').replace(/\D/g, '').replace(/^(91|0)(?=[6-9]\d{9}$)/, '');
+  return /^[6-9]\d{9}$/.test(d);
+}
+
+/**
+ * The number they can be messaged on, from all the numbers a card, an
+ * email signature or a letterhead shows: one marked WhatsApp, then one
+ * marked mobile, then any mobile-looking number, then whatever there is.
+ */
+function pickFromList(list) {
+  const numbers = (Array.isArray(list) ? list : [])
+    .map((p) => ({ number: phoneIn(p?.number) || phone(p?.number), label: String(p?.label || '').toLowerCase() }))
+    .filter((p) => p.number);
+  return (
+    numbers.find((p) => /whats\s*app|\bwa\b/.test(p.label)) ||
+    numbers.find((p) => /mob|cell|\bm\b|hp/.test(p.label)) ||
+    numbers.find((p) => isMobile(p.number)) ||
+    numbers[0] ||
+    null
+  )?.number ?? null;
+}
+
 /**
  * The customer's number, and where it was found. A chat's message box
  * comes first — it is where the number is typed before the screenshot —
- * then a number shown in the chat header, then whatever the reading
- * named (a letterhead, a signature, a number written in a message).
+ * then a number shown in the chat header. Otherwise the reading's own
+ * pick, checked against every number it listed: a mobile wins over a
+ * landline, because the one number is also their WhatsApp number.
  */
 function resolvePhone(raw) {
-  const fromBox = phoneIn(raw.messageBoxText);
-  if (fromBox) return { number: fromBox, source: 'message_box' };
-  const fromHeader = phoneIn(raw.chatHeaderTitle);
-  if (fromHeader) return { number: fromHeader, source: 'chat_header' };
-  const named = phone(raw.customerPhone) || phoneIn(raw.customerPhone);
-  if (named) return { number: named, source: raw.sourceType === 'whatsapp_chat' ? 'chat_message' : 'document' };
-  return { number: null, source: null };
+  const type = SOURCE_TYPES.includes(raw.sourceType) ? raw.sourceType : 'document';
+  if (type === 'whatsapp_chat') {
+    const fromBox = phoneIn(raw.messageBoxText);
+    if (fromBox) return { number: fromBox, source: 'message_box' };
+    const fromHeader = phoneIn(raw.chatHeaderTitle);
+    if (fromHeader) return { number: fromHeader, source: 'chat_header' };
+  }
+  // The number alone: "M: 97874 98412" gives "97874 98412".
+  const named = phoneIn(raw.customerPhone) || phone(raw.customerPhone);
+  const listed = pickFromList(raw.phoneNumbers);
+  // The reading's pick stands unless it is a landline and a mobile was listed.
+  const number = named && (isMobile(named) || !listed || !isMobile(listed)) ? named : listed || named;
+  if (!number) return { number: null, source: null };
+  const source = { whatsapp_chat: 'chat_message', email: 'email', visiting_card: 'visiting_card' }[type] || 'document';
+  return { number, source };
+}
+
+/** An email address, lower-cased, or null. */
+function email(v) {
+  const m = String(v || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return m ? m[0].toLowerCase() : null;
 }
 
 /** Guard-rail whatever came back into a predictable shape. */
@@ -273,13 +338,19 @@ function normaliseDraft(raw) {
   const { number, source } = resolvePhone(raw);
   const lines = Array.isArray(raw.lines) ? raw.lines : [];
   return {
-    sourceType:     raw.sourceType === 'whatsapp_chat' ? 'whatsapp_chat' : 'document',
+    sourceType:     SOURCE_TYPES.includes(raw.sourceType) ? raw.sourceType : 'document',
     customerName:   text(raw.customerName),
-    // One number: the customer reached us on WhatsApp from it, so it is
-    // their mobile and their WhatsApp number both.
+    contactPerson:  text(raw.contactPerson),
+    customerEmail:  email(raw.customerEmail),
+    // One number, their mobile and their WhatsApp number both: the one
+    // they reached us on, or can be messaged on.
     customerMobile:   number,
     customerWhatsapp: number,
     phoneSource:      source,
+    // Every number shown (a card often has several), labelled as printed.
+    phoneNumbers: (Array.isArray(raw.phoneNumbers) ? raw.phoneNumbers : [])
+      .map((p) => ({ number: phoneIn(p?.number) || phone(p?.number), label: text(p?.label) }))
+      .filter((p) => p.number),
     messageBoxText:   text(raw.messageBoxText),
     chatHeaderTitle:  text(raw.chatHeaderTitle),
     poNumber:     text(raw.poNumber),
@@ -303,6 +374,6 @@ function normaliseDraft(raw) {
 }
 
 module.exports = {
-  extractPurchaseOrder, parseJsonReply, normaliseDraft, phoneIn, phoneKey,
-  OUTPUT_SCHEMA, IMAGE_TYPES, PDF_TYPE,
+  extractPurchaseOrder, parseJsonReply, normaliseDraft, phoneIn, phoneKey, isMobile,
+  OUTPUT_SCHEMA, SOURCE_TYPES, IMAGE_TYPES, PDF_TYPE,
 };

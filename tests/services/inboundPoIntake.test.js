@@ -234,6 +234,17 @@ describe('the customer by phone number', () => {
     expect(r.draft.customer).toMatchObject({ customerName: 'Sri Lakshmi Garments', matchedBy: 'name' });
   });
 
+  test('an email address finds the customer when no number does', async () => {
+    const c = await Customer.create({
+      name: 'Fellows Fashion Ventures', contactName: 'M', phoneNumber: '0000000000',
+      purchase: { name: 'Mohan', email: 'Purchase@Fellows.in' },
+    });
+    extractPurchaseOrder.mockResolvedValue(reading({ customerName: 'Fellows', customerEmail: 'purchase@fellows.in', lines: [] }));
+    const r = await draft();
+    expect(r.draft.customer).toMatchObject({ customerId: String(c._id), matchedBy: 'email' });
+    expect(r.summary.lines).toBe(0); // a visiting card carries no order
+  });
+
   test('an unknown number is shown, and nothing matched on it', async () => {
     extractPurchaseOrder.mockResolvedValue(reading({ customerName: 'Somebody New', customerMobile: '+91 91234 56789', customerWhatsapp: '+91 91234 56789' }));
     const r = await draft();
