@@ -25,6 +25,7 @@ process.env.NODE_ENV = 'test';
 
 jest.mock('../../utils/inboundPoOcr', () => ({
   extractPurchaseOrder: jest.fn(),
+  phoneKey: jest.requireActual('../../utils/inboundPoOcr').phoneKey,
   IMAGE_TYPES: new Set(['image/jpeg', 'image/png']),
   PDF_TYPE: 'application/pdf',
 }));
@@ -204,6 +205,43 @@ describe('matching against the masters', () => {
 // ══════════════════════════════════════════════════════════════════
 //  3. WHAT IS RECORDED
 // ══════════════════════════════════════════════════════════════════
+describe('the customer by phone number', () => {
+  // A chat shows the name the contact was saved under on someone's
+  // phone, which is rarely the name on the master. The number is.
+  test('a number on the master finds the customer the name could not', async () => {
+    const c = await Customer.create({ name: 'Fellows Fashion Ventures', contactName: 'M', phoneNumber: '9787498412' });
+    extractPurchaseOrder.mockResolvedValue(reading({ customerName: 'Fellows Fashion Va...', customerPhone: '+91 97874 98412' }));
+    const r = await draft();
+    expect(r.draft.customerPhone).toBe('+91 97874 98412');
+    expect(r.draft.customer).toMatchObject({ customerId: String(c._id), confident: true, matchedBy: 'phone' });
+  });
+
+  test('any of the customer\'s numbers counts, however it is written', async () => {
+    const c = await Customer.create({
+      name: 'Ravi Knits', contactName: 'R', phoneNumber: '04212345678',
+      merchandiser: { name: 'Priya', mobile: '098432 10987' },
+    });
+    extractPurchaseOrder.mockResolvedValue(reading({ customerName: null, customerPhone: '98432-10987' }));
+    const r = await draft();
+    expect(r.draft.customer).toMatchObject({ customerId: String(c._id), matchedBy: 'phone' });
+  });
+
+  test('a number two customers share is no match; the name decides', async () => {
+    await Customer.create({ name: 'Twin A', contactName: 'A', phoneNumber: '9000099999' });
+    await Customer.create({ name: 'Twin B', contactName: 'B', phoneNumber: '9000099999' });
+    extractPurchaseOrder.mockResolvedValue(reading({ customerPhone: '9000099999' }));
+    const r = await draft();
+    expect(r.draft.customer).toMatchObject({ customerName: 'Sri Lakshmi Garments', matchedBy: 'name' });
+  });
+
+  test('an unknown number is shown, and nothing matched on it', async () => {
+    extractPurchaseOrder.mockResolvedValue(reading({ customerName: 'Somebody New', customerPhone: '+91 91234 56789' }));
+    const r = await draft();
+    expect(r.draft.customerPhone).toBe('+91 91234 56789');
+    expect(r.draft.customer).toMatchObject({ confident: false, matchedBy: null });
+  });
+});
+
 describe('the ledger', () => {
   test('a reading is recorded before anybody sees it', async () => {
     extractPurchaseOrder.mockResolvedValue(reading());

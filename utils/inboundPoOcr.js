@@ -36,11 +36,13 @@ function parseJsonReply(text) {
 }
 
 const PROMPT = [
-  'This is a purchase order sent to us by a customer. Read it and return what it says.',
+  'This is a purchase order or an enquiry sent to us by a customer — a document, a photo,',
+  'or a screenshot of a chat (e.g. WhatsApp). Read it and return what it says.',
   '',
   'Return ONLY a JSON object, no prose and no markdown fences:',
   '{',
   '  "customerName": string or null,',
+  '  "customerPhone": string or null,',
   '  "poNumber": string or null,',
   '  "poDate": "YYYY-MM-DD" or null,',
   '  "deliveryDate": "YYYY-MM-DD" or null,',
@@ -63,6 +65,10 @@ const PROMPT = [
   '- Lower a line\'s confidence when the text is unclear. Be honest; a low number is',
   '  useful and a falsely high one is not.',
   '- Ignore our own letterhead if the document quotes it back. We want what THEY ordered.',
+  '- customerPhone: the customer\'s phone or mobile number wherever it shows — their',
+  '  letterhead or signature, or in a chat screenshot the contact\'s number in the header',
+  '  or typed into the message box. Copy it as written. In a chat the customer is the',
+  '  other party (the name in the header), not us. null if no number is visible.',
 ].join('\n');
 
 /**
@@ -105,6 +111,23 @@ async function extractPurchaseOrder(buffer, mimetype) {
   };
 }
 
+/**
+ * A phone number as written, or null when it is not one: 10 to 13 digits
+ * once spaces, dashes, brackets and a leading + are set aside.
+ */
+function phone(v) {
+  if (v == null) return null;
+  const text = String(v).trim();
+  const digits = text.replace(/\D/g, '');
+  return digits.length >= 10 && digits.length <= 13 ? text : null;
+}
+
+/** The last ten digits — how +91 98765 43210, 098765 43210 and 9876543210 compare equal. */
+function phoneKey(v) {
+  const digits = String(v || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
 /** Guard-rail whatever came back into a predictable shape. */
 function normaliseDraft(raw) {
   const num = (v) => {
@@ -123,6 +146,7 @@ function normaliseDraft(raw) {
   const lines = Array.isArray(raw.lines) ? raw.lines : [];
   return {
     customerName: raw.customerName ? String(raw.customerName).trim() : null,
+    customerPhone: phone(raw.customerPhone),
     poNumber:     raw.poNumber ? String(raw.poNumber).trim() : null,
     poDate:       date(raw.poDate),
     deliveryDate: date(raw.deliveryDate),
@@ -143,4 +167,4 @@ function normaliseDraft(raw) {
   };
 }
 
-module.exports = { extractPurchaseOrder, parseJsonReply, normaliseDraft, IMAGE_TYPES, PDF_TYPE };
+module.exports = { extractPurchaseOrder, parseJsonReply, normaliseDraft, phoneKey, IMAGE_TYPES, PDF_TYPE };

@@ -29,7 +29,7 @@
 const Customer = require('../models/Customer');
 const Elastic  = require('../models/Elastic');
 
-const { extractPurchaseOrder } = require('../utils/inboundPoOcr');
+const { extractPurchaseOrder, phoneKey } = require('../utils/inboundPoOcr');
 const { rank } = require('../utils/fuzzyMatch');
 const { promptVersion } = require('../utils/aiPrompts');
 const ledger = require('./aiLedger');
@@ -81,15 +81,36 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
 
   // ── Match against the masters ──
   const [customers, elastics] = await Promise.all([
-    Customer.find({}).select('name').lean(),
+    Customer.find({})
+      .select('name phoneNumber purchase.mobile accountant.mobile merchandiser.mobile').lean(),
     // Archived products are deliberately excluded: offering one would
     // draft an order for something the plant has stopped making.
     Elastic.find({ archived: { $ne: true } }).select('name').lean(),
   ]);
 
-  const customerMatch = draft.customerName
+  // A phone number is the surer key: a chat shows the name the contact
+  // was saved under, which is often not the name on the master, but the
+  // number is the number. Any of a customer's numbers counts. Only a
+  // number that belongs to exactly one customer is taken as a match.
+  const key = phoneKey(draft.customerPhone);
+  const byPhone = key
+    ? customers.filter((c) =>
+        [c.phoneNumber, c.purchase?.mobile, c.accountant?.mobile, c.merchandiser?.mobile]
+          .some((p) => phoneKey(p) === key))
+    : [];
+
+  const byName = draft.customerName
     ? rank(draft.customerName, customers.map((c) => ({ id: String(c._id), label: c.name })))
     : { best: null, candidates: [], confident: false, blocked: [] };
+
+  const customerMatch = byPhone.length === 1
+    ? {
+        best: { id: String(byPhone[0]._id), label: byPhone[0].name },
+        candidates: [{ id: String(byPhone[0]._id), label: byPhone[0].name, score: 1 }],
+        confident: true,
+        matchedBy: 'phone',
+      }
+    : { ...byName, matchedBy: byName.confident ? 'name' : null };
 
   const elasticChoices = elastics.map((e) => ({ id: String(e._id), label: e.name }));
 
@@ -119,6 +140,7 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
     promptVersion: promptVersion('inbound-po-ocr'),
     proposed: {
       customerName: draft.customerName,
+      customerPhone: draft.customerPhone,
       poNumber: draft.poNumber,
       matchedCustomer: customerMatch.confident ? customerMatch.best.label : null,
       lines: lines.map((l) => ({
@@ -145,6 +167,8 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
         customerName: customerMatch.confident ? customerMatch.best.label : null,
         candidates: customerMatch.candidates.map((c) => ({ id: c.id, name: c.label, score: c.score })),
         confident: customerMatch.confident,
+        /** 'phone' or 'name' — what the match rests on; null when none. */
+        matchedBy: customerMatch.matchedBy,
       },
     },
     summary: {
