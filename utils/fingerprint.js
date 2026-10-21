@@ -44,6 +44,10 @@ const ACTION_CODES = Object.freeze({
   // production consequences, so it belongs in the trail on its own
   // rather than only as a side effect of a stage update.
   JOB_MACHINE_CHANGED:      'JOB_MACHINE_CHANGED',
+  // A running job switched to another elastic of its order, mid-run —
+  // exceptional, always with a reason, and the line it left is frozen
+  // at what was woven (services/jobMidRun.js).
+  JOB_ELASTIC_CHANGED:      'JOB_ELASTIC_CHANGED',
   // Sub-stage / per-action events recorded on the parent JobOrder
   WARPING_STARTED:          'WARPING_STARTED',
   WARPING_COMPLETED:        'WARPING_COMPLETED',
@@ -120,6 +124,7 @@ const ACTION_LABELS = Object.freeze({
   JOB_COMPLETED:            'Job Completed',
   JOB_CANCELLED:            'Job Cancelled',
   JOB_MACHINE_CHANGED:      'Machine Changed',
+  JOB_ELASTIC_CHANGED:      'Elastic Changed Mid-run',
   WARPING_STARTED:          'Warping Started',
   WARPING_COMPLETED:        'Warping Completed',
   WARPING_CANCELLED:        'Warping Cancelled',

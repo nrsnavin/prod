@@ -71,6 +71,7 @@ const { assessLines, plannedFromJobs } = require('../services/excessPlanning');
 const RawMaterial = require('../models/RawMaterial');
 const Elastic = require('../models/Elastic');
 const { checkHookFit, hookFitError } = require('../utils/machineFit');
+const { changeElasticMidRun, orderElasticsForJob } = require('../services/jobMidRun');
 
 function fullJobPopulate(query) {
   return query
@@ -746,6 +747,48 @@ router.post(
 );
 
 // ─────────────────────────────────────────────────────────────
+//  4b. CHANGE THE ELASTIC MID-RUN — the exceptional case
+//
+//  POST /job/:jobId/change-elastic
+//    { elastic, quantity, auditReason, freeze: [ids], heads, confirmHooks, expectedVersion }
+//  GET  /job/:jobId/order-elastics
+//    the order's elastics as candidates: ordered, planned, pending, on this job
+//
+//  See services/jobMidRun.js. The line that leaves is frozen at what
+//  was woven; the one that comes in must be on the order and within
+//  what it still has unplanned; the loom's heads follow if asked.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  '/:jobId/order-elastics',
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.isValidObjectId(req.params.jobId)) return next(new ErrorHandler('Job not found', 404));
+    res.json({ success: true, ...(await orderElasticsForJob(req.params.jobId)) });
+  })
+);
+
+router.post(
+  '/:jobId/change-elastic',
+  isAdmin('admin', 'production'),
+  catchAsyncErrors(async (req, res) => {
+    const out = await changeElasticMidRun({
+      jobId: req.params.jobId,
+      elastic: req.body.elastic,
+      quantity: req.body.quantity,
+      freeze: req.body.freeze ?? [],
+      heads: req.body.heads ?? 'frozen',
+      confirmHooks: req.body.confirmHooks === true,
+    }, req);
+    res.json({
+      success: true,
+      message: out.message,
+      frozen: out.frozen,
+      headsChanged: out.headsChanged,
+      job: { _id: out.job._id, jobOrderNo: out.job.jobOrderNo, status: out.job.status, elastics: out.job.elastics },
+    });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
 //  5. UPDATE JOB STATUS
 // ─────────────────────────────────────────────────────────────
 router.post(
@@ -1074,6 +1117,9 @@ router.get(
       return {
         elasticId: e.elastic._id, elasticName: e.elastic.name,
         planned, produced, packed, wasted,
+        // Changed mid-run (services/jobMidRun.js): a frozen line is
+        // complete as it stands; an added one came in with a reason.
+        frozen: !!e.frozen, plannedBeforeFreeze: e.plannedBeforeFreeze ?? null, addedMidRun: !!e.addedMidRun,
         // planned − produced, and NOT − wasted.
         //
         // `producedElastic` is GROSS: it is what came off the loom, and
@@ -1732,7 +1778,14 @@ router.get('/:jobId', async (req, res) => {
           // Still being loaded for this job: nothing counted until marked running.
           loading: job.machine.status === 'running' && !!job.machine.loading,
         } : null,
-        plannedElastics: mapElasticQty(job.elastics),
+        orderId: job.order?._id ?? job.order ?? null,
+        plannedElastics: mapElasticQty(job.elastics).map((row, i) => ({
+          ...row,
+          frozen: !!job.elastics[i]?.frozen,
+          plannedBeforeFreeze: job.elastics[i]?.plannedBeforeFreeze ?? null,
+          addedMidRun: !!job.elastics[i]?.addedMidRun,
+          reason: job.elastics[i]?.frozenReason || job.elastics[i]?.addedReason || '',
+        })),
         producedElastics: mapElasticQty(job.producedElastic),
         packedElastics: mapElasticQty(job.packedElastic),
         wastageElastics: mapElasticQty(job.wastageElastic),
