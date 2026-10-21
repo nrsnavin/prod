@@ -54,6 +54,7 @@ const {
 // those writes used to ask where the order actually was — which is how
 // cancelling a job on a CANCELLED order set it back to Approved.
 const orderLifecycle = require('../services/orderLifecycle');
+const dispatchQueue = require('../services/dispatchQueue');
 const { raiseJob } = require('../services/jobRaise');
 const { isProductionLocked } = require('../utils/productionLock');
 const { outsourcingBlockers, outsourcingDerived } = require('../utils/outsourcingRecord');
@@ -829,6 +830,17 @@ router.post(
         stampStage(job, nextStatus, req.user?._id);
         job.status = nextStatus;
         await job.save({ session });
+
+        // Packing is the dispatch stage: the job joins the dispatch queue,
+        // waiting for marketing / admin to say how urgent delivery is. In
+        // the same transaction, so the move and the queue entry stand or
+        // fall together. Completing a job that somehow has no entry (one
+        // already past packing when the queue arrived) adds it then.
+        if (nextStatus === 'packing' || nextStatus === 'completed') {
+          await dispatchQueue.enqueueJob(job, {
+            session, actor: { by: req.user?._id, byName: req.user?.name || '' },
+          });
+        }
       });
     } finally {
       await session.endSession();
@@ -915,6 +927,11 @@ router.post(
         });
         job.fingerprints.push(fp);
         await job.save({ session });
+
+        // Nothing left to deliver: off the dispatch queue, if it was on it.
+        await dispatchQueue.cancelForJob(job._id, 'Job cancelled', {
+          session, actor: { by: req.user?._id, byName: req.user?.name || '' },
+        });
 
         // Only now that the job is marked 'cancelled' does its planned
         // quantity return to pending: recomputed after the save, in the

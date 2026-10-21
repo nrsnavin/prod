@@ -22,13 +22,16 @@
 // Preparatory and weaving were merged into a single "production"
 // department (they always shared the production role). Packing stays
 // separate — it's a distinct downstream stage with its own features.
-const DEPARTMENTS = ["admin", "production", "packing", "finance"];
+// Marketing answers for the customer — when a delivery is needed — and
+// has its own role, so no finance or production gate opens to it.
+const DEPARTMENTS = ["admin", "production", "packing", "finance", "marketing"];
 
 const DEPARTMENT_ROLE = {
   admin:       "admin",
   production:  "production",
   packing:     "production",
   finance:     "accounts",
+  marketing:   "marketing",
   // Legacy (pre-merge) departments still resolve to the production role,
   // so any account not yet migrated keeps working.
   preparatory: "production",

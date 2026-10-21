@@ -715,6 +715,14 @@ app.use("/api/v2/sample",      gate('accounts', 'production'),
   requireFeature('/samples'),
   requireFeatureRead('/samples'),
   require("./api/sample.js"));
+// The dispatch queue: what is packed (or a finished sample) and waiting to
+// leave, in delivery-urgency order. Finance raises the challans, packing
+// sends the goods, marketing says how urgent each is — all three reach it;
+// setting the urgency is admin / marketing only (api/dispatch.js).
+app.use("/api/v2/dispatch",    gate('accounts', 'production', 'marketing'),
+  requireFeature('/dispatch'),
+  requireFeatureRead('/dispatch'),
+  require("./api/dispatch.js"));
 // QC is a leaf, but the Jobs screen reads QC results, so /jobs passes too.
 app.use("/api/v2/qc",          gate('production'), requireFeature('/qc', '/jobs'), requireFeatureRead('/qc', '/jobs'), require("./api/qc.js"));
 // Complaints carry the blast-radius trace, which names other customers

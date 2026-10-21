@@ -36,7 +36,7 @@ const userSchema = new mongoose.Schema(
       // preparatory + weaving were merged into "production"; the legacy
       // values stay enum-valid so pre-migration accounts still save.
       type: String,
-      enum: ["admin", "production", "packing", "finance", "preparatory", "weaving"],
+      enum: ["admin", "production", "packing", "finance", "marketing", "preparatory", "weaving"],
     },
     // Per-user custom feature access (keys mirror the web nav paths, e.g.
     // "/orders", "/wastage"). When set, this is the source of truth for

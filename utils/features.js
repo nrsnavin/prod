@@ -30,6 +30,9 @@ const FEATURES = [
   // both default sets carry them — the log is only worth keeping if the
   // people who know what happened can write in it.
   { key: "/samples",             label: "Sample Requests",     section: "Sales",          depts: ["admin", "finance", "production"] },
+  // What is packed and waiting to leave, in delivery-urgency order.
+  // Marketing sets the urgency; finance raises the challan; packing sends it.
+  { key: "/dispatch",            label: "Dispatch",            section: "Sales",          depts: ["admin", "finance", "packing", "marketing"] },
 
   { key: "/planner",             label: "Auto Planner",        section: "Production",     depts: ["admin", "production"] },
   { key: "/warping",             label: "Warping",             section: "Production",     depts: ["admin", "production"] },

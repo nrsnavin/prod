@@ -41,6 +41,7 @@ const { saveIf, changedMeanwhile } = require('../utils/conditionalSave.js');
 const { nextNumber } = require('../utils/sequence.js');
 const Customer = require('../models/Customer.js');
 const SampleRequest = require('../models/SampleRequest.js');
+const dispatchQueue = require('../services/dispatchQueue');
 const SamplePhoto = require('../models/SamplePhoto.js');
 
 const {
@@ -655,6 +656,15 @@ router.put(
     // second came from a status the sample had already left.
     if (!(await saveIf(doc, { status: from }))) {
       return next(changedMeanwhile('This sample', 'updated'));
+    }
+
+    // A completed sample is to be sent: it joins the dispatch queue. Moved
+    // anywhere else (reopened, closed unsent), it comes off it again —
+    // unless it has already gone.
+    if (status === 'completed') {
+      await dispatchQueue.enqueueSample(doc, { actor: who });
+    } else if (from === 'completed') {
+      await dispatchQueue.cancelForSample(doc._id, `Sample ${status === 'closed' ? 'closed' : 'reopened'}`, { actor: who });
     }
 
     const fresh = await SampleRequest.findById(doc._id).populate('customer', 'name').lean();
