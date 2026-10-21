@@ -292,7 +292,16 @@ async function importWorkbook(wb) {
     if (missing.length) { report.skipped.push(...missing); continue; }
 
     const { materialCost, details } = await calculateElasticCosting(doc);
-    const conversionCost = 1.25;
+    // The sheet's conversion cost when it has one; otherwise the one the
+    // elastic already carries. This was a fixed 1.25 written over every
+    // imported elastic, so an import quietly undid every conversion cost
+    // set since.
+    const existing = await Elastic.findOne({ nameKey: elasticNameKey(name) }).select('costing').lean();
+    const existingCosting = existing?.costing ? await Costing.findById(existing.costing).select('conversionCost').lean() : null;
+    const sheetConversion = num(row.conversionCost);
+    const conversionCost = sheetConversion != null && sheetConversion >= 0
+      ? sheetConversion
+      : existingCosting?.conversionCost ?? 1.25;
     const totalCost = materialCost + conversionCost;
 
     // Matched on the folded key, not the name as typed. An upsert keyed

@@ -168,7 +168,7 @@ router.post(
 
       // Priced before anything is written: it only reads the materials.
       const { materialCost, details } = await calculateElasticCosting(elasticData);
-      const conversionCost = elasticData.conversionCost ?? 1.25;
+      const conversionCost = conversionCostOf(elasticData.conversionCost) ?? 1.25;
       const totalCost = materialCost + conversionCost;
 
       // The elastic, its opening stock movement and its cost sheet in one
@@ -1112,6 +1112,17 @@ router.put(
         if (clash) return next(clash);
       }
 
+      // The conversion cost lives on the cost sheet, not the elastic. The
+      // form has always sent it and this route used to drop it, so an edit
+      // to it was silently lost and the next recalculation kept the old
+      // figure. Checked here, before anything is written.
+      const convGiven = elasticData.conversionCost !== undefined
+        && elasticData.conversionCost !== null && elasticData.conversionCost !== "";
+      const newConversion = convGiven ? conversionCostOf(elasticData.conversionCost) : undefined;
+      if (convGiven && newConversion == null) {
+        return next(new ErrorHandler("Conversion cost must be a number, 0 or more", 400));
+      }
+
       const fieldsToCopy = [
         "name", "weaveType", "pick", "noOfHook", "weight",
         "spandexEnds", "warpSpandex", "weftYarn", "spandexCovering",
@@ -1158,37 +1169,24 @@ router.put(
         Object.prototype.hasOwnProperty.call(elasticData, f)
       );
 
-      if (costingDirty) {
-        let materialCost = 0, details = [];
+      // Re-costed from the elastic AS SAVED — every grammage, the new and
+      // the untouched — at today's material prices, with the conversion
+      // cost as edited. It used to be costed from the request body, so a
+      // partial edit (just the warp yarns, say) threw on the parts it did
+      // not send, and the cost sheet was then written with a material cost
+      // of 0. Now a failure leaves the cost sheet as it was and says so.
+      let costingWarning = null;
+      if (costingDirty || convGiven) {
         try {
-          ({ materialCost, details } = await calculateElasticCosting(elasticData));
+          await recostElastic(elastic, newConversion);
         } catch (costErr) {
-          console.warn("Costing recalculation warning:", costErr.message);
-        }
-
-        if (elastic.costing) {
-          const existingCosting = await Costing.findById(elastic.costing);
-          const conversionCost  = existingCosting?.conversionCost ?? 1.25;
-          await Costing.findByIdAndUpdate(elastic.costing, {
-            materialCost, details,
-            totalCost: materialCost + conversionCost,
-            status: "Draft",
-          });
-        } else {
-          const conversionCost = 1.25;
-          const costing = await Costing.create({
-            date: new Date(), elastic: elastic._id,
-            conversionCost, materialCost, details,
-            totalCost: materialCost + conversionCost,
-            status: "Draft",
-          });
-          elastic.costing = costing._id;
-          await elastic.save();
+          costingWarning = `Saved, but the cost could not be recalculated: ${costErr.message}`;
+          console.warn("[update-elastic] costing:", costErr.message);
         }
       }
 
       const updated = await _populate(Elastic.findById(elastic._id));
-      res.json({ success: true, elastic: updated });
+      res.json({ success: true, elastic: updated, ...(costingWarning ? { costingWarning } : {}) });
     } catch (err) {
       // An error that already says what it is — the 409 from a stale
       // version, a 404 — keeps its status. Rewrapping it as a 400 made a
@@ -1232,6 +1230,13 @@ router.put(
  * the cost sheet if it has none. `elastic` must be loaded through
  * _populate (the costing reads the populated materials).
  */
+/** A conversion cost as a number, or null when it is not a usable one. */
+function conversionCostOf(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 async function recostElastic(elastic, convCostOverride) {
   const { materialCost, details } =
     await calculateElasticCosting(elastic.toObject());
@@ -1244,10 +1249,10 @@ async function recostElastic(elastic, convCostOverride) {
       )
     : null;
 
+  // The conversion cost as last set (the edit form and the bulk price
+  // update both write it to the cost sheet), unless one is given here.
   const conversionCost =
-    convCostOverride != null
-      ? Number(convCostOverride)
-      : (existingCosting?.conversionCost ?? 1.25);
+    conversionCostOf(convCostOverride) ?? existingCosting?.conversionCost ?? 1.25;
 
   const totalCost = materialCost + conversionCost;
 
@@ -1298,9 +1303,22 @@ router.post(
       return next(new ErrorHandler("Elastic not found", 404));
     }
 
+    if (convCostOverride != null && convCostOverride !== "" && conversionCostOf(convCostOverride) == null) {
+      return next(new ErrorHandler("Conversion cost must be a number, 0 or more", 400));
+    }
+
+    // What it was, so the screen can say what changed.
+    const before = elastic.costing && typeof elastic.costing === "object"
+      ? {
+          materialCost: elastic.costing.materialCost ?? null,
+          conversionCost: elastic.costing.conversionCost ?? null,
+          totalCost: elastic.costing.totalCost ?? null,
+        }
+      : null;
+
     try {
       const updatedCosting = await recostElastic(elastic, convCostOverride);
-      res.json({ success: true, costing: updatedCosting });
+      res.json({ success: true, costing: updatedCosting, before });
     } catch (err) {
       console.error("[recalculate-elastic-cost]", err.message);
       return next(new ErrorHandler(err.message, 400));

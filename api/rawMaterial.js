@@ -21,7 +21,7 @@ const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { appendStockMovement, normaliseMovements } = require("../utils/stockLedger");
-const { receiveAtCost, costOf } = require("../utils/materialValuation");
+const { receiveAtCost, costOf, noteLatestPrice } = require("../utils/materialValuation");
 const { countUsage } = require("../utils/masterUsage");
 const YarnLot           = require("../models/YarnLot");
 const { creditLot, drawFromLot, unplacedQuantity } = require("../services/yarnLotService");
@@ -793,6 +793,13 @@ router.post(
         const credited = await receiveAtCost(material._id, qtyNum, unitPrice, session);
         material.stock   = credited?.stock   ?? _stockBefore + qtyNum;
         material.avgCost = credited?.avgCost ?? material.avgCost;
+
+        // A receipt at a new rate is the latest purchase price, which is
+        // what an elastic's cost sheet is priced at.
+        if (await noteLatestPrice(material._id, poLine?.price,
+          `Received on PO ${po.poNo != null ? `#${po.poNo}` : String(po._id)}`, session)) {
+          material.price = Number(poLine.price);
+        }
 
         await appendStockMovement(material._id, {
           type:     "PO_INWARD",

@@ -91,3 +91,29 @@ it('gives an inserted row its key, so the next import matches it', async () => {
   await importWorkbook(sheetWith('FRESH PRODUCT'));
   expect(await Elastic.countDocuments()).toBe(1);
 });
+
+describe("an import and the elastic's conversion cost", () => {
+  const Costing = () => require('../../models/Costing');
+  const convOf = async () => (await Costing().findOne().lean()).conversionCost;
+
+  it('keeps a conversion cost set since, instead of resetting it to 1.25', async () => {
+    await importWorkbook(sheetWith('NEWDAY ROMEO BLACK'));
+    await Costing().updateOne({}, { $set: { conversionCost: 2.4 } });
+    await importWorkbook(sheetWith('NEWDAY ROMEO BLACK'));
+    expect(await convOf()).toBe(2.4);
+  });
+
+  it("takes the sheet's own conversion cost when it has one", async () => {
+    const wb = sheetWith('NEWDAY ROMEO BLACK');
+    const ws = wb.getWorksheet('Elastics');
+    ws.getRow(1).getCell(20).value = 'conversionCost';
+    ws.getRow(2).getCell(20).value = 1.9;
+    await importWorkbook(wb);
+    expect(await convOf()).toBe(1.9);
+  });
+
+  it('a new elastic with none starts at the default', async () => {
+    await importWorkbook(sheetWith('NEWDAY ROMEO WHITE'));
+    expect(await convOf()).toBe(1.25);
+  });
+});

@@ -192,4 +192,39 @@ async function receiveAtCost(materialId, qty, unitCost, session) {
   );
 }
 
-module.exports = { nextAverage, costOf, receiveAtCost, round, COST_DP };
+/**
+ * A receipt at a new rate moves the LATEST purchase price.
+ *
+ * `price` is what a new PO defaults to and what an elastic's cost sheet
+ * is priced at; the average above is what issues are valued at. A receipt
+ * used to move only the average, so "Recalculate cost" on an elastic went
+ * on pricing yarn at the old rate until someone retyped it by hand. Only
+ * a real price moves it (a PO line with no price leaves it alone), and
+ * every change is recorded in the material's price history.
+ *
+ * @param {ObjectId|string} materialId
+ * @param {number} boughtAt  ₹/kg on the PO line
+ * @param {string} reason    e.g. "Received on PO #41"
+ * @param {ClientSession} [session]
+ * @returns {Promise<boolean>} whether the price changed
+ */
+async function noteLatestPrice(materialId, boughtAt, reason, session = null) {
+  const price = Number(boughtAt);
+  if (!Number.isFinite(price) || price <= 0) return false;
+  const RawMaterial = require('../models/RawMaterial');
+  const current = await RawMaterial.findById(materialId).select('price').session(session).lean();
+  if (!current) return false;
+  const oldPrice = Number(current.price) || 0;
+  if (oldPrice === price) return false;
+  await RawMaterial.updateOne(
+    { _id: materialId },
+    {
+      $set: { price },
+      $push: { priceHistory: { price, oldPrice, changedAt: new Date(), reason } },
+    },
+    { session }
+  );
+  return true;
+}
+
+module.exports = { nextAverage, costOf, receiveAtCost, noteLatestPrice, round, COST_DP };

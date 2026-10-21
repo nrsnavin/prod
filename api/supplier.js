@@ -37,7 +37,7 @@ const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
 const { creditLot } = require("../services/yarnLotService");
 const { appendStockMovement } = require("../utils/stockLedger");
-const { receiveAtCost } = require("../utils/materialValuation");
+const { receiveAtCost, noteLatestPrice } = require("../utils/materialValuation");
 const PdfTemplate = require("../models/PdfTemplate");
 const { starterTemplate }   = require("../services/pdf/docTypes");
 const { getPdfBranding }     = require("../services/documentSettings");
@@ -811,6 +811,12 @@ router.post(
             // the same stale figure. See utils/materialValuation.js.
             const updated = await receiveAtCost(
               credit.rawMaterial, credit.qty, credit.unitPrice, session
+            );
+            // Bought at a new rate: that is now the latest purchase price,
+            // which elastic cost sheets are priced at.
+            await noteLatestPrice(
+              credit.rawMaterial, credit.unitPrice,
+              `Received on PO ${po.poNo != null ? `#${po.poNo}` : String(po._id)}`, session
             );
             await appendStockMovement(credit.rawMaterial, {
               date: credit.inItem.inwardDate
