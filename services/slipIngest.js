@@ -20,6 +20,13 @@
 //    5. waits. "OK <code>" on WhatsApp saves the rows that are clear;
 //       the web review screen can correct and save the rest.
 //
+//  A floor sheet (utils/floorSheetPdf.js) is printed with no plan. When
+//  its shift still has none, the slip waits as needs_plan with the plan
+//  the sheet proposes — each machine, the operator written against it
+//  matched to an employee by name. Creating that plan (web, or "OK" on
+//  WhatsApp for the operators that matched) re-reads the slip against
+//  it, and the figures written become the shift's production draft.
+//
 //  Saving goes through services/shiftSubmit.js, the same path as a
 //  worker's own entry: values become a SUBMISSION, pending verification.
 //  A supervisor still verifies every entry before it reaches the job.
@@ -48,6 +55,9 @@ const { promptVersion } = require('../utils/aiPrompts');
 const { enqueue } = require('../utils/outbox');
 const { sendWhatsApp } = require('../utils/whatsapp');
 const { submitProduction } = require('./shiftSubmit');
+const { createShiftPlan } = require('./shiftPlanCreate');
+const Machine = require('../models/Machine');
+const { levenshtein } = require('../utils/fuzzyMatch');
 const ledger = require('./aiLedger');
 
 const SURFACE = 'production-slip-ocr';
@@ -327,6 +337,16 @@ async function resolveShift(read, caption, override) {
       if (plan) return { plan, dateKey, shift, from: 'plan' };
     }
   }
+  if (read.sheetNo) {
+    // A floor sheet names its own date and shift. It was printed with no
+    // plan, so there may still be none — that is for stage() to offer.
+    const m = read.sheetNo.match(/^FS-(\d{4})(\d{2})(\d{2})-([DN])$/);
+    if (m) {
+      const dateKey = `${m[1]}-${m[2]}-${m[3]}`;
+      const shift = m[4] === 'N' ? 'NIGHT' : 'DAY';
+      return { plan: await planFor(dateKey, shift), dateKey, shift, from: 'sheet' };
+    }
+  }
   const codes = read.rows.map((r) => r.code).filter(Boolean);
   if (codes.length) {
     const plan = await planFromCodes(codes);
@@ -527,8 +547,19 @@ async function readSlipJob(slipId) {
 }
 
 /** Everything that depends on the read and the shift, ready to $set. */
-async function stage(slip, read, override) {
-  const base = { read, format: read.format, rows: [], unmatched: [] };
+async function stage(slip, fullRead, override) {
+  const base = { read: fullRead, format: fullRead.format, rows: [], unmatched: [], planDraft: [] };
+  // A floor sheet lists every machine; the ones nobody wrote on (free
+  // looms, mostly) are not part of the shift.
+  const read = fullRead.format === 'floor'
+    ? { ...fullRead, rows: fullRead.rows.filter((r) => !blankRow(r)) }
+    : fullRead;
+  if (fullRead.format === 'floor' && fullRead.rows.length && !read.rows.length) {
+    return {
+      ...base, status: 'failed', shiftPlan: null, dateKey: null, shift: null, dateFrom: null,
+      problem: 'Nothing is written on the sheet yet: no operator, timer or metres on any row.',
+    };
+  }
   if (!read.rows.length) {
     return {
       ...base, status: 'failed', shiftPlan: null, dateKey: null, shift: null, dateFrom: null,
@@ -546,6 +577,14 @@ async function stage(slip, read, override) {
     };
   }
   if (!where.plan) {
+    const planDraft = await draftPlan(read.rows);
+    if (planDraft.some((r) => r.machine)) {
+      return {
+        ...common, status: 'needs_plan', shiftPlan: null, planDraft,
+        problem: `There is no ${shiftLabel(where.shift).toLowerCase()} shift plan for ${dateLabel(where.dateKey)} yet. `
+          + 'Check the operators read from the sheet and create the plan from it.',
+      };
+    }
     return {
       ...common, status: 'failed', shiftPlan: null,
       problem: `There is no ${shiftLabel(where.shift).toLowerCase()} shift plan for ${dateLabel(where.dateKey)}.`,
@@ -565,7 +604,7 @@ async function stage(slip, read, override) {
 async function setShift(slipId, { dateKey, shift }) {
   const slip = await SlipIngest.findById(slipId);
   if (!slip) throw new ErrorHandler('Slip not found', 404);
-  if (!['ready', 'failed'].includes(slip.status) || !slip.read) {
+  if (!['ready', 'failed', 'needs_plan'].includes(slip.status) || !slip.read) {
     throw new ErrorHandler(`This slip is ${slip.status}; its shift cannot be changed now.`, 409);
   }
   if (slip.rows.some((r) => r.applied)) {
@@ -579,6 +618,185 @@ async function setShift(slipId, { dateKey, shift }) {
   );
   if (!saved) throw new ErrorHandler('The slip changed just now. Reload and try again.', 409);
   return saved;
+}
+
+// ── A plan from a sheet, when the shift has none ─────────────────
+
+/** Nothing written on a floor-sheet row. */
+const blankRow = (r) => !r.operator && r.production == null && !r.timer && !r.remarks;
+
+const foldName = (s) => String(s || '').toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+
+/**
+ * The employee a hand-written name means, if it can be told:
+ *   exact  the name as on record (case, spacing and dots aside)
+ *   close  one candidate only, by first name, initials ("Ravi K") or a
+ *          letter or two out — offered, but marked for a look
+ * Weaving employees are preferred: they are who runs looms.
+ */
+function matchEmployee(written, employees) {
+  const w = foldName(written);
+  if (!w) return null;
+  const pool = (list) => {
+    const weaving = list.filter((e) => e.department === 'weaving');
+    return weaving.length ? weaving : list;
+  };
+  const one = (list, match) => {
+    const ids = new Set(list.map((e) => String(e._id)));
+    return ids.size === 1 ? { employee: list[0], match } : null;
+  };
+
+  const exact = employees.filter((e) => foldName(e.name) === w);
+  if (exact.length) return one(pool(exact), 'exact');
+
+  const wt = w.split(' ');
+  const byTokens = employees.filter((e) => {
+    const et = foldName(e.name).split(' ');
+    if (wt.length === 1) return et[0] === wt[0];
+    return wt.length <= et.length && wt.every((t, i) => et[i].startsWith(t));
+  });
+  if (byTokens.length) return one(pool(byTokens), 'close');
+
+  if (w.length >= 4) {
+    const allowed = w.length >= 7 ? 2 : 1;
+    const scored = employees
+      .map((e) => ({ e, d: Math.min(levenshtein(foldName(e.name), w), levenshtein(foldName(e.name).split(' ')[0], w)) }))
+      .filter((x) => x.d <= allowed);
+    if (scored.length) {
+      const best = Math.min(...scored.map((x) => x.d));
+      return one(pool(scored.filter((x) => x.d === best).map((x) => x.e)), 'close');
+    }
+  }
+  return null;
+}
+
+/** Each row read → the machine it names, its job, and the operator written. */
+async function draftPlan(rows) {
+  const machines = await Machine.find().select('_id ID orderRunning')
+    .populate({ path: 'orderRunning', model: 'JobOrder', select: 'jobOrderNo' }).lean();
+  const byAlnum = new Map();
+  const byNumber = new Map();
+  for (const m of machines) {
+    const k = machineKeys(m.ID);
+    byAlnum.set(k.alnum, m);
+    if (k.number != null) byNumber.set(k.number, [...(byNumber.get(k.number) || []), m]);
+  }
+  const employees = await Employee.find().select('_id name department').lean();
+
+  const draft = [];
+  const seen = new Set();
+  for (const r of rows) {
+    const notes = [];
+    let machine = null;
+    if (r.machine) {
+      const k = machineKeys(r.machine);
+      machine = byAlnum.get(k.alnum)
+        || (k.number != null && (byNumber.get(k.number) || []).length === 1 ? byNumber.get(k.number)[0] : null);
+    }
+    if (!machine) notes.push('No machine with this number');
+    else if (seen.has(String(machine._id))) notes.push('Same machine twice on the sheet');
+    if (machine) seen.add(String(machine._id));
+
+    const who = r.operator ? matchEmployee(r.operator, employees) : null;
+    if (!r.operator) notes.push('No operator written');
+    else if (!who) notes.push(`No employee called “${r.operator}”`);
+    else if (who.match === 'close') notes.push(`Taken as ${who.employee.name}`);
+
+    draft.push({
+      machine: machine?._id ?? null,
+      machineID: machine?.ID ?? null,
+      machineRead: r.machine,
+      jobNo: machine?.orderRunning?.jobOrderNo != null ? `J-${machine.orderRunning.jobOrderNo}` : null,
+      operatorRead: r.operator,
+      employee: who?.employee._id ?? null,
+      employeeName: who?.employee.name ?? null,
+      match: who?.match ?? null,
+      production: r.production,
+      timer: r.timer,
+      notes,
+    });
+  }
+  return draft;
+}
+
+/** A draft row that can go into the plan as it stands. */
+const plannable = (r) => !!(r.machine && r.employee && !r.notes.includes('Same machine twice on the sheet'));
+
+/**
+ * Create the shift's plan from a needs_plan slip, then match the slip
+ * against it so its figures become the production draft.
+ *
+ * @param {object} opts
+ *   edits  web: [{ index, include, employee }] over planDraft — the rows
+ *          to plan and who runs each. Without edits (an "OK" on WhatsApp)
+ *          the rows whose operator matched are planned.
+ *   expectedVersion  web only: the version the screen was showing
+ * @returns {{ slip, created, detailCount }}
+ */
+async function createPlanFromSlip(slipId, { edits = null, expectedVersion = null } = {}) {
+  const slip = await SlipIngest.findById(slipId);
+  if (!slip) throw new ErrorHandler('Slip not found', 404);
+  if (slip.status !== 'needs_plan') {
+    throw new ErrorHandler(`This slip is ${slip.status}; there is no plan to create from it.`, 409);
+  }
+  if (expectedVersion != null && slip.__v !== expectedVersion) {
+    throw new ErrorHandler('The slip changed just now. Reload and try again.', 409);
+  }
+
+  const chosen = [];
+  if (edits) {
+    const valid = (id) => id && /^[a-f\d]{24}$/i.test(String(id));
+    for (const e of edits) {
+      const row = slip.planDraft[Number(e.index)];
+      if (!row || !e.include) continue;
+      const employee = e.employee !== undefined ? e.employee : row.employee;
+      if (!row.machine) throw new ErrorHandler(`“${row.machineRead || 'A row'}” is not a machine; untick it.`, 400);
+      if (!valid(employee)) throw new ErrorHandler(`${row.machineID}: choose the operator.`, 400);
+      chosen.push({ machine: row.machine, operator: String(employee), machineID: row.machineID });
+    }
+  } else {
+    for (const row of slip.planDraft) {
+      if (plannable(row)) chosen.push({ machine: row.machine, operator: String(row.employee), machineID: row.machineID });
+    }
+  }
+  const byMachine = new Map();
+  for (const c of chosen) {
+    if (byMachine.has(String(c.machine))) throw new ErrorHandler(`${c.machineID} is ticked twice.`, 400);
+    byMachine.set(String(c.machine), c);
+  }
+  if (!chosen.length) throw new ErrorHandler('No machine has an operator to plan yet.', 400);
+  const operators = [...new Set(chosen.map((c) => c.operator))];
+  const found = await Employee.countDocuments({ _id: { $in: operators } });
+  if (found !== operators.length) throw new ErrorHandler('An operator chosen is not on record.', 400);
+
+  // Someone may have made the plan meanwhile; then the slip is simply
+  // matched to that one.
+  let created = false;
+  let detailCount = 0;
+  if (!(await planFor(slip.dateKey, slip.shift))) {
+    try {
+      const out = await createShiftPlan({
+        date: slip.dateKey,
+        shiftType: slip.shift,
+        description: `From floor sheet${slip.read?.sheetNo ? ` ${slip.read.sheetNo}` : ''} (slip #${slip.confirmCode})`,
+        machines: chosen.map((c) => ({ machine: c.machine, operator: c.operator })),
+      });
+      created = true;
+      detailCount = out.detailCount;
+    } catch (err) {
+      if (err.statusCode !== 409) throw err;
+    }
+  }
+
+  const staged = await stage(slip, slip.read, { dateKey: slip.dateKey, shift: slip.shift });
+  staged.dateFrom = slip.dateFrom; // still known from the sheet, not set by hand
+  const saved = await SlipIngest.findOneAndUpdate(
+    { _id: slip._id, status: 'needs_plan', __v: slip.__v },
+    { $set: staged, $inc: { __v: 1 } },
+    { new: true }
+  );
+  if (!saved) throw new ErrorHandler('The slip changed just now. Reload and try again.', 409);
+  return { slip: saved, created, detailCount };
 }
 
 // ── Saving ───────────────────────────────────────────────────────
@@ -710,12 +928,28 @@ function summaryText(slip) {
     if (link) lines.push(`Or open: ${link}`);
     return lines.join('\n');
   }
+  if (slip.status === 'needs_plan') {
+    const draft = slip.planDraft || [];
+    const ok = draft.filter(plannable);
+    const lines = [
+      `Slip ${code}: no ${shiftLabel(slip.shift).toLowerCase()} shift plan for ${dateLabel(slip.dateKey)} yet.`,
+      `${draft.length} machine${draft.length === 1 ? '' : 's'} written on the sheet; ${ok.length} with an operator matched.`,
+    ];
+    const doubtful = draft.filter((r) => r.notes.length).slice(0, 6);
+    if (doubtful.length) {
+      lines.push(`To check: ${doubtful.map((r) => `${r.machineID || r.machineRead} (${r.notes[0]})`).join(', ')}${draft.filter((r) => r.notes.length).length > 6 ? ', …' : ''}`);
+    }
+    if (ok.length) lines.push(`Reply OK ${code} to create the plan with those ${ok.length}, then confirm the metres.`);
+    lines.push(`Reply NO ${code} to drop it.`);
+    if (link) lines.push(`Check operators and create the plan: ${link}`);
+    return lines.join('\n');
+  }
   if (slip.status !== 'ready') return `Slip ${code} is ${slip.status}.`;
 
   const ready = slip.rows.filter((r) => r.state === 'ready' && !r.applied);
   const check = slip.rows.filter((r) => r.state === 'check' && !r.applied);
   const skip = slip.rows.filter((r) => r.state === 'skip');
-  const from = { plan: "the sheet's plan number", codes: "the sheet's codes", caption: 'your message', slip: 'the slip', person: 'you' }[slip.dateFrom];
+  const from = { plan: "the sheet's plan number", sheet: "the sheet number", codes: "the sheet's codes", caption: 'your message', slip: 'the slip', person: 'you' }[slip.dateFrom];
   const lines = [
     `Slip ${code}: ${shiftLabel(slip.shift)} shift, ${dateLabel(slip.dateKey)}${from ? ` (from ${from})` : ''}.`,
     `${slip.rows.length} loom${slip.rows.length === 1 ? '' : 's'} read: ${ready.length} ready, ${check.length} to check.`,
@@ -751,6 +985,7 @@ module.exports = {
   receiveUpload,
   readSlipJob,
   setShift,
+  createPlanFromSlip,
   applySlip,
   discardSlip,
   summaryText,
@@ -759,5 +994,5 @@ module.exports = {
   parseSlipCommand,
   parseDateShift,
   SURFACE,
-  _internals: { machineKeys, normCode, resolveShift, matchRows, planFor, stage, downloadMedia },
+  _internals: { machineKeys, normCode, resolveShift, matchRows, planFor, stage, downloadMedia, matchEmployee, draftPlan },
 };

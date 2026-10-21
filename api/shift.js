@@ -34,9 +34,11 @@ const multer = require("multer");
 // it audits as. See middleware/userContext.js.
 const { keepRequestContext } = require("../middleware/userContext.js");
 const { shortCode } = require("../utils/shiftSheetPdf");
+const { floorSheetNo } = require("../utils/floorSheetPdf");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
 const { submitProduction } = require("../services/shiftSubmit");
+const { createShiftPlan } = require("../services/shiftPlanCreate");
 const { VISION_MODEL } = require("../utils/anthropicClient");
 const { promptVersion } = require("../utils/aiPrompts");
 const ledger = require("../services/aiLedger");
@@ -872,128 +874,23 @@ router.delete(
 // ════════════════════════════════════════════════════════════════
 //  CREATE A SHIFT PLAN — whole, or not at all
 //
-//  One plan writes three collections: the ShiftPlan, a ShiftDetail per
-//  machine, and the running job's list of shifts. (It used to write a
-//  fourth, each operator's Employee.shifts; that array is no longer
-//  written — see models/Employee.js.)
-//
-//  None of it used to run in a transaction, so a failure part-way — a
-//  bad row, a validation error, a dropped connection — left a plan
-//  naming some of its machines, from a request that had answered with
-//  an error. Now it is one transaction, and the response is written
-//  only after it commits.
-//
-//  The details are still created with create(), one by one, rather than
-//  insertMany: the audit plugin (models/plugins/auditFields.js) stamps
-//  createdBy on save, not on insertMany, and a batched insert would have
-//  dropped it silently. The references are batched where the plugin
-//  still fires — one update per job, not per machine.
+//  One transaction: the ShiftPlan, a ShiftDetail per machine and the
+//  running jobs' lists of shifts. See services/shiftPlanCreate.js, which
+//  a floor sheet read from a photo uses too.
 // ════════════════════════════════════════════════════════════════
 router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, res) => {
   const { date, shiftType, description = '', machines = [] } = req.body;
-
-  if (!date || !shiftType) {
-    return res.status(400).json({ success: false, message: 'date and shiftType are required.' });
-  }
-  if (!Array.isArray(machines) || machines.length === 0) {
-    return res.status(400).json({ success: false, message: 'At least one machine must be assigned.' });
-  }
-
-  // Rows missing a machine or an operator have always been skipped. A
-  // row naming something that is not an id is refused up front, before
-  // anything is written, rather than failing inside the loop.
-  const rows = machines.filter((m) => m && m.machine && m.operator);
-  const bad = rows.find((m) =>
-    !mongoose.Types.ObjectId.isValid(String(m.machine)) || !mongoose.Types.ObjectId.isValid(String(m.operator))
-  );
-  if (bad) {
-    return res.status(400).json({ success: false, message: 'Every row needs a valid machine and operator.' });
-  }
-
-  const planDate = new Date(date);
-  if (Number.isNaN(planDate.getTime())) {
-    return res.status(400).json({ success: false, message: 'date is not a valid date.' });
-  }
-  planDate.setUTCHours(0, 0, 0, 0);
-
-  const session = await mongoose.startSession();
-  let shiftPlan;
-  let detailCount = 0;
   try {
-    await session.withTransaction(async () => {
-      // Everything is derived inside the callback: withTransaction may
-      // run it again after a transient error, and a retry must start
-      // from nothing rather than from the aborted attempt's arrays.
-      [shiftPlan] = await ShiftPlan.create([{
-        date: planDate, shift: shiftType,
-        description: String(description).trim(), status: 'draft',
-      }], { session });
-
-      const machineDocs = await Machine.find({ _id: { $in: rows.map((m) => m.machine) } })
-        .select('elastics orderRunning').session(session).lean();
-      const byId = new Map(machineDocs.map((m) => [String(m._id), m]));
-
-      const detailIds = [];
-      const byJob = new Map();       // job id → [detail ids]
-
-      for (const m of rows) {
-        const machineDoc = byId.get(String(m.machine));
-        // A head the editor left empty is stored as `elastic: null`, and
-        // a ShiftDetail requires an elastic on every head it lists — so a
-        // partly threaded loom used to make this whole route throw. An
-        // empty head produces nothing; it is not a line on the sheet.
-        const elastics = (machineDoc?.elastics || [])
-          .filter((e) => e && e.elastic)
-          .map((e) => ({ head: e.head, elastic: e.elastic?._id ?? e.elastic }));
-
-        const [detail] = await ShiftDetail.create([{
-          date: planDate, shift: shiftType,
-          // The machine's running job, or nothing. This used to fall back
-          // to `m.machine` when the machine was idle, which put a MACHINE
-          // id in a field declared as a JobOrder.
-          job: machineDoc?.orderRunning ?? null,
-          machine: m.machine, employee: m.operator,
-          shiftPlan: shiftPlan._id, elastics,
-          status: 'open', timer: '00:00:00',
-        }], { session });
-
-        detailIds.push(detail._id);
-        if (machineDoc?.orderRunning) {
-          const k = String(machineDoc.orderRunning);
-          byJob.set(k, [...(byJob.get(k) || []), detail._id]);
-        }
-      }
-
-      await ShiftPlan.updateOne(
-        { _id: shiftPlan._id },
-        { $push: { plan: { $each: detailIds } } },
-        { session }
-      );
-      // Keep the job's own list true. The job page reads shifts by their
-      // `job` ref, but an array nothing maintains is how it came to be a
-      // fact-shaped empty in the first place.
-      for (const [job, ids] of byJob) {
-        await JobOrder.updateOne({ _id: job }, { $addToSet: { shiftDetails: { $each: ids } } }, { session });
-      }
-      detailCount = detailIds.length;
+    const { shiftPlan, detailCount } = await createShiftPlan({ date, shiftType, description, machines });
+    return res.status(201).json({
+      success: true, shiftPlanId: shiftPlan._id, status: 'draft',
+      message: `Shift plan saved as draft (${detailCount} machine(s) included).`,
     });
   } catch (err) {
-    if (err.code === 11000) {
-      return res.status(409).json({ success: false, message: 'A shift plan already exists for this date and shift type.' });
-    }
-    if (err.name === 'ValidationError' || err.name === 'CastError') {
-      return res.status(400).json({ success: false, message: err.message });
-    }
+    if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
     console.error('[POST /create-shift-plan]', err);
     return res.status(500).json({ success: false, message: err.message });
-  } finally {
-    await session.endSession();
   }
-
-  return res.status(201).json({
-    success: true, shiftPlanId: shiftPlan._id, status: 'draft',
-    message: `Shift plan saved as draft (${detailCount} machine(s) included).`,
-  });
 });
 
 router.post('/confirm-shift-plan', isAdmin('admin', 'production'), async (req, res) => {
@@ -1181,6 +1078,58 @@ router.get("/attendance-mismatch", isAdmin('admin', 'production'), async (req, r
 // Exported for characterization/unit tests (Phase B0.3) — this is the
 // core production cascade the /verify-production route delegates to.
 router.applyProductionCascade = applyProductionCascade;
+
+// ═════════════════════════════════════════════════════════════════
+//  GET /shift/floor-sheet.pdf?date=YYYY-MM-DD&shift=DAY|NIGHT
+//
+//  A production sheet for a shift that has no plan yet: every machine,
+//  the job it is running or FREE, and blank Operator / Timer /
+//  Production / Supervisor-signature columns with a QR per row. A photo
+//  of it filled in can create the plan (Production Slips).
+// ═════════════════════════════════════════════════════════════════
+router.get(
+  "/floor-sheet.pdf",
+  isAdmin("admin", "production"),
+  catchAsyncErrors(async (req, res, next) => {
+    const dateKey = String(req.query.date || moment().format("YYYY-MM-DD"));
+    const shift = String(req.query.shift || "DAY").toUpperCase();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey) || !moment(dateKey, "YYYY-MM-DD", true).isValid()) {
+      return next(new ErrorHandler("date must look like 2026-10-21", 400));
+    }
+    if (!["DAY", "NIGHT"].includes(shift)) return next(new ErrorHandler("shift must be DAY or NIGHT", 400));
+
+    const machines = await Machine.find()
+      .select("ID status orderRunning elastics")
+      .populate({ path: "orderRunning", model: "JobOrder", select: "jobOrderNo status" })
+      .populate({ path: "elastics.elastic", model: "Elastic", select: "name" })
+      .lean();
+    machines.sort((a, b) => String(a.ID).localeCompare(String(b.ID), undefined, { numeric: true, sensitivity: "base" }));
+
+    const rows = machines.map((m) => {
+      const job = m.orderRunning;
+      const names = [...new Set((m.elastics || []).map((e) => e?.elastic?.name).filter(Boolean))];
+      return {
+        machineId: String(m._id),
+        machine: m.ID,
+        job: job ? (job.jobOrderNo != null ? `J-${job.jobOrderNo}` : "Job") : null,
+        detail: job && names.length ? (names.length > 2 ? `${names.slice(0, 2).join(", ")} +${names.length - 2}` : names.join(", ")) : "",
+        status: m.status,
+      };
+    });
+
+    const sheetNo = floorSheetNo(dateKey, shift);
+    const pdf = await renderPdf("floorSheet", {
+      sheetNo,
+      dateLabel: moment(dateKey, "YYYY-MM-DD").format("DD-MMM-YYYY"),
+      shift,
+      rows,
+      branding: await getPdfBranding(),
+    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="floor-sheet-${dateKey}-${shift}.pdf"`);
+    return res.send(pdf);
+  })
+);
 
 // ═════════════════════════════════════════════════════════════════
 //  GET /shift/:shiftPlanId/production-sheet.pdf

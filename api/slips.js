@@ -8,6 +8,8 @@
 //    GET  /api/v2/slips/:id/photo/:page     a photo
 //    POST /api/v2/slips/upload              multipart "photos" (+ caption, dateKey, shift)
 //    POST /api/v2/slips/:id/shift           { dateKey, shift } — it is this shift
+//    POST /api/v2/slips/:id/create-plan     { rows: [{ index, include, employee }], expectedVersion }
+//                                           — a sheet for a shift with no plan: create it
 //    POST /api/v2/slips/:id/apply           { rows: [{ index, include, production, timer, remarks }], expectedVersion }
 //    POST /api/v2/slips/:id/discard
 //
@@ -88,6 +90,20 @@ function shape(s, photos) {
         appliedProduction: r.appliedProduction,
       })),
       unmatched: s.unmatched || [],
+      planDraft: (s.planDraft || []).map((r, index) => ({
+        index,
+        machine: r.machine ? String(r.machine) : null,
+        machineID: r.machineID,
+        machineRead: r.machineRead,
+        jobNo: r.jobNo,
+        operatorRead: r.operatorRead,
+        employee: r.employee ? String(r.employee) : null,
+        employeeName: r.employeeName,
+        match: r.match,
+        production: r.production,
+        timer: r.timer,
+        notes: r.notes || [],
+      })),
       photos: photos.map((p) => ({ page: p.page, contentType: p.contentType, size: p.size })),
     } : {}),
   };
@@ -164,6 +180,32 @@ router.post(
     const slip = await slips.setShift(req.params.id, req.body);
     const photos = await SlipPhoto.find({ slip: slip._id }).select('page contentType size').sort({ page: 1 }).lean();
     res.json({ success: true, slip: shape(slip.toObject(), photos) });
+  })
+);
+
+router.post(
+  '/:id/create-plan',
+  validate({ body: z.object({
+    rows: z.array(z.object({
+      index: z.number().int().min(0),
+      include: z.boolean(),
+      employee: z.string().regex(/^[a-f\d]{24}$/i).nullable().optional(),
+    })).max(500),
+    expectedVersion: z.number().int().optional(),
+  }) }),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!idParam(req, next)) return;
+    const out = await slips.createPlanFromSlip(req.params.id, {
+      edits: req.body.rows,
+      expectedVersion: req.body.expectedVersion ?? null,
+    });
+    const photos = await SlipPhoto.find({ slip: out.slip._id }).select('page contentType size').sort({ page: 1 }).lean();
+    res.json({
+      success: true,
+      created: out.created,
+      planned: out.detailCount,
+      slip: shape(out.slip.toObject(), photos),
+    });
   })
 );
 

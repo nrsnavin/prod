@@ -11,6 +11,12 @@
 //           (SD-8F3A2C) that names its shift entry exactly, and the
 //           header carries the plan number (SP-20261006-D).
 //
+//    floor  the app's printed Floor Production Sheet
+//           (utils/floorSheetPdf.js), printed with no plan: every machine
+//           with its job or FREE, and the operator, timer and metres
+//           written by hand. The header carries a sheet number
+//           (FS-20261021-D) naming the date and shift.
+//
 //    slip   the factory's own hand-written slip: one line per loom with
 //           a machine number, the metres and the run time, and the date
 //           and Day/Night written somewhere on it.
@@ -20,9 +26,9 @@
 //  never by the model.
 //
 //  readSlip(pages) -> {
-//    format: 'sheet' | 'slip' | null,
-//    planNo, date: 'YYYY-MM-DD' | null, shift: 'DAY' | 'NIGHT' | null,
-//    rows: [{ code, machine, operator, production, timer, remarks, confidence }],
+//    format: 'sheet' | 'floor' | 'slip' | null,
+//    planNo, sheetNo, date: 'YYYY-MM-DD' | null, shift: 'DAY' | 'NIGHT' | null,
+//    rows: [{ code, machine, job, operator, production, timer, remarks, signed, confidence }],
 //    problem: null | 'not_a_slip' | 'unreadable',
 //    model, usage, latencyMs
 //  }
@@ -36,29 +42,37 @@ const MAX_PAGES = 10;
 
 const PROMPT = [
   'These photos are production records from an elastic (narrow-fabric) weaving factory.',
-  'They are one of two kinds:',
+  'They are one of three kinds:',
   '',
   'A) "sheet": the factory\'s PRINTED "Shift Production Sheet". A table with printed columns',
   '   QR, Code (like "SD-8F3A2C"), Machine ID, Operator, Job No, Shift, Date, and three',
   '   HAND-WRITTEN columns: "Production (m)", "Timer (H:M:S)" and "Remarks". The header shows',
   '   a plan number like "SP-20261006-D" (date, then D for day or N for night shift).',
   '',
-  'B) "slip": a HAND-WRITTEN slip in the factory\'s own format: one line per loom with a',
+  'B) "floor": the factory\'s PRINTED "Floor Production Sheet". A table with printed columns',
+  '   QR, Machine ID, Job (a job number like "J-12", or "FREE") and HAND-WRITTEN columns',
+  '   "Operator", "Timer (H:M:S)", "Production (m)" and "Supervisor signature". The header shows',
+  '   a sheet number like "FS-20261021-D" (date, then D for day or N for night shift).',
+  '   Many rows, often the FREE ones, are left blank: include them only if something is written.',
+  '',
+  'C) "slip": a HAND-WRITTEN slip in the factory\'s own format: one line per loom with a',
   '   machine number (e.g. "M-07", "7", "L12"), perhaps the operator, the metres produced and',
   '   the run time; the date and Day/Night shift are written somewhere on it.',
   '',
   'Read every data row on every photo. For each row:',
   '- code: the printed Code exactly (sheet only), else null.',
   '- machine: the machine number as written or printed, else null.',
-  '- operator: the operator name if present, else null.',
+  '- job: the printed Job ("J-12" or "FREE") on a floor sheet, else null.',
+  '- operator: the operator name if present, spelt as written, else null.',
   '- production: the metres written, as an integer. Copy the number; never add, multiply or',
   '  correct it. Blank or illegible: null.',
   '- timer: the run time as "H:MM:SS" (or "H:MM" if no seconds are written). Blank: null.',
   '- remarks: any note on that row, or "".',
+  '- signed: true if the supervisor signature cell of that row is signed (floor sheet), else false.',
   '- confidence: 0 to 1 for THIS row\'s hand-written values. Lower it whenever a digit could be',
   '  read two ways (1/7, 3/8, 0/6, 5/6).',
   '',
-  'Also give, if visible: planNo (sheet header), date as "YYYY-MM-DD" (dates are written',
+  'Also give, if visible: planNo (sheet header, "SP-…"), sheetNo (floor sheet header, "FS-…"), date as "YYYY-MM-DD" (dates are written',
   'day first: 06/10/26 is 6 October 2026), and shift "DAY" or "NIGHT". Null when not visible;',
   'never guess them.',
   '',
@@ -68,7 +82,8 @@ const PROMPT = [
   '',
   'Return ONLY a JSON object, no prose, no markdown fences:',
   '{"format":"sheet","planNo":"SP-20261006-D","date":"2026-10-06","shift":"DAY","problem":null,',
-  ' "rows":[{"code":"SD-8F3A2C","machine":"M-07","operator":"Ravi","production":1240,"timer":"7:45:00","remarks":"","confidence":0.9}]}',
+  ' "rows":[{"code":"SD-8F3A2C","machine":"M-07","job":null,"operator":"Ravi","production":1240,"timer":"7:45:00","remarks":"","signed":false,"confidence":0.9}]}',
+  'A floor sheet has "format":"floor", "sheetNo":"FS-20261021-D", "planNo":null and rows with "code":null and "job".',
 ].join('\n');
 
 function parseJsonReply(text) {
@@ -104,6 +119,12 @@ function asShift(v) {
   return null;
 }
 
+/** "FS-20261021-D" (or "FS 20261021 N") → canonical; anything else null. */
+function asSheetNo(v) {
+  const m = String(v ?? '').toUpperCase().match(/FS-?\s?(\d{8})-?\s?([DN])/);
+  return m ? `FS-${m[1]}-${m[2]}` : null;
+}
+
 /** One raw row → a clean record, or null if it carries nothing. */
 function normaliseRow(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -122,10 +143,12 @@ function normaliseRow(raw) {
   return {
     code,
     machine,
+    job: text(raw.job)?.toUpperCase() ?? null,
     operator: text(raw.operator),
     production,
     timer: asTimer(raw.timer),
     remarks: raw.remarks == null ? '' : String(raw.remarks).trim().slice(0, 300),
+    signed: raw.signed === true,
     confidence: Math.max(0, Math.min(1, confidence)),
   };
 }
@@ -192,8 +215,8 @@ async function readSlip(pages) {
     }
     return null;
   };
-  const formats = results.map((r) => r.parsed.format).filter((f) => f === 'sheet' || f === 'slip');
-  const format = formats.includes('sheet') ? 'sheet' : formats[0] || null;
+  const formats = results.map((r) => r.parsed.format).filter((f) => ['sheet', 'floor', 'slip'].includes(f));
+  const format = ['sheet', 'floor'].find((f) => formats.includes(f)) || formats[0] || null;
   const rows = results.flatMap((r) => (Array.isArray(r.parsed.rows) ? r.parsed.rows : []))
     .map(normaliseRow).filter(Boolean);
   const problems = results.map((r) => r.parsed.problem).filter(Boolean);
@@ -208,6 +231,7 @@ async function readSlip(pages) {
       const m = String(v ?? '').toUpperCase().match(/SP-?(\d{8})-?([DN])/);
       return m ? `SP-${m[1]}-${m[2]}` : null;
     }),
+    sheetNo: first('sheetNo', asSheetNo),
     date: first('date', asDate),
     shift: first('shift', asShift),
     rows,
@@ -221,5 +245,5 @@ async function readSlip(pages) {
 module.exports = {
   readSlip,
   SUPPORTED_TYPES: [...SUPPORTED],
-  _internals: { normaliseRow, asTimer, asDate, asShift, parseJsonReply, PROMPT },
+  _internals: { normaliseRow, asTimer, asDate, asShift, asSheetNo, parseJsonReply, PROMPT },
 };

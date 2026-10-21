@@ -10,6 +10,7 @@ const RENDERERS = Object.freeze({
   orderPnl:       ['../orderPnlPdf', 'buildOrderPnlPdf'],
   materialLedger: ['../materialLedgerPdf', 'buildMaterialLedgerPdf'],
   shiftSheet:     ['../shiftSheetPdf', 'buildShiftSheetPdf'],
+  floorSheet:     ['../floorSheetPdf', 'buildFloorSheetPdf'],
   morningDigest:  ['../reportPdf', 'buildMorningDigestPdf'],
   eveningReport:  ['../reportPdf', 'buildEveningReportPdf'],
   template:       ['../../services/pdf/templateRenderer', 'renderTemplatePdf'],

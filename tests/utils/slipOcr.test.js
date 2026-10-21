@@ -53,6 +53,21 @@ describe('reading', () => {
     expect(out.planNo).toBe('SP-20261006-D');
   });
 
+  it('a floor sheet: its sheet number names the shift; each row keeps the printed job and the signature', async () => {
+    mockCreate.mockResolvedValueOnce(reply({
+      format: 'floor', planNo: null, sheetNo: 'fs 20261021 n',
+      rows: [
+        { machine: 'M-2', job: 'j-12', operator: 'Ravi', production: '900', timer: '6:00', signed: true },
+        { machine: 'M-3', job: 'free' },
+      ],
+    }));
+    const out = await readSlip([jpeg]);
+    expect(out).toMatchObject({ format: 'floor', sheetNo: 'FS-20261021-N', planNo: null });
+    expect(out.rows[0]).toMatchObject({ machine: 'M-2', job: 'J-12', operator: 'Ravi', production: 900, timer: '6:00:00', signed: true });
+    expect(out.rows[1]).toMatchObject({ job: 'FREE', operator: null, production: null, signed: false });
+    expect(mockCreate.mock.calls[0][0].messages[0].content.slice(-1)[0].text).toMatch(/Floor Production Sheet/);
+  });
+
   it('nothing read says why', async () => {
     mockCreate.mockResolvedValueOnce(reply({ rows: [], problem: 'not_a_slip' }));
     expect((await readSlip([jpeg])).problem).toBe('not_a_slip');

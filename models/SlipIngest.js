@@ -4,7 +4,9 @@
 //
 //  received → reading → ready → applied
 //                     ↘ failed        (nothing could be read / matched)
-//  ready / failed → discarded
+//                     ↘ needs_plan    (a sheet for a shift with no plan yet:
+//                                      create the plan from it → ready)
+//  ready / failed / needs_plan → discarded
 //
 //  Nothing here touches a shift until someone confirms it — by replying
 //  "OK <code>" on WhatsApp, or on the web review screen. Even then the
@@ -14,8 +16,8 @@
 
 const mongoose = require('mongoose');
 
-const STATUSES = ['received', 'reading', 'ready', 'failed', 'applied', 'discarded'];
-const OPEN_STATUSES = ['received', 'reading', 'ready', 'failed'];
+const STATUSES = ['received', 'reading', 'ready', 'failed', 'needs_plan', 'applied', 'discarded'];
+const OPEN_STATUSES = ['received', 'reading', 'ready', 'failed', 'needs_plan'];
 
 const RowSchema = new mongoose.Schema(
   {
@@ -49,6 +51,28 @@ const RowSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// One line of the plan a sheet proposes, when its shift has no plan yet.
+const PlanDraftRowSchema = new mongoose.Schema(
+  {
+    /** The machine the written/printed number names, if one does. */
+    machine: { type: mongoose.Types.ObjectId, ref: 'Machine', default: null },
+    machineID: { type: String, default: null },
+    machineRead: { type: String, default: null },
+    jobNo: { type: String, default: null },
+    /** The operator as written, and who that was taken to be. */
+    operatorRead: { type: String, default: null },
+    employee: { type: mongoose.Types.ObjectId, ref: 'Employee', default: null },
+    employeeName: { type: String, default: null },
+    /** exact: the name as on record; close: near enough to need a look; null: no match. */
+    match: { type: String, enum: ['exact', 'close', null], default: null },
+    production: { type: Number, default: null },
+    timer: { type: String, default: null },
+    /** Why it needs a look, in words. */
+    notes: { type: [String], default: [] },
+  },
+  { _id: false }
+);
+
 const SlipIngestSchema = new mongoose.Schema(
   {
     source: { type: String, enum: ['whatsapp', 'web'], required: true },
@@ -75,7 +99,7 @@ const SlipIngestSchema = new mongoose.Schema(
 
     /** What the photo said, kept so a corrected date/shift can re-match. */
     read: { type: mongoose.Schema.Types.Mixed, default: null },
-    format: { type: String, enum: ['sheet', 'slip', null], default: null },
+    format: { type: String, enum: ['sheet', 'floor', 'slip', null], default: null },
 
     /** The shift it belongs to. */
     shiftPlan: { type: mongoose.Types.ObjectId, ref: 'ShiftPlan', default: null },
@@ -85,6 +109,8 @@ const SlipIngestSchema = new mongoose.Schema(
     dateFrom: { type: String, default: null },
 
     rows: { type: [RowSchema], default: [] },
+    /** status needs_plan: the plan the sheet proposes, to check and create. */
+    planDraft: { type: [PlanDraftRowSchema], default: [] },
     unmatched: {
       type: [{
         // machineRead, not machine: elsewhere `machine` is a reference, and

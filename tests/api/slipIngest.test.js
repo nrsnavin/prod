@@ -140,9 +140,17 @@ describe('working out the shift', () => {
     expect(fixed.dateFrom).toBe('person');
   });
 
-  it('says so when there is no plan for that shift', async () => {
+  it('says so when there is no plan for that shift, and offers to make one from the slip', async () => {
     await plan({ shift: 'DAY' });
     const slip = await uploadAndRead({ date: '2026-10-06', shift: 'NIGHT', rows: [row({ machine: 'M-01' })] });
+    expect(slip.status).toBe('needs_plan');
+    expect(slip.problem).toMatch(/no night shift plan for 6 Oct 2026/);
+    expect(slip.planDraft).toHaveLength(1);
+    expect(slip.planDraft[0]).toMatchObject({ machineID: 'M-01', employee: null, notes: ['No operator written'] });
+  });
+
+  it('a slip naming no machine there is still just failed when the shift has no plan', async () => {
+    const slip = await uploadAndRead({ date: '2026-10-06', shift: 'NIGHT', rows: [row({ machine: 'Z-99' })] });
     expect(slip.status).toBe('failed');
     expect(slip.problem).toMatch(/no night shift plan for 6 Oct 2026/);
   });

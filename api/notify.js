@@ -422,7 +422,8 @@ async function handleIncoming(req) {
 //
 //   a photo (caption optional, e.g. "DAY 06-10")  → read in the background,
 //                                                   summary sent back
-//   OK 4821                                       → save the clear rows
+//   OK 4821                                       → save the clear rows (or, for a
+//                                                   sheet with no plan, create it)
 //   NO 4821                                       → drop the slip
 //   4821 DAY 06-10                                → it is this date and shift
 // ─────────────────────────────────────────────────────────────────
@@ -471,6 +472,16 @@ async function handleSlipMessage(req, senderE164, cmd) {
     if (cmd.action === "set") {
       const updated = await slips.setShift(slip._id, { dateKey: cmd.dateKey, shift: cmd.shift });
       return { status: 200, body: twimlReply(slips.summaryText(updated)) };
+    }
+
+    // OK on a sheet whose shift has no plan: create it from the operators
+    // that matched, then say what is ready to save.
+    if (slip.status === "needs_plan") {
+      const out = await slips.createPlanFromSlip(slip._id, {});
+      const head = out.created
+        ? `Plan created for the ${out.detailCount} machine${out.detailCount === 1 ? "" : "s"} (a draft; confirm it under Shift Plans).`
+        : "A plan for that shift already exists; matched the slip to it.";
+      return { status: 200, body: twimlReply(`${head}\n${slips.summaryText(out.slip)}`) };
     }
 
     // OK

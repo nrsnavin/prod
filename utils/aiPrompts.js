@@ -82,8 +82,8 @@ const PROMPTS = Object.freeze({
   },
 
   'production-slip-ocr': {
-    version: 'v1.0',
-    notes: 'Photos of a production record sent over WhatsApp or uploaded: the printed shift sheet or the factory\'s own slip. Reads only; matching is done against the database. Prompt lives in utils/slipOcr.js.',
+    version: 'v1.1',
+    notes: 'Photos of a production record sent over WhatsApp or uploaded: the printed shift sheet, the printed floor sheet (no plan; v1.1) or the factory\'s own slip. Reads only; matching is done against the database. Prompt lives in utils/slipOcr.js.',
     system: null,
   },
 
