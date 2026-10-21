@@ -1,6 +1,7 @@
 "use strict";
 
 const express = require("express");
+const { refreshOpenShiftHeads } = require("../utils/machineHeads");
 const {
   assertVersion, versionFilter, bumpVersion, expectedVersionOf, conflictError,
 } = require("../utils/versioning");
@@ -274,21 +275,31 @@ router.patch(
     }
 
     // ── Atomic guarded update ───────────────────────────────
-    // The status guard lives IN the filter: a machine that starts
-    // running between a read and a write can no longer slip through
-    // (the old read-check-save had that TOCTOU window).
+    // A free machine takes any head count. A running one too, as long as
+    // the new count still covers the heads its job's plan uses — the
+    // plan is what production is counted by (utils/machineHeads.js), so
+    // a loom cannot be given fewer heads than it is weaving on. The
+    // guard lives IN the filter, so a plan changed between a read and
+    // the write cannot slip through.
     const machine = await Machine.findOneAndUpdate(
-      { _id: machineId, status: 'free' },
+      {
+        _id: machineId,
+        $or: [
+          { status: 'free' },
+          { $expr: { $gte: [noOfHead, { $size: { $ifNull: ['$elastics', []] } }] } },
+        ],
+      },
       { $set: { NoOfHead: noOfHead } },
       { new: false } // returns the pre-update doc → `old` for the log
     );
     if (!machine) {
-      const exists = await Machine.findById(machineId).select('status');
+      const exists = await Machine.findById(machineId).select('ID status elastics');
       if (!exists) return next(new ErrorHandler('Machine not found.', 404));
+      const planned = (exists.elastics || []).length;
       return next(
         new ErrorHandler(
-          `Head count can only be updated when the machine is free ` +
-          `(current status: "${exists.status}").`,
+          `${exists.ID} is ${exists.status} with a ${planned}-head plan. Change the job's head plan ` +
+          `to ${noOfHead} heads or fewer first (Change machine on the job), then the machine's head count.`,
           400
         )
       );
@@ -724,6 +735,9 @@ router.put(
       }
       throw err;
     }
+
+    // The running job's shifts not yet verified follow the new map.
+    await refreshOpenShiftHeads(machine, machine.orderRunning);
 
     console.log(`[machine/updateOrder] Elastics updated for ${machine.ID}`);
 

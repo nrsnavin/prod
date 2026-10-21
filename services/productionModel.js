@@ -159,7 +159,9 @@ function buildRows(shifts, heads, picks) {
     const total = Number(s.productionMeters);
     if (!Number.isFinite(total) || total <= 0) { skipped.noMetres++; continue; }
     const machine = String(s.machine);
-    const h = Number(heads.get(machine));
+    // The heads this shift's metres were multiplied by: the heads it ran,
+    // else (older shifts) the machine's head count.
+    const h = Number(s.headsRun) > 0 ? Number(s.headsRun) : Number(heads.get(machine));
     if (!Number.isFinite(h) || h <= 0) { skipped.noHeads++; continue; }
     const pick = effectivePick((s.elastics || []).map((e) => picks.get(String(e.elastic))));
     if (pick == null) { skipped.noPick++; continue; }
@@ -431,7 +433,7 @@ function evaluate(rows) {
 async function loadRows({ now = new Date() } = {}) {
   const since = new Date(now.getTime() - HISTORY_DAYS * DAY_MS);
   const shifts = await ShiftDetail.find({ status: 'closed', date: { $gte: since } })
-    .select('date timer productionMeters machine elastics')
+    .select('date timer productionMeters headsRun machine elastics')
     .lean();
   const machineIds = [...new Set(shifts.map((s) => String(s.machine)))];
   const elasticIds = [...new Set(shifts.flatMap((s) => (s.elastics || []).map((e) => String(e.elastic))))];
@@ -514,12 +516,15 @@ async function expectFor({ machineId, elasticIds, minutes }) {
     id, name: byId.get(id)?.name ?? null, pick: byId.get(id)?.pick ?? null, heads,
   }));
   const { pick, problem: pickProblem } = pickOfRunning(elastics);
+  // The heads that will run: one per elastic given (the head plan), or
+  // the whole machine when no plan was given.
+  const heads = ids.length || machine.NoOfHead;
 
   const base = {
     available: trained.available,
     reason: trained.available ? null : NOT_ENOUGH,
     trainedAt: trained.trainedAt,
-    machine: { id: String(machine._id), code: machine.ID, heads: machine.NoOfHead },
+    machine: { id: String(machine._id), code: machine.ID, heads: machine.NoOfHead, headsRunning: heads },
     elastics,
     pick: pick != null ? round(pick, 2) : null,
     pickProblem,
@@ -529,7 +534,7 @@ async function expectFor({ machineId, elasticIds, minutes }) {
     ...base,
     summary: machineSummary(trained.model, machine._id, { pick }),
     prediction: minutes && pick
-      ? predict(trained.model, { machine: machine._id, minutes, pick, heads: machine.NoOfHead })
+      ? predict(trained.model, { machine: machine._id, minutes, pick, heads })
       : null,
   };
 }

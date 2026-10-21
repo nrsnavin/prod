@@ -112,6 +112,14 @@ const ShiftDetailSchema = new mongoose.Schema(
       default: [],
     },
 
+    // Heads that ran, recorded when production is verified: the metres
+    // are per head × this. Absent on shifts verified before it was kept,
+    // which were multiplied by the machine's head count (Machine.NoOfHead).
+    headsRun: {
+      type: Number,
+      default: undefined,
+    },
+
     // 👷 OPERATOR
     employee: {
       type: mongoose.Types.ObjectId,

@@ -87,7 +87,7 @@ async function loadSeries({ machineIds, since }) {
   if (since) filter.date = { $gte: since };
 
   const shifts = await ShiftDetail.find(filter)
-    .select('machine date productionMeters elastics job')
+    .select('machine date productionMeters headsRun elastics job')
     .sort({ date: 1 })
     .lean();
 
@@ -122,7 +122,7 @@ async function loadSeries({ machineIds, since }) {
     // Two observations is not an expectation either.
     if (!exp || exp.mean <= 0 || exp.observations < 3) continue;
 
-    const headCount = heads.length || 1;
+    const headCount = Number(s.headsRun) > 0 ? Number(s.headsRun) : (heads.length || 1);
     const perHead = s.productionMeters / headCount;
 
     byMachine.get(String(s.machine))?.push({

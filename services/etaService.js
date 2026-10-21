@@ -14,6 +14,7 @@
 // ═════════════════════════════════════════════════════════════════
 
 const mongoose    = require("mongoose");
+const { headsInUse } = require("../utils/machineHeads");
 const { liveJobStatus } = require('../domain/jobStatus');
 const Job         = require("../models/JobOrder.js");
 const Machine     = require("../models/Machine.js");
@@ -60,7 +61,8 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now, 
     const machine = job.machine;
     if (!machine?._id) continue;
 
-    const noOfHead = Number(machine.NoOfHead) || 1;
+    // The heads this job's plan runs, which may be fewer than the loom has.
+    const noOfHead = headsInUse(machine);
 
     const headsByElastic = {};
     for (const h of machine.elastics || []) {
@@ -94,7 +96,8 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now, 
         rateSource = "posterior";
       } else if (plantMetersPerMachineDay && plantMetersPerMachineDay > 0) {
         metersPerHeadPerShift =
-          plantMetersPerMachineDay / Math.max(1, noOfHead) / Math.max(1, C.SHIFTS_PER_DAY);
+          // The plant rate is per whole machine: split over the heads it has.
+          plantMetersPerMachineDay / Math.max(1, Number(machine.NoOfHead) || 1) / Math.max(1, C.SHIFTS_PER_DAY);
         rateSource = "plant";
       } else {
         metersPerHeadPerShift =

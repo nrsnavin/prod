@@ -25,6 +25,14 @@ const { recomputePending } = require("../services/orderPending.js");
 const { notify } = require("../utils/notify");
 const { enqueue } = require("../utils/outbox");
 
+// The heads a verified shift's metres were multiplied by, inside an
+// aggregation over ShiftDetail with its machine looked up as "m": the
+// heads it ran, or for an older shift the loom's head count. Matches
+// utils/machineHeads.js headsOfShift.
+const HEADS_OF_SHIFT = {
+  $max: [1, { $ifNull: ["$headsRun", { $ifNull: [{ $arrayElemAt: ["$m.NoOfHead", 0] }, 1] }] }],
+};
+
 // ────────────────────────────────────────────────────────────────
 //  applyProductionCascade
 //
@@ -42,8 +50,8 @@ async function applyProductionCascade(
   { shift, machine, productionMeters, timer, feedback, req }
 ) {
   // `productionMeters` here is the per-head value the admin entered.
-  // The historical cascade multiplies by `machine.NoOfHead` for the
-  // job/order/plan totals, mirroring the original /enter-shift-production.
+  // Totals multiply by the heads RUNNING (the head plan), not the heads
+  // the loom has — see utils/machineHeads.js.
   const prodValue = Number(productionMeters);
   if (!Number.isFinite(prodValue) || prodValue < 0) {
     throw new ErrorHandler("productionMeters must be a non-negative number", 400);
@@ -63,16 +71,19 @@ async function applyProductionCascade(
   // The cascade fans production across every elastic head on the
   // running machine. An empty heads array means nothing was actually
   // produced this shift — fail loudly instead of silently writing zero.
-  if (!Array.isArray(machineDoc.elastics) || machineDoc.elastics.length === 0) {
+  // A head left empty in the plan is not running; it makes nothing.
+  const runningHeads = (machineDoc.elastics || []).filter((h) => h && h.elastic);
+  if (runningHeads.length === 0) {
     throw new ErrorHandler(
       "Machine has no elastics configured — cannot record production",
       400
     );
   }
+  const heads = runningHeads.length;
 
   const elasticProductionMap = {};
-  for (const head of machineDoc.elastics) {
-    const eid = head.elastic.toString();
+  for (const head of runningHeads) {
+    const eid = (head.elastic._id ?? head.elastic).toString();
     elasticProductionMap[eid] = (elasticProductionMap[eid] || 0) + prodValue;
   }
 
@@ -104,8 +115,9 @@ async function applyProductionCascade(
       jobStage: job.status,
       shiftId: shift._id.toString(),
       shiftLabel: shift.shift || null,
-      productionMeters: prodValue * (machineDoc?.NoOfHead || 1),
+      productionMeters: prodValue * heads,
       production: prodValue,
+      heads,
       timer: timer || null,
       machineId: machineDoc?._id?.toString() || null,
       machineName: machineDoc?.ID || null,
@@ -143,7 +155,7 @@ async function applyProductionCascade(
 
   const sp = await ShiftPlan.findById(shift.shiftPlan).session(session);
   if (sp) {
-    sp.totalProduction = (sp.totalProduction || 0) + prodValue * (machineDoc?.NoOfHead || 1);
+    sp.totalProduction = (sp.totalProduction || 0) + prodValue * heads;
     await sp.save({ session });
   }
 
@@ -194,17 +206,14 @@ async function applyProductionCascade(
 async function _checkLowOutputShift(shift, machine, prodValue, req) {
   const since = new Date(Date.now() - 30 * 86_400_000);
   // Per head on both sides. `prodValue` is the per-head figure entered;
-  // `productionMeters` is stored as per head × the machine's heads, and
+  // `productionMeters` is stored as per head × the heads that ran, and
   // averaging those totals compared a per-head figure with machine
   // totals: an ordinary shift on a six-head loom read as ~17% of normal.
   // This shift is left out of its own baseline (it runs after commit).
   const rows = await ShiftDetail.aggregate([
     { $match: { status: "closed", date: { $gte: since }, _id: { $ne: shift?._id } } },
     { $lookup: { from: Machine.collection.collectionName, localField: "machine", foreignField: "_id", as: "m" } },
-    { $project: { perHead: { $divide: [
-      "$productionMeters",
-      { $max: [1, { $ifNull: [{ $arrayElemAt: ["$m.NoOfHead", 0] }, 1] }] },
-    ] } } },
+    { $project: { perHead: { $divide: ["$productionMeters", HEADS_OF_SHIFT] } } },
     { $group: { _id: null, total: { $sum: "$perHead" }, n: { $sum: 1 } } },
   ]);
   const r = rows[0] || {};
@@ -240,13 +249,14 @@ async function _checkMachineAnomaly(shift, machine, prodValue, req) {
   const since = new Date(Date.now() - 30 * 86_400_000);
   const rows = await ShiftDetail.aggregate([
     { $match: { status: "closed", machine: machine._id, date: { $gte: since }, _id: { $ne: shift?._id } } },
-    { $group: { _id: null, total: { $sum: "$productionMeters" }, n: { $sum: 1 } } },
+    { $lookup: { from: Machine.collection.collectionName, localField: "machine", foreignField: "_id", as: "m" } },
+    { $group: { _id: null, total: { $sum: { $divide: ["$productionMeters", HEADS_OF_SHIFT] } }, n: { $sum: 1 } } },
   ]);
   const r = rows[0] || {};
   if (!r.n || r.n < 3) return; // not enough machine history
-  // The stored figures are machine totals (per head × heads); this
-  // shift's figure is per head. Compared per head.
-  const avg = r.total / r.n / Math.max(1, Number(machine.NoOfHead) || 1);
+  // The stored figures are machine totals (per head × heads that ran);
+  // this shift's figure is per head. Compared per head.
+  const avg = r.total / r.n;
   if (!(avg > 0)) return;
   const pct = (prodValue / avg) * 100;
   if (pct >= 40) return; // not an anomaly
@@ -275,7 +285,9 @@ async function _checkMachineAnomaly(shift, machine, prodValue, req) {
 //  counting. Runs inside the correction transaction (takes `session`).
 // ═════════════════════════════════════════════════════════════════
 async function _rederiveShiftProduction(session, { shift, newTotalMeters, req, auditReason, code }) {
-  const heads = Array.isArray(shift.elastics) && shift.elastics.length > 0 ? shift.elastics.length : 1;
+  const heads = Number(shift.headsRun) > 0
+    ? Number(shift.headsRun)
+    : (Array.isArray(shift.elastics) && shift.elastics.length > 0 ? shift.elastics.length : 1);
   const oldTotal = Number(shift.productionMeters) || 0;
   const oldPerHead = oldTotal / heads;
   const newPerHead = Number(newTotalMeters) / heads;

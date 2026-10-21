@@ -35,6 +35,7 @@ const multer = require("multer");
 const { keepRequestContext } = require("../middleware/userContext.js");
 const { shortCode } = require("../utils/shiftSheetPdf");
 const { floorSheetNo } = require("../utils/floorSheetPdf");
+const { headsInUse } = require("../utils/machineHeads");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
 const { submitProduction } = require("../services/shiftSubmit");
@@ -532,7 +533,16 @@ router.post(
         const finalTimer    = timer    != null ? timer    : (shift.submittedTimer    || "00:00:00");
         const finalFeedback = feedback != null ? feedback : (shift.submittedFeedback || "");
 
-        shift.productionMeters = prodValue * (machine?.NoOfHead || 1);
+        // Per head × the heads that ran — the job's head plan, which may
+        // use fewer heads than the loom has (utils/machineHeads.js). The
+        // snapshot is brought up to that plan too, so a later correction
+        // (_rederiveShiftProduction) divides by the same heads.
+        const runningHeads = (machine?.elastics || []).filter((h) => h && h.elastic);
+        if (runningHeads.length) {
+          shift.elastics = runningHeads.map((h) => ({ head: h.head, elastic: h.elastic }));
+        }
+        shift.headsRun         = headsInUse(machine);
+        shift.productionMeters = prodValue * shift.headsRun;
         shift.timer            = finalTimer;
         shift.feedback         = finalFeedback;
         shift.status           = "closed";

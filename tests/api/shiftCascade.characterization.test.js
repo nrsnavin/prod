@@ -102,7 +102,7 @@ describe('applyProductionCascade — guards', () => {
 });
 
 describe('applyProductionCascade — accumulation + fan-out', () => {
-  test('one head: job/order += per-head value; ShiftPlan += value × NoOfHead', async () => {
+  test('one head running on a 4-head loom: job/order += per-head value; totals × the heads running', async () => {
     const s = await seedScenario({ noOfHead: 4, heads: [null], planned: 1000, orderedQty: 1000 });
     await runInTxn((session) =>
       cascade(session, { shift: s.shift, machine: s.machine, productionMeters: 100 })
@@ -114,7 +114,10 @@ describe('applyProductionCascade — accumulation + fan-out', () => {
     // SHIFT_PRODUCTION_VERIFIED fingerprint records both figures.
     const fp = job.fingerprints.find(f => f.code === 'SHIFT_PRODUCTION_VERIFIED');
     expect(fp.meta.production).toBe(100);
-    expect(fp.meta.productionMeters).toBe(400); // 100 × NoOfHead(4)
+    // × the heads the plan runs (1), not the heads the loom has (4): the
+    // other three wove nothing.
+    expect(fp.meta.productionMeters).toBe(100);
+    expect(fp.meta.heads).toBe(1);
 
     const order = await Order.findById(s.order._id);
     expect(order.producedElastic[0].quantity).toBe(100);
@@ -123,7 +126,7 @@ describe('applyProductionCascade — accumulation + fan-out', () => {
     expect(order.pendingElastic[0].quantity).toBe(0);
 
     const sp = await ShiftPlan.findById(s.sp._id);
-    expect(sp.totalProduction).toBe(400); // 100 × NoOfHead(4)
+    expect(sp.totalProduction).toBe(100); // 100 × 1 head running
   });
 
   test('multiple heads on the same elastic each contribute the per-head value', async () => {

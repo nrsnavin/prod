@@ -18,6 +18,7 @@ const Wastage     = require('../models/Wastage');
 const Machine     = require('../models/Machine');
 const { recomputePending } = require('../services/orderPending.js');
 const ShiftDetail = require('../models/ShiftDetail');
+const { refreshOpenShiftHeads } = require('../utils/machineHeads');
 const WarpingBatch = require('../models/WarpingBatch');
 const PurchaseOrder = require('../models/PurchaseOrder');
 
@@ -307,8 +308,19 @@ router.post(
     // on rather than a claimed machine and an aborted write. The same
     // check guards /assign-machine — both routes reach the same head
     // map, and a rule enforced on one of them is not a rule.
-    const machineForFit = await Machine.findById(machineId).select('ID NoOfHooks');
+    const machineForFit = await Machine.findById(machineId).select('ID NoOfHooks NoOfHead');
     if (!machineForFit) return next(new ErrorHandler('Machine not found', 404));
+    // Heads in use: the plan may run fewer heads than the loom has (a wide
+    // elastic that fits on 6 of 8), but never more, and from head 1 up.
+    const headKeys = Object.keys(headElasticMap).map(Number).sort((a, b) => a - b);
+    if (headKeys.some((k, i) => !Number.isInteger(k) || k !== i)) {
+      return next(new ErrorHandler('Heads must run from head 1 up, without gaps.', 400));
+    }
+    if (headKeys.length > (Number(machineForFit.NoOfHead) || 0)) {
+      return next(new ErrorHandler(
+        `${machineForFit.ID} has ${machineForFit.NoOfHead} heads; the plan uses ${headKeys.length}.`, 400
+      ));
+    }
     const fit = await checkHookFit(machineForFit, Object.values(headElasticMap));
     if (!fit.fits && req.body?.confirmHooks !== true) {
       return next(hookFitError(machineForFit, fit, ErrorHandler));
@@ -448,6 +460,13 @@ router.post(
               toMachineName:   machine.ID,
             },
           });
+        }
+
+        // Re-planning the heads of the machine this job is already on:
+        // its shifts not yet verified take the new head plan, so they are
+        // verified and corrected against the heads that actually run.
+        if (previousMachineId === machine._id.toString()) {
+          await refreshOpenShiftHeads(machine, job._id, session);
         }
 
         job.machine = machine._id;
@@ -1128,13 +1147,14 @@ router.post(
     const ownedByThisJob = machine.orderRunning?.toString() === job._id.toString();
     if (machine.status !== 'free' && !ownedByThisJob)
       return next(new ErrorHandler(`Machine "${machine.ID}" is currently ${machine.status} on another job.`, 400));
-    if (elastics.length !== machine.NoOfHead)
-      return next(new ErrorHandler(`Expected ${machine.NoOfHead} head entries, got ${elastics.length}.`, 400));
+    // The plan may run fewer heads than the loom has, never more.
+    if (elastics.length > machine.NoOfHead)
+      return next(new ErrorHandler(`${machine.ID} has ${machine.NoOfHead} heads; got ${elastics.length} head entries.`, 400));
 
     const sortedHeads = [...headNums].sort((a, b) => a - b);
     for (let i = 0; i < sortedHeads.length; i++) {
       if (sortedHeads[i] !== i + 1)
-        return next(new ErrorHandler(`Head numbers must run 1 to ${machine.NoOfHead} without gaps.`, 400));
+        return next(new ErrorHandler(`Head numbers must run 1 to ${elastics.length} without gaps.`, 400));
     }
 
     const jobElasticIds = new Set(job.elastics.map(e => e.elastic.toString()));
@@ -1258,7 +1278,7 @@ router.post(
       success: true,
       message: held
         ? `Machine "${machine.ID}" assigned. The job stays in preparatory — ${held.join('; ')}.`
-        : `Machine "${machine.ID}" assigned with ${machine.NoOfHead}-head plan.`,
+        : `Machine "${machine.ID}" assigned with ${elastics.length}-head plan.`,
       weavingHeld: held ? { blockers: held } : null,
       data: {
         jobId: job._id, jobStatus: job.status, machineId: machine._id, machineID: machine.ID, NoOfHead: machine.NoOfHead,
@@ -1529,7 +1549,7 @@ router.get('/:jobId', async (req, res) => {
     const job = await JobOrder.findById(jobId)
       .populate('customer', 'name phone')
       .populate('order',    'orderNo status')
-      .populate('machine',  'ID manufacturer NoOfHead NoOfHooks status')
+      .populate('machine',  'ID manufacturer NoOfHead NoOfHooks status elastics')
       .populate('createdBy',   'name role')
       .populate('updatedBy',   'name role')
       .populate('weavingBy',   'name role')
@@ -1682,7 +1702,14 @@ router.get('/:jobId', async (req, res) => {
         date: fmtDate(job.date), status: job.status,
         customerName: job.customer?.name || '-', customerPhone: job.customer?.phone || '',
         orderNo: job.order?.orderNo || '',
-        machine: job.machine ? { machineId: job.machine._id, machineName: job.machine.ID || '-', machineNoOfHead: job.machine.NoOfHead || 0, manufacturer: job.machine.manufacturer || '', status: job.machine.status || 'free' } : null,
+        machine: job.machine ? {
+          machineId: job.machine._id, machineName: job.machine.ID || '-', machineNoOfHead: job.machine.NoOfHead || 0,
+          // The heads this job's plan runs, and on which head each elastic sits.
+          headsInUse: (job.machine.elastics || []).filter((h) => h && h.elastic).length || job.machine.NoOfHead || 0,
+          headPlan: (job.machine.elastics || []).filter((h) => h && h.elastic)
+            .map((h) => ({ head: h.head, elastic: String(h.elastic) })),
+          manufacturer: job.machine.manufacturer || '', status: job.machine.status || 'free',
+        } : null,
         plannedElastics: mapElasticQty(job.elastics),
         producedElastics: mapElasticQty(job.producedElastic),
         packedElastics: mapElasticQty(job.packedElastic),
