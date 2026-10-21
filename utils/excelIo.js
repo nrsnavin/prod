@@ -16,6 +16,7 @@ const Elastic     = require('../models/Elastic');
 const Costing     = require('../models/Costing');
 const { calculateElasticCosting } = require('./elasticCosting.js');
 const { elasticNameKey } = require('./elasticName.js');
+const { recipeMaterialFilters } = require('./recipeMaterials.js');
 
 // ── Sheet column contracts (single source of truth) ────────────
 const COLUMNS = {
@@ -413,7 +414,8 @@ async function buildElasticTemplateWorkbook({ withExample = false } = {}) {
     [],
     ['1. Fill the Elastics sheet: one row per elastic.'],
     ['2. Fill ElasticWarpYarns: one row per warp yarn of each elastic (an elastic can have several).'],
-    ['3. Pick materials from the dropdowns. They list the Materials sheet — the raw materials already in the app.'],
+    ['3. Pick materials from the dropdowns. Each material column lists the raw materials for that slot (warp yarns,'],
+    ['   spandex, covering, weft) — the same ones the elastic form offers. The Materials sheet lists them all.'],
     ['   A material that is not there must be added under Raw Materials first.'],
     ['4. Upload it on the Elastic Products screen: Bulk upload.'],
     [],
@@ -454,33 +456,67 @@ async function buildElasticTemplateWorkbook({ withExample = false } = {}) {
   ];
   lines.forEach((cells, i) => cells.forEach((v, j) => { info.getCell(i + 1, j + 1).value = v; }));
   info.getCell(1, 1).font = { bold: true, size: 14 };
-  for (const r of [13, 35]) info.getRow(r).font = { bold: true };
+  for (const r of [14, 36]) info.getRow(r).font = { bold: true };
 
+  // Each material column lists only that slot's materials — warp yarns in
+  // the warp column, spandex in the spandex one — by the same rules as
+  // the elastic form's pickers. The lists sit on a hidden sheet; a slot
+  // with nothing in it falls back to every material, so a mill whose
+  // groups are named differently still gets a dropdown.
   const n = Math.max(materials.length, 1) + 1;
-  const src = `Materials!$A$2:$A$${n}`;
+  const allSrc = `Materials!$A$2:$A$${n}`;
+  const filters = await recipeMaterialFilters();
+  const slots = [
+    ['warp', 'Warp yarn'], ['rubber', 'Warp spandex'], ['covering', 'Spandex covering'], ['weft', 'Weft yarn'],
+  ];
+  const bySlot = {};
+  for (const [bucket] of slots) {
+    // One after another, like everything else here: cheap, and no session.
+    const ids = await RawMaterial.find({ archived: { $ne: true }, ...filters[bucket] }).distinct('_id');
+    const keep = new Set(ids.map(String));
+    bySlot[bucket] = materials.filter((m) => keep.has(String(m._id))).map((m) => m.name)
+      .sort((a, b) => a.localeCompare(b));
+  }
+  const srcFor = {};
+  slots.forEach(([bucket], i) => {
+    const col = colLetter(i + 1);
+    srcFor[bucket] = bySlot[bucket].length
+      ? `Lists!$${col}$2:$${col}$${bySlot[bucket].length + 1}`
+      : allSrc;
+  });
+
   const example = withExample && materials.length > 0;
-  const pick = (cat) => materials.find((m) => foldName(m.category).includes(cat))?.name || materials[0]?.name;
+  const pick = (bucket) => bySlot[bucket][0] || materials[0]?.name;
   buildSheet(wb, 'Elastics', example ? [{
     name: '20mm Knitted White (example — replace)', weaveType: '8', spandexEnds: 40, yarnEnds: 120, pick: 12,
     noOfHook: 8, weight: 2.4, minStock: 500, width: 20, elongation: 120, recovery: 90, strech: 'firm',
-    warpSpandex_material: pick('rubber') || pick('spandex'), warpSpandex_ends: 40, warpSpandex_weight: 0.5,
-    spandexCovering_material: pick('cover'), spandexCovering_weight: 0.2,
+    warpSpandex_material: pick('rubber'), warpSpandex_ends: 40, warpSpandex_weight: 0.5,
+    spandexCovering_material: pick('covering'), spandexCovering_weight: 0.2,
     weftYarn_material: pick('weft'), weftYarn_weight: 0.4, conversionCost: 1.5,
   }] : [], {
     dropdowns: {
-      warpSpandex_material: { range: src },
-      spandexCovering_material: { range: src },
-      weftYarn_material: { range: src },
+      warpSpandex_material: { range: srcFor.rubber },
+      spandexCovering_material: { range: srcFor.covering },
+      weftYarn_material: { range: srcFor.weft },
     },
   });
   buildSheet(wb, 'ElasticWarpYarns', example ? [
     { elasticName: '20mm Knitted White (example — replace)', material: pick('warp'), ends: 120, type: 'ground', weight: 1.0 },
-  ] : [], { dropdowns: { material: { range: src } } });
+  ] : [], { dropdowns: { material: { range: srcFor.warp } } });
   const ref = buildSheet(wb, 'Materials', materials.map((m) => ({
     name: m.name, category: m.category, supplier: m.supplier?.name || '', price: m.price || 0,
   })), { dropdowns: {} });
   ref.getColumn(1).width = 34;
   await ref.protect('', { selectLockedCells: true, selectUnlockedCells: true, autoFilter: true, sort: true });
+
+  // The per-slot lists the dropdowns point at, last and hidden.
+  const lists = wb.addWorksheet('Lists', { state: 'hidden' });
+  slots.forEach(([bucket, title], i) => {
+    const col = colLetter(i + 1);
+    lists.getCell(`${col}1`).value = title;
+    bySlot[bucket].forEach((name, j) => { lists.getCell(`${col}${j + 2}`).value = name; });
+  });
+  await lists.protect('', { selectLockedCells: true, selectUnlockedCells: true });
   return wb;
 }
 

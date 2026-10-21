@@ -20,6 +20,7 @@ const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
+const { recipeMaterialFilters } = require("../utils/recipeMaterials");
 const { appendStockMovement, normaliseMovements } = require("../utils/stockLedger");
 const { receiveAtCost, costOf, noteLatestPrice } = require("../utils/materialValuation");
 const { countUsage } = require("../utils/masterUsage");
@@ -1595,70 +1596,14 @@ router.get(
 //  exactly four composition slots, and they are a property of the cloth
 //  rather than of the group list. What is no longer hardcoded is which
 //  materials fall into each — that comes from the groups, so renaming
-//  one in Settings moves its materials here too.
-const RECIPE_BUCKETS = Object.freeze({
-  warp:     ['warp'],
-  weft:     ['weft'],
-  covering: ['covering'],
-  // Named "rubber" in the response for the elastic form's warp-spandex
-  // slot; "spandex" accepted too, because that is what the floor calls
-  // it and a mill that renamed the group should not lose the picker.
-  rubber:   ['rubber', 'spandex'],
-});
-
+//  one in Settings moves its materials here too. The rules live in
+//  utils/recipeMaterials.js, shared with the bulk-upload Excel template.
 router.get(
   "/materialForNewElastic",
   catchAsyncErrors(async (req, res, next) => {
-    const groups = await MaterialGroup.find({ archived: { $ne: true } })
-      .select("_id name")
-      .lean();
-
-    // A group belongs to a bucket when its name CONTAINS the keyword,
-    // folded to lowercase — so "Warp", "warp yarn" and "Warp Spandex"
-    // all reach the warp picker, and a rename that keeps the word
-    // keeps working.
-    const bucketFor = (name) => {
-      const n = String(name || "").toLowerCase();
-      for (const [bucket, keywords] of Object.entries(RECIPE_BUCKETS)) {
-        if (keywords.some((k) => n.includes(k))) return bucket;
-      }
-      return null;
-    };
-
-    const idsByBucket = { warp: [], weft: [], covering: [], rubber: [] };
-    const namesByBucket = { warp: [], weft: [], covering: [], rubber: [] };
-    for (const g of groups) {
-      const bucket = bucketFor(g.name);
-      if (!bucket) continue;
-      idsByBucket[bucket].push(g._id);
-      namesByBucket[bucket].push(g.name);
-    }
-
-    // Matched by group link OR by category name, and the name match is
-    // a case-insensitive regex rather than an equality — a material
-    // that predates the migration carries only the string.
-    const query = (bucket) => {
-      const names = namesByBucket[bucket];
-      const ids   = idsByBucket[bucket];
-      const or = [];
-      if (ids.length)   or.push({ group: { $in: ids } });
-      if (names.length) {
-        or.push({
-          category: { $in: names.map((n) => new RegExp(`^${escapeRegex(n)}$`, "i")) },
-        });
-      }
-      // No group carries this keyword — fall back to the literal the
-      // endpoint always used, so a database with no groups seeded yet
-      // behaves exactly as it did before.
-      if (or.length === 0) {
-        or.push({
-          category: {
-            $in: RECIPE_BUCKETS[bucket].map((k) => new RegExp(`^${escapeRegex(k)}$`, "i")),
-          },
-        });
-      }
-      return RawMaterial.find({ archived: { $ne: true }, $or: or }).sort({ name: 1 });
-    };
+    const filters = await recipeMaterialFilters();
+    const query = (bucket) =>
+      RawMaterial.find({ archived: { $ne: true }, ...filters[bucket] }).sort({ name: 1 });
 
     const [warp, rubber, weft, covering] = await Promise.all([
       query("warp"), query("rubber"), query("weft"), query("covering"),

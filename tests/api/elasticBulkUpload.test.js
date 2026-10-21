@@ -81,13 +81,61 @@ describe('the template', () => {
     const { res, wb } = await download();
     expect(res.status).toBe(200);
     expect(res.headers['content-disposition']).toMatch(/elastic_products_upload\.xlsx/);
-    expect(wb.worksheets.map((w) => w.name)).toEqual(['Instructions', 'Elastics', 'ElasticWarpYarns', 'Materials']);
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Instructions', 'Elastics', 'ElasticWarpYarns', 'Materials', 'Lists']);
+    expect(wb.getWorksheet('Lists').state).toBe('hidden');
     expect(wb.getWorksheet('Elastics').getRow(1).values).toEqual(expect.arrayContaining(['name', 'weftYarn_material', 'conversionCost']));
     const mats = wb.getWorksheet('Materials').getColumn(1).values.slice(2);
     expect(mats).toEqual(expect.arrayContaining(['Poly 150D', 'Spandex 840D', 'Cover 40D', 'Poly 300D']));
     // The material columns are dropdowns drawn from that sheet.
     const dv = wb.getWorksheet('Elastics').dataValidations.model;
-    expect(Object.values(dv).some((v) => String(v.formulae?.[0]).startsWith('Materials!'))).toBe(true);
+    expect(Object.keys(dv).length).toBeGreaterThan(0);
+  });
+
+  test('each material column offers only the materials for its slot, as the elastic form does', async () => {
+    const MaterialGroup = require('../../models/MaterialGroup');
+    // A group named "Spandex Yarn" puts its materials in the spandex slot,
+    // whatever their category says.
+    const g = await MaterialGroup.create({ name: 'Spandex Yarn', code: 'SPX' });
+    const extra = await RawMaterial.create({ name: 'Lycra 1120D', category: 'Spandex Yarn', group: g._id, price: 950, stock: 0 });
+    try {
+      const { wb } = await download();
+      const lists = wb.getWorksheet('Lists');
+      const listFor = (sheet, header) => {
+        const ws = wb.getWorksheet(sheet);
+        const col = ws.getRow(1).values.indexOf(header);
+        const letter = String.fromCharCode(64 + col);
+        const range = ws.dataValidations.model[`${letter}2`].formulae[0];
+        const [, c, from, to] = range.match(/^Lists!\$([A-Z])\$(\d+):\$[A-Z]\$(\d+)$/);
+        const names = [];
+        for (let r = Number(from); r <= Number(to); r++) names.push(lists.getCell(`${c}${r}`).value);
+        return names;
+      };
+      expect(listFor('ElasticWarpYarns', 'material')).toEqual(['Poly 150D']);
+      expect(listFor('Elastics', 'warpSpandex_material')).toEqual(['Lycra 1120D']);
+      expect(listFor('Elastics', 'spandexCovering_material')).toEqual(['Cover 40D']);
+      expect(listFor('Elastics', 'weftYarn_material')).toEqual(['Poly 300D']);
+
+      // And the material picked from that dropdown is the one saved.
+      fill(wb, 'Elastics', [full('Lycra Tape', { warpSpandex_material: 'Lycra 1120D' })]);
+      expect((await upload(wb)).body).toMatchObject({ added: 1, skipped: [] });
+      const e = await Elastic.findOne({ name: 'Lycra Tape' }).lean();
+      expect(String(e.warpSpandex.id)).toBe(String(extra._id));
+    } finally {
+      await RawMaterial.deleteOne({ _id: extra._id });
+      await MaterialGroup.deleteOne({ _id: g._id });
+    }
+  });
+
+  test('a slot with no materials of its own falls back to the whole list', async () => {
+    await RawMaterial.updateOne({ _id: cover._id }, { $set: { category: 'other' } });
+    try {
+      const { wb } = await download();
+      const ws = wb.getWorksheet('Elastics');
+      const letter = String.fromCharCode(64 + ws.getRow(1).values.indexOf('spandexCovering_material'));
+      expect(ws.dataValidations.model[`${letter}2`].formulae[0]).toBe('Materials!$A$2:$A$5');
+    } finally {
+      await RawMaterial.updateOne({ _id: cover._id }, { $set: { category: 'covering' } });
+    }
   });
 
   test('can come with a worked example row', async () => {
