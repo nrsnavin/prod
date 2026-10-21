@@ -286,8 +286,10 @@ router.post(
     if (!machineId) return next(new ErrorHandler('machineId is required', 400));
     if (!headElasticMap || !Object.keys(headElasticMap).length)
       return next(new ErrorHandler('headElasticMap must be a non-empty object', 400));
-    if (Object.values(headElasticMap).some(v => !v))
-      return next(new ErrorHandler('All machine heads must have an elastic assigned', 400));
+    // A head with no elastic is FREE: it stays on the plan, runs nothing
+    // and is counted for nothing. At least one head has to run.
+    if (!Object.values(headElasticMap).some(Boolean))
+      return next(new ErrorHandler('At least one head must run an elastic; the rest can be free.', 400));
 
     // `let`: re-read inside the transaction below, which is the copy that
     // is judged and written. This one only fails fast on the common case.
@@ -374,7 +376,7 @@ router.post(
               status:       'running',
               orderRunning: job._id,
               elastics:     Object.entries(headElasticMap).map(
-                ([head, elastic]) => ({ head: Number(head) + 1, elastic })
+                ([head, elastic]) => ({ head: Number(head) + 1, elastic: elastic || null })
               ),
             },
           },
@@ -1704,10 +1706,13 @@ router.get('/:jobId', async (req, res) => {
         orderNo: job.order?.orderNo || '',
         machine: job.machine ? {
           machineId: job.machine._id, machineName: job.machine.ID || '-', machineNoOfHead: job.machine.NoOfHead || 0,
-          // The heads this job's plan runs, and on which head each elastic sits.
-          headsInUse: (job.machine.elastics || []).filter((h) => h && h.elastic).length || job.machine.NoOfHead || 0,
-          headPlan: (job.machine.elastics || []).filter((h) => h && h.elastic)
-            .map((h) => ({ head: h.head, elastic: String(h.elastic) })),
+          // The heads this job's plan runs, and what is on each head of
+          // the plan — null for a head marked free.
+          headsInUse: (job.machine.elastics || []).length
+            ? (job.machine.elastics || []).filter((h) => h && h.elastic).length
+            : job.machine.NoOfHead || 0,
+          headPlan: (job.machine.elastics || []).filter((h) => h && h.head != null)
+            .map((h) => ({ head: h.head, elastic: h.elastic ? String(h.elastic) : null })),
           manufacturer: job.machine.manufacturer || '', status: job.machine.status || 'free',
         } : null,
         plannedElastics: mapElasticQty(job.elastics),

@@ -138,6 +138,56 @@ describe('production is counted by the heads running', () => {
   });
 });
 
+describe('a head marked free', () => {
+  it('can sit anywhere in the plan; nothing is counted for it', async () => {
+    const s = await seed();
+    const e = String(s.elastic._id);
+    // Heads 1, 2, 4 run; 3 is free (a broken needle, say); 5–8 not planned.
+    const res = await post('/job/plan-weaving', {
+      jobId: String(s.job._id), machineId: String(s.machine._id),
+      headElasticMap: { 0: e, 1: e, 2: '', 3: e },
+    });
+    expect(res.status).toBe(200);
+    const m = await M.Machine.findById(s.machine._id).lean();
+    expect(m.elastics.map((h) => (h.elastic ? 'run' : 'free'))).toEqual(['run', 'run', 'free', 'run']);
+
+    const detail = await request(app).get(`/api/v2/job/${s.job._id}`).set('Cookie', cookie());
+    expect(detail.body.data.machine.headsInUse).toBe(3);
+    expect(detail.body.data.machine.headPlan.map((h) => h.elastic)).toEqual([e, e, null, e]);
+
+    const shift = await shiftFor(s);
+    expect(shift.elastics).toHaveLength(3);
+    await post('/shift/verify-production', { shiftId: String(shift._id), productionMeters: 100 });
+    expect(await M.ShiftDetail.findById(shift._id).lean()).toMatchObject({ productionMeters: 300, headsRun: 3 });
+    expect((await M.JobOrder.findById(s.job._id).lean()).producedElastic[0].quantity).toBe(300);
+  });
+
+  it('a plan with every head free is refused; at least one has to run', async () => {
+    const s = await seed();
+    const res = await post('/job/plan-weaving', {
+      jobId: String(s.job._id), machineId: String(s.machine._id), headElasticMap: { 0: '', 1: null },
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/At least one head must run/);
+  });
+
+  it('every head marked free on the machine page: verifying says nothing ran, and records nothing', async () => {
+    const s = await seed();
+    await plan(s, 8);
+    const shift = await shiftFor(s);
+    const m = await M.Machine.findById(s.machine._id).lean();
+    await request(app).put('/api/v2/machine/updateOrder').set('Cookie', cookie()).send({
+      id: String(s.machine._id), expectedVersion: m.__v,
+      elastics: Array.from({ length: 8 }, (_, i) => ({ head: i + 1, elastic: null })),
+    });
+    const res = await post('/shift/verify-production', { shiftId: String(shift._id), productionMeters: 100 });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/Every head on .* is marked free/);
+    expect((await M.ShiftDetail.findById(shift._id).lean()).status).not.toBe('closed');
+    expect((await M.JobOrder.findById(s.job._id).lean()).producedElastic || []).toEqual([]);
+  });
+});
+
 describe("the machine page's head-map editor", () => {
   it('leaving heads empty there counts the same way, for shifts not yet verified', async () => {
     const s = await seed();
@@ -173,7 +223,8 @@ describe('helpers', () => {
   const { headsInUse, headsOfShift } = require('../../utils/machineHeads');
   it('heads in use is the heads with an elastic, else the whole loom', () => {
     expect(headsInUse({ NoOfHead: 8, elastics: [{ head: 1, elastic: 'a' }, { head: 2, elastic: null }] })).toBe(1);
-    expect(headsInUse({ NoOfHead: 8, elastics: [] })).toBe(8);
+    expect(headsInUse({ NoOfHead: 8, elastics: [] })).toBe(8); // no plan at all
+    expect(headsInUse({ NoOfHead: 8, elastics: [{ head: 1, elastic: null }] })).toBe(0); // all free
     expect(headsOfShift({ headsRun: 6 }, { NoOfHead: 8 })).toBe(6);
     expect(headsOfShift({}, { NoOfHead: 8 })).toBe(8); // verified before headsRun was kept
   });

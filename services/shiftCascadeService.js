@@ -75,7 +75,9 @@ async function applyProductionCascade(
   const runningHeads = (machineDoc.elastics || []).filter((h) => h && h.elastic);
   if (runningHeads.length === 0) {
     throw new ErrorHandler(
-      "Machine has no elastics configured — cannot record production",
+      (machineDoc.elastics || []).length
+        ? `Every head on ${machineDoc.ID || "this machine"} is marked free — nothing ran, so there is no production to record. Put an elastic on the heads that ran (Edit map on the machine).`
+        : "Machine has no elastics configured — cannot record production",
       400
     );
   }

@@ -9,13 +9,22 @@
 //  total, the ETA's machine-day rate — multiplies by the heads running,
 //  not the heads the machine has. Multiplying by NoOfHead counted two
 //  heads' worth of elastic that was never woven.
+//
+//  A head with no elastic in the plan is FREE: it is not running, and
+//  nothing is counted for it — not its metres, not its share of a rate.
 // ══════════════════════════════════════════════════════════════════
 
 const carrying = (heads) => (Array.isArray(heads) ? heads : []).filter((h) => h && h.elastic).length;
 
-/** Heads with an elastic in the machine's head plan; its own head count if it has no plan. */
+/**
+ * Heads with an elastic in the machine's head plan — free heads not
+ * counted, so a plan with every head free runs none. A machine with no
+ * plan at all (older data) counts as all its heads.
+ */
 function headsInUse(machine) {
-  return carrying(machine?.elastics) || Math.max(1, Number(machine?.NoOfHead) || 1);
+  const plan = Array.isArray(machine?.elastics) ? machine.elastics : [];
+  if (plan.length) return carrying(plan);
+  return Math.max(1, Number(machine?.NoOfHead) || 1);
 }
 
 /**
