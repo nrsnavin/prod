@@ -27,8 +27,12 @@ const COLUMNS = {
     'warpSpandex_material', 'warpSpandex_ends', 'warpSpandex_weight',
     'spandexCovering_material', 'spandexCovering_weight',
     'weftYarn_material', 'weftYarn_weight',
+    'conversionCost',
   ],
   ElasticWarpYarns: ['elasticName', 'material', 'ends', 'type', 'weight'],
+  // Read-only reference in the elastic upload template: the raw materials
+  // that exist, which the *_material dropdowns are drawn from.
+  Materials: ['name', 'category', 'supplier', 'price'],
 };
 
 const MATERIAL_SRC = 'RawMaterials!$A$2:$A$1000';
@@ -70,7 +74,7 @@ function colLetter(n) {
 }
 
 // ── Workbook writer (shared by template + export) ──────────────
-function buildSheet(wb, name, rows) {
+function buildSheet(wb, name, rows, { dropdowns } = {}) {
   const cols = COLUMNS[name];
   const ws = wb.addWorksheet(name);
   ws.columns = cols.map((c) => ({ header: c, key: c, width: Math.max(14, c.length + 3) }));
@@ -84,7 +88,7 @@ function buildSheet(wb, name, rows) {
 
   if (rows && rows.length) ws.addRows(rows);
 
-  const dd = DROPDOWNS[name];
+  const dd = dropdowns || DROPDOWNS[name];
   if (dd) {
     for (const [header, cfg] of Object.entries(dd)) {
       const letter = colLetter(cols.indexOf(header) + 1);
@@ -111,7 +115,7 @@ function buildTemplateWorkbook() {
     'An elastic can have many warp yarns: one row per yarn in ElasticWarpYarns (keyed by elasticName).',
   ].forEach((t, i) => { info.getCell(i + 1, 1).value = t; });
   info.getCell(1, 1).font = { bold: true, size: 13 };
-  for (const name of Object.keys(COLUMNS)) buildSheet(wb, name, []);
+  for (const name of ['Suppliers', 'RawMaterials', 'Elastics', 'ElasticWarpYarns']) buildSheet(wb, name, []);
   return wb;
 }
 
@@ -122,6 +126,7 @@ async function buildExportWorkbook() {
     RawMaterial.find({}).populate('supplier', 'name').lean(),
     Elastic.find({ archived: { $ne: true } })
       .populate('warpSpandex.id spandexCovering.id weftYarn.id warpYarn.id', 'name')
+      .populate('costing', 'conversionCost')
       .lean(),
   ]);
   const nameOf = (ref) => (ref && ref.name) ? ref.name : '';
@@ -149,6 +154,7 @@ async function buildExportWorkbook() {
       spandexCovering_weight: e.spandexCovering && e.spandexCovering.weight,
       weftYarn_material: nameOf(e.weftYarn && e.weftYarn.id),
       weftYarn_weight: e.weftYarn && e.weftYarn.weight,
+      conversionCost: e.costing && e.costing.conversionCost,
     });
     for (const w of (e.warpYarn || [])) {
       warpRows.push({ elasticName: e.name, material: nameOf(w.id), ends: w.ends, type: w.type, weight: w.weight });
@@ -175,7 +181,7 @@ function readSheet(wb, name) {
   const out = [];
   ws.eachRow((row, rn) => {
     if (rn === 1) return;
-    const obj = {};
+    const obj = { __row: rn };
     let any = false;
     row.eachCell({ includeEmpty: false }, (cell, col) => {
       const h = headers[col];
@@ -192,8 +198,15 @@ function readSheet(wb, name) {
  * @param {ExcelJS.Workbook} wb  already-loaded workbook
  * @returns {Promise<{suppliers,materials,elastics,skipped:string[]}>}
  */
-async function importWorkbook(wb) {
-  const report = { suppliers: 0, materials: 0, elastics: 0, skipped: [] };
+async function importWorkbook(wb, { scope = 'all' } = {}) {
+  const report = { suppliers: 0, materials: 0, elastics: 0, added: 0, updated: 0, skipped: [], warnings: [] };
+
+  // The elastic upload reads ONLY the elastic sheets: a Materials sheet in
+  // it is a reference to pick from, never something to write back.
+  if (scope === 'elastics') {
+    await importElasticSheets(wb, report);
+    return report;
+  }
 
   for (const row of readSheet(wb, 'Suppliers')) {
     const name = str(row.name);
@@ -222,120 +235,259 @@ async function importWorkbook(wb) {
       report.skipped.push(`RawMaterial "${name}": supplier "${supplierName}" not found`);
       continue;
     }
+    // Stock only for a NEW material, as its opening figure. An existing
+    // material's stock moves through the stock ledger (receipts, issues,
+    // counts); a sheet setting it directly — or zeroing it from a blank
+    // cell — left the ledger and the shelf disagreeing with nothing to
+    // explain it.
     await RawMaterial.findOneAndUpdate(
       { name },
-      { $set: {
+      {
+        $set: {
           name, category: str(row.category) || 'other', supplier: supplierId,
-          price: num(row.price) ?? 0, stock: num(row.stock) ?? 0, minStock: num(row.minStock) ?? 0,
-        } },
+          price: num(row.price) ?? 0, minStock: num(row.minStock) ?? 0,
+        },
+        $setOnInsert: { stock: num(row.stock) ?? 0 },
+      },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
     report.materials++;
   }
 
-  const materialMap = new Map(
-    (await RawMaterial.find({}, 'name').lean()).map((m) => [m.name, m._id]),
-  );
-  const resolveMat = (n, ctx, missing) => {
-    const name = str(n);
-    if (!name) return undefined;
-    const id = materialMap.get(name);
-    if (!id) missing.push(`${ctx}: material "${name}" not found`);
-    return id;
-  };
+  await importElasticSheets(wb, report);
 
-  const warpByElastic = new Map();
+  return report;
+}
+
+
+// ── Elastics: upload by sheet, matched by name ─────────────────
+//
+// One row per elastic on "Elastics"; its warp yarns, one row each, on
+// "ElasticWarpYarns" (keyed by elasticName). Materials are named, and
+// must already exist — this never creates or changes a raw material.
+//
+// A row for an elastic that already exists UPDATES it, and a blank cell
+// leaves that field as it is: a sheet holding only names and new weights
+// must not zero every pick, hook count and testing figure it left empty,
+// and an elastic with no warp-yarn rows keeps the warp yarns it has. A
+// NEW elastic needs its spandex ends, pick, hooks and weight. A row that
+// cannot be saved is skipped with the reason; the rest go in.
+
+const foldName = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+const PARTS = [
+  { key: 'warpSpandex', label: 'Warp spandex', ends: true },
+  { key: 'spandexCovering', label: 'Spandex covering' },
+  { key: 'weftYarn', label: 'Weft yarn' },
+];
+const REQUIRED_FOR_NEW = ['spandexEnds', 'pick', 'noOfHook', 'weight'];
+
+async function importElasticSheets(wb, report) {
+  const materials = await RawMaterial.find({ archived: { $ne: true } }, 'name').lean();
+  const materialByName = new Map(materials.map((m) => [foldName(m.name), m._id]));
+
+  const warpRowsByKey = new Map();
   for (const row of readSheet(wb, 'ElasticWarpYarns')) {
     const en = str(row.elasticName);
     if (!en) continue;
-    if (!warpByElastic.has(en)) warpByElastic.set(en, []);
-    warpByElastic.get(en).push(row);
+    const key = elasticNameKey(en);
+    if (!warpRowsByKey.has(key)) warpRowsByKey.set(key, []);
+    warpRowsByKey.get(key).push(row);
   }
+  const seen = new Set();
 
   for (const row of readSheet(wb, 'Elastics')) {
     const name = str(row.name);
     if (!name) continue;
-    const missing = [];
-    const warpYarn = (warpByElastic.get(name) || []).map((w) => ({
-      id: resolveMat(w.material, `Elastic "${name}" warpYarn`, missing),
-      ends: num(w.ends), type: str(w.type), weight: num(w.weight),
-    })).filter((w) => w.id);
+    const where = `Elastics row ${row.__row} "${name}"`;
+    const key = elasticNameKey(name);
+    seen.add(key);
+    const problems = [];
 
-    const doc = {
-      name,
-      weaveType: str(row.weaveType) || '8',
-      spandexEnds: num(row.spandexEnds) ?? 0,
-      yarnEnds: num(row.yarnEnds),
-      pick: num(row.pick) ?? 0,
-      noOfHook: num(row.noOfHook) ?? 0,
-      weight: num(row.weight) ?? 0,
-      minStock: num(row.minStock) ?? 0,
-      testingParameters: {
-        width: num(row.width), elongation: num(row.elongation) ?? 120,
-        recovery: num(row.recovery) ?? 90, strech: str(row.strech),
-      },
-      warpSpandex: {
-        id: resolveMat(row.warpSpandex_material, `Elastic "${name}" warpSpandex`, missing),
-        ends: num(row.warpSpandex_ends), weight: num(row.warpSpandex_weight),
-      },
-      spandexCovering: {
-        id: resolveMat(row.spandexCovering_material, `Elastic "${name}" spandexCovering`, missing),
-        weight: num(row.spandexCovering_weight),
-      },
-      weftYarn: {
-        id: resolveMat(row.weftYarn_material, `Elastic "${name}" weftYarn`, missing),
-        weight: num(row.weftYarn_weight),
-      },
-      warpYarn,
+    const set = { name };
+    const put = (path, v) => { if (v !== undefined) set[path] = v; };
+    const nonNeg = (col) => {
+      const v = num(row[col]);
+      if (v !== undefined && v < 0) { problems.push(`${col} cannot be negative`); return undefined; }
+      if (row[col] !== undefined && str(row[col]) !== undefined && v === undefined) {
+        problems.push(`${col} must be a number`);
+      }
+      return v;
+    };
+    const material = (label, value) => {
+      const n = str(value);
+      if (!n) return undefined;
+      const id = materialByName.get(foldName(n));
+      if (!id) problems.push(`${label}: no raw material named "${n}" — add it under Raw Materials first`);
+      return id;
     };
 
-    if (missing.length) { report.skipped.push(...missing); continue; }
-
-    const { materialCost, details } = await calculateElasticCosting(doc);
-    // The sheet's conversion cost when it has one; otherwise the one the
-    // elastic already carries. This was a fixed 1.25 written over every
-    // imported elastic, so an import quietly undid every conversion cost
-    // set since.
-    const existing = await Elastic.findOne({ nameKey: elasticNameKey(name) }).select('costing').lean();
-    const existingCosting = existing?.costing ? await Costing.findById(existing.costing).select('conversionCost').lean() : null;
-    const sheetConversion = num(row.conversionCost);
-    const conversionCost = sheetConversion != null && sheetConversion >= 0
-      ? sheetConversion
-      : existingCosting?.conversionCost ?? 1.25;
-    const totalCost = materialCost + conversionCost;
-
-    // Matched on the folded key, not the name as typed. An upsert keyed
-    // on the exact string treats "Newday Romeo Black" in a sheet as a
-    // different product from "NEWDAY ROMEO BLACK" in the catalogue and
-    // inserts a second row — a duplicate created by the one path that
-    // never goes near the API's own check. Keying on nameKey updates
-    // the elastic that is already there, which is what somebody
-    // importing a sheet of their own products means by it.
-    //
-    // The name in `$set` still wins, so a sheet CAN restyle the
-    // capitalisation of an existing product. It just cannot fork it.
-    const elastic = await Elastic.findOneAndUpdate(
-      { nameKey: elasticNameKey(name) }, { $set: doc },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    );
-    const costing = await Costing.findOneAndUpdate(
-      { elastic: elastic._id },
-      { $set: { date: new Date(), elastic: elastic._id, conversionCost, materialCost, details, totalCost, status: 'Draft' } },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    );
-    if (String(elastic.costing) !== String(costing._id)) {
-      elastic.costing = costing._id;
-      await elastic.save();
+    put('weaveType', str(row.weaveType));
+    for (const f of ['spandexEnds', 'yarnEnds', 'pick', 'noOfHook', 'weight', 'minStock']) put(f, nonNeg(f));
+    put('testingParameters.width', nonNeg('width'));
+    put('testingParameters.elongation', nonNeg('elongation'));
+    put('testingParameters.recovery', nonNeg('recovery'));
+    put('testingParameters.strech', str(row.strech));
+    for (const part of PARTS) {
+      put(`${part.key}.id`, material(part.label, row[`${part.key}_material`]));
+      put(`${part.key}.weight`, nonNeg(`${part.key}_weight`));
+      if (part.ends) put(`${part.key}.ends`, nonNeg(`${part.key}_ends`));
     }
+    const warpRows = warpRowsByKey.get(key);
+    if (warpRows) {
+      set.warpYarn = warpRows.map((w) => ({
+        id: material(`Warp yarn (ElasticWarpYarns row ${w.__row})`, w.material),
+        ends: num(w.ends), type: str(w.type), weight: num(w.weight),
+      })).filter((w) => w.id);
+    }
+    const conversion = nonNeg('conversionCost');
+
+    const existing = await Elastic.findOne({ nameKey: key });
+    if (!existing) {
+      const missing = REQUIRED_FOR_NEW.filter((f) => set[f] === undefined);
+      if (missing.length) problems.push(`a new elastic needs ${missing.join(', ')}`);
+    }
+    if (problems.length) { report.skipped.push(`${where}: ${problems.join('; ')}`); continue; }
+
+    // Through the document, so the schema's own checks and the name key
+    // run exactly as they do for one created on screen.
+    const doc = existing || new Elastic({ weaveType: '8' });
+    doc.set(set);
+    try {
+      await doc.save();
+    } catch (err) {
+      report.skipped.push(`${where}: ${err.message}`);
+      continue;
+    }
+
+    try {
+      const { materialCost, details } = await calculateElasticCosting(doc.toObject());
+      const prior = doc.costing ? await Costing.findById(doc.costing).select('conversionCost').lean() : null;
+      const conversionCost = conversion ?? prior?.conversionCost ?? 1.25;
+      const costing = await Costing.findOneAndUpdate(
+        { elastic: doc._id },
+        { $set: {
+            date: new Date(), elastic: doc._id, conversionCost, materialCost, details,
+            totalCost: materialCost + conversionCost, status: 'Draft',
+          } },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+      if (String(doc.costing) !== String(costing._id)) {
+        doc.costing = costing._id;
+        await doc.save();
+      }
+    } catch (err) {
+      report.warnings.push(`${where}: saved, but its cost could not be worked out — ${err.message}`);
+    }
+
+    if (existing) report.updated++; else report.added++;
     report.elastics++;
   }
 
-  return report;
+  for (const [key, rows] of warpRowsByKey) {
+    if (!seen.has(key)) {
+      report.skipped.push(
+        `ElasticWarpYarns row ${rows[0].__row}: "${str(rows[0].elasticName)}" has no row on the Elastics sheet — add one (the name is enough)`
+      );
+    }
+  }
+}
+
+// ── The elastic upload template ────────────────────────────────
+//
+// Instructions, the two sheets to fill, and the raw materials that exist
+// as a reference sheet the material dropdowns are drawn from — so a
+// material is picked, not typed, and a typo cannot invent one.
+async function buildElasticTemplateWorkbook({ withExample = false } = {}) {
+  const materials = await RawMaterial.find({ archived: { $ne: true } })
+    .populate('supplier', 'name').sort({ category: 1, name: 1 }).lean();
+
+  const wb = new ExcelJS.Workbook();
+  const info = wb.addWorksheet('Instructions');
+  info.getColumn(1).width = 26;
+  info.getColumn(2).width = 12;
+  info.getColumn(3).width = 70;
+  info.getColumn(4).width = 18;
+  const lines = [
+    ['Elastic products — bulk upload'],
+    [],
+    ['1. Fill the Elastics sheet: one row per elastic.'],
+    ['2. Fill ElasticWarpYarns: one row per warp yarn of each elastic (an elastic can have several).'],
+    ['3. Pick materials from the dropdowns. They list the Materials sheet — the raw materials already in the app.'],
+    ['   A material that is not there must be added under Raw Materials first.'],
+    ['4. Upload it on the Elastic Products screen: Bulk upload.'],
+    [],
+    ['A row whose name matches an existing elastic UPDATES it; blank cells leave its values as they are.'],
+    ['An elastic with no ElasticWarpYarns rows keeps the warp yarns it has. Rows that cannot be saved are listed with the reason.'],
+    ['The cost sheet is worked out on upload from the grammages and today’s material prices.'],
+    [],
+    ['Column', 'Required', 'What it is', 'Example'],
+    ['name', 'yes', 'Elastic name, as it should appear everywhere', '20mm Knitted White'],
+    ['weaveType', '', 'Weave type (default 8)', '8'],
+    ['spandexEnds', 'new', 'Number of spandex ends', '40'],
+    ['yarnEnds', '', 'Number of yarn ends', '120'],
+    ['pick', 'new', 'Pick', '12'],
+    ['noOfHook', 'new', 'Number of hooks', '8'],
+    ['weight', 'new', 'Weight, grams per metre', '2.4'],
+    ['minStock', '', 'Reorder level, metres', '500'],
+    ['width', '', 'Width, mm', '20'],
+    ['elongation', '', 'Elongation % (default 120)', '120'],
+    ['recovery', '', 'Recovery % (default 90)', '90'],
+    ['strech', '', 'Stretch, as described', 'firm'],
+    ['warpSpandex_material', '', 'Warp spandex (rubber) — pick from the list', 'Spandex 840D'],
+    ['warpSpandex_ends', '', 'Warp spandex ends', '40'],
+    ['warpSpandex_weight', '', 'Warp spandex, grams per metre', '0.5'],
+    ['spandexCovering_material', '', 'Spandex covering — pick from the list', 'Cover 40D'],
+    ['spandexCovering_weight', '', 'Covering, grams per metre', '0.2'],
+    ['weftYarn_material', '', 'Weft yarn — pick from the list', 'Poly 300D'],
+    ['weftYarn_weight', '', 'Weft, grams per metre', '0.4'],
+    ['conversionCost', '', '₹ a metre on top of materials (default 1.25, or the elastic’s current one)', '1.5'],
+    [],
+    ['ElasticWarpYarns sheet'],
+    ['elasticName', 'yes', 'The elastic’s name, as on the Elastics sheet', '20mm Knitted White'],
+    ['material', 'yes', 'Warp yarn — pick from the list', 'Poly 150D'],
+    ['ends', '', 'Ends of this yarn', '120'],
+    ['type', '', 'Optional note, e.g. ground / binder', 'ground'],
+    ['weight', '', 'This yarn, grams per metre', '1.0'],
+    [],
+    ['new = required when the elastic does not exist yet.'],
+  ];
+  lines.forEach((cells, i) => cells.forEach((v, j) => { info.getCell(i + 1, j + 1).value = v; }));
+  info.getCell(1, 1).font = { bold: true, size: 14 };
+  for (const r of [13, 35]) info.getRow(r).font = { bold: true };
+
+  const n = Math.max(materials.length, 1) + 1;
+  const src = `Materials!$A$2:$A$${n}`;
+  const example = withExample && materials.length > 0;
+  const pick = (cat) => materials.find((m) => foldName(m.category).includes(cat))?.name || materials[0]?.name;
+  buildSheet(wb, 'Elastics', example ? [{
+    name: '20mm Knitted White (example — replace)', weaveType: '8', spandexEnds: 40, yarnEnds: 120, pick: 12,
+    noOfHook: 8, weight: 2.4, minStock: 500, width: 20, elongation: 120, recovery: 90, strech: 'firm',
+    warpSpandex_material: pick('rubber') || pick('spandex'), warpSpandex_ends: 40, warpSpandex_weight: 0.5,
+    spandexCovering_material: pick('cover'), spandexCovering_weight: 0.2,
+    weftYarn_material: pick('weft'), weftYarn_weight: 0.4, conversionCost: 1.5,
+  }] : [], {
+    dropdowns: {
+      warpSpandex_material: { range: src },
+      spandexCovering_material: { range: src },
+      weftYarn_material: { range: src },
+    },
+  });
+  buildSheet(wb, 'ElasticWarpYarns', example ? [
+    { elasticName: '20mm Knitted White (example — replace)', material: pick('warp'), ends: 120, type: 'ground', weight: 1.0 },
+  ] : [], { dropdowns: { material: { range: src } } });
+  const ref = buildSheet(wb, 'Materials', materials.map((m) => ({
+    name: m.name, category: m.category, supplier: m.supplier?.name || '', price: m.price || 0,
+  })), { dropdowns: {} });
+  ref.getColumn(1).width = 34;
+  await ref.protect('', { selectLockedCells: true, selectUnlockedCells: true, autoFilter: true, sort: true });
+  return wb;
 }
 
 module.exports = {
   COLUMNS,
   buildTemplateWorkbook,
+  buildElasticTemplateWorkbook,
   buildExportWorkbook,
   importWorkbook,
 };

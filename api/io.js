@@ -18,6 +18,7 @@ const multer  = require('multer');
 const ExcelJS = require('exceljs');
 
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
+const { keepRequestContext } = require('../middleware/userContext');
 const {
   buildTemplateWorkbook,
   buildExportWorkbook,
@@ -63,7 +64,11 @@ router.get('/export', isAuthenticated, isAdmin('admin'), async (_req, res, next)
 router.post(
   '/import',
   isAuthenticated, isAdmin('admin'),
-  upload.single('file'),
+  // Wrapped so the request's database and user survive the upload: plain
+  // multer finishes from a stream event outside them, and a workbook big
+  // enough to arrive in chunks was imported into the live database
+  // whoever uploaded it (middleware/userContext.js).
+  keepRequestContext(upload.single('file')),
   async (req, res, next) => {
     try {
       if (!req.file || !req.file.buffer) {

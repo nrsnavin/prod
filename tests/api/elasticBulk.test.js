@@ -96,8 +96,10 @@ describe('updating the price (conversion cost) of several', () => {
 
   it('one that cannot be costed is reported, and the rest still are', async () => {
     const good = await elastic();
-    const broken = await elastic({ warpSpandex: undefined });
-    await Elastic.updateOne({ _id: broken._id }, { $unset: { warpSpandex: 1 } });
+    // Names a raw material that no longer exists, so it cannot be priced.
+    // (A recipe part simply left out costs nothing, like one weighing 0.)
+    const broken = await elastic();
+    await Elastic.updateOne({ _id: broken._id }, { $set: { 'warpSpandex.id': new mongoose.Types.ObjectId() } });
     const res = await post('/api/v2/elastic/bulk/costing', { ids: [String(broken._id), String(good._id)], conversionCost: 4 });
     expect(res.body).toMatchObject({ done: 1, refused: 1 });
     expect(res.body.results[0].ok).toBe(false);

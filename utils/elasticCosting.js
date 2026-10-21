@@ -33,22 +33,22 @@ async function calculateElasticCosting(elasticData) {
 
   // 🧵 Warp Spandex
   await addMaterialCost({
-    materialId: elasticData.warpSpandex.id,
-    quantity: elasticData.warpSpandex.weight,
+    materialId: elasticData.warpSpandex?.id,
+    quantity: elasticData.warpSpandex?.weight,
     description: "Warp Spandex",
   });
 
   // 🧵 Spandex Covering
   await addMaterialCost({
-    materialId: elasticData.spandexCovering.id,
-    quantity: elasticData.spandexCovering.weight,
+    materialId: elasticData.spandexCovering?.id,
+    quantity: elasticData.spandexCovering?.weight,
     description: "Spandex Covering",
   });
 
   // 🧶 Weft Yarn
   await addMaterialCost({
-    materialId: elasticData.weftYarn.id,
-    quantity: elasticData.weftYarn.weight,
+    materialId: elasticData.weftYarn?.id,
+    quantity: elasticData.weftYarn?.weight,
     description: "Weft Yarn",
   });
 

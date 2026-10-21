@@ -20,6 +20,10 @@ const { getPdfBranding } = require("../services/documentSettings");
 const { saveIf } = require("../utils/conditionalSave");
 const { countUsage } = require("../utils/masterUsage");
 const { elasticNameKey } = require("../utils/elasticName.js");
+const multer  = require("multer");
+const ExcelJS = require("exceljs");
+const { keepRequestContext } = require("../middleware/userContext");
+const { buildElasticTemplateWorkbook, importWorkbook } = require("../utils/excelIo.js");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 
 router.use(isAuthenticated);
@@ -1238,8 +1242,13 @@ function conversionCostOf(v) {
 }
 
 async function recostElastic(elastic, convCostOverride) {
+  // From the elastic as stored, not as passed in: callers hand over a
+  // POPULATED elastic, where a material deleted since reads as null and
+  // was skipped — costing the elastic as if that part weighed nothing.
+  // With the stored ids, a missing material is reported instead.
+  const stored = await Elastic.findById(elastic._id).lean();
   const { materialCost, details } =
-    await calculateElasticCosting(elastic.toObject());
+    await calculateElasticCosting(stored || elastic.toObject());
 
   const existingCosting = elastic.costing
     ? await Costing.findById(
@@ -1284,6 +1293,61 @@ async function recostElastic(elastic, convCostOverride) {
   await elastic.save();
   return created;
 }
+
+// ─────────────────────────────────────────────────────────────
+//  BULK UPLOAD FROM EXCEL
+//
+//    GET  /elastic/bulk/template[?example=1]   the workbook to fill
+//    POST /elastic/bulk/upload  (multipart 'file')
+//
+//  Only the elastic sheets are read; the raw materials sheet in the
+//  template is a reference to pick from and is never written back — so
+//  an upload cannot touch a material's stock or price. See
+//  utils/excelIo.js (importElasticSheets) for the rules.
+// ─────────────────────────────────────────────────────────────
+const elasticUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+router.get(
+  "/bulk/template",
+  isAdmin('admin', 'accounts'),
+  catchAsyncErrors(async (req, res) => {
+    const wb = await buildElasticTemplateWorkbook({ withExample: req.query.example === "1" });
+    res.setHeader("Content-Type", XLSX_MIME);
+    res.setHeader("Content-Disposition", 'attachment; filename="elastic_products_upload.xlsx"');
+    await wb.xlsx.write(res);
+    res.end();
+  })
+);
+
+router.post(
+  "/bulk/upload",
+  isAdmin('admin', 'accounts'),
+  keepRequestContext(elasticUpload.single("file")),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!req.file?.buffer) return next(new ErrorHandler('Choose the filled workbook to upload (field "file")', 400));
+    const wb = new ExcelJS.Workbook();
+    try {
+      await wb.xlsx.load(req.file.buffer);
+    } catch {
+      return next(new ErrorHandler("Could not read that file as an Excel (.xlsx) workbook", 400));
+    }
+    if (!wb.getWorksheet("Elastics")) {
+      return next(new ErrorHandler('The workbook has no "Elastics" sheet — download the template and fill that', 400));
+    }
+    const report = await importWorkbook(wb, { scope: "elastics" });
+    res.json({
+      success: true,
+      added: report.added,
+      updated: report.updated,
+      skipped: report.skipped,
+      warnings: report.warnings,
+      message:
+        `${report.added} added, ${report.updated} updated` +
+        (report.skipped.length ? `, ${report.skipped.length} not saved` : ""),
+    });
+  })
+);
 
 router.post(
   "/recalculate-elastic-cost",
