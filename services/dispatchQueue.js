@@ -42,11 +42,13 @@ async function enqueueJob(job, { session = null, actor = null } = {}) {
   if (existing) return revive(existing, actor, session);
 
   const elasticIds = (job.elastics || []).map((e) => e.elastic).filter(Boolean);
-  const [customer, order, elastics] = await Promise.all([
-    job.customer ? Customer.findById(job.customer).select('name').session(session).lean() : null,
-    job.order ? Order.findById(job.order).select('orderNo').session(session).lean() : null,
-    elasticIds.length ? Elastic.find({ _id: { $in: elasticIds } }).select('name').session(session).lean() : [],
-  ]);
+  // One after another: a transaction's session takes one operation at a
+  // time (tests/architecture/noParallelSessionOps.test.js).
+  const customer = job.customer ? await Customer.findById(job.customer).select('name').session(session).lean() : null;
+  const order = job.order ? await Order.findById(job.order).select('orderNo').session(session).lean() : null;
+  const elastics = elasticIds.length
+    ? await Elastic.find({ _id: { $in: elasticIds } }).select('name').session(session).lean()
+    : [];
   const names = elastics.map((e) => e.name);
 
   const [item] = await DispatchItem.create([{
