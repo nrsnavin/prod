@@ -2,6 +2,7 @@
 
 const express = require("express");
 const { refreshOpenShiftHeads } = require("../utils/machineHeads");
+const { setMachineLoading } = require("../services/machineLoading");
 const {
   assertVersion, versionFilter, bumpVersion, expectedVersionOf, conflictError,
 } = require("../utils/versioning");
@@ -227,7 +228,7 @@ router.get(
       // Populated, because the column wants the job NUMBER and the
       // machine only stores the id. Selecting the id alone would have
       // swapped one wrong answer for another.
-      .select("ID manufacturer NoOfHead NoOfHooks status DateOfPurchase orderRunning")
+      .select("ID manufacturer NoOfHead NoOfHooks status DateOfPurchase orderRunning loading")
       .populate("orderRunning", "jobOrderNo status")
       .sort({ ID: 1 });
 
@@ -319,6 +320,32 @@ router.patch(
         machineID: machine.ID,
         noOfHead:  machine.NoOfHead,
       },
+    });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  LOADING → RUNNING
+//      PATCH /machine/loading   { id, loading }
+//
+//  A loom given a job is loaded first and weaves nothing; its shifts
+//  are marked loading and left out of production and efficiency. Mark
+//  it running (loading: false) once it weaves, and production counts
+//  from the current shift. loading: true puts it back.
+// ─────────────────────────────────────────────────────────────
+router.patch(
+  '/loading',
+  catchAsyncErrors(async (req, res, next) => {
+    const { id, loading } = req.body;
+    if (!id || !mongoose.Types.ObjectId.isValid(String(id))) return next(new ErrorHandler('id is required.', 400));
+    if (typeof loading !== 'boolean') return next(new ErrorHandler('loading must be true or false.', 400));
+    const { machine, shiftsChanged } = await setMachineLoading(id, loading);
+    res.status(200).json({
+      success: true,
+      message: loading
+        ? `${machine.ID} marked loading. No production is counted until it is marked running.`
+        : `${machine.ID} marked running. Production counts from this shift.`,
+      data: { machineId: machine._id, loading: !!machine.loading, loadingSince: machine.loadingSince, shiftsChanged },
     });
   })
 );
@@ -591,6 +618,9 @@ router.get(
       machine: {
         id:           machine.ID,
         status:       machine.status,
+        // Being loaded for its job: nothing counted until marked running.
+        loading:      machine.status === "running" && !!machine.loading,
+        loadingSince: machine.status === "running" && machine.loading ? machine.loadingSince : null,
         // The document version, sent back as `expectedVersion` by the
         // edit and head-map forms so a save from a stale screen is a 409
         // rather than a silent overwrite. See utils/versioning.js.
@@ -660,7 +690,7 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     const machines = await Machine.find({ status: "running" })
       .populate("orderRunning", "jobOrderNo")
-      .select("ID manufacturer NoOfHead NoOfHooks elastics orderRunning status");
+      .select("ID manufacturer NoOfHead NoOfHooks elastics orderRunning status loading");
 
     const data = machines.map((m) => ({
       machineId:    m._id,
@@ -672,6 +702,7 @@ router.get(
       NoOfHead:     m.NoOfHead,
       jobOrderNo:   m.orderRunning?.jobOrderNo?.toString() ?? "—",
       elastics:     m.elastics,
+      loading:      !!m.loading,
     }));
 
     res.status(200).json({ success: true, data });

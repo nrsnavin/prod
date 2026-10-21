@@ -78,6 +78,19 @@ const MachineSchema = new mongoose.Schema(
       enum: ["free", "running", "maintenance"],
       default: "free",
     },
+    // A job just put on the loom is being LOADED (beam up, heads drawn
+    // in) before it weaves. The machine is the job's ("running"), but
+    // nothing is produced: its shifts are marked loading and left out of
+    // production and efficiency until someone marks it running
+    // (services/machineLoading.js). Meaningful only while running.
+    loading: {
+      type: Boolean,
+      default: false,
+    },
+    loadingSince: {
+      type: Date,
+      default: null,
+    },
     shifts: [
       {
         type: mongoose.Types.ObjectId,

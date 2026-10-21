@@ -350,6 +350,8 @@ router.post(
     // "not found", exactly like a shift that does not exist.
     const shift = await ShiftDetail.findOne({ _id: req.params.id, employee });
     if (!shift) return next(new ErrorHandler("Shift not found", 404));
+    if (shift.status === "loading")
+      return next(new ErrorHandler("Your machine is being loaded this shift — there is no production to enter.", 409));
     if (!["open", "pending_verification"].includes(shift.status))
       return next(new ErrorHandler("This shift has already been verified and closed", 409));
     // The same lock the supervisor-side entry obeys: once the job has

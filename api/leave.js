@@ -390,7 +390,7 @@ router.get('/conflicts', isAuthenticated, isAdmin('admin', 'accounts'), async (_
     const openShifts = leaves.length === 0 ? [] : await ShiftDetail.find({
       employee: { $in: leaves.map((lv) => lv.employee?._id).filter(Boolean) },
       date:     { $in: leaves.map((lv) => lv.date) },
-      status:   { $in: ['open', 'running', 'pending_verification'] },
+      status:   { $in: ['open', 'running', 'pending_verification', 'loading'] },
     }).select('_id employee date shift status').lean();
 
     const shiftKey = (emp, date) => `${String(emp)}|${new Date(date).toISOString().slice(0, 10)}`;

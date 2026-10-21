@@ -36,6 +36,9 @@ const { keepRequestContext } = require("../middleware/userContext.js");
 const { shortCode } = require("../utils/shiftSheetPdf");
 const { floorSheetNo } = require("../utils/floorSheetPdf");
 const { headsInUse } = require("../utils/machineHeads");
+
+/** A shift whose machine was being loaded: nothing to enter or verify. */
+const LOADING_SHIFT = "This machine was being loaded this shift — there is no production to enter. Mark the machine running and production counts from then.";
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
 const { submitProduction } = require("../services/shiftSubmit");
@@ -393,11 +396,12 @@ router.post(
     if (shift.status === "closed") {
       return next(new ErrorHandler("Shift is already closed", 400));
     }
+    if (shift.status === "loading") return next(new ErrorHandler(LOADING_SHIFT, 409));
     await assertShiftProductionOpen(shift, { JobOrder, Machine }, "enter production");
 
     // Written only while the shift is still not closed, in one step: see
     // submitWhileOpen. A verification that lands first wins.
-    const updated = await submitWhileOpen(shift._id, { $ne: "closed" }, {
+    const updated = await submitWhileOpen(shift._id, { $nin: ["closed", "loading"] }, {
       submittedProductionMeters: prodValue,
       submittedTimer:            timer    || "00:00:00",
       submittedFeedback:         feedback || "",
@@ -426,6 +430,7 @@ router.post(
 
     const shift = await ShiftDetail.findById(shiftId);
     if (!shift) return next(new ErrorHandler("Shift not found", 404));
+    if (shift.status === "loading") return next(new ErrorHandler(LOADING_SHIFT, 409));
     if (!["open", "pending_verification"].includes(shift.status)) {
       return next(new ErrorHandler(
         `Shift cannot be updated in status '${shift.status}'`, 400
@@ -523,6 +528,7 @@ router.post(
         if (shift.status === "closed") {
           throw new ErrorHandler("Shift is already closed", 400);
         }
+        if (shift.status === "loading") throw new ErrorHandler(LOADING_SHIFT, 409);
         await assertPlanNotFinalized(shift, session);
         await assertShiftProductionOpen(shift, { JobOrder, Machine }, "verify production");
 
@@ -1395,7 +1401,8 @@ router.post(
 
     const details = plan.plan || [];
     if (details.length === 0) return next(new ErrorHandler("Nothing to finalise — the shift has no production entries", 400));
-    const unverified = details.filter((d) => d.status !== "closed").length;
+    // A loading shift has nothing to verify: it is done as it stands.
+    const unverified = details.filter((d) => !["closed", "loading"].includes(d.status)).length;
     if (unverified > 0) {
       return next(new ErrorHandler(
         `Cannot finalise — ${unverified} entr${unverified > 1 ? "ies are" : "y is"} not verified yet. Verify every entry first.`,

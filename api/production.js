@@ -288,7 +288,9 @@ router.get('/analytics', async (req, res) => {
     } catch(e) { return res.status(400).json({ success:false, message:e.message }); }
 
     // ── DB filter ──────────────────────────────────────────────
-    const dbFilter = { date:{ $gte:rangeStart, $lte:rangeEnd } };
+    // Loading shifts produce nothing by design: left out, so a loom being
+    // loaded does not read as an idle one (services/machineLoading.js).
+    const dbFilter = { date:{ $gte:rangeStart, $lte:rangeEnd }, status:{ $ne:'loading' } };
     if (shift !== 'all') dbFilter.shift = shift.toUpperCase();
     if (machineId)  dbFilter.machine  = machineId;
     if (employeeId) dbFilter.employee = employeeId;

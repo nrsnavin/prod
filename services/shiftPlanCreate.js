@@ -26,6 +26,7 @@ const ShiftDetail = require('../models/ShiftDetail');
 const Machine = require('../models/Machine');
 const JobOrder = require('../models/JobOrder');
 const ErrorHandler = require('../utils/ErrorHandler');
+const { startingStatus } = require('./machineLoading');
 
 /**
  * @param {object} input
@@ -69,7 +70,7 @@ async function createShiftPlan({ date, shiftType, description = '', machines = [
       }], { session });
 
       const machineDocs = await Machine.find({ _id: { $in: rows.map((m) => m.machine) } })
-        .select('elastics orderRunning').session(session).lean();
+        .select('elastics orderRunning status loading').session(session).lean();
       const byId = new Map(machineDocs.map((m) => [String(m._id), m]));
 
       const detailIds = [];
@@ -93,7 +94,8 @@ async function createShiftPlan({ date, shiftType, description = '', machines = [
           job: machineDoc?.orderRunning ?? null,
           machine: m.machine, employee: m.operator,
           shiftPlan: shiftPlan._id, elastics,
-          status: 'open', timer: '00:00:00',
+          // A loom still being loaded has nothing to produce this shift.
+          status: startingStatus(machineDoc), timer: '00:00:00',
         }], { session });
 
         detailIds.push(detail._id);

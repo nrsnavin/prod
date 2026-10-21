@@ -44,7 +44,10 @@ const ShiftDetailSchema = new mongoose.Schema(
     //   closed               – admin verified; canonical numbers cascaded
     status: {
       type: String,
-      enum: ["open", "running", "pending_verification", "closed"],
+      // loading: the machine was being loaded for its job this shift —
+      // no production to enter, and left out of production and
+      // efficiency figures (services/machineLoading.js).
+      enum: ["open", "running", "pending_verification", "closed", "loading"],
       default: "open",
     },
 

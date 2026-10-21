@@ -35,6 +35,8 @@ async function submitProduction(entries, { userId, aiSuggestionId, surface = 'sh
 
     if (!sd) { skipped.push({ id, reason: 'ShiftDetail not found' }); continue; }
     if (sd.status === 'closed') { skipped.push({ id, reason: 'Already closed' }); continue; }
+    // The machine was being loaded: no production on this shift.
+    if (sd.status === 'loading') { skipped.push({ id, reason: 'Machine was loading' }); continue; }
 
     // A finalised plan is frozen for payroll and reporting. Skipped
     // rather than thrown so one locked shift in a batch does not reject
@@ -52,7 +54,7 @@ async function submitProduction(entries, { userId, aiSuggestionId, surface = 'sh
     // unconditional write flipped it back to pending, and verifying it
     // again cascaded its metres into the job a second time.
     const written = await ShiftDetail.findOneAndUpdate(
-      { _id: id, status: { $ne: 'closed' } },
+      { _id: id, status: { $nin: ['closed', 'loading'] } },
       {
         $set: {
           submittedProductionMeters: prodNum,

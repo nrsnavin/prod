@@ -424,6 +424,7 @@ async function matchRows(read, plan) {
 
     if (plan.finalized) { state = 'skip'; notes.push('Shift is finalised'); }
     else if (entry.status === 'closed') { state = 'skip'; notes.push('Already verified'); }
+    else if (entry.status === 'loading') { state = 'skip'; notes.push('Machine was loading'); }
 
     if (state !== 'skip') {
       if (seen.has(String(entry._id))) check('Same loom twice on the slip');

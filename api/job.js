@@ -19,6 +19,14 @@ const Machine     = require('../models/Machine');
 const { recomputePending } = require('../services/orderPending.js');
 const ShiftDetail = require('../models/ShiftDetail');
 const { refreshOpenShiftHeads } = require('../utils/machineHeads');
+const { setMachineLoading } = require('../services/machineLoading');
+
+/** Whether the machine is loading once this assignment is saved. */
+function loadingAfter(req, machine, previousMachineId) {
+  if (typeof req.body?.loading === 'boolean') return req.body.loading;
+  const sameMachine = previousMachineId != null && String(previousMachineId) === String(machine._id);
+  return sameMachine ? !!machine.loading : false;
+}
 const WarpingBatch = require('../models/WarpingBatch');
 const PurchaseOrder = require('../models/PurchaseOrder');
 
@@ -470,6 +478,12 @@ router.post(
         if (previousMachineId === machine._id.toString()) {
           await refreshOpenShiftHeads(machine, job._id, session);
         }
+
+        // Loading: a loom just given a job is loaded before it weaves,
+        // and those shifts count for nothing (services/machineLoading.js).
+        // Asked for explicitly; otherwise a new machine starts weaving
+        // and a re-plan of the same machine keeps what it was.
+        await setMachineLoading(machine._id, loadingAfter(req, machine, previousMachineId), { session });
 
         job.machine = machine._id;
         await job.save({ session });
@@ -1267,6 +1281,7 @@ router.post(
             });
           }
         }
+        await setMachineLoading(claimed._id, loadingAfter(req, claimed, txJob.machine?.toString() ?? null), { session });
         txJob.machine = claimed._id;
         await txJob.save({ session });
         job.status = txJob.status;
@@ -1551,7 +1566,7 @@ router.get('/:jobId', async (req, res) => {
     const job = await JobOrder.findById(jobId)
       .populate('customer', 'name phone')
       .populate('order',    'orderNo status')
-      .populate('machine',  'ID manufacturer NoOfHead NoOfHooks status elastics')
+      .populate('machine',  'ID manufacturer NoOfHead NoOfHooks status elastics loading')
       .populate('createdBy',   'name role')
       .populate('updatedBy',   'name role')
       .populate('weavingBy',   'name role')
@@ -1714,6 +1729,8 @@ router.get('/:jobId', async (req, res) => {
           headPlan: (job.machine.elastics || []).filter((h) => h && h.head != null)
             .map((h) => ({ head: h.head, elastic: h.elastic ? String(h.elastic) : null })),
           manufacturer: job.machine.manufacturer || '', status: job.machine.status || 'free',
+          // Still being loaded for this job: nothing counted until marked running.
+          loading: job.machine.status === 'running' && !!job.machine.loading,
         } : null,
         plannedElastics: mapElasticQty(job.elastics),
         producedElastics: mapElasticQty(job.producedElastic),
