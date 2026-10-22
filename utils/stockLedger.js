@@ -66,6 +66,7 @@ async function appendStockMovement(materialId, movement, session) {
  */
 const MOVEMENT_DIRECTION = {
   ORDER_APPROVAL:      -1,
+  ORDER_AMENDMENT:     -1,
   JOB_CONSUMPTION:     -1,
   PO_INWARD:           +1,
   ORDER_CANCEL_REFUND: +1,
@@ -79,6 +80,7 @@ const MOVEMENT_DIRECTION = {
  */
 const TYPE_LABEL = {
   ORDER_APPROVAL:      'Order approved',
+  ORDER_AMENDMENT:     'Order amended — elastic added',
   ORDER_CANCEL_REFUND: 'Order cancelled — returned',
   PO_INWARD:           'Goods received',
   JOB_CONSUMPTION:     'Issued to job',

@@ -31,6 +31,9 @@ const ACTION_CODES = Object.freeze({
   ORDER_UPDATED:            'ORDER_UPDATED',
   ORDER_DELETED:            'ORDER_DELETED',
   ORDER_APPROVED:           'ORDER_APPROVED',
+  // An elastic added to an approved order, with a reason; its yarn is
+  // drawn then (services/orderAmend.js).
+  ORDER_ELASTIC_ADDED:      'ORDER_ELASTIC_ADDED',
   RAW_MATERIAL_DEDUCTED:    'RAW_MATERIAL_DEDUCTED',
   RAW_MATERIAL_RESTORED:    'RAW_MATERIAL_RESTORED',
   ORDER_PRODUCTION_STARTED: 'ORDER_PRODUCTION_STARTED',
@@ -114,6 +117,7 @@ const ACTION_LABELS = Object.freeze({
   ORDER_UPDATED:            'Order Updated',
   ORDER_DELETED:            'Order Deleted',
   ORDER_APPROVED:           'Order Approved',
+  ORDER_ELASTIC_ADDED:      'Elastic Added to Order',
   RAW_MATERIAL_DEDUCTED:    'Raw Material Deducted',
   RAW_MATERIAL_RESTORED:    'Raw Material Restored',
   ORDER_PRODUCTION_STARTED: 'Production Started',

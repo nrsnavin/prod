@@ -47,6 +47,7 @@ const {
 } = require("../services/lotAllocation");
 const { applyLotAssignments } = require("../services/orderService.js");
 const { appendStockMovement } = require("../utils/stockLedger.js");
+const { addElasticToOrder } = require("../services/orderAmend");
 const { receiveAtCost } = require("../utils/materialValuation.js");
 const { estimateOrderEta } = require("../utils/orderEta.js");
 const Customer             = require("../models/Customer.js");
@@ -494,6 +495,7 @@ router.get(
       // Excess rows name their own elastic; it is always on the order
       // too, but relying on that would break the day it isn't.
       ...(order.excessPlanning || []),
+      ...(order.amendments || []),
     ]
       .map((row) => row?.elastic)
       .filter(Boolean);
@@ -570,6 +572,9 @@ router.get(
         // allocation cap, so its meaning must not drift.
         pending:  qtyFor(order.pendingElastic, id)  ?? e.quantity,
         reserved: qtyFor(order.reservations, id)    ?? 0,
+        // Added after approval, with its own yarn draw (services/orderAmend.js).
+        addedLater: !!e.addedLater,
+        addedAt: e.addedAt || null,
       };
     });
 
@@ -728,6 +733,20 @@ router.get(
           reason:          x.reason || "",
           materialsDrawn:  x.materialsDrawn || [],
           recordedAt:      x.recordedAt || null,
+        })),
+        // Elastics added after approval, each with the yarn it drew and
+        // what it was short — a decision someone made, with a reason.
+        amendments: (order.amendments || []).map((a) => ({
+          elastic:        a.elastic,
+          name:           elasticNames.get(String(a.elastic)) || a.elasticName || "—",
+          quantity:       a.quantity ?? 0,
+          rate:           a.rate ?? 0,
+          reason:         a.reason || "",
+          forced:         !!a.forced,
+          forceReason:    a.forceReason || "",
+          shortfalls:     a.shortfalls || [],
+          materialsDrawn: a.materialsDrawn || [],
+          recordedAt:     a.recordedAt || null,
         })),
         canApprove,
         createdBy:   order.createdBy  || null,
@@ -888,6 +907,77 @@ router.post(
       })();
     } catch (error) {
       // withTransaction has already aborted; only the session is ours to close.
+      return next(error);
+    } finally {
+      session.endSession();
+    }
+  })
+);
+
+
+// ════════════════════════════════════════════════════════════════
+//  ADD AN ELASTIC TO AN APPROVED ORDER  — the rare case
+//
+//  POST /order/:id/add-elastic
+//    { elastic, quantity, rate?, auditReason, force?, forceReason?, expectedVersion? }
+//
+//  The line's own yarn is drawn as approval would have drawn it: short
+//  of stock it is refused with the shortfall (INSUFFICIENT_STOCK), or
+//  forced with a reason draws what there is. See services/orderAmend.js.
+// ════════════════════════════════════════════════════════════════
+router.post(
+  "/:id/add-elastic",
+  isAuthenticated, isAdmin("admin", "production", "accounts"),
+  catchAsyncErrors(async (req, res, next) => {
+    const session = await mongoose.startSession();
+    try {
+      let out;
+      await session.withTransaction(async () => {
+        out = await addElasticToOrder(session, {
+          orderId: req.params.id,
+          elastic: req.body.elastic,
+          quantity: req.body.quantity,
+          rate: req.body.rate,
+          reason: req.body.auditReason ?? req.body.reason,
+          force: req.body.force === true,
+          forceReason: req.body.forceReason,
+          actor: actorFromRequest(req),
+          userId: req.user?._id,
+          req,
+        });
+      });
+      const { order, elasticName, drawn, shortfalls, forced } = out;
+      const note = drawn.length
+        ? `${drawn.length} material${drawn.length === 1 ? "" : "s"} drawn`
+          + (forced ? ` (forced through ${shortfalls.length} shortfall${shortfalls.length === 1 ? "" : "s"})` : "")
+        : "no raw material needed";
+      res.status(200).json({
+        success: true,
+        message: `${elasticName} added to order #${order.orderNo} for ${out.line.quantity} m — ${note}. Elastic reserved.`,
+        line: out.line,
+        materialsDrawn: drawn,
+        shortfalls,
+        forced,
+        __v: order.__v,
+      });
+
+      // Critical-stockout pings after the commit, as approval does.
+      (async () => {
+        try {
+          const { maybeFireCriticalStockout } = require("../utils/inventoryAlerts");
+          for (const snap of out.stockoutSnapshots) {
+            const fresh = await RawMaterial.findById(snap.materialId).select("name category minStock _id");
+            if (!fresh) continue;
+            await maybeFireCriticalStockout({
+              material: fresh, oldStock: snap.oldStock, newStock: snap.newStock,
+              reason: `Order #${order.orderNo ?? ""} amended (${elasticName} added)`,
+            });
+          }
+        } catch (err) {
+          console.warn(`[notify:order-amend-hooks] crashed: ${err?.message}`);
+        }
+      })();
+    } catch (error) {
       return next(error);
     } finally {
       session.endSession();

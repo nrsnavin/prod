@@ -30,6 +30,10 @@ const OrderedElasticSchema = new mongoose.Schema(
     // 0 means "not priced yet", and the P&L says so out loud rather
     // than reporting the order as a total loss.
     rate: { type: Number, default: 0, min: 0 },
+    // Added after approval (services/orderAmend.js): the yarn for it was
+    // drawn then, with a reason, rather than at approval.
+    addedLater: { type: Boolean, default: false },
+    addedAt:    { type: Date, default: null },
   },
   { _id: false }
 );
@@ -185,6 +189,46 @@ const OrderSchema = new mongoose.Schema(
           default: [],
         },
 
+        recordedBy: { type: mongoose.Types.ObjectId, ref: "User" },
+        recordedAt: { type: Date, default: Date.now },
+      }, { _id: false })],
+      default: [],
+    },
+
+    // ── Amendments ────────────────────────────────────────────
+    // An elastic added to the order AFTER approval — rare, with a
+    // reason. Approval drew yarn for the lines it had; each amendment
+    // draws its own, and records what it got (a forced one through a
+    // shortfall draws what there was). Kept here, as excessPlanning
+    // is, because it is a decision someone made on a date.
+    amendments: {
+      type: [new mongoose.Schema({
+        elastic:     { type: mongoose.Types.ObjectId, ref: "Elastic", required: true },
+        elasticName: { type: String, default: "" },
+        quantity:    { type: Number, default: 0 },
+        rate:        { type: Number, default: 0 },
+        reason:      { type: String, default: "" },
+        forced:      { type: Boolean, default: false },
+        forceReason: { type: String, default: "" },
+        shortfalls: {
+          type: [new mongoose.Schema({
+            rawMaterial: { type: mongoose.Types.ObjectId, ref: "RawMaterial" },
+            name:        { type: String, default: "" },
+            required:    { type: Number, default: 0 },
+            available:   { type: Number, default: 0 },
+            short:       { type: Number, default: 0 },
+          }, { _id: false })],
+          default: [],
+        },
+        materialsDrawn: {
+          type: [new mongoose.Schema({
+            rawMaterial: { type: mongoose.Types.ObjectId, ref: "RawMaterial" },
+            name:        { type: String, default: "" },
+            requested:   { type: Number, default: 0 },
+            applied:     { type: Number, default: 0 },
+          }, { _id: false })],
+          default: [],
+        },
         recordedBy: { type: mongoose.Types.ObjectId, ref: "User" },
         recordedAt: { type: Date, default: Date.now },
       }, { _id: false })],
