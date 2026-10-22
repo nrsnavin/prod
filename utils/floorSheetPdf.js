@@ -4,8 +4,8 @@
 //  Floor production sheet (PDF) — no shift plan needed
 //
 //  Every machine on the floor, one row each, with the job it is running
-//  or FREE. Operator, Timer, Production and Supervisor signature are
-//  left blank for the floor to fill by hand; each row carries a QR.
+//  or FREE. Operator, Timer, Production, a signature box and Remarks
+//  are left blank for the floor to fill by hand; each row carries a QR.
 //
 //  The header carries a sheet number, FS-20261021-D (date, then D for
 //  day or N for night), which is how a photo of the filled sheet finds
@@ -58,10 +58,12 @@ async function buildFloorSheetPdf(sheet) {
     { key: 'qr',         label: 'QR',                   w: 44 },
     { key: 'machine',    label: 'Machine ID',           w: 72 },
     { key: 'job',        label: 'Job',                  w: 140 },
-    { key: 'operator',   label: 'Operator',             w: 150 },
-    { key: 'timer',      label: 'Timer (H:M:S)',        w: 92 },
-    { key: 'production', label: 'Production (m)',       w: 92 },
-    { key: 'sign',       label: 'Supervisor signature', w: 0 },
+    { key: 'operator',   label: 'Operator',       w: 132 },
+    { key: 'timer',      label: 'Timer (H:M:S)',  w: 84 },
+    { key: 'production', label: 'Production (m)', w: 84 },
+    // A box to initial, not a line to sign along: the width goes to remarks.
+    { key: 'sign',       label: 'Sign',           w: 56 },
+    { key: 'remarks',    label: 'Remarks',        w: 0 },
   ];
   const fixed = cols.reduce((s, c) => s + c.w, 0);
   cols[cols.length - 1].w = right - left - fixed;
@@ -91,7 +93,7 @@ async function buildFloorSheetPdf(sheet) {
     if (pageNo === 1) {
       doc.roundedRect(left, 70, right - left, 18, 3).fill('#FFF4E0');
       doc.fillColor('#8a5a00').font('Helvetica').fontSize(8).text(
-        'Write the OPERATOR, TIMER (H:M:S) and PRODUCTION (metres) in ink; the supervisor signs each row. '
+        'Write the OPERATOR, TIMER (H:M:S), PRODUCTION (metres) and any REMARKS in ink; the supervisor initials each row. '
           + 'Leave a FREE machine blank. Photograph the sheet into Production Slips (or WhatsApp) to draft the shift.',
         left + 8, 74, { width: right - left - 16 }
       );
@@ -165,7 +167,7 @@ async function buildFloorSheetPdf(sheet) {
       }
 
       // A baseline to write on in each blank column.
-      [3, 4, 5, 6].forEach((ci) => {
+      [3, 4, 5, 6, 7].forEach((ci) => {
         const bx = colX(ci);
         doc.moveTo(bx + 6, y + rowH - 10).lineTo(bx + cols[ci].w - 6, y + rowH - 10).lineWidth(0.5).stroke('#B8B8B8');
       });

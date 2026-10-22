@@ -111,8 +111,9 @@ describe('the printed sheet', () => {
     expect(res.headers['content-disposition']).toMatch(/floor-sheet-2026-10-21-NIGHT\.pdf/);
     const text = await pdfText(res.body);
     expect(text).toMatch(/FS-20261021-N/);
-    expect(text).toMatch(/SUPERVISOR SIGNATURE/);
     expect(text).toMatch(/OPERATOR/);
+    expect(text).toMatch(/\bSIGN\b/);
+    expect(text).toMatch(/REMARKS/);
     const at = (s) => text.indexOf(s);
     expect(at('M-1')).toBeLessThan(at('M-2'));
     expect(at('M-2')).toBeLessThan(at('M-10'));

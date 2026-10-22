@@ -5,7 +5,8 @@
 //
 //  A4 landscape, paginated. One row per assigned machine, prefilled
 //  with QR · Code · Machine ID · Operator · Job No · Shift · Date, and
-//  three EMPTY hand-written columns: Production (m) · Timer · Remarks.
+//  four EMPTY hand-written columns: Production (m) · Timer · Sign ·
+//  Remarks — the signature a small box, so remarks keep their room.
 //
 //  The Code is the last 6 hex of the ShiftDetail id (e.g. SD-8F3A2C)
 //  and the QR encodes the full id. On upload the OCR layer maps each
@@ -58,16 +59,17 @@ async function buildShiftSheetPdf(plan) {
 
   // Column layout (last column fills remaining width).
   const cols = [
-    { key: 'qr',         label: 'QR',            w: 42 },
-    { key: 'code',       label: 'Code',          w: 70 },
-    { key: 'machine',    label: 'Machine ID',    w: 72 },
-    { key: 'operator',   label: 'Operator',      w: 110 },
-    { key: 'job',        label: 'Job No',        w: 52 },
-    { key: 'shift',      label: 'Shift',         w: 42 },
-    { key: 'date',       label: 'Date',          w: 74 },
-    { key: 'production',  label: 'Production (m)', w: 96 },
-    { key: 'timer',      label: 'Timer (H:M:S)', w: 90 },
-    { key: 'remarks',    label: 'Remarks',       w: 0 },
+    { key: 'qr',         label: 'QR',             w: 42 },
+    { key: 'code',       label: 'Code',           w: 62 },
+    { key: 'machine',    label: 'Machine ID',     w: 64 },
+    { key: 'operator',   label: 'Operator',       w: 96 },
+    { key: 'job',        label: 'Job No',         w: 50 },
+    { key: 'shift',      label: 'Shift',          w: 40 },
+    { key: 'date',       label: 'Date',           w: 66 },
+    { key: 'production', label: 'Production (m)', w: 84 },
+    { key: 'timer',      label: 'Timer (H:M:S)',  w: 80 },
+    { key: 'sign',       label: 'Sign',           w: 50 },
+    { key: 'remarks',    label: 'Remarks',        w: 0 },
   ];
   const fixed = cols.reduce((s, c) => s + c.w, 0);
   cols[cols.length - 1].w = right - left - fixed;
@@ -102,7 +104,7 @@ async function buildShiftSheetPdf(plan) {
     if (pageNo === 1) {
       doc.roundedRect(left, 66, right - left, 18, 3).fill('#FFF4E0');
       doc.fillColor('#8a5a00').font('Helvetica').fontSize(8).text(
-        'Write PRODUCTION (metres), TIMER (H:M:S) and REMARKS in ink. Do not alter the Code / QR — they identify each row for scanning.',
+        'Write PRODUCTION (metres), TIMER (H:M:S) and REMARKS in ink; the supervisor initials each row. Do not alter the Code / QR — they identify each row for scanning.',
         left + 8, 70, { width: right - left - 16 }
       );
       tableTop = 90;
@@ -173,7 +175,7 @@ async function buildShiftSheetPdf(plan) {
       put(5, plan.shift);
       put(6, plan.dateLabel, { size: 8 });
       // Empty writable columns — a baseline to write on.
-      [7, 8, 9].forEach((ci) => {
+      [7, 8, 9, 10].forEach((ci) => {
         const bx = colX(ci);
         doc.moveTo(bx + 6, y + rowH - 11).lineTo(bx + cols[ci].w - 6, y + rowH - 11).lineWidth(0.5).stroke('#B8B8B8');
       });
