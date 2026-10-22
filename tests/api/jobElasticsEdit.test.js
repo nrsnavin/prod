@@ -234,13 +234,33 @@ describe('a job whose preparation has begun', () => {
     expect(res.body.message).toMatch(/batch/i);
   });
 
-  it('is refused once the job has left preparatory', async () => {
+  it('is refused once the job has reached packing', async () => {
     const { job, elastic } = await seed();
-    await JobOrder.updateOne({ _id: job._id }, { $set: { status: 'weaving' } });
+    await JobOrder.updateOne({ _id: job._id }, { $set: { status: 'packing' } });
 
     const res = await edit(job, [{ elastic: String(elastic._id), quantity: 600 }]);
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/only be changed while the job is preparatory/i);
+    expect(res.body.message).toMatch(/until the job reaches packing/i);
+  });
+
+  it('a weaving job: the same elastics, each at no less than what was woven, nothing made touched', async () => {
+    const { job, elastic } = await seed();
+    await JobOrder.updateOne({ _id: job._id }, {
+      $set: { status: 'weaving', producedElastic: [{ elastic: elastic._id, quantity: 650 }], packedElastic: [{ elastic: elastic._id, quantity: 400 }] },
+    });
+    const low = await edit(job, [{ elastic: String(elastic._id), quantity: 600 }]);
+    expect(low.status).toBe(400);
+    expect(low.body.message).toMatch(/650 m .* already woven or packed/);
+
+    const other = await edit(job, [{ elastic: String(new (require('mongoose').Types.ObjectId)()), quantity: 700 }]);
+    expect(other.body.message).toMatch(/keeps its elastics/);
+
+    const ok = await edit(job, [{ elastic: String(elastic._id), quantity: 700 }]);
+    expect(ok.status).toBe(200);
+    const after = await JobOrder.findById(job._id).lean();
+    expect(after.elastics[0].quantity).toBe(700);
+    expect(after.producedElastic[0].quantity).toBe(650); // not zeroed
+    expect(after.packedElastic[0].quantity).toBe(400);
   });
 
   it('still allows it while both stages are merely open', async () => {

@@ -20,6 +20,12 @@
 //      and, if asked, put on the loom's heads in place of the frozen
 //      one, so production counts for it from the next verified shift.
 //
+//  With nothing coming in — the beam ran out and the job carries on
+//  with its other elastics — the frozen elastic's heads are simply
+//  freed. And a job past weaving (finishing, checking) can still be
+//  set straight the same way: nothing more is produced on it, but its
+//  lines should say what was actually made.
+//
 //  Nothing is erased. The job's lines are the record of what the loom
 //  actually ran; the fingerprint says who changed it and why.
 // ══════════════════════════════════════════════════════════════════
@@ -42,8 +48,8 @@ const { checkHookFit, hookFitError } = require('../utils/machineFit');
 /** An exceptional change needs a reason that says something. */
 const MIN_REASON = 8;
 
-/** The job stages a loom can be re-set in. */
-const CHANGEABLE = ['preparatory', 'weaving'];
+/** The job stages the lines can be changed in. */
+const CHANGEABLE = ['preparatory', 'weaving', 'finishing', 'checking'];
 
 const qtyOf = (rows, id) => rows.find((r) => String(r.elastic) === String(id))?.quantity || 0;
 const r3 = (n) => Math.round(n * 1000) / 1000;
@@ -87,20 +93,25 @@ async function orderElasticsForJob(jobId) {
 /**
  * @param {object} input
  *   jobId
- *   elastic        the elastic coming in (must be on the order, not on the job)
+ *   elastic        the elastic coming in (must be on the order, not on the
+ *                  job), or null: nothing comes in, the frozen lines just close
  *   quantity       metres planned for it — at most what the order has unplanned
  *   freeze         ids of this job's lines to freeze at what was woven
  *   heads          'frozen' (default): the new elastic takes the heads the
- *                  frozen elastics were on; 'all': every running head;
- *                  'none': leave the head map for later
+ *                  frozen elastics were on (freed, when nothing comes in);
+ *                  'all': every running head; 'none': leave the head map
  *   confirmHooks   go ahead although the loom has too few hooks for it
  * @param {object} req   for the reason, the version and the fingerprint
  */
-async function changeElasticMidRun({ jobId, elastic, quantity, freeze = [], heads = 'frozen', confirmHooks = false }, req) {
+async function changeElasticMidRun({ jobId, elastic = null, quantity, freeze = [], heads = 'frozen', confirmHooks = false }, req) {
   if (!mongoose.isValidObjectId(jobId)) throw new ErrorHandler('Job not found', 404);
-  if (!mongoose.isValidObjectId(elastic)) throw new ErrorHandler('Choose the elastic to put on', 400);
-  const qty = Number(quantity);
-  if (!Number.isFinite(qty) || qty <= 0) throw new ErrorHandler('quantity must be a positive number', 400);
+  const incomingId = elastic ? String(elastic) : null;
+  if (incomingId && !mongoose.isValidObjectId(incomingId)) throw new ErrorHandler('Choose the elastic to put on', 400);
+  const qty = incomingId ? Number(quantity) : 0;
+  if (incomingId && (!Number.isFinite(qty) || qty <= 0)) throw new ErrorHandler('quantity must be a positive number', 400);
+  if (!incomingId && !(Array.isArray(freeze) && freeze.length)) {
+    throw new ErrorHandler('Choose an elastic to put on, or at least one line to freeze.', 400);
+  }
   const reason = String(req.body?.auditReason ?? req.body?.reason ?? '').trim();
   if (reason.length < MIN_REASON) {
     throw new ErrorHandler(`This is an exceptional change: give the reason (at least ${MIN_REASON} characters).`, 400);
@@ -111,8 +122,8 @@ async function changeElasticMidRun({ jobId, elastic, quantity, freeze = [], head
   if (!['frozen', 'all', 'none'].includes(heads)) throw new ErrorHandler('heads must be frozen, all or none', 400);
   const freezeIds = [...new Set(freeze.map(String))];
 
-  const incoming = await Elastic.findById(elastic).select('name noOfHook').lean();
-  if (!incoming) throw new ErrorHandler('Elastic not found', 404);
+  const incoming = incomingId ? await Elastic.findById(incomingId).select('name noOfHook').lean() : null;
+  if (incomingId && !incoming) throw new ErrorHandler('Elastic not found', 404);
 
   let job;
   let order;
@@ -128,15 +139,15 @@ async function changeElasticMidRun({ jobId, elastic, quantity, freeze = [], head
       if (!job) throw new ErrorHandler('Job not found', 404);
       assertVersion(job, req);
       if (!CHANGEABLE.includes(job.status)) {
-        throw new ErrorHandler(`The elastic can be changed while the job is weaving (it is ${job.status}).`, 400);
+        throw new ErrorHandler(`The elastic can be changed until the job reaches packing (it is ${job.status}).`, 400);
       }
-      if ((job.elastics || []).some((e) => String(e.elastic) === String(elastic))) {
+      if (incomingId && (job.elastics || []).some((e) => String(e.elastic) === incomingId)) {
         throw new ErrorHandler(`${incoming.name} is already on this job.`, 400);
       }
 
       order = await Order.findById(job.order).session(session);
       if (!order) throw new ErrorHandler('Order not found for this job', 404);
-      const onOrder = (order.elasticOrdered || []).some((l) => String(l.elastic) === String(elastic));
+      const onOrder = !incomingId || (order.elasticOrdered || []).some((l) => String(l.elastic) === incomingId);
       if (!onOrder) {
         throw new ErrorHandler(
           `${incoming.name} is not on order #${order.orderNo}. Only an elastic the customer ordered can be put on mid-run.`, 400
@@ -168,9 +179,9 @@ async function changeElasticMidRun({ jobId, elastic, quantity, freeze = [], head
         order: order._id, status: { $ne: 'cancelled' }, _id: { $ne: job._id },
       }).select('elastics').session(session).lean();
       const planned = plannedFromJobs([...siblings, { elastics: job.elastics }]);
-      const [row] = assessLines([{ elastic, quantity: qty }], order, planned);
-      const pending = r3(Math.max(0, row.ordered - row.alreadyPlanned));
-      if (qty > pending) {
+      const [row] = incomingId ? assessLines([{ elastic: incomingId, quantity: qty }], order, planned) : [null];
+      const pending = row ? r3(Math.max(0, row.ordered - row.alreadyPlanned)) : 0;
+      if (row && qty > pending) {
         const err = new ErrorHandler(
           pending > 0
             ? `Order #${order.orderNo} has only ${pending} m of ${incoming.name} not yet planned (${row.ordered} ordered, ${r3(row.alreadyPlanned)} on jobs). Plan up to ${pending} m here, or raise a job for the rest.`
@@ -182,11 +193,15 @@ async function changeElasticMidRun({ jobId, elastic, quantity, freeze = [], head
         throw err;
       }
 
-      // ── Add what is coming in ───────────────────────────────────
-      job.elastics.push({ elastic, quantity: qty, addedMidRun: true, addedAt: now, addedReason: reason });
-      // A row each, at zero: wastage only adds to a row that exists.
-      for (const key of ['producedElastic', 'packedElastic', 'wastageElastic']) {
-        if (!job[key].some((e) => String(e.elastic) === String(elastic))) job[key].push({ elastic, quantity: 0 });
+      // ── Add what is coming in, if anything ──────────────────────
+      if (incomingId) {
+        job.elastics.push({ elastic: incomingId, quantity: qty, addedMidRun: true, addedAt: now, addedReason: reason });
+        // A row each, at zero: wastage only adds to a row that exists.
+        for (const key of ['producedElastic', 'packedElastic', 'wastageElastic']) {
+          if (!job[key].some((e) => String(e.elastic) === incomingId)) job[key].push({ elastic: incomingId, quantity: 0 });
+        }
+      } else if (!frozenRows.length) {
+        throw new ErrorHandler('Nothing to change: the lines named are frozen already.', 400);
       }
 
       const frozenNames = frozenRows.length
@@ -198,7 +213,7 @@ async function changeElasticMidRun({ jobId, elastic, quantity, freeze = [], head
         meta: {
           auditReason: reason,
           jobStage: job.status,
-          added: { elastic: String(elastic), name: incoming.name, quantity: qty },
+          added: incomingId ? { elastic: incomingId, name: incoming.name, quantity: qty } : null,
           frozen: frozenRows.map((f) => ({ ...f, name: nameOf(f.elastic) })),
         },
       });
@@ -222,20 +237,24 @@ async function changeElasticMidRun({ jobId, elastic, quantity, freeze = [], head
       if (heads !== 'none' && job.machine) {
         const machine = await Machine.findOne({ _id: job.machine, orderRunning: job._id }).session(session);
         if (machine) {
-          const fit = await checkHookFit(machine, [elastic]);
-          if (!fit.fits && !confirmHooks) throw hookFitError(machine, fit, ErrorHandler);
-          if (!fit.fits) hookNote = `${machine.ID} has ${machine.NoOfHooks} hooks per head; ${incoming.name} needs ${incoming.noOfHook}.`;
+          if (incomingId) {
+            const fit = await checkHookFit(machine, [incomingId]);
+            if (!fit.fits && !confirmHooks) throw hookFitError(machine, fit, ErrorHandler);
+            if (!fit.fits) hookNote = `${machine.ID} has ${machine.NoOfHooks} hooks per head; ${incoming.name} needs ${incoming.noOfHook}.`;
+          }
           const frozenSet = new Set(freezeIds);
+          // Nothing coming in: the heads the frozen elastic was on are
+          // freed, so nothing is counted for them (utils/machineHeads.js).
           const next = (machine.elastics || []).map((h) => {
             const cur = h.elastic ? String(h.elastic._id ?? h.elastic) : null;
             const take = cur && (heads === 'all' || frozenSet.has(cur));
             if (take) headsChanged += 1;
-            return { head: h.head, elastic: take ? elastic : h.elastic };
+            return { head: h.head, elastic: take ? incomingId : h.elastic };
           });
           if (headsChanged) {
             await Machine.updateOne({ _id: machine._id }, { $set: { elastics: next } }, { session });
             machine.elastics = next;
-            await refreshOpenShiftHeads(machine, job._id, session);
+            await refreshOpenShiftHeads(machine, job._id, session, { allowEmpty: true });
           }
         }
       }
@@ -244,9 +263,10 @@ async function changeElasticMidRun({ jobId, elastic, quantity, freeze = [], head
     await session.endSession();
   }
 
-  const parts = [`${incoming.name} added to J-${job.jobOrderNo} for ${qty} m`];
-  if (frozenRows.length) parts.push(`${frozenRows.length} line${frozenRows.length === 1 ? '' : 's'} frozen at what was woven`);
-  if (headsChanged) parts.push(`put on ${headsChanged} head${headsChanged === 1 ? '' : 's'}`);
+  const parts = [];
+  if (incomingId) parts.push(`${incoming.name} added to J-${job.jobOrderNo} for ${qty} m`);
+  if (frozenRows.length) parts.push(`${frozenRows.length} line${frozenRows.length === 1 ? '' : 's'} of J-${job.jobOrderNo} frozen at what was woven`);
+  if (headsChanged) parts.push(incomingId ? `put on ${headsChanged} head${headsChanged === 1 ? '' : 's'}` : `${headsChanged} head${headsChanged === 1 ? '' : 's'} freed`);
   else if (heads !== 'none' && job.machine) parts.push('no head changed — set the head map on the machine');
   return {
     message: parts.join('; ') + '.' + (hookNote ? ` ${hookNote}` : ''),

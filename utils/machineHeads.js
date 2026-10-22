@@ -42,12 +42,14 @@ function headsOfShift(shift, machine) {
  * the new plan, so what they show — and are later corrected against —
  * is the heads that actually run. Verified shifts keep what they ran.
  */
-async function refreshOpenShiftHeads(machine, jobId, session = null) {
+async function refreshOpenShiftHeads(machine, jobId, session = null, { allowEmpty = false } = {}) {
   if (!machine?._id || !jobId) return;
   const ShiftDetail = require('../models/ShiftDetail');
   const running = (machine.elastics || []).filter((h) => h && h.elastic)
     .map((h) => ({ head: h.head, elastic: h.elastic._id ?? h.elastic }));
-  if (!running.length) return;
+  // An empty map is usually a plan not yet made, not a loom with every
+  // head freed; a caller that means the latter says so.
+  if (!running.length && !allowEmpty) return;
   await ShiftDetail.updateMany(
     { machine: machine._id, job: jobId, status: { $in: ['open', 'pending_verification'] } },
     { $set: { elastics: running } },

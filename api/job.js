@@ -582,30 +582,63 @@ router.post(
         // Two planners changing one job's quantities: the second is a 409
         // and re-reads, rather than replacing the first person's figures.
         assertVersion(job, req);
-        if (job.status !== 'preparatory') {
+        // Preparatory: the lines are free to change, and so is which
+        // elastics there are, as long as nothing is drawn yet. Running
+        // (weaving, finishing, checking): the same elastics, each at no
+        // less than what was woven — the beam came up short, or the loom
+        // was set for a rounder number — and nothing made is touched.
+        const running = ['weaving', 'finishing', 'checking'].includes(job.status);
+        if (job.status !== 'preparatory' && !running) {
           throw new ErrorHandler(
-            `Quantities can only be changed while the job is preparatory (current: "${job.status}").`,
+            `Quantities can be changed until the job reaches packing (current: "${job.status}").`,
             400
           );
         }
 
-        // ── Has the floor started on it? ────────────────────────────────
-        const warping  = job.warping  ? await Warping.findById(job.warping).select('status').session(session).lean()   : null;
-        const covering = job.covering ? await Covering.findById(job.covering).select('status').session(session).lean() : null;
-        const batches  = await WarpingBatch.countDocuments({ job: job._id, status: { $ne: 'cancelled' } }).session(session);
-        const started = [];
-        if (warping  && warping.status  !== 'open') started.push(`warping is ${warping.status}`);
-        if (covering && covering.status !== 'open') started.push(`covering is ${covering.status}`);
-        // A batch is yarn off the rack, whatever the stage says.
-        if (batches > 0) started.push(`${batches} warping batch(es) already raised`);
-        if (started.length > 0) {
-          const err = new ErrorHandler(
-            `Quantities cannot be changed once preparation has started — ${started.join('; ')}.`,
-            409
-          );
-          err.code = 'JOB_PREPARATION_STARTED';
-          err.details = { blockers: started };
-          throw err;
+        if (!running) {
+          // ── Has the floor started on it? ──────────────────────────────
+          const warping  = job.warping  ? await Warping.findById(job.warping).select('status').session(session).lean()   : null;
+          const covering = job.covering ? await Covering.findById(job.covering).select('status').session(session).lean() : null;
+          const batches  = await WarpingBatch.countDocuments({ job: job._id, status: { $ne: 'cancelled' } }).session(session);
+          const started = [];
+          if (warping  && warping.status  !== 'open') started.push(`warping is ${warping.status}`);
+          if (covering && covering.status !== 'open') started.push(`covering is ${covering.status}`);
+          // A batch is yarn off the rack, whatever the stage says.
+          if (batches > 0) started.push(`${batches} warping batch(es) already raised`);
+          if (started.length > 0) {
+            const err = new ErrorHandler(
+              `Quantities cannot be changed once preparation has started — ${started.join('; ')}.`,
+              409
+            );
+            err.code = 'JOB_PREPARATION_STARTED';
+            err.details = { blockers: started };
+            throw err;
+          }
+        } else {
+          const have = new Set((job.elastics || []).map((e) => String(e.elastic)));
+          const sent = new Set(elastics.map((e) => String(e.elastic)));
+          if (have.size !== sent.size || [...have].some((id) => !sent.has(id))) {
+            throw new ErrorHandler(
+              'A running job keeps its elastics: send every line it has, and only those. ' +
+              'To bring one in or close one out, use Change elastic.',
+              400
+            );
+          }
+          const woven = (rows, id) => (rows || []).find((r) => String(r.elastic) === id)?.quantity || 0;
+          for (const e of elastics) {
+            const id = String(e.elastic);
+            const line = job.elastics.find((l) => String(l.elastic) === id);
+            const q = Number(e.quantity);
+            if (line.frozen && q !== line.quantity) {
+              throw new ErrorHandler(`A frozen line stays at what was woven (${line.quantity} m).`, 400);
+            }
+            const made = Math.max(woven(job.producedElastic, id), woven(job.packedElastic, id));
+            if (q < made) {
+              throw new ErrorHandler(
+                `${made} m of this elastic is already woven or packed; the plan cannot be below that.`, 400
+              );
+            }
+          }
         }
 
         const order = await Order.findById(job.order).session(session);
@@ -655,13 +688,22 @@ router.post(
         }));
         const zeroed = elastics.map((e) => ({ elastic: e.elastic, quantity: 0 }));
 
-        job.elastics       = elastics.map((e) => ({ elastic: e.elastic, quantity: Number(e.quantity) }));
-        // Nothing has been made yet — the job is preparatory and no beam
-        // has been started — so these are reset rather than carried across,
-        // which also drops rows for an elastic the edit removed.
-        job.producedElastic = zeroed;
-        job.packedElastic   = zeroed;
-        job.wastageElastic  = zeroed;
+        if (running) {
+          // Only the figures move; the lines, their flags and everything
+          // made against them stay.
+          for (const e of elastics) {
+            const line = job.elastics.find((l) => String(l.elastic) === String(e.elastic));
+            line.quantity = Number(e.quantity);
+          }
+        } else {
+          job.elastics       = elastics.map((e) => ({ elastic: e.elastic, quantity: Number(e.quantity) }));
+          // Nothing has been made yet — the job is preparatory and no beam
+          // has been started — so these are reset rather than carried across,
+          // which also drops rows for an elastic the edit removed.
+          job.producedElastic = zeroed;
+          job.packedElastic   = zeroed;
+          job.wastageElastic  = zeroed;
+        }
 
         stampFingerprint(job, ACTION_CODES.JOB_STAGE_UPDATED, {
           req,
@@ -683,10 +725,12 @@ router.post(
         // Writing the warping also makes this edit collide with a warping
         // batch being raised at the same moment, which writes it too: one
         // of them is retried and sees the other.
-        if (job.warping) {
+        // A running job's programmes are done: the sheets they printed
+        // are history, and are left as they were.
+        if (!running && job.warping) {
           await Warping.updateOne({ _id: job.warping }, { $set: { elasticOrdered: job.elastics } }, { session });
         }
-        if (job.covering) {
+        if (!running && job.covering) {
           await Covering.updateOne({ _id: job.covering }, { $set: { elasticPlanned: job.elastics } }, { session });
         }
 
@@ -772,7 +816,7 @@ router.post(
   catchAsyncErrors(async (req, res) => {
     const out = await changeElasticMidRun({
       jobId: req.params.jobId,
-      elastic: req.body.elastic,
+      elastic: req.body.elastic || null,
       quantity: req.body.quantity,
       freeze: req.body.freeze ?? [],
       heads: req.body.heads ?? 'frozen',

@@ -108,7 +108,7 @@ describe('switching the loom to another elastic of the order', () => {
 
     const res = await change(s, {});
     expect(res.status).toBe(200);
-    expect(res.body.message).toMatch(/added to J-\d+ for 3000 m; 1 line frozen at what was woven; put on 2 heads/);
+    expect(res.body.message).toMatch(/added to J-\d+ for 3000 m; 1 line of J-\d+ frozen at what was woven; put on 2 heads/);
 
     const job = await M.JobOrder.findById(s.job._id).lean();
     const old = job.elastics.find((e) => String(e.elastic) === String(s.a._id));
@@ -175,6 +175,43 @@ describe('switching the loom to another elastic of the order', () => {
   });
 });
 
+describe('freezing with nothing coming in', () => {
+  it('closes the line at what was woven, frees its heads, and the job carries on', async () => {
+    const s = await seed();
+    await verify(await shiftOn(s), 1600);
+    const res = await post(`/job/${s.job._id}/change-elastic`, {
+      freeze: [String(s.a._id)], auditReason: 'Beam ran out; nothing else to put on this loom',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.message).toMatch(/1 line of J-\d+ frozen at what was woven; 2 heads freed/);
+    const job = await M.JobOrder.findById(s.job._id).lean();
+    expect(job.elastics).toHaveLength(1);
+    expect(job.elastics[0]).toMatchObject({ quantity: 3200, frozen: true });
+    const m = await M.Machine.findById(s.machine._id).lean();
+    expect(m.elastics.map((h) => h.elastic)).toEqual([null, null]);
+    expect((await M.Order.findById(s.order._id).lean()).pendingElastic.find((p) => String(p.elastic) === String(s.a._id)).quantity).toBe(1800);
+    const after = await shiftOn(s);
+    expect((await M.ShiftDetail.findById(after._id).lean()).elastics).toHaveLength(0);
+  });
+
+  it('needs something to do', async () => {
+    const s = await seed();
+    const res = await post(`/job/${s.job._id}/change-elastic`, { freeze: [], auditReason: 'Beam ran out, nothing else to put on' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/Choose an elastic to put on, or at least one line to freeze/);
+  });
+
+  it('works on a job in finishing or checking too', async () => {
+    const s = await seed();
+    await M.JobOrder.updateOne({ _id: s.job._id }, { $set: { status: 'checking', producedElastic: [{ elastic: s.a._id, quantity: 4100 }] } });
+    const res = await change(s, { heads: 'none' });
+    expect(res.status).toBe(200);
+    const job = await M.JobOrder.findById(s.job._id).lean();
+    expect(job.elastics.find((e) => String(e.elastic) === String(s.a._id))).toMatchObject({ quantity: 4100, frozen: true });
+    expect(job.elastics.find((e) => String(e.elastic) === String(s.b._id))).toMatchObject({ quantity: 3000, addedMidRun: true });
+  });
+});
+
 describe('what it refuses', () => {
   it('needs a proper reason', async () => {
     const s = await seed();
@@ -200,11 +237,11 @@ describe('what it refuses', () => {
     expect((await M.Machine.findById(s.machine._id).lean()).elastics.every((h) => String(h.elastic) === String(s.a._id))).toBe(true);
   });
 
-  it('a job that is past weaving, and an elastic already on the job', async () => {
+  it('a job in packing, and an elastic already on the job', async () => {
     const s = await seed();
     expect((await change(s, { elastic: String(s.a._id) })).body.message).toMatch(/already on this job/);
-    await M.JobOrder.updateOne({ _id: s.job._id }, { $set: { status: 'finishing' } });
-    expect((await change(s, {})).body.message).toMatch(/while the job is weaving/);
+    await M.JobOrder.updateOne({ _id: s.job._id }, { $set: { status: 'packing' } });
+    expect((await change(s, {})).body.message).toMatch(/until the job reaches packing/);
   });
 
   it('a stale screen', async () => {
