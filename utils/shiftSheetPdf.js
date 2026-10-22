@@ -16,7 +16,7 @@
 //  buildShiftSheetPdf(plan) -> Promise<Buffer>
 //    plan = {
 //      dateLabel, shift, planNo,
-//      rows: [{ sdId, machine, operator, job }, ...]
+//      rows: [{ sdId, machine, operator, job, loading }, ...]
 //    }
 // ═════════════════════════════════════════════════════════════════
 const PDFDocument = require('pdfkit');
@@ -172,6 +172,11 @@ async function buildShiftSheetPdf(plan) {
       put(2, r.machine, { bold: true });
       put(3, r.operator);
       put(4, r.job);
+      // The loom is being loaded: no production this shift.
+      if (r.loading) {
+        doc.fillColor('#8a5a00').font('Helvetica-Oblique').fontSize(7)
+          .text('(loading)', colX(4) + 4, y + rowH / 2 + 6, { width: cols[4].w - 8 });
+      }
       put(5, plan.shift);
       put(6, plan.dateLabel, { size: 8 });
       // Empty writable columns — a baseline to write on.

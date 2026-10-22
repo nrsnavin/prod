@@ -17,7 +17,7 @@
 //  buildFloorSheetPdf(sheet) -> Promise<Buffer>
 //    sheet = {
 //      sheetNo, dateLabel, shift,
-//      rows: [{ machineId, machine, job, detail, status }, ...],
+//      rows: [{ machineId, machine, job, detail, status, loading }, ...],
 //      branding
 //    }
 //    job: "J-12" or null (free); detail: a short line under it (the elastic)
@@ -154,6 +154,12 @@ async function buildFloorSheetPdf(sheet) {
       if (r.job) {
         doc.fillColor(INK).font('Helvetica-Bold').fontSize(9.5)
           .text(r.job, colX(2) + 4, y + (r.detail ? 8 : rowH / 2 - 5), { width: cols[2].w - 8 });
+        // Still being loaded for the job: nothing is woven yet.
+        if (r.loading) {
+          doc.fillColor('#8a5a00').font('Helvetica-Oblique').fontSize(8)
+            .text('(loading)', colX(2) + 4 + doc.widthOfString(r.job, { font: 'Helvetica-Bold', size: 9.5 }) + 10,
+              y + (r.detail ? 9 : rowH / 2 - 4));
+        }
         if (r.detail) {
           doc.fillColor(MUT).font('Helvetica').fontSize(7)
             .text(r.detail, colX(2) + 4, y + 21, { width: cols[2].w - 8, height: 9, ellipsis: true });

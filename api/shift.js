@@ -1115,7 +1115,7 @@ router.get(
     if (!["DAY", "NIGHT"].includes(shift)) return next(new ErrorHandler("shift must be DAY or NIGHT", 400));
 
     const machines = await Machine.find()
-      .select("ID status orderRunning elastics")
+      .select("ID status orderRunning elastics loading")
       .populate({ path: "orderRunning", model: "JobOrder", select: "jobOrderNo status" })
       .populate({ path: "elastics.elastic", model: "Elastic", select: "name" })
       .lean();
@@ -1128,6 +1128,9 @@ router.get(
         machineId: String(m._id),
         machine: m.ID,
         job: job ? (job.jobOrderNo != null ? `J-${job.jobOrderNo}` : "Job") : null,
+        // Still being loaded for the job: said on the sheet, so nobody
+        // writes metres against a loom that was not weaving.
+        loading: !!job && m.status === "running" && !!m.loading,
         detail: job && names.length ? (names.length > 2 ? `${names.slice(0, 2).join(", ")} +${names.length - 2}` : names.join(", ")) : "",
         status: m.status,
       };
@@ -1166,7 +1169,7 @@ router.get(
         path: "plan",
         model: "ShiftDetail",
         populate: [
-          { path: "machine", model: "Machine", select: "ID" },
+          { path: "machine", model: "Machine", select: "ID status loading" },
           { path: "employee", model: "Employee", select: "name" },
           { path: "job", model: "JobOrder", select: "jobOrderNo" },
         ],
@@ -1179,6 +1182,8 @@ router.get(
       machine: d.machine?.ID || "—",
       operator: d.employee?.name || "—",
       job: d.job?.jobOrderNo != null ? `J-${d.job.jobOrderNo}` : "—",
+      // A loading shift, or a loom still loading now: nothing to enter.
+      loading: d.status === "loading" || (d.machine?.status === "running" && !!d.machine?.loading),
     }));
 
     const dateLabel = moment(sp.date).format("DD-MMM-YYYY");

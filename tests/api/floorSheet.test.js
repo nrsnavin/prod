@@ -121,6 +121,14 @@ describe('the printed sheet', () => {
     expect((text.match(/FREE/g) || []).length).toBeGreaterThanOrEqual(2);
   });
 
+  it('says a loom is loading beside its job', async () => {
+    await Machine.updateOne({ ID: 'M-2' }, { $set: { loading: true, loadingSince: new Date() } });
+    const text = await pdfText((await download(admin, '?date=2026-10-21&shift=DAY')).body);
+    expect(text).toMatch(/\(loading\)/);
+    await Machine.updateOne({ ID: 'M-2' }, { $set: { loading: false } });
+    expect(await pdfText((await download(admin, '?date=2026-10-21&shift=DAY')).body)).not.toMatch(/\(loading\)/);
+  });
+
   it('refuses a date it cannot read, and is not for accounts', async () => {
     expect((await download(admin, '?date=21-10-2026&shift=DAY')).status).toBe(400);
     expect((await download(admin, '?date=2026-10-21&shift=EVENING')).status).toBe(400);
