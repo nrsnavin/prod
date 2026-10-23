@@ -196,6 +196,7 @@ function machineState(m, detail, plan) {
   if (plan?.finalized) { entry = 'locked'; why = 'This shift is finalised.'; }
   else if (detail?.status === 'closed') { entry = 'verified'; why = 'Verified already.'; }
   else if (detail?.status === 'loading' || (loading && !detail)) { entry = 'loading'; why = 'The loom is being loaded for its job — nothing to enter.'; }
+  else if (m.status === 'maintenance') { entry = 'free'; why = 'Under maintenance — nothing to enter.'; }
   else if (!job || m.status !== 'running') { entry = 'free'; why = 'No job on this loom.'; }
   else if (isProductionLocked(job.status)) { entry = 'locked'; why = `Its job is ${job.status}; production is closed.`; }
   else if (!detail) entry = 'unplanned';

@@ -222,6 +222,9 @@ describe('the shift as the floor sees it', () => {
       { head: 2, elastic: null },
     ]);
     expect(by[s.free.ID]).toMatchObject({ entry: 'free', job: null, why: 'No job on this loom.' });
+    await M.Machine.updateOne({ _id: s.free._id }, { status: 'maintenance' });
+    const again = await floor((await open()).body.token).get('/shift');
+    expect(again.body.state.machines.find((m) => m.ID === s.free.ID)).toMatchObject({ entry: 'free', why: /Under maintenance/ });
     expect(by[s.loading.ID]).toMatchObject({ entry: 'loading', loading: true });
     expect(body.state.counts).toMatchObject({ total: 3, toEnter: 1, entered: 0, free: 1, loading: 1, unplanned: 1 });
   });
