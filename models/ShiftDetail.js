@@ -96,6 +96,9 @@ const ShiftDetailSchema = new mongoose.Schema(
     submittedTimer:            { type: String },
     submittedFeedback:         { type: String },
     submittedAt:               { type: Date   },
+    // The floor-entry screen opens with a shift PIN, not a login: the
+    // supervisor's typed name is all there is to record.
+    submittedByName:           { type: String, default: '' },
     submittedBy: {
       type: mongoose.Types.ObjectId,
       ref: "User",

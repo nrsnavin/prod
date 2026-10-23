@@ -52,7 +52,7 @@ function safeEqual(a, b) {
 // per signed-in user rather than per office IP, failed logins only, and
 // counters in MongoDB so they hold across every worker process.
 const {
-  apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter,
+  apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter,
 } = require("./middleware/rateLimits.js").buildLimiters();
 
 const user     = require("./api/user.js");
@@ -569,6 +569,13 @@ app.use("/api/v2/machine",     gate('production'),
 // shift gates itself inside the router — it has to carve out the two
 // employee self-service reads the mobile app uses.
 app.use("/api/v2/shift",       gate('production'), shift);
+// The floor-entry screen: opened with a shift PIN, not a login, so it
+// carries its own auth (api/floor.js). A PIN guess and a photo read are
+// the two things worth limiting, by address.
+app.use("/api/v2/floor",
+  (req, res, next) => (req.method === 'POST' && req.path === '/open' ? floorPinLimiter(req, res, next) : next()),
+  (req, res, next) => (req.method === 'POST' && req.path === '/timer-photo' ? photoOcrLimiter(req, res, next) : next()),
+  require("./api/floor.js"));
 // Analytics and the Order/Elastic-group forms all read the customer list
 // without ever writing one.
 app.use("/api/v2/customer",    gate('accounts'),

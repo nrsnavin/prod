@@ -2,6 +2,8 @@
 
 const express = require("express");
 const { refreshOpenShiftHeads } = require("../utils/machineHeads");
+const { getPdfBranding } = require("../services/documentSettings.js");
+const { renderPdf } = require("../utils/renderPdf");
 const { setMachineLoading } = require("../services/machineLoading");
 const {
   assertVersion, versionFilter, bumpVersion, expectedVersionOf, conflictError,
@@ -321,6 +323,32 @@ router.patch(
         noOfHead:  machine.NoOfHead,
       },
     });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  QR LABELS
+//      GET /machine/qr-labels.pdf?ids=a,b   (every machine when absent)
+//
+//  One label per loom for the floor-entry screen to scan: the QR,
+//  the machine ID, manufacturer, hooks and heads. utils/machineLabelsPdf.js.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  '/qr-labels.pdf',
+  // Gated where the router is mounted (production), like the rest of it.
+  catchAsyncErrors(async (req, res, next) => {
+    const ids = String(req.query.ids || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) return next(new ErrorHandler('ids must be machine ids', 400));
+    const machines = await Machine.find(ids.length ? { _id: { $in: ids } } : {})
+      .select('ID manufacturer NoOfHooks NoOfHead').lean();
+    machines.sort((a, b) => String(a.ID).localeCompare(String(b.ID), undefined, { numeric: true, sensitivity: 'base' }));
+    const pdf = await renderPdf('machineLabels', {
+      machines: machines.map((m) => ({ id: String(m._id), ID: m.ID, manufacturer: m.manufacturer || '', hooks: m.NoOfHooks ?? null, heads: m.NoOfHead ?? null })),
+      branding: await getPdfBranding(),
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="machine-qr-labels${ids.length ? '-' + ids.length : ''}.pdf"`);
+    res.send(pdf);
   })
 );
 

@@ -32,9 +32,8 @@ const multer = require('multer');
 const mongoose = require('mongoose');
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const ErrorHandler = require('../utils/ErrorHandler');
-const { readTimerPhoto } = require('../utils/timerOcr');
-const { PROMPTS } = require('../utils/aiPrompts');
 const ledger = require('../services/aiLedger');
+const { keepAndReadTimerPhoto, markPhotoUsed, asRunTime } = require('../services/timerPhotoRead');
 const { validate, z } = require('../middleware/validate');
 const { isSelfServiceOnly } = require('../utils/features');
 const ShiftDetail = require('../models/ShiftDetail');
@@ -50,11 +49,6 @@ const upload = multer({
   limits: { fileSize: 8 * 1024 * 1024, files: 1 },
 });
 
-/** "7:45" / "07:45:12" → "H:MM:SS"; anything else (a meter's 1234.6) → null. */
-function asRunTime(text) {
-  const m = String(text || '').trim().match(/^(\d{1,2}):([0-5]\d)(?::([0-5]\d))?$/);
-  return m ? `${Number(m[1])}:${m[2]}:${m[3] ?? '00'}` : null;
-}
 
 /**
  * The shift, if this person may attach photos to it or see its photos:
@@ -89,72 +83,22 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     if (!req.file) return next(new ErrorHandler('Attach a photo of the timer', 400));
 
-    // Kept with the shift first, so it is there for verification
-    // whatever happens to the reading.
-    let photo = null;
-    const shiftId = req.body?.shiftId;
-    if (shiftId) {
-      const shift = await reachableShift(req, shiftId);
+    // The shift, if given, has to be one this person may reach.
+    let shiftId = null;
+    if (req.body?.shiftId) {
+      const shift = await reachableShift(req, req.body.shiftId);
       if (!shift) return next(new ErrorHandler('Shift not found', 404));
-      if (!TimerPhoto.ALLOWED_CONTENT_TYPES.includes(req.file.mimetype)) {
-        return next(new ErrorHandler('Use a JPEG, PNG or WEBP photo.', 400));
-      }
-      photo = await TimerPhoto.create({
-        shift: shift._id,
-        contentType: req.file.mimetype,
-        size: req.file.size,
-        data: `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`,
-        uploadedBy: req.user?._id ?? null,
-        uploadedByName: req.user?.name ?? '',
-        expiresAt: TimerPhoto.expiryFrom(),
-      });
+      shiftId = shift._id;
     }
-    const photoId = photo ? String(photo._id) : null;
-    const keep = (err) => {
-      // The caller can say the photo was kept even though it wasn't read.
-      if (photoId) {
-        if (typeof err.code !== 'string') err.code = 'NOT_READ';
-        err.details = { ...(err.details || {}), photoId };
-      }
-      return err;
-    };
-
-    let result;
+    let out;
     try {
-      result = await readTimerPhoto(req.file.buffer, req.file.mimetype);
-    } catch (err) {
-      if (photo) await TimerPhoto.updateOne({ _id: photo._id }, { readProblem: 'not_read' });
-      return next(keep(err));
-    }
-    if (!result.available) {
-      if (photo) await TimerPhoto.updateOne({ _id: photo._id }, { readProblem: 'not_set_up' });
-      const err = new ErrorHandler("Reading photos isn't set up on this server. Type the run time instead.", 503);
-      err.code = 'AI_UNAVAILABLE';
-      return next(keep(err));
-    }
-
-    const { reading } = result;
-    const primary = reading.primary != null ? reading.displays[reading.primary] : null;
-    const suggestionId = await ledger.record({
-      surface: SURFACE,
-      model: result.model,
-      promptVersion: PROMPTS[SURFACE]?.version,
-      refType: 'user',
-      refId: req.user?._id,
-      // What the field would be filled with if nobody changed anything.
-      proposed: { runTime: asRunTime(primary?.text), text: primary?.text ?? null, kind: primary?.kind ?? null },
-      latencyMs: result.latencyMs,
-      usage: result.usage,
-    });
-    if (photo) {
-      await TimerPhoto.updateOne({ _id: photo._id }, {
-        readText: primary?.text ?? null,
-        readKind: primary?.kind ?? null,
-        readProblem: reading.problem ?? null,
-        suggestion: suggestionId && mongoose.isValidObjectId(String(suggestionId)) ? suggestionId : null,
+      out = await keepAndReadTimerPhoto({
+        file: req.file, shiftId, uploadedBy: req.user?._id ?? null, uploadedByName: req.user?.name ?? '', refId: req.user?._id,
       });
+    } catch (err) {
+      return next(err);
     }
-
+    const { reading, suggestionId, photoId } = out;
     res.json({ success: true, available: true, reading, suggestionId, photoId });
   })
 );
@@ -187,17 +131,7 @@ router.post(
     const photo = await TimerPhoto.findById(req.params.photoId).select('shift suggestion').lean();
     if (!photo || !(await reachableShift(req, photo.shift))) return next(new ErrorHandler('Photo not found', 404));
 
-    // One photo per shift is the one the run time came from: the latest used.
-    await TimerPhoto.updateMany({ shift: photo.shift, _id: { $ne: photo._id }, used: true }, { used: false });
-    await TimerPhoto.updateOne({ _id: photo._id }, { used: true, runTimeUsed: runTime, usedAt: new Date() });
-    if (photo.suggestion) {
-      await ledger.settle(String(photo.suggestion), {
-        accepted: { runTime },
-        decidedBy: req.user?._id,
-        expectSurface: SURFACE,
-        ignoreMissing: true,
-      });
-    }
+    await markPhotoUsed(photo._id, runTime, { decidedBy: req.user?._id });
     res.json({ success: true });
   })
 );

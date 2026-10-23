@@ -11,6 +11,7 @@ const RENDERERS = Object.freeze({
   materialLedger: ['../materialLedgerPdf', 'buildMaterialLedgerPdf'],
   shiftSheet:     ['../shiftSheetPdf', 'buildShiftSheetPdf'],
   floorSheet:     ['../floorSheetPdf', 'buildFloorSheetPdf'],
+  machineLabels:  ['../machineLabelsPdf', 'buildMachineLabelsPdf'],
   morningDigest:  ['../reportPdf', 'buildMorningDigestPdf'],
   eveningReport:  ['../reportPdf', 'buildEveningReportPdf'],
   template:       ['../../services/pdf/templateRenderer', 'renderTemplatePdf'],

@@ -128,4 +128,46 @@ async function createShiftPlan({ date, shiftType, description = '', machines = [
   return { shiftPlan, detailCount };
 }
 
-module.exports = { createShiftPlan };
+/**
+ * One more machine on an existing plan — the floor scanned a loom the
+ * plan left out. Same writes as the plan itself, for one row.
+ * @returns the new ShiftDetail
+ */
+async function addMachineToPlan(planId, { machine, operator }) {
+  if (!mongoose.Types.ObjectId.isValid(String(machine)) || !mongoose.Types.ObjectId.isValid(String(operator))) {
+    throw new ErrorHandler('A valid machine and operator are needed.', 400);
+  }
+  const session = await mongoose.startSession();
+  let detail;
+  try {
+    await session.withTransaction(async () => {
+      const plan = await ShiftPlan.findById(planId).select('date shift finalized plan').session(session);
+      if (!plan) throw new ErrorHandler('Shift plan not found', 404);
+      if (plan.finalized) throw new ErrorHandler('This shift is finalised; nothing can be added to it.', 409);
+      const already = await ShiftDetail.findOne({ shiftPlan: plan._id, machine }).select('_id').session(session).lean();
+      if (already) throw new ErrorHandler('That machine is on this shift already.', 409);
+
+      const machineDoc = await Machine.findById(machine).select('elastics orderRunning status loading').session(session).lean();
+      if (!machineDoc) throw new ErrorHandler('Machine not found', 404);
+      const elastics = (machineDoc.elastics || [])
+        .filter((e) => e && e.elastic)
+        .map((e) => ({ head: e.head, elastic: e.elastic?._id ?? e.elastic }));
+      [detail] = await ShiftDetail.create([{
+        date: plan.date, shift: plan.shift,
+        job: machineDoc.orderRunning ?? null,
+        machine, employee: operator,
+        shiftPlan: plan._id, elastics,
+        status: startingStatus(machineDoc), timer: '00:00:00',
+      }], { session });
+      await ShiftPlan.updateOne({ _id: plan._id }, { $push: { plan: detail._id } }, { session });
+      if (machineDoc.orderRunning) {
+        await JobOrder.updateOne({ _id: machineDoc.orderRunning }, { $addToSet: { shiftDetails: detail._id } }, { session });
+      }
+    });
+  } finally {
+    await session.endSession();
+  }
+  return detail;
+}
+
+module.exports = { createShiftPlan, addMachineToPlan };

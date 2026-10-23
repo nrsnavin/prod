@@ -74,6 +74,7 @@ function buildLimiters({
   otpLimit = 20,
   webhookLimit = 30,
   photoOcrPerHour = 40,
+  floorPinPerAddress = 8,
   storeFor = (prefix) => new MongoRateLimitStore({ prefix }),
 } = {}) {
   const apiLimiter = rateLimit({
@@ -143,7 +144,20 @@ function buildLimiters({
     message: { success: false, message: 'Too many photos read in the last hour. Type the value, or try again later.' },
   });
 
-  return { apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter };
+  // A four-digit shift PIN guessed from the floor: a handful of tries a
+  // quarter hour is plenty for a mistyped one and nothing like enough to
+  // walk the space.
+  const floorPinLimiter = rateLimit({
+    ...common,
+    windowMs: FIFTEEN_MIN,
+    limit: floorPinPerAddress,
+    skipSuccessfulRequests: true,
+    keyGenerator: ipKey,
+    store: storeFor('rl:floor-pin:'),
+    message: { success: false, message: 'Too many PIN attempts — ask the admin for the PIN and try again in a few minutes.' },
+  });
+
+  return { apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter };
 }
 
 module.exports = { buildLimiters, userOrIpKey, accountKey, ipKey };

@@ -36,6 +36,7 @@ const { keepRequestContext } = require("../middleware/userContext.js");
 const { shortCode } = require("../utils/shiftSheetPdf");
 const { floorSheetNo } = require("../utils/floorSheetPdf");
 const { headsInUse } = require("../utils/machineHeads");
+const { pinFor, rotatePin, shapePin } = require("../services/floorEntry");
 
 /** A shift whose machine was being loaded: nothing to enter or verify. */
 const LOADING_SHIFT = "This machine was being loaded this shift — there is no production to enter. Mark the machine running and production counts from then.";
@@ -1094,6 +1095,31 @@ router.get("/attendance-mismatch", isAdmin('admin', 'production'), async (req, r
 // Exported for characterization/unit tests (Phase B0.3) — this is the
 // core production cascade the /verify-production route delegates to.
 router.applyProductionCascade = applyProductionCascade;
+
+// ═════════════════════════════════════════════════════════════════
+//  THE FLOOR PIN
+//    GET  /shift/floor-pin?date&shift      the PIN (made the first time), who opened with it
+//    POST /shift/floor-pin/rotate { date, shift }   a new PIN; old sessions end
+//
+//  What a supervisor types on the floor tablet to open this shift's
+//  entry screen (services/floorEntry.js).
+// ═════════════════════════════════════════════════════════════════
+router.get(
+  "/floor-pin",
+  isAdmin("admin", "production"),
+  catchAsyncErrors(async (req, res) => {
+    const doc = await pinFor(String(req.query.date || ""), String(req.query.shift || "").toUpperCase(), { createdBy: req.user?._id });
+    res.json({ success: true, ...shapePin(doc) });
+  })
+);
+router.post(
+  "/floor-pin/rotate",
+  isAdmin("admin", "production"),
+  catchAsyncErrors(async (req, res) => {
+    const doc = await rotatePin(String(req.body.date || ""), String(req.body.shift || "").toUpperCase(), { by: req.user?._id });
+    res.json({ success: true, message: "New PIN made. Anyone on the floor with the old one has to enter this one.", ...shapePin(doc) });
+  })
+);
 
 // ═════════════════════════════════════════════════════════════════
 //  GET /shift/floor-sheet.pdf?date=YYYY-MM-DD&shift=DAY|NIGHT
