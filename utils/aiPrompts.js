@@ -52,8 +52,8 @@ const PROMPTS = Object.freeze({
   },
 
   'timer-ocr': {
-    version: 'v1.0',
-    notes: 'Every display on a loom panel, with kind, label, confidence and alternative readings; the client asks about anything unclear. Advisory only.',
+    version: 'v1.1',
+    notes: 'Every display on a loom panel, with kind, label, confidence and alternative readings; the client asks about anything unclear. Advisory only. v1.1: written for the SELEC LTC9A on these looms — H:MM:SS read from the right, blank leading hours, faint colons always written, seven-segment look-alikes as alternatives, the printed model name never a reading.',
     system: null,   // lives in utils/timerOcr.js
   },
 
