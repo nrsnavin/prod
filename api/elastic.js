@@ -1392,6 +1392,113 @@ router.post(
 
 
 // ─────────────────────────────────────────────────────────────
+//  THE COST SHEET
+//      GET  /elastic/:id/cost-sheet
+//      POST /elastic/:id/cost-sheet
+//           { prices: [{ material, price }], conversionCost?, reason?, recostOthers? }
+//
+//  Every material in the recipe with today's price, what it costs in a
+//  metre, and the price the last costing used (services/
+//  elasticCostSheet.js). Saving changes the MATERIAL's price — the one
+//  in the raw-material master, with a price-history entry, as a price
+//  revision anywhere else does — and the conversion cost, then
+//  re-costs this elastic; with recostOthers, every other elastic in use
+//  that has a changed material too, so their totals do not sit on the
+//  old price.
+// ─────────────────────────────────────────────────────────────
+const { buildCostSheet, recipeMaterialIds, usingMaterial } = require("../services/elasticCostSheet");
+const { maybeFirePriceChangeAlert } = require("../utils/inventoryAlerts");
+
+router.get(
+  "/:id/cost-sheet",
+  catchAsyncErrors(async (req, res, next) => {
+    const sheet = await buildCostSheet(req.params.id);
+    if (!sheet) return next(new ErrorHandler("Elastic not found", 404));
+    res.json({ success: true, sheet });
+  })
+);
+
+router.post(
+  "/:id/cost-sheet",
+  isAdmin('admin', 'accounts'),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Invalid elastic id", 400));
+    const elastic = await _populate(Elastic.findById(req.params.id));
+    if (!elastic) return next(new ErrorHandler("Elastic not found", 404));
+
+    const prices = Array.isArray(req.body?.prices) ? req.body.prices : [];
+    if (prices.length > 20) return next(new ErrorHandler("Too many prices in one save", 400));
+    const own = new Set(recipeMaterialIds(await Elastic.findById(elastic._id).lean()));
+    const wanted = new Map();
+    for (const p of prices) {
+      const id = String(p?.material || "");
+      if (!own.has(id)) return next(new ErrorHandler("A price was given for a material this elastic does not use", 400));
+      const price = Number(p?.price);
+      if (p?.price === "" || p?.price == null || !Number.isFinite(price) || price < 0 || price > 100000) {
+        return next(new ErrorHandler("Each price must be a number between ₹0 and ₹1,00,000 a kg", 400));
+      }
+      wanted.set(id, Math.round(price * 10000) / 10000);
+    }
+    const conv = req.body?.conversionCost;
+    if (conv != null && conv !== "" && (conversionCostOf(conv) == null || Number(conv) > 10000)) {
+      return next(new ErrorHandler("Conversion cost must be between ₹0 and ₹10,000 a metre", 400));
+    }
+    const reason = String(req.body?.reason || "").trim().slice(0, 200) || `Cost sheet of ${elastic.name}`;
+
+    // The material prices, each with its history row, as a price
+    // revision from the materials screen would write them.
+    const RawMaterial = require("../models/RawMaterial");
+    const changed = [];
+    for (const [id, newPrice] of wanted) {
+      const material = await RawMaterial.findById(id).select("name price priceHistory");
+      if (!material) return next(new ErrorHandler("A material in this recipe no longer exists — fix the recipe first", 409));
+      const oldPrice = Number(material.price) || 0;
+      if (newPrice === oldPrice) continue;
+      await RawMaterial.findByIdAndUpdate(id, {
+        $set: { price: newPrice },
+        $push: { priceHistory: { price: newPrice, oldPrice, changedAt: new Date(), reason } },
+      });
+      changed.push({ id, name: material.name, oldPrice, newPrice });
+      maybeFirePriceChangeAlert({ material, oldPrice, newPrice, reason });
+    }
+
+    let costing;
+    try {
+      costing = await recostElastic(elastic, conv);
+    } catch (err) {
+      return next(new ErrorHandler(err.message, 400));
+    }
+
+    // The other elastics on a changed material, if asked.
+    const others = { recosted: 0, failed: [] };
+    if (req.body?.recostOthers && changed.length) {
+      const ids = new Set();
+      for (const c of changed) {
+        for (const e of await Elastic.find(usingMaterial(c.id, elastic._id)).select("_id").lean()) ids.add(String(e._id));
+      }
+      for (const id of ids) {
+        const other = await _populate(Elastic.findById(id));
+        if (!other) continue;
+        try {
+          await recostElastic(other);
+          others.recosted += 1;
+        } catch (err) {
+          others.failed.push({ id, name: other.name, reason: err.message });
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      changed,
+      costing,
+      others,
+      sheet: await buildCostSheet(elastic._id),
+    });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
 //  DELETE ELASTIC
 //
 //  An elastic named by an order, a job, a delivery challan or a

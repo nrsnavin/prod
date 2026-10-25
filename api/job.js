@@ -2020,10 +2020,15 @@ async function _buildMrpData(jobId) {
     productionMode:  job.productionMode || "in_house",
     outsourceVendor: job.outsourceVendor || "",
     elastics: (job.elastics || []).map((e) => ({
+      // So the sheet can open the elastic to correct its recipe.
+      id:       e.elastic?._id ? String(e.elastic._id) : null,
       name:     e.elastic?.name || "Unknown",
       quantity: Number(e.quantity) || 0,
     })),
     materials,
+    // When this was worked out: the requirement is read from each
+    // elastic's recipe as it stands at this moment.
+    computedAt: new Date().toISOString(),
   };
 }
 
