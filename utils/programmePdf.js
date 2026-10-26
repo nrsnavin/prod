@@ -389,6 +389,7 @@ const kg = (n) => (Number.isInteger(Number(n)) ? String(n) : Number(n).toFixed(2
 /**
  * data = {
  *   jobOrderNo, customerName, orderNo, dateLabel, status, remarks, branding,
+ *   sheetRef,   // "CV-" + the last six of the covering id
  *   lines: [{ name, quantity, warpSpandex, spandexCovering, spandexEnds, totalWeight }],
  *   beamEntries: [{ beamNo, weight, note }],
  *   producedWeight
@@ -406,7 +407,9 @@ async function buildCoveringProgrammePdf(data) {
       { label: 'Job order', value: data.jobOrderNo != null ? `J-${data.jobOrderNo}` : '—', bold: true },
       { label: 'Opened', value: dash(data.dateLabel) },
       { label: 'Status', value: dash(data.status) },
-      { label: 'Lines', value: lines.length },
+      // Printed so a photo of the filled sheet can be matched back to
+      // this covering (utils/coveringBeamOcr.js reads it).
+      { label: 'Sheet ref', value: dash(data.sheetRef), bold: true },
     ],
   });
 

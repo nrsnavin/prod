@@ -46,7 +46,7 @@ describe('renderPdf', () => {
   it('knows every renderer the routes ask for', () => {
     expect(PDF_NAMES.sort()).toEqual(
       ['elasticPrices', 'elasticSpec', 'eveningReport', 'floorSheet', 'machineLabels', 'materialLedger', 'morningDigest', 'mrp',
-        'orderPnl', 'orderStatus', 'shiftSheet', 'template', 'warpingProgramme', 'coveringProgramme'].sort()
+        'orderPnl', 'orderStatus', 'shiftSheet', 'template', 'warpingProgramme', 'coveringProgramme', 'coveringBeamLabels'].sort()
     );
   });
 

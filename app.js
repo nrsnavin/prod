@@ -685,7 +685,11 @@ app.use("/api/v2/stock-counts", gate('production', 'accounts'),
 app.use("/api/v2/warping",     gate('production'), warping);
 app.use("/api/v2/wastage",     gate('production'), wastage);
 app.use("/api/v2/attendance",  gate('accounts', 'production'), attendence);
-app.use("/api/v2/covering",    gate('production'), covering);
+// Reading a filled covering programme from a photo is an AI call, so it
+// is limited like the timer photos.
+app.use("/api/v2/covering",    gate('production'),
+  (req, res, next) => (req.method === 'POST' && /^\/[^/]+\/beam-sheet$/.test(req.path) ? photoOcrLimiter(req, res, next) : next()),
+  covering);
 // The Machines screen's head-map editor reads a job's assignment.
 app.use("/api/v2/job",         gate('production'),
   requireFeature('/jobs'),

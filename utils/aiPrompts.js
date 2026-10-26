@@ -87,6 +87,12 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'covering-beam-ocr': {
+    version: 'v1.0',
+    notes: 'Handwritten beam numbers and weights off a printed covering programme (S.No | Beam # | Weight (kg) | Remarks, two tables side by side), with the job order and the CV- sheet reference. Advisory: every row is checked before it is saved. Prompt lives in utils/coveringBeamOcr.js.',
+    system: null,
+  },
+
   'inbound-po-ocr': {
     version: 'v1.0',
     notes: "Vision extract of a CUSTOMER's purchase order. Prompt lives in utils/inboundPoOcr.js.",

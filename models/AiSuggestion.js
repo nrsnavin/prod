@@ -58,6 +58,9 @@ const AI_SURFACES = Object.freeze([
   // before it fills the field; settle() records what they used.
   'timer-ocr',
   'production-slip-ocr',
+  // The beam weights written by hand on a printed covering programme,
+  // read from a photo; each row is checked on screen before it is saved.
+  'covering-beam-ocr',
   // Grouping complaint prose into recurring themes. The odd one out in
   // this list: it proposes no value a human then accepts or edits, so it
   // is never settled and its rows stay 'proposed' for ever. It is here

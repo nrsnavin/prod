@@ -145,6 +145,11 @@ describe('the covering programme', () => {
     expect(text).toMatch(/1\.12/);
   });
 
+  it('prints the sheet reference a photo of it is matched back by', async () => {
+    const text = await pdfText(await buildCoveringProgrammePdf(covering({ sheetRef: 'CV-ED789E' })));
+    expect(text).toMatch(/SHEET REF\s*CV-ED789E/);
+  });
+
   it('prints 20 rows for beam weights, numbered across the two halves, blank when nothing is weighed', async () => {
     const text = await pdfText(await buildCoveringProgrammePdf(covering()));
     expect(text).toMatch(/to be entered at the machine/i);

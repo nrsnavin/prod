@@ -93,6 +93,7 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 const { renderPdf } = require("../utils/renderPdf");
 const { getPdfBranding } = require("../services/documentSettings.js");
+const { sheetRefOf } = require("../utils/coveringBeamOcr");
 
 router.get(
   "/:id/programme.pdf",
@@ -121,6 +122,7 @@ router.get(
       orderNo: covering.job?.order?.orderNo ?? null,
       dateLabel: d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "",
       status: String(covering.status || "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()),
+      sheetRef: sheetRefOf(covering._id),
       remarks: covering.remarks || "",
       // Total weight a metre = warp spandex + spandex covering, as the
       // covering page works it out.
@@ -571,6 +573,275 @@ router.delete(
     } finally {
       await session.endSession();
     }
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  THE FILLED COVERING PROGRAMME, READ FROM A PHOTO
+//
+//    POST /covering/:id/beam-sheet     multipart "photos" (1–4, or a PDF)
+//      → { available, reading: { rows: [...each with a status] }, warnings, suggestionId }
+//    POST /covering/:id/beam-entries   { beams: [{ beamNo, weight, note }], suggestionId? }
+//      → the checked rows saved together, as /beam-entry saves one
+//    GET  /covering/:id/beam-labels.pdf[?beams=1,2,3]
+//      → one label a weighed beam, to tie on it
+//
+//  Reading saves nothing: the rows come back marked new / already
+//  recorded (same or a different weight) / duplicated on the sheet /
+//  not readable, and a person checks them before saving. Open to the
+//  same people as /beam-entry — covering operators record their own.
+// ─────────────────────────────────────────────────────────────
+const multer = require("multer");
+const ledger = require("../services/aiLedger");
+const { PROMPTS } = require("../utils/aiPrompts");
+const { readCoveringBeams, MAX_PAGES } = require("../utils/coveringBeamOcr");
+
+const BEAM_SURFACE = "covering-beam-ocr";
+const beamSheetUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: MAX_PAGES },
+});
+const round3 = (n) => Math.round(n * 1000) / 1000;
+const dayLabel = (d) => (d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
+
+/** Each read row, marked against what is already recorded on the covering. */
+function markRows(rows, recorded) {
+  const seen = new Set();
+  return rows.map((r) => {
+    const out = { ...r, status: "new", recordedWeight: null };
+    if (r.beamNo == null || r.weight == null || r.weight > BEAM_WEIGHT_MAX_KG) {
+      out.status = "invalid";
+      return out;
+    }
+    if (seen.has(r.beamNo)) {
+      out.status = "duplicate";
+      return out;
+    }
+    seen.add(r.beamNo);
+    const had = recorded.get(r.beamNo);
+    if (had) {
+      out.recordedWeight = had.weight;
+      out.status = Math.abs(had.weight - r.weight) < 0.0005 ? "recorded_same" : "recorded_different";
+    }
+    return out;
+  });
+}
+
+router.post(
+  "/:id/beam-sheet",
+  (req, res, next) => beamSheetUpload.array("photos", MAX_PAGES)(req, res, (err) => {
+    if (err?.code === "LIMIT_FILE_SIZE") return next(new ErrorHandler("That photo is too large (over 8 MB). Try again with a smaller one.", 400));
+    if (err?.code === "LIMIT_FILE_COUNT" || err?.code === "LIMIT_UNEXPECTED_FILE") {
+      return next(new ErrorHandler(`At most ${MAX_PAGES} photos at a time.`, 400));
+    }
+    return next(err);
+  }),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Invalid covering id", 400));
+    const covering = await Covering.findById(req.params.id)
+      .select("status beamEntries job")
+      .populate({ path: "job", select: "jobOrderNo" })
+      .lean();
+    if (!covering) return next(new ErrorHandler("Covering not found", 404));
+
+    let result;
+    try {
+      result = await readCoveringBeams(req.files || []);
+    } catch (err) {
+      if (err.statusCode) return next(new ErrorHandler(err.message, err.statusCode));
+      return next(err);
+    }
+    if (!result.available) {
+      return res.json({ success: true, available: false, message: "Reading photos is not set up (no AI key). Enter the beams by hand." });
+    }
+
+    const { reading } = result;
+    const recorded = new Map((covering.beamEntries || []).map((b) => [Number(b.beamNo), b]));
+    const rows = markRows(reading.rows, recorded);
+    const jobOrderNo = covering.job?.jobOrderNo ?? null;
+    const sheetRef = sheetRefOf(covering._id);
+
+    const warnings = [];
+    if (reading.jobOrderNo != null && jobOrderNo != null && reading.jobOrderNo !== jobOrderNo) {
+      warnings.push(`This sheet says J-${reading.jobOrderNo}; this covering is for J-${jobOrderNo}.`);
+    }
+    if (reading.sheetRef && reading.sheetRef !== sheetRef) {
+      warnings.push(`This sheet's reference is ${reading.sheetRef}; this covering's is ${sheetRef}.`);
+    }
+    if (covering.status === "completed" || covering.status === "cancelled") {
+      warnings.push(`This covering is ${covering.status}; no beams can be added to it.`);
+    }
+
+    const suggestionId = await ledger.record({
+      surface: BEAM_SURFACE,
+      model: result.model,
+      promptVersion: PROMPTS[BEAM_SURFACE]?.version,
+      refType: "covering",
+      refId: covering._id,
+      // Keyed by beam, so settling diffs each beam's weight on its own.
+      proposed: {
+        beams: Object.fromEntries(rows.filter((r) => r.status !== "invalid" && r.status !== "duplicate").map((r) => [String(r.beamNo), r.weight])),
+      },
+      latencyMs: result.latencyMs,
+      usage: result.usage,
+    });
+
+    res.json({
+      success: true,
+      available: true,
+      reading: { ...reading, rows },
+      warnings,
+      suggestionId,
+      covering: { _id: String(covering._id), jobOrderNo, sheetRef, status: covering.status },
+    });
+  })
+);
+
+router.post(
+  "/:id/beam-entries",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Invalid covering id", 400));
+    const list = req.body?.beams;
+    if (!Array.isArray(list) || !list.length) return next(new ErrorHandler("Send at least one beam", 400));
+    if (list.length > 200) return next(new ErrorHandler("At most 200 beams at a time", 400));
+
+    // The same checks /beam-entry makes, row by row, before anything is written.
+    const beams = [];
+    const inRequest = new Set();
+    for (const [i, b] of list.entries()) {
+      const beam = Number(b?.beamNo);
+      const w = Number(b?.weight);
+      const where = `Row ${i + 1}`;
+      if (!Number.isInteger(beam) || beam <= 0) return next(new ErrorHandler(`${where}: beam number must be a positive whole number`, 400));
+      if (!Number.isFinite(w) || w <= 0) return next(new ErrorHandler(`${where} (beam ${beam}): weight must be a positive number (kg)`, 400));
+      if (w > BEAM_WEIGHT_MAX_KG) return next(new ErrorHandler(`${where} (beam ${beam}): weight ${w} kg exceeds ${BEAM_WEIGHT_MAX_KG} kg for a single beam`, 400));
+      if (inRequest.has(beam)) return next(new ErrorHandler(`Beam ${beam} is listed twice`, 400));
+      inRequest.add(beam);
+      beams.push({ beamNo: beam, weight: round3(w), note: typeof b.note === "string" ? b.note.trim().slice(0, 200) : "" });
+    }
+
+    const session = await mongoose.startSession();
+    let resp;
+    try {
+      await session.withTransaction(async () => {
+        const covering = await Covering.findById(req.params.id).session(session);
+        if (!covering) throw new ErrorHandler("Covering not found", 404);
+        if (covering.status === "completed" || covering.status === "cancelled") {
+          throw new ErrorHandler(`Cannot add beam entries to a ${covering.status} covering`, 400);
+        }
+
+        // A beam already recorded at the same weight is the same beam sent
+        // again (a second press of Save) and is skipped; at a different
+        // weight it is a disagreement nobody has settled, so nothing is
+        // saved until it is — the same rule /beam-entry keeps for one.
+        const recorded = new Map(covering.beamEntries.map((e) => [Number(e.beamNo), e]));
+        const clashes = beams.filter((b) => recorded.has(b.beamNo) && Math.abs(recorded.get(b.beamNo).weight - b.weight) >= 0.0005);
+        if (clashes.length) {
+          const err = new ErrorHandler(
+            clashes.map((b) => `Beam ${b.beamNo} is already recorded at ${recorded.get(b.beamNo).weight} kg`).join("; ") +
+            " — delete that entry first if the weight was wrong", 409);
+          err.code = "BEAM_ALREADY_RECORDED";
+          err.details = { beams: clashes.map((b) => ({ beamNo: b.beamNo, weight: b.weight, recordedWeight: recorded.get(b.beamNo).weight })) };
+          throw err;
+        }
+        const adding = beams.filter((b) => !recorded.has(b.beamNo));
+        const skipped = beams.filter((b) => recorded.has(b.beamNo)).map((b) => b.beamNo);
+
+        const now = new Date();
+        for (const b of adding) {
+          covering.beamEntries.push({ ...b, enteredAt: now, enteredBy: req.user?._id || undefined });
+        }
+        covering.producedWeight = covering.beamEntries.reduce((sum, e) => sum + (e.weight || 0), 0);
+        await covering.save({ session });
+
+        if (adding.length) {
+          const job = await JobOrder.findById(covering.job).session(session);
+          if (job) {
+            let total = covering.beamEntries.length - adding.length;
+            for (const b of adding) {
+              total += 1;
+              job.fingerprints.push(buildFingerprint(ACTION_CODES.COVERING_BEAM_ENTRY, {
+                entityId: covering.job,
+                actor:    actorFromRequest(req),
+                meta: {
+                  coveringId:     covering._id.toString(),
+                  beamNo:         b.beamNo,
+                  weight:         b.weight,
+                  unit:           "kg",
+                  producedWeight: covering.producedWeight,
+                  totalBeams:     total,
+                  note:           b.note || undefined,
+                  source:         "beam-sheet",
+                },
+              }));
+            }
+            await job.save({ session });
+          }
+        }
+
+        const addedNos = new Set(adding.map((b) => b.beamNo));
+        resp = {
+          added: covering.beamEntries.filter((e) => addedNos.has(Number(e.beamNo))).map((e) => ({
+            _id: String(e._id), beamNo: e.beamNo, weight: e.weight, note: e.note || "",
+          })),
+          skipped,
+          producedWeight: round3(covering.producedWeight),
+          totalBeams: covering.beamEntries.length,
+        };
+      });
+    } catch (err) {
+      return next(err);
+    } finally {
+      await session.endSession();
+    }
+
+    // What the person saved, against what was read — after the commit, and
+    // never a reason to fail the save.
+    if (req.body.suggestionId && mongoose.Types.ObjectId.isValid(String(req.body.suggestionId))) {
+      await ledger.settle(String(req.body.suggestionId), {
+        accepted: { beams: Object.fromEntries(beams.map((b) => [String(b.beamNo), b.weight])) },
+        decidedBy: req.user?._id,
+        expectSurface: BEAM_SURFACE,
+        ignoreMissing: true,
+      });
+    }
+    res.status(201).json({ success: true, ...resp });
+  })
+);
+
+router.get(
+  "/:id/beam-labels.pdf",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Invalid covering id", 400));
+    const covering = await Covering.findById(req.params.id)
+      .select("job elasticPlanned beamEntries")
+      .populate({ path: "job", select: "jobOrderNo customer", populate: { path: "customer", select: "name" } })
+      .populate({ path: "elasticPlanned.elastic", select: "name" })
+      .lean();
+    if (!covering) return next(new ErrorHandler("Covering not found", 404));
+
+    // ?beams=3,4 — just those (the ones just saved); otherwise every beam.
+    const only = req.query.beams
+      ? new Set(String(req.query.beams).split(",").map((s) => Number(s.trim())).filter((n) => Number.isInteger(n) && n > 0))
+      : null;
+    const beams = [...(covering.beamEntries || [])]
+      .filter((b) => !only || only.has(Number(b.beamNo)))
+      .sort((a, b) => a.beamNo - b.beamNo)
+      .map((b) => ({ entryId: String(b._id), beamNo: b.beamNo, weight: b.weight, note: b.note || "", dateLabel: dayLabel(b.enteredAt) }));
+
+    const names = [...new Set((covering.elasticPlanned || []).map((l) => l.elastic?.name).filter(Boolean))];
+    const data = {
+      jobOrderNo: covering.job?.jobOrderNo ?? null,
+      coveringId: String(covering._id),
+      customerName: covering.job?.customer?.name || "",
+      elasticName: names.join(" + "),
+      beams,
+      branding: await getPdfBranding(),
+    };
+    const pdf = await renderPdf("coveringBeamLabels", data);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="covering-beam-labels-J-${data.jobOrderNo ?? covering._id}.pdf"`);
+    res.send(pdf);
   })
 );
 
