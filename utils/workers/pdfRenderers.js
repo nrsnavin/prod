@@ -6,6 +6,8 @@
 
 const RENDERERS = Object.freeze({
   mrp:            ['../mrpPdf', 'buildMrpPdf'],
+  warpingProgramme: ['../programmePdf', 'buildWarpingProgrammePdf'],
+  coveringProgramme: ['../programmePdf', 'buildCoveringProgrammePdf'],
   orderStatus:    ['../orderStatusPdf', 'buildOrderStatusPdf'],
   orderPnl:       ['../orderPnlPdf', 'buildOrderPnlPdf'],
   materialLedger: ['../materialLedgerPdf', 'buildMaterialLedgerPdf'],

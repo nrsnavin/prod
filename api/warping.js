@@ -218,12 +218,78 @@ router.get("/list", catchAsyncErrors(async (req, res, next) => {
   });
 }));
 
+// ─────────────────────────────────────────────────────────────
+//  GET /warping/:id/programme.pdf — the warping programme, printable
+//
+//  Drawn on the server (utils/programmePdf.js) rather than printed from
+//  the browser, which put a blank page in front, stranded a tape heading
+//  at the foot of a page and lined no two beam tables up.
+// ─────────────────────────────────────────────────────────────
+const { renderPdf } = require("../utils/renderPdf");
+const { getPdfBranding } = require("../services/documentSettings.js");
+
+const dateLabel = (d) => (d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
+const statusLabel = (s) => String(s || "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+
+router.get("/:id/programme.pdf", catchAsyncErrors(async (req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Invalid warping id", 400));
+  const warping = await Warping.findById(req.params.id)
+    .populate({
+      path: "job", select: "jobOrderNo date customer order",
+      populate: [{ path: "customer", select: "name" }, { path: "order", select: "orderNo" }],
+    })
+    .populate({ path: "elasticOrdered.elastic", select: "name" })
+    .lean();
+  if (!warping) return next(new ErrorHandler("Warping not found", 404));
+  const plan = await WarpingPlan.findOne({ warping: warping._id })
+    .populate("beams.sections.warpYarn", "name")
+    .populate("beams.elastic", "name")
+    .populate("beams.sections.yarnLot", "lotNo shade")
+    .lean();
+
+  const lotOf = (sec) => {
+    const lotNo = sec.lotNo || sec.yarnLot?.lotNo || "";
+    const shade = sec.shade || sec.yarnLot?.shade || "";
+    return lotNo ? (shade ? `${lotNo} · ${shade}` : lotNo) : "";
+  };
+  const data = {
+    jobOrderNo: warping.job?.jobOrderNo ?? null,
+    customerName: warping.job?.customer?.name || "",
+    orderNo: warping.job?.order?.orderNo ?? null,
+    dateLabel: dateLabel(warping.date || warping.createdAt),
+    status: statusLabel(warping.status),
+    remarks: plan?.remarks || "",
+    elastics: (warping.elasticOrdered || []).map((l) => ({ name: l.elastic?.name || "Unknown", quantity: Number(l.quantity) || 0 })),
+    plan: plan ? {
+      beams: (plan.beams || []).map((b, i) => ({
+        beamNo: b.beamNo ?? i + 1,
+        tapeNo: b.tapeNo ?? null,
+        elasticName: b.elastic?.name || "",
+        pairedBeamNo: b.pairedBeamNo ?? null,
+        totalEnds: b.totalEnds ?? null,
+        sections: (b.sections || []).map((s) => ({
+          yarn: s.warpYarn?.name || "",
+          lot: lotOf(s),
+          ends: Number(s.ends) || 0,
+          maxMeters: s.maxMeters ?? null,
+        })),
+      })),
+    } : null,
+    branding: await getPdfBranding(),
+  };
+  const pdf = await renderPdf("warpingProgramme", data);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="warping-programme-J-${data.jobOrderNo ?? warping._id}.pdf"`);
+  res.send(pdf);
+}));
+
 router.get("/detail/:id", catchAsyncErrors(async (req, res, next) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     return next(new ErrorHandler("Invalid warping id", 400));
   }
   const warping = await Warping.findById(req.params.id)
-    .populate({ path: "job", select: "jobOrderNo status date" })
+    // The customer is named on the page and on the printed programme.
+    .populate({ path: "job", select: "jobOrderNo status date customer", populate: { path: "customer", select: "name" } })
     .populate({
       path: "elasticOrdered.elastic",
       populate: [

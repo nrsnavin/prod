@@ -86,6 +86,66 @@ router.get(
   })
 );
 
+// ─────────────────────────────────────────────────────────────
+//  GET /covering/:id/programme.pdf — the covering programme, printable
+//
+//  Drawn on the server (utils/programmePdf.js), like the warping one.
+// ─────────────────────────────────────────────────────────────
+const { renderPdf } = require("../utils/renderPdf");
+const { getPdfBranding } = require("../services/documentSettings.js");
+
+router.get(
+  "/:id/programme.pdf",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Invalid covering id", 400));
+    const covering = await Covering.findById(req.params.id)
+      .populate({
+        path: "job", select: "jobOrderNo date customer order",
+        populate: [{ path: "customer", select: "name" }, { path: "order", select: "orderNo" }],
+      })
+      .populate({
+        path: "elasticPlanned.elastic",
+        select: "name spandexEnds warpSpandex spandexCovering",
+        populate: [
+          { path: "warpSpandex.id", model: "RawMaterial", select: "name" },
+          { path: "spandexCovering.id", model: "RawMaterial", select: "name" },
+        ],
+      })
+      .lean();
+    if (!covering) return next(new ErrorHandler("Covering not found", 404));
+
+    const d = covering.date || covering.createdAt;
+    const data = {
+      jobOrderNo: covering.job?.jobOrderNo ?? null,
+      customerName: covering.job?.customer?.name || "",
+      orderNo: covering.job?.order?.orderNo ?? null,
+      dateLabel: d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "",
+      status: String(covering.status || "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()),
+      remarks: covering.remarks || "",
+      // Total weight a metre = warp spandex + spandex covering, as the
+      // covering page works it out.
+      lines: (covering.elasticPlanned || []).map((l) => {
+        const el = l.elastic || {};
+        return {
+          name: el.name || "Unknown",
+          quantity: Number(l.quantity) || 0,
+          warpSpandex: el.warpSpandex?.id?.name || "",
+          spandexCovering: el.spandexCovering?.id?.name || "",
+          spandexEnds: el.spandexEnds ?? null,
+          totalWeight: (Number(el.warpSpandex?.weight) || 0) + (Number(el.spandexCovering?.weight) || 0),
+        };
+      }),
+      beamEntries: (covering.beamEntries || []).map((b) => ({ beamNo: b.beamNo, weight: b.weight, note: b.note || "" })),
+      producedWeight: covering.producedWeight ?? null,
+      branding: await getPdfBranding(),
+    };
+    const pdf = await renderPdf("coveringProgramme", data);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="covering-programme-J-${data.jobOrderNo ?? covering._id}.pdf"`);
+    res.send(pdf);
+  })
+);
+
 router.get(
   "/detail",
   catchAsyncErrors(async (req, res, next) => {
