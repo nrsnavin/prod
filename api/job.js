@@ -1708,7 +1708,11 @@ router.get('/:jobId', async (req, res) => {
     const fpUser = u => u ? { name: u.name, role: u.role } : null;
 
     const w = job.warping; const wp = w?.warpingPlan;
+    // The ids are what the job page links and acts on (its warping and
+    // covering card); without them every link there was plain text.
     const warping = w ? {
+      _id: String(w._id),
+      hasPlan: !!wp,
       status: w.status || 'open', date: fmtDate(w.date), completedDate: fmtDate(w.completedDate),
       noOfBeams: wp?.noOfBeams || 0, remarks: wp?.remarks || '',
       beams: (wp?.beams || []).map(b => ({
@@ -1728,7 +1732,17 @@ router.get('/:jobId', async (req, res) => {
     } : null;
 
     const co = job.covering;
-    const covering = co ? { status: co.status || 'open', date: fmtDate(co.date), completedDate: fmtDate(co.completedDate), remarks: co.remarks || '', elasticPlanned: mapElasticQty(co.elasticPlanned) } : null;
+    const covering = co ? {
+      _id: String(co._id),
+      status: co.status || 'open', date: fmtDate(co.date), completedDate: fmtDate(co.completedDate), remarks: co.remarks || '', elasticPlanned: mapElasticQty(co.elasticPlanned),
+      // The beams weighed so far, so the job page can show them and add one.
+      beamEntries: (co.beamEntries || []).map((b) => ({ _id: String(b._id), beamNo: b.beamNo, weight: b.weight, note: b.note || '' })),
+      // Summed from the beams themselves when there are any: the stored
+      // total is only kept by the add-beam route.
+      producedWeight: (co.beamEntries || []).length
+        ? Math.round((co.beamEntries || []).reduce((t, b) => t + (Number(b.weight) || 0), 0) * 1000) / 1000
+        : Number(co.producedWeight) || 0,
+    } : null;
 
     const shiftDetails = shiftDocs.map(d => {
       // Until an admin verifies, the operator's numbers live in the

@@ -75,6 +75,7 @@ async function seed() {
     elasticPlanned: [{ elastic: elastic._id, quantity: 1800 }],
     beamEntries: [{ beamNo: 1, weight: 12.5 }],
   });
+  await M.JobOrder.updateOne({ _id: job._id }, { $set: { warping: warping._id, covering: covering._id } });
   return { warping, covering, job, order };
 }
 
@@ -128,5 +129,29 @@ describe('the covering programme PDF', () => {
 
   it('is 404 for a covering that does not exist', async () => {
     expect((await download(`/api/v2/covering/${new mongoose.Types.ObjectId()}/programme.pdf`)).status).toBe(404);
+  });
+});
+
+// ── The job page's warping and covering card ──────────────────────
+// It links to both records, shows whether the warping has a plan, and
+// adds covering beams — all from what GET /job/:id sends. It sent the
+// status alone, so every link there was plain text.
+describe('the job detail, for its warping and covering card', () => {
+  it('carries the warping and covering ids, whether there is a plan, and the covering beams', async () => {
+    const { job, warping, covering } = await seed();
+    const res = await request(app).get(`/api/v2/job/${job._id}`).set('Cookie', cookie());
+    expect(res.status).toBe(200);
+    const d = res.body.data;
+    expect(d.warping).toMatchObject({ _id: String(warping._id), status: 'open', hasPlan: true });
+    expect(d.covering).toMatchObject({ _id: String(covering._id), status: 'in_progress', producedWeight: 12.5 });
+    expect(d.covering.beamEntries).toEqual([expect.objectContaining({ beamNo: 1, weight: 12.5 })]);
+  });
+
+  it('says when the warping has no plan yet', async () => {
+    const { job, warping } = await seed();
+    await M.WarpingPlan.deleteMany({ warping: warping._id });
+    await M.Warping.updateOne({ _id: warping._id }, { $unset: { warpingPlan: 1 } });
+    const res = await request(app).get(`/api/v2/job/${job._id}`).set('Cookie', cookie());
+    expect(res.body.data.warping.hasPlan).toBe(false);
   });
 });
