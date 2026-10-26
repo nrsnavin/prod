@@ -732,6 +732,9 @@ router.get(
           // reason was ever asked for — not that one was withheld.
           reason:          x.reason || "",
           materialsDrawn:  x.materialsDrawn || [],
+          // The job was created though the yarn was short (jobRaise.js).
+          forced:          !!x.forced,
+          forceReason:     x.forceReason || "",
           recordedAt:      x.recordedAt || null,
         })),
         // Elastics added after approval, each with the yarn it drew and

@@ -467,3 +467,88 @@ describe('a job that fails after the yarn has been drawn', () => {
     boom.mockRestore();
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  CREATING THE JOB THOUGH THE EXCESS YARN IS SHORT
+//
+//  Stock is often short on paper because it was never entered, not
+//  because the rack is empty. With force and a reason the job is made:
+//  what is in stock is drawn, the short material is left at 0, and the
+//  ledger, the job and the order all say it was forced and by how much.
+// ══════════════════════════════════════════════════════════════════
+describe('forcing the job through a shortfall', () => {
+  // 200 m over: nylon 4 g/m → 0.8 kg (0.5 in stock), spandex 1 g/m → 0.2 kg.
+  const FORCE = { force: true, forceReason: 'Stock not entered yet, yarn is on the rack' };
+
+  test('the refusal says it can be forced with a reason', async () => {
+    const { elastic } = await makeElastic(0.5);
+    const order = await makeOrder(elastic, 1000);
+    const res = await createJob(order, elastic, 1200);
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/anyway with a reason/i);
+    expect(res.body.details.shortfalls[0]).toMatchObject({ short: 0.3 });
+  });
+
+  test('forced: the job is created, what is in stock is drawn, the short one is left at 0', async () => {
+    const { elastic, nylon, spandex } = await makeElastic(0.5);
+    const order = await makeOrder(elastic, 1000);
+    const res = await createJob(order, elastic, 1200, FORCE);
+    expect(res.status).toBe(201);
+    const jobId = res.body.data.job._id;
+
+    expect(await stockOf(nylon._id)).toBe(0);
+    expect(await stockOf(spandex._id)).toBeCloseTo(0.3, 3);
+
+    // What left, not what was asked for.
+    const rows = await M.MaterialOutward.find({ job: jobId }).lean();
+    const nylonRow = rows.find((r) => String(r.rawMaterial) === String(nylon._id));
+    expect(nylonRow.quantity).toBeCloseTo(0.5, 3);
+    expect(nylonRow.remarks).toMatch(/forced — requested 0\.8, short 0\.3/);
+
+    // The material's ledger records both.
+    const n = await M.RawMaterial.findById(nylon._id).select("+stockMovements").lean();
+    const line = n.stockMovements.slice(-1)[0];
+    expect(line).toMatchObject({ type: 'JOB_CONSUMPTION', quantity: -0.5, requested: -0.8, balance: 0 });
+
+    // The job and the order say it was forced, and why.
+    const job = await M.JobOrder.findById(jobId).lean();
+    const fp = job.fingerprints.find((f) => f.meta?.forced);
+    expect(fp.meta.forceReason).toBe(FORCE.forceReason);
+    expect(fp.meta.shortfalls[0]).toMatchObject({ name: n.name, short: 0.3 });
+    const after = await M.Order.findById(order._id).lean();
+    const excess = after.excessPlanning.slice(-1)[0];
+    expect(excess).toMatchObject({ forced: true, forceReason: FORCE.forceReason });
+    expect(excess.materialsDrawn.find((d) => String(d.rawMaterial) === String(nylon._id)))
+      .toMatchObject({ quantity: 0.5, requested: 0.8 });
+  });
+
+  test('a material with nothing at all is still recorded, and the job is still made', async () => {
+    const { elastic, nylon } = await makeElastic(0);
+    const order = await makeOrder(elastic, 1000);
+    const res = await createJob(order, elastic, 1200, FORCE);
+    expect(res.status).toBe(201);
+    expect(await stockOf(nylon._id)).toBe(0);
+    const n = await M.RawMaterial.findById(nylon._id).select("+stockMovements").lean();
+    expect(n.stockMovements.slice(-1)[0]).toMatchObject({ quantity: 0, requested: -0.8 });
+  });
+
+  test('forcing needs a reason of at least 8 characters, and changes nothing without one', async () => {
+    const { elastic, nylon } = await makeElastic(0.5);
+    const order = await makeOrder(elastic, 1000);
+    const res = await createJob(order, elastic, 1200, { force: true, forceReason: 'short' });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/at least 8 characters/);
+    expect(await M.JobOrder.countDocuments({ order: order._id })).toBe(0);
+    expect(await stockOf(nylon._id)).toBe(0.5);
+  });
+
+  test('force with enough stock is an ordinary job: nothing marked forced', async () => {
+    const { elastic, nylon } = await makeElastic(1000);
+    const order = await makeOrder(elastic, 1000);
+    const res = await createJob(order, elastic, 1200, { force: true });
+    expect(res.status).toBe(201);
+    expect(await stockOf(nylon._id)).toBeCloseTo(1000 - 0.8, 3);
+    const after = await M.Order.findById(order._id).lean();
+    expect(after.excessPlanning.slice(-1)[0].forced).toBe(false);
+  });
+});

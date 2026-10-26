@@ -185,9 +185,16 @@ const OrderSchema = new mongoose.Schema(
             rawMaterial: { type: mongoose.Types.ObjectId, ref: "RawMaterial" },
             name:        { type: String, default: "" },
             quantity:    { type: Number, default: 0 },
+            // What the excess asked for, when a forced job drew less.
+            requested:   { type: Number },
           }, { _id: false })],
           default: [],
         },
+
+        // The job was created though the yarn was short, with a reason
+        // (services/jobRaise.js) — what was in stock was drawn.
+        forced:      { type: Boolean, default: false },
+        forceReason: { type: String, default: "" },
 
         recordedBy: { type: mongoose.Types.ObjectId, ref: "User" },
         recordedAt: { type: Date, default: Date.now },

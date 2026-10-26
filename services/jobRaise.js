@@ -37,8 +37,16 @@ const {
 } = require('./excessPlanning');
 const orderLifecycle = require('./orderLifecycle');
 
+/** As a forced order approval asks for. */
+const MIN_FORCE_REASON = 8;
+const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
+
 /**
- * @param {object} body           { orderId, date, elastics: [{ elastic, quantity }], excessReason? }
+ * @param {object} body           { orderId, date, elastics: [{ elastic, quantity }], excessReason?,
+ *                                  force?, forceReason? }
+ *   force + forceReason: create the job though the excess yarn is short —
+ *   what is in stock is drawn, the rest is recorded as short, as a forced
+ *   order approval does. For stock that was never entered, mostly.
  * @param {object} ctx
  * @param {object} ctx.actor       who is raising it (utils/fingerprint actor)
  * @param {*}      ctx.userId      their user id, for the order's records
@@ -151,6 +159,7 @@ async function raiseJobIn(session, body, { actor, userId }) {
     // excess meter is yarn nobody has deducted. Compute it, refuse if
     // the stock is not there, and draw it below.
     let excessRequirement = [];
+    let shortfalls = [];
     const priceById = new Map();
     if (excessRows.length > 0) {
       excessRequirement = await excessMaterialRequirement(rows);
@@ -167,11 +176,12 @@ async function raiseJobIn(session, body, { actor, userId }) {
       // that has not been received since averaging existed.
       for (const m of materials) priceById.set(String(m._id), costOf(m));
 
-      const shortfalls = stockShortfalls(excessRequirement, stockById);
-      if (shortfalls.length > 0) {
+      shortfalls = stockShortfalls(excessRequirement, stockById);
+      if (shortfalls.length > 0 && body.force !== true) {
         const err = new ErrorHandler(
           'Not enough raw material for the excess quantity — '
-          + shortfalls.map((s) => `${s.name} short by ${s.short} kg`).join('; '),
+          + shortfalls.map((s) => `${s.name} short by ${s.short} kg`).join('; ')
+          + '. Create it anyway with a reason to draw what is in stock.',
           409
         );
         err.code = 'INSUFFICIENT_STOCK_FOR_EXCESS';
@@ -180,20 +190,52 @@ async function raiseJobIn(session, body, { actor, userId }) {
       }
     }
 
+    // ── Forcing through a shortfall ─────────────────────────────
+    // Only when something is actually short, and only with a reason —
+    // the same rule as a forced order approval. Stock is often short on
+    // paper because it was never entered, not because the rack is empty.
+    const forced = body.force === true && shortfalls.length > 0;
+    const forceReason = typeof body.forceReason === 'string' ? body.forceReason.trim() : '';
+    if (forced && forceReason.length < MIN_FORCE_REASON) {
+      throw new ErrorHandler(
+        `forceReason must be at least ${MIN_FORCE_REASON} characters when creating a job through a shortfall`,
+        400
+      );
+    }
+
     // Deduct before the job exists, so a job can never reach the floor
     // on yarn that was not there. Each deduction is a conditional update,
     // `stock: { $gte: qty }`, inside the transaction: a shortfall throws
     // and the whole raise rolls back, draws already made included.
+    //
+    // Forced, a short material gives what it has and is left at 0 — the
+    // draw records both what was wanted and what left, so the gap is on
+    // the ledger rather than inferred from a balance. The filter on the
+    // stock as read keeps that exact inside the transaction.
     const drawn = [];
     if (excessRequirement.length > 0) {
       for (const r of excessRequirement) {
         const qty = Number(r.requiredWeight) || 0;
         if (qty <= 0) continue;
-        const updated = await RawMaterial.findOneAndUpdate(
-          { _id: r.rawMaterial, stock: { $gte: qty } },
-          { $inc: { stock: -qty, totalConsumption: qty } },
-          { new: true, session }
-        );
+        let updated;
+        let applied = qty;
+        if (forced) {
+          const current = await RawMaterial.findById(r.rawMaterial).select('stock name').session(session).lean();
+          if (!current) throw new ErrorHandler(`Raw material ${r.name || r.rawMaterial} not found`, 404);
+          const have = Math.max(0, Number(current.stock) || 0);
+          applied = r3(Math.min(qty, have));
+          updated = await RawMaterial.findOneAndUpdate(
+            { _id: r.rawMaterial, stock: current.stock },
+            { $set: { stock: r3(Math.max(0, have - qty)) }, $inc: { totalConsumption: applied } },
+            { new: true, session }
+          );
+        } else {
+          updated = await RawMaterial.findOneAndUpdate(
+            { _id: r.rawMaterial, stock: { $gte: qty } },
+            { $inc: { stock: -qty, totalConsumption: qty } },
+            { new: true, session }
+          );
+        }
         if (!updated) {
           const err = new ErrorHandler(
             `Raw material ran out while raising this job (${r.name || 'material'}) — nothing was deducted. Try again.`,
@@ -205,7 +247,8 @@ async function raiseJobIn(session, body, { actor, userId }) {
         drawn.push({
           rawMaterial: r.rawMaterial,
           name: r.name || updated.name || '',
-          quantity: qty,
+          quantity: applied,
+          requested: qty,
           balance: updated.stock,
         });
       }
@@ -231,21 +274,29 @@ async function raiseJobIn(session, body, { actor, userId }) {
     // outward row, no ledger row and no refund: yarn gone from the
     // system with nothing anywhere to say where. Everything below this
     // point can now fail without the stock figure lying.
+    // A material that had nothing to give leaves no outward row (there
+    // is no quantity to record), but still has its ledger line saying
+    // what was asked of it.
     if (drawn.length > 0) {
-      await MaterialOutward.create(drawn.map((d) => ({
-        rawMaterial: d.rawMaterial,
-        quantity:    d.quantity,
-        job:         job._id,
-        type:        'JOB_CONSUMPTION',
-        outwardDate: new Date(),
-        unitPrice:   priceById.get(String(d.rawMaterial)) ?? 0,
-        remarks:     `Excess planning on J-${job.jobOrderNo} (order #${order.orderNo})`,
-      })), { session, ordered: true });
+      const withQty = drawn.filter((d) => d.quantity > 0);
+      if (withQty.length) {
+        await MaterialOutward.create(withQty.map((d) => ({
+          rawMaterial: d.rawMaterial,
+          quantity:    d.quantity,
+          job:         job._id,
+          type:        'JOB_CONSUMPTION',
+          outwardDate: new Date(),
+          unitPrice:   priceById.get(String(d.rawMaterial)) ?? 0,
+          remarks:     `Excess planning on J-${job.jobOrderNo} (order #${order.orderNo})`
+            + (d.quantity < d.requested ? ` (forced — requested ${d.requested}, short ${r3(d.requested - d.quantity)})` : ''),
+        })), { session, ordered: true });
+      }
       for (const d of drawn) {
         await appendStockMovement(d.rawMaterial, {
           type: 'JOB_CONSUMPTION',
           refNo: job.jobOrderNo != null ? String(job.jobOrderNo) : '',
-          quantity: -d.quantity,
+          quantity: d.quantity > 0 ? -d.quantity : 0, // never -0 on the ledger
+          ...(d.quantity !== d.requested ? { requested: -d.requested } : {}),
           balance: d.balance,
           unitCost: priceById.get(String(d.rawMaterial)) ?? 0,
         }, session);
@@ -273,6 +324,7 @@ async function raiseJobIn(session, body, { actor, userId }) {
         excessQuantity: excessRows.reduce((s, r) => s + r.excess, 0),
         excessReason:  excessReason || undefined,
         excessMaterialDrawn: drawn.map((d) => `${d.name} ${d.quantity}`),
+        ...(forced ? { forced: true, forceReason, shortfalls } : {}),
       },
     });
     job.fingerprints.push(jobFp);
@@ -298,7 +350,10 @@ async function raiseJobIn(session, body, { actor, userId }) {
         // and there is no honest way to divide a shared material back out.
         materialsDrawn:  drawn.map((d) => ({
           rawMaterial: d.rawMaterial, name: d.name, quantity: d.quantity,
+          ...(d.quantity !== d.requested ? { requested: d.requested } : {}),
         })),
+        forced,
+        forceReason:     forced ? forceReason : '',
         recordedBy:      userId || null,
         recordedAt:      new Date(),
       });
@@ -343,4 +398,4 @@ async function raiseJobIn(session, body, { actor, userId }) {
     return { job, warping, covering, jobFp };
 }
 
-module.exports = { raiseJob };
+module.exports = { raiseJob, MIN_FORCE_REASON };
