@@ -17,6 +17,7 @@ const mongoose   = require('mongoose');
 const router     = express.Router();
 const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
+const { employedFrom } = require('../utils/employeeStatus');
 const ShiftDetail= require('../models/ShiftDetail');
 const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
 const { maybeFireAttendanceCrashed } = require('../utils/attendanceAlerts');
@@ -380,7 +381,8 @@ router.get('/date', isAdmin('admin', 'accounts'), async (req, res) => {
       .sort({ 'employee.name': 1 })
       .lean();
 
-    const allEmployees = await Employee.find({}, 'name department skill role').lean();
+    // Only people still here on that day can be missing from it.
+    const allEmployees = await Employee.find(employedFrom(date), 'name department skill role').lean();
     const markedIds    = new Set(records.map(r => r.employee?._id?.toString() ?? r.employee?.toString()));
     const unmarked     = allEmployees.filter(e => !markedIds.has(e._id.toString()));
 
@@ -700,7 +702,7 @@ router.get('/repeatedly-unmarked', isAdmin('admin', 'accounts'), async (req, res
     }
 
     // 4. Compute unmarked = workingDays - markedDays per active employee.
-    const employees = await Employee.find({})
+    const employees = await Employee.find(employedFrom(since))
       .select('name department')
       .lean();
 

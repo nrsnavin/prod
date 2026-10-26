@@ -45,6 +45,7 @@ require('../models/Machine');
 require('../models/JobOrder');
 const User = require('../models/User');
 const Employee = require('../models/Employee');
+const { employedFrom } = require('../utils/employeeStatus');
 const NotificationSettings = require('../models/NotificationSettings');
 const ErrorHandler = require('../utils/ErrorHandler');
 const { readSlip, SUPPORTED_TYPES } = require('../utils/slipOcr');
@@ -578,7 +579,7 @@ async function stage(slip, fullRead, override) {
     };
   }
   if (!where.plan) {
-    const planDraft = await draftPlan(read.rows);
+    const planDraft = await draftPlan(read.rows, where.dateKey);
     if (planDraft.some((r) => r.machine)) {
       return {
         ...common, status: 'needs_plan', shiftPlan: null, planDraft,
@@ -672,7 +673,7 @@ function matchEmployee(written, employees) {
 }
 
 /** Each row read → the machine it names, its job, and the operator written. */
-async function draftPlan(rows) {
+async function draftPlan(rows, dateKey = null) {
   const machines = await Machine.find().select('_id ID orderRunning')
     .populate({ path: 'orderRunning', model: 'JobOrder', select: 'jobOrderNo' }).lean();
   const byAlnum = new Map();
@@ -682,7 +683,8 @@ async function draftPlan(rows) {
     byAlnum.set(k.alnum, m);
     if (k.number != null) byNumber.set(k.number, [...(byNumber.get(k.number) || []), m]);
   }
-  const employees = await Employee.find().select('_id name department').lean();
+  // Names are matched only among people still here on the slip's date.
+  const employees = await Employee.find(employedFrom(dateKey)).select('_id name department').lean();
 
   const draft = [];
   const seen = new Set();

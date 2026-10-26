@@ -30,6 +30,7 @@ const ShiftPlan = require('../models/ShiftPlan');
 const ShiftDetail = require('../models/ShiftDetail');
 const Machine = require('../models/Machine');
 const Employee = require('../models/Employee');
+const { assertCanWork, employedFrom } = require('../utils/employeeStatus');
 require('../models/JobOrder');
 require('../models/Elastic');
 const ErrorHandler = require('../utils/ErrorHandler');
@@ -242,7 +243,8 @@ async function shiftState({ dateKey, shift }) {
     plan ? await ShiftDetail.find({ _id: { $in: plan.plan || [] } })
       .select('machine employee status submittedProductionMeters submittedTimer submittedFeedback submittedAt submittedByName productionMeters timer feedback verifiedAt')
       .populate({ path: 'employee', select: 'name department' }).lean() : [],
-    await Employee.find().select('name department').sort({ name: 1 }).lean(),
+    // The operators to pick from: whoever is still here on this shift's date.
+    await Employee.find(employedFrom(dateKey)).select('name department').sort({ name: 1 }).lean(),
   ];
   machines.sort((a, b) => String(a.ID).localeCompare(String(b.ID), undefined, { numeric: true, sensitivity: 'base' }));
   const detailByMachine = new Map(details.map((d) => [String(d.machine), d]));
@@ -350,6 +352,7 @@ async function setOperator(session, { machine, operator }) {
   if (plan.finalized) throw new ErrorHandler('This shift is finalised.', 409);
   const emp = await Employee.findById(operator).select('_id').lean();
   if (!emp) throw new ErrorHandler('That operator is not on record.', 404);
+  await assertCanWork([operator], session.dateKey);
 
   const detail = await ShiftDetail.findOne({ shiftPlan: plan._id, machine }).select('status').lean();
   if (!detail) {
@@ -385,6 +388,7 @@ async function enterProduction(session, { detailId, production, timer, feedback,
   }
 
   if (operator && mongoose.isValidObjectId(String(operator))) {
+    await assertCanWork([operator], session.dateKey);
     await ShiftDetail.updateOne({ _id: detail._id, status: { $ne: 'closed' } }, { $set: { employee: operator } });
   }
   const out = await submitProduction(

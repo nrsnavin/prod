@@ -35,6 +35,7 @@
 
 const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
+const { stillHere } = require('../utils/employeeStatus');
 
 /** Statuses that mean a person was at work in some useful capacity. */
 const PRESENT = new Set(['present', 'late']);
@@ -159,7 +160,7 @@ function cellRate(cell, plantRate) {
 async function forecast({ days = DEFAULT_WINDOW_DAYS, now = new Date() } = {}) {
   const cells = await buildTable({ days, now });
 
-  const employees = await Employee.find({ department: 'production' })
+  const employees = await Employee.find({ $and: [{ department: 'production' }, stillHere(now)] })
     .select('name')
     .lean();
   const roster = employees.length;

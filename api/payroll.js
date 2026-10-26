@@ -14,6 +14,7 @@ const PDFDocument      = require('pdfkit');
 const router           = express.Router();
 const Attendance       = require('../models/Attendence');
 const Employee         = require('../models/Employee');
+const { stillHere, employedFrom } = require('../utils/employeeStatus');
 const Payroll          = require('../models/Payroll');
 const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
@@ -77,7 +78,7 @@ router.post('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
 
 router.get('/employees', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const emps = await Employee.find({})
+    const emps = await Employee.find(stillHere())
       .select('name department role skill hourlyRate').sort({ name: 1 }).lean();
     res.json({
       success: true,
@@ -121,7 +122,9 @@ router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
     if (employeeId) {
       empIds = [employeeId];
     } else {
-      const all = await Employee.find({}, '_id name hourlyRate').lean();
+      // Everyone who worked any of the month, a leaver included.
+      const monthStart = `${Number(year)}-${String(Number(month)).padStart(2, '0')}-01`;
+      const all = await Employee.find(employedFrom(monthStart), '_id name hourlyRate').lean();
       empIds  = all.filter(e => (e.hourlyRate ?? 0) > 0).map(e => e._id.toString());
       // Report (don't silently drop) employees with no rate — a missing
       // rate = a missing paycheck, so surface exactly who was skipped.

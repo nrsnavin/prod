@@ -26,6 +26,7 @@ const ShiftDetail = require('../models/ShiftDetail');
 const Machine = require('../models/Machine');
 const JobOrder = require('../models/JobOrder');
 const ErrorHandler = require('../utils/ErrorHandler');
+const { assertCanWork } = require('../utils/employeeStatus');
 const { startingStatus } = require('./machineLoading');
 
 /**
@@ -55,6 +56,8 @@ async function createShiftPlan({ date, shiftType, description = '', machines = [
   const planDate = new Date(date);
   if (Number.isNaN(planDate.getTime())) throw new ErrorHandler('date is not a valid date.', 400);
   planDate.setUTCHours(0, 0, 0, 0);
+  // Nobody who has left by this date goes on it.
+  await assertCanWork(rows.map((m) => m.operator), planDate);
 
   const session = await mongoose.startSession();
   let shiftPlan;
@@ -146,6 +149,7 @@ async function addMachineToPlan(planId, { machine, operator }) {
       if (plan.finalized) throw new ErrorHandler('This shift is finalised; nothing can be added to it.', 409);
       const already = await ShiftDetail.findOne({ shiftPlan: plan._id, machine }).select('_id').session(session).lean();
       if (already) throw new ErrorHandler('That machine is on this shift already.', 409);
+      await assertCanWork([operator], plan.date, { session });
 
       const machineDoc = await Machine.findById(machine).select('elastics orderRunning status loading').session(session).lean();
       if (!machineDoc) throw new ErrorHandler('Machine not found', 404);

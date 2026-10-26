@@ -27,6 +27,7 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const BonusConfig      = require("../models/BonusConfig");
 const BonusRecord      = require("../models/BonusRecord");
 const Employee         = require("../models/Employee");
+const { employedFrom } = require("../utils/employeeStatus");
 const ShiftDetail      = require("../models/ShiftDetail");
 const Attendance       = require("../models/Attendence.js");
 const Payroll          = require("../models/Payroll");
@@ -302,7 +303,8 @@ router.post(
     }
 
     const win = diwaliWindow(cfg, year);
-    const employees = await Employee.find().select("name department hourlyRate bonusPercent");
+    // Everyone who worked any of the bonus year, a leaver included.
+    const employees = await Employee.find(employedFrom(win.start)).select("name department hourlyRate bonusPercent");
 
     if (employees.length === 0) {
       return next(new ErrorHandler("No employees found", 404));
@@ -408,7 +410,8 @@ router.get(
     const cfg  = await getOrCreateConfig(year);
     const win  = diwaliWindow(cfg, year);
 
-    const employees = await Employee.find().select("name department hourlyRate bonusPercent");
+    // Everyone who worked any of the bonus year, a leaver included.
+    const employees = await Employee.find(employedFrom(win.start)).select("name department hourlyRate bonusPercent");
     const rows = [];
     for (const emp of employees) {
       const c = await computeEmployeeBonus(emp, cfg, win);

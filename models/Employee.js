@@ -6,6 +6,9 @@ const SKILL_LEVELS = ["not_known", "basic", "good", "expert"];
 const skillLevel = { type: String, enum: SKILL_LEVELS, default: "not_known" };
 const rating5 = { type: Number, min: 1, max: 5, default: null };
 
+/** Why someone left. "absconded": stopped coming without notice. */
+const OFFBOARD_REASONS = ["resigned", "terminated", "absconded", "retired", "contract_ended", "other"];
+
 const EmployeeSchema = new mongoose.Schema(
   {
     name: {
@@ -92,6 +95,42 @@ const EmployeeSchema = new mongoose.Schema(
       max: 100,
     },
 
+    // ── OFFBOARDING ────────────────────────────────────────
+    // Someone who has left is never deleted: their shifts, attendance,
+    // pay and bonus stay theirs. They are marked, and from the day after
+    // their last working day they are left out of the pickers and the
+    // rosters (utils/employeeStatus.js), cannot be put on a shift, and
+    // cannot sign in. Reinstating them (a rehire) moves the record of
+    // leaving into pastOffboardings.
+    // Documents written before this field existed have no status and
+    // count as active.
+    status: {
+      type: String,
+      enum: ["active", "offboarded"],
+      default: "active",
+      index: true,
+    },
+    offboarding: {
+      lastWorkingDay: { type: Date },
+      reason: { type: String, enum: OFFBOARD_REASONS },
+      note: { type: String, default: "" },
+      recordedBy: { type: mongoose.Types.ObjectId, ref: "User" },
+      recordedByName: { type: String, default: "" },
+      recordedAt: { type: Date },
+    },
+    pastOffboardings: [
+      {
+        _id: false,
+        lastWorkingDay: Date,
+        reason: String,
+        note: String,
+        recordedByName: String,
+        recordedAt: Date,
+        reinstatedAt: Date,
+        reinstatedByName: String,
+      },
+    ],
+
     // NO LONGER WRITTEN. Kept so existing documents still load.
     //
     // A copy of "which shifts did this person work", one ref per shift,
@@ -116,3 +155,4 @@ const EmployeeSchema = new mongoose.Schema(
 const Employee = mongoose.model("Employee", EmployeeSchema);
 
 module.exports = Employee;
+module.exports.OFFBOARD_REASONS = OFFBOARD_REASONS;

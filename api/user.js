@@ -18,6 +18,7 @@ const {
 } = require("../utils/mailer");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { recordAccess } = require("../utils/accessLog");
+const { stillHere } = require("../utils/employeeStatus");
 const { validate, fields: { text, objectId, textish }, z } = require("../middleware/validate");
 
 // ── Request shapes (middleware/validate.js) ─────────────────────────
@@ -560,7 +561,8 @@ router.post(
       401
     ));
 
-    const employees = await Employee.find({ phoneNumber: phone }).select("_id").limit(5).lean();
+    // Someone who has left cannot sign in, even if a PIN were somehow left behind.
+    const employees = await Employee.find({ $and: [{ phoneNumber: phone }, stillHere()] }).select("_id").limit(5).lean();
     const user = employees.length
       ? await User.findOne({ employee: { $in: employees.map((e) => e._id) }, pin: { $exists: true } })
           .select("+pin +pinAttempts +pinLockedUntil")
@@ -1179,7 +1181,7 @@ router.put(
 // ══════════════════════════════════════════════════════════════
 async function workerAccessOf(employeeId) {
   if (!mongoose.isValidObjectId(employeeId)) return { error: ["Employee not found", 404] };
-  const employee = await Employee.findById(employeeId).select("name phoneNumber department").lean();
+  const employee = await Employee.findById(employeeId).select("name phoneNumber department status").lean();
   if (!employee) return { error: ["Employee not found", 404] };
   const login = await User.findOne({ employee: employee._id })
     // Every default field (tokenVersion among them, which a reset bumps)
@@ -1196,6 +1198,7 @@ function workerAccessView(employee, login) {
       name: employee.name,
       phoneNumber: employee.phoneNumber || null,
       department: employee.department || null,
+      status: employee.status || "active",
     },
     login: login
       ? {
@@ -1229,13 +1232,17 @@ router.post(
     const { employee, login: existing, error } = await workerAccessOf(req.params.employeeId);
     if (error) return next(new ErrorHandler(...error));
 
+    if (employee.status === "offboarded") {
+      return next(new ErrorHandler(`${employee.name} has left. Reinstate them before giving them sign-in again.`, 409));
+    }
     const phone = normalisePhone(employee.phoneNumber);
     if (!phone) {
       return next(new ErrorHandler(
         "Add a 10-digit phone number to this employee first. It is what they sign in with.", 400
       ));
     }
-    const shared = await Employee.findOne({ phoneNumber: employee.phoneNumber, _id: { $ne: employee._id } })
+    // Only someone still here can clash: a leaver's number never signs in.
+    const shared = await Employee.findOne({ $and: [{ phoneNumber: employee.phoneNumber, _id: { $ne: employee._id } }, stillHere()] })
       .select("name").lean();
     if (shared) {
       return next(new ErrorHandler(

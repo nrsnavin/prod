@@ -18,6 +18,7 @@ const LeaveRequest = require("../models/LeaveRequest");
 const Attendance   = require("../models/Attendence.js");
 const RawMaterial  = require("../models/RawMaterial");
 const Employee     = require("../models/Employee");
+const { stillHere } = require("../utils/employeeStatus");
 const Order        = require("../models/Order");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -103,7 +104,7 @@ async function computeKpis() {
         },
       },
     ]),
-    Employee.countDocuments({}),
+    Employee.countDocuments(stillHere()),
     // Orders still open whose supply date has passed — the one number
     // a supervisor opens the dashboard to find out. Served by the
     // { status, supplyDate } index.

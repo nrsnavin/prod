@@ -26,6 +26,9 @@ const request = require("supertest");
 const app = require("../../app");
 const Employee = require("../../models/Employee");
 const ShiftDetail = require("../../models/ShiftDetail");
+const { stillHere } = require("../../utils/employeeStatus");
+// Who still works here today (utils/employeeStatus.js), as the routes filter.
+const stillHereFilter = () => stillHere();
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -54,7 +57,7 @@ describe("POST /api/v2/employee/create-employee", () => {
   beforeEach(() => jest.clearAllMocks());
 
   it("returns 201 and the new employee on success", async () => {
-    Employee.findOne = jest.fn().mockResolvedValue(null);
+    Employee.findOne = jest.fn().mockReturnValue({ select: () => ({ lean: jest.fn().mockResolvedValue(null) }) });
     Employee.create = jest.fn().mockResolvedValue(fakeEmployee());
 
     const res = await request(app)
@@ -94,7 +97,7 @@ describe("POST /api/v2/employee/create-employee", () => {
   });
 
   it("returns 409 when phone number already exists", async () => {
-    Employee.findOne = jest.fn().mockResolvedValue(fakeEmployee());
+    Employee.findOne = jest.fn().mockReturnValue({ select: () => ({ lean: jest.fn().mockResolvedValue(fakeEmployee()) }) });
 
     const res = await request(app)
       .post("/api/v2/employee/create-employee")
@@ -127,14 +130,24 @@ describe("GET /api/v2/employee/get-employees", () => {
 
     await request(app).get("/api/v2/employee/get-employees?department=weaving");
 
-    expect(Employee.find).toHaveBeenCalledWith({ department: "weaving" });
+    // Still working here today, and in that department.
+    expect(Employee.find).toHaveBeenCalledWith({ $and: [stillHereFilter(), { department: "weaving" }] });
   });
 
-  it("does not filter when department=all", async () => {
+  it("does not filter by department when department=all", async () => {
     const chain = { select: jest.fn().mockReturnThis(), sort: jest.fn().mockResolvedValue([]) };
     Employee.find = jest.fn().mockReturnValue(chain);
 
     await request(app).get("/api/v2/employee/get-employees?department=all");
+
+    expect(Employee.find).toHaveBeenCalledWith(stillHereFilter());
+  });
+
+  it("lists everyone ever with status=all", async () => {
+    const chain = { select: jest.fn().mockReturnThis(), sort: jest.fn().mockResolvedValue([]) };
+    Employee.find = jest.fn().mockReturnValue(chain);
+
+    await request(app).get("/api/v2/employee/get-employees?status=all");
 
     expect(Employee.find).toHaveBeenCalledWith({});
   });
@@ -276,6 +289,6 @@ describe("GET /api/v2/employee/get-employee-weave", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(Employee.find).toHaveBeenCalledWith({ department: "weaving" });
+    expect(Employee.find).toHaveBeenCalledWith({ $and: [{ department: "weaving" }, stillHereFilter()] });
   });
 });

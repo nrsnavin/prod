@@ -904,7 +904,13 @@ router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, re
       message: `Shift plan saved as draft (${detailCount} machine(s) included).`,
     });
   } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ success: false, message: err.message });
+    if (err.statusCode) {
+      // EMPLOYEE_OFFBOARDED carries who, so the form can point at them.
+      return res.status(err.statusCode).json({
+        success: false, message: err.message,
+        ...(typeof err.code === 'string' ? { code: err.code, details: err.details } : {}),
+      });
+    }
     console.error('[POST /create-shift-plan]', err);
     return res.status(500).json({ success: false, message: err.message });
   }

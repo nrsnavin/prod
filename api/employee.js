@@ -8,6 +8,10 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const Employee         = require("../models/Employee");
 const ShiftDetail      = require("../models/ShiftDetail");
+const User             = require("../models/User");
+const { OFFBOARD_REASONS } = require("../models/Employee");
+const { stillHere, dayOf, factoryToday, fmtDay } = require("../utils/employeeStatus");
+const { isSelfServiceOnly } = require("../utils/features");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { assertVersion } = require("../utils/versioning");
 const aadhaar = require("../utils/aadhaar");
@@ -86,7 +90,13 @@ router.post(
     }
 
     if (phoneNumber) {
-      const existing = await Employee.findOne({ phoneNumber });
+      const existing = await Employee.findOne({ phoneNumber }).select("name status").lean();
+      if (existing?.status === "offboarded") {
+        return next(new ErrorHandler(
+          `${phoneNumber} belongs to ${existing.name}, who has left. Reinstate them from their page instead of adding them again.`,
+          409
+        ));
+      }
       if (existing) {
         return next(
           new ErrorHandler(
@@ -120,15 +130,22 @@ router.post(
 router.get(
   "/get-employees",
   catchAsyncErrors(async (req, res, next) => {
-    const { department } = req.query;
+    const { department, status = "active" } = req.query;
 
-    const filter = {};
+    // active (the default): still working here today, someone serving
+    // notice included. left: gone by today. all: everyone ever.
+    let filter = {};
+    if (status === "left") {
+      filter = { status: "offboarded", "offboarding.lastWorkingDay": { $lt: dayOf(factoryToday()) } };
+    } else if (status !== "all") {
+      filter = stillHere();
+    }
     if (department && department !== "all") {
-      filter.department = department;
+      filter = { $and: [filter, { department }] };
     }
 
     const employees = await Employee.find(filter)
-      .select("name phoneNumber role department performance skill")
+      .select("name phoneNumber role department performance skill status offboarding.lastWorkingDay offboarding.reason")
       .sort({ name: 1 });
 
     res.status(200).json({ success: true, employees });
@@ -204,6 +221,15 @@ router.get(
         skill:       employee.skill       || 0,
         hourlyRate:  employee.hourlyRate  || 0,
         skillProfile: employee.skillProfile || null,
+        status:      employee.status || "active",
+        offboarding: employee.status === "offboarded" ? {
+          lastWorkingDay: employee.offboarding?.lastWorkingDay ?? null,
+          reason:         employee.offboarding?.reason ?? null,
+          note:           employee.offboarding?.note || "",
+          recordedByName: employee.offboarding?.recordedByName || "",
+          recordedAt:     employee.offboarding?.recordedAt ?? null,
+        } : null,
+        pastOffboardings: employee.pastOffboardings || [],
         totalShifts,
         result,
       },
@@ -214,7 +240,7 @@ router.get(
 router.get(
   "/get-employee-weave",
   catchAsyncErrors(async (req, res, next) => {
-    const employees = await Employee.find({ department: "weaving" })
+    const employees = await Employee.find({ $and: [{ department: "weaving" }, stillHere()] })
       .select("name phoneNumber role department")
       .sort({ name: 1 });
 
@@ -405,8 +431,9 @@ router.get(
       return res.json({ success: true, employees: [], count: 0 });
     }
 
+    // Someone who has left is no longer anyone's concern here.
     const employees = await Employee.find({
-      _id: { $in: candidateIds.map((id) => new mongoose.Types.ObjectId(id)) },
+      $and: [{ _id: { $in: candidateIds.map((id) => new mongoose.Types.ObjectId(id)) } }, stillHere()],
     })
       .select("name department")
       .lean();
@@ -424,6 +451,167 @@ router.get(
       .sort((a, b) => b.dropPct - a.dropPct);
 
     return res.json({ success: true, employees: out, count: out.length });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  OFFBOARDING — someone leaves
+//
+//    POST /employee/:id/offboard   { lastWorkingDay: "YYYY-MM-DD", reason, note? }
+//    POST /employee/:id/reinstate  { note? }   — rehired
+//
+//  Admin only. Nothing of theirs is deleted: shifts, attendance, pay and
+//  bonus stay as they were, and periods they worked in still count them
+//  (utils/employeeStatus.js). From the day after their last working day
+//  they are out of the pickers and rosters and cannot be put on a shift.
+//
+//  Refused while they are on a shift after their last working day — a
+//  planned loom would be left with nobody on it; move it first.
+//
+//  A worker login (phone + PIN) is closed at once: the PIN removed and
+//  every open session ended. A manager login (email) is left for the
+//  admin to remove under Users, and the reply says so.
+// ══════════════════════════════════════════════════════════════
+const OFFBOARD_BODY = z.object({
+  lastWorkingDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "lastWorkingDay must look like 2026-10-31"),
+  reason: z.enum(OFFBOARD_REASONS),
+  note: z.string().max(500).optional(),
+});
+
+router.post(
+  "/:id/offboard",
+  isAdmin("admin"),
+  validate({ body: OFFBOARD_BODY }),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Employee not found", 404));
+    const last = dayOf(req.body.lastWorkingDay);
+    if (!last) return next(new ErrorHandler("lastWorkingDay is not a date", 400));
+
+    const employee = await Employee.findById(req.params.id).select("name status offboarding").lean();
+    if (!employee) return next(new ErrorHandler("Employee not found", 404));
+    if (employee.status === "offboarded") {
+      return next(new ErrorHandler(
+        `${employee.name} is already recorded as leaving on ${fmtDay(employee.offboarding?.lastWorkingDay)}.`, 409));
+    }
+
+    // On a shift after the last day: planned (nobody would run the loom)
+    // or even verified (then the last day is wrong).
+    const later = await ShiftDetail.find({ employee: employee._id, date: { $gt: last } })
+      .select("date shift status machine")
+      .populate({ path: "machine", model: "Machine", select: "ID" })
+      .sort({ date: 1 })
+      .limit(20)
+      .lean();
+    if (later.length) {
+      const err = new ErrorHandler(
+        `${employee.name} is on ${later.length === 20 ? "20 or more shifts" : `${later.length} shift${later.length === 1 ? "" : "s"}`} ` +
+        `after ${fmtDay(last)}. Put someone else on ${later.length === 1 ? "it" : "them"} first, or pick a later last working day.`,
+        409);
+      err.code = "EMPLOYEE_HAS_LATER_SHIFTS";
+      err.details = {
+        shifts: later.map((d) => ({
+          id: String(d._id), date: d.date, shift: d.shift || null, status: d.status, machine: d.machine?.ID ?? null,
+        })),
+      };
+      return next(err);
+    }
+
+    const note = (req.body.note || "").trim();
+    const session = await mongoose.startSession();
+    let login = null;
+    let closedPhoneSignIn = false;
+    try {
+      await session.withTransaction(async () => {
+        closedPhoneSignIn = false;
+        const updated = await Employee.updateOne(
+          { _id: employee._id, status: { $ne: "offboarded" } },
+          {
+            $set: {
+              status: "offboarded",
+              offboarding: {
+                lastWorkingDay: last,
+                reason: req.body.reason,
+                note,
+                recordedBy: req.user?._id,
+                recordedByName: req.user?.name || "",
+                recordedAt: new Date(),
+              },
+            },
+          },
+          { session }
+        );
+        if (!updated.modifiedCount) throw new ErrorHandler(`${employee.name} was offboarded meanwhile.`, 409);
+
+        login = await User.findOne({ employee: employee._id })
+          .select("name email department role features employee +pin").session(session);
+        if (login && isSelfServiceOnly(login)) {
+          // Their way in goes now, and so does every session open on a phone.
+          closedPhoneSignIn = !!login.pin;
+          await User.updateOne(
+            { _id: login._id },
+            { $unset: { pin: 1, pinLockedUntil: 1 }, $set: { pinAttempts: 0 }, $inc: { tokenVersion: 1 } },
+            { session }
+          );
+        }
+      });
+    } catch (err) {
+      return next(err);
+    } finally {
+      await session.endSession();
+    }
+
+    if (login && isSelfServiceOnly(login)) {
+      await recordAccess(req, ACTION_CODES.PHONE_SIGNIN_OFF, login, {
+        employee: String(employee._id), via: "offboarding", hadPin: closedPhoneSignIn,
+      });
+    }
+    console.log(`[employee/offboard] ${employee.name} — last day ${fmtDay(last)} (${req.body.reason})`);
+
+    res.json({
+      success: true,
+      employee: { id: String(employee._id), name: employee.name, status: "offboarded", lastWorkingDay: last, reason: req.body.reason },
+      workerLoginClosed: !!(login && isSelfServiceOnly(login)),
+      // Left in place: an email login is the admin's to remove.
+      managerLogin: login && !isSelfServiceOnly(login) ? { id: String(login._id), email: login.email } : null,
+    });
+  })
+);
+
+router.post(
+  "/:id/reinstate",
+  isAdmin("admin"),
+  validate({ body: z.object({ note: z.string().max(500).optional() }) }),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Employee not found", 404));
+    const employee = await Employee.findById(req.params.id).select("name status offboarding").lean();
+    if (!employee) return next(new ErrorHandler("Employee not found", 404));
+    if (employee.status !== "offboarded") return next(new ErrorHandler(`${employee.name} has not left.`, 409));
+
+    const o = employee.offboarding || {};
+    const note = (req.body.note || "").trim();
+    const updated = await Employee.updateOne(
+      { _id: employee._id, status: "offboarded" },
+      {
+        $set: { status: "active" },
+        $unset: { offboarding: 1 },
+        // What happened before is kept: when they left, why, and when they came back.
+        $push: {
+          pastOffboardings: {
+            lastWorkingDay: o.lastWorkingDay,
+            reason: o.reason,
+            note: [o.note, note && `Reinstated: ${note}`].filter(Boolean).join(" · "),
+            recordedByName: o.recordedByName || "",
+            recordedAt: o.recordedAt,
+            reinstatedAt: new Date(),
+            reinstatedByName: req.user?.name || "",
+          },
+        },
+      }
+    );
+    if (!updated.modifiedCount) return next(new ErrorHandler(`${employee.name} was reinstated meanwhile.`, 409));
+    console.log(`[employee/reinstate] ${employee.name}`);
+    // Phone sign-in is not turned back on: the admin sets a new PIN.
+    res.json({ success: true, employee: { id: String(employee._id), name: employee.name, status: "active" } });
   })
 );
 

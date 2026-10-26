@@ -12,6 +12,7 @@ const JobOrder         = require("../models/JobOrder");
 const Order            = require("../models/Order");
 const { recomputePacked } = require("../services/orderPending.js");
 const Employee         = require("../models/Employee");
+const { stillHere } = require("../utils/employeeStatus");
 const Elastic          = require("../models/Elastic");
 const StockMovement    = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
@@ -375,7 +376,7 @@ router.get(
   "/employees-by-department/:dept",
   catchAsyncErrors(async (req, res, next) => {
     const employees = await Employee.find({
-      department: req.params.dept,
+      $and: [{ department: req.params.dept }, stillHere()],
     }).select("_id name").sort({ name: 1 });
 
     res.status(200).json({ success: true, employees });
