@@ -202,7 +202,14 @@ function machineState(m, detail, plan) {
   let why = null;
   if (plan?.finalized) { entry = 'locked'; why = 'This shift is finalised.'; }
   else if (detail?.status === 'closed') { entry = 'verified'; why = 'Verified already.'; }
-  else if (detail?.status === 'loading' || (loading && !detail)) { entry = 'loading'; why = 'The loom is being loaded for its job — nothing to enter.'; }
+  else if (detail?.status === 'loading' || (loading && !detail)) {
+    // Loading is work too: the operator loading it goes on the shift,
+    // with nothing to enter.
+    entry = 'loading';
+    why = detail?.employee
+      ? `Being loaded for its job by ${detail.employee.name || 'the operator on it'} — no production to enter.`
+      : 'Being loaded for its job — no production to enter. Put the operator loading it on the shift.';
+  }
   else if (m.status === 'maintenance') { entry = 'free'; why = 'Under maintenance — nothing to enter.'; }
   else if (!job || m.status !== 'running') { entry = 'free'; why = 'No job on this loom.'; }
   else if (isProductionLocked(job.status)) { entry = 'locked'; why = `Its job is ${job.status}; production is closed.`; }
@@ -251,6 +258,7 @@ function planView(plan) {
       completedAt: plan.floor.completedAt,
       completedBy: plan.floor.completedBy || '',
       freeMachines: (plan.floor.freeMachines || []).map((f) => ({ id: String(f.machine), ID: f.ID, why: f.why || '' })),
+      loadingMachines: (plan.floor.loadingMachines || []).map((f) => ({ id: String(f.machine), ID: f.ID, operatorName: f.operatorName || '' })),
     } : null,
   };
 }
@@ -408,7 +416,7 @@ async function completeFloorPlan(session, { force = false } = {}) {
 
   const [machines, details] = await Promise.all([
     Machine.find().select(MACHINE_FIELDS).populate({ path: 'orderRunning', select: 'jobOrderNo status' }).lean(),
-    ShiftDetail.find({ shiftPlan: plan._id }).select('machine status').lean(),
+    ShiftDetail.find({ shiftPlan: plan._id }).select('machine status employee').populate({ path: 'employee', select: 'name' }).lean(),
   ]);
   const detailByMachine = new Map(details.map((d) => [String(d.machine), d]));
   const rows = machines.map((m) => ({ m, state: machineState(m, detailByMachine.get(String(m._id)) || null, plan) }));
@@ -426,7 +434,11 @@ async function completeFloorPlan(session, { force = false } = {}) {
   const freeMachines = rows
     .filter((r) => r.state.entry === 'free' && !detailByMachine.has(String(r.m._id)))
     .map((r) => ({ machine: r.m._id, ID: r.m.ID, why: r.state.why || '' }));
-  const floor = { completedAt: new Date(), completedBy: session.name, freeMachines };
+  // Looms being loaded that shift, and who loaded them when the floor said.
+  const loadingMachines = rows
+    .filter((r) => r.state.entry === 'loading')
+    .map((r) => ({ machine: r.m._id, ID: r.m.ID, operatorName: detailByMachine.get(String(r.m._id))?.employee?.name || '' }));
+  const floor = { completedAt: new Date(), completedBy: session.name, freeMachines, loadingMachines };
   const written = await ShiftPlan.updateOne(
     { _id: plan._id, 'floor.completedAt': { $exists: false } },
     { $set: { floor } }
@@ -437,6 +449,7 @@ async function completeFloorPlan(session, { force = false } = {}) {
     entered: entered.length,
     toEnter: toEnter.map((r) => r.m.ID),
     freeMachines: freeMachines.map((f) => ({ id: String(f.machine), ID: f.ID, why: f.why })),
+    loadingMachines: loadingMachines.map((f) => ({ id: String(f.machine), ID: f.ID, operatorName: f.operatorName })),
   };
 }
 

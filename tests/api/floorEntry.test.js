@@ -343,14 +343,27 @@ describe('the plan, when nobody made one', () => {
     expect(entry.status).toBe(200);
     expect(entry.body.plan.floor).toBeNull();
 
+    // Sita loaded L3 this shift: on the plan, with nothing to enter.
+    const loading = await f.post('/operator', { machine: String(s.loading._id), operator: String(s.sita._id) });
+    expect(loading.status).toBe(200);
+    expect((await detailOf(plan, s.loading))).toMatchObject({ status: 'loading', employee: s.sita._id });
+    const l3 = (await f.get('/shift')).body.state.machines.find((m) => m.ID === s.loading.ID);
+    expect(l3).toMatchObject({ entry: 'loading', detail: { operator: { name: 'Sita' } } });
+    expect(l3.why).toMatch(/by Sita/);
+
     // L1 was the only loom running a job (L3 loading, L2 free).
     const res = await f.post('/complete', {});
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ entered: 1, toEnter: [], freeMachines: [{ ID: s.free.ID, why: 'No job on this loom.' }] });
+    expect(res.body).toMatchObject({
+      entered: 1, toEnter: [],
+      freeMachines: [{ ID: s.free.ID, why: 'No job on this loom.' }],
+      loadingMachines: [{ ID: s.loading.ID, operatorName: 'Sita' }],
+    });
     expect(res.body.plan).toMatchObject({ status: 'draft', fromFloor: true, floor: { completedBy: 'Kumar', freeMachines: [{ ID: s.free.ID }] } });
     const after = await M.ShiftPlan.findById(plan._id).lean();
     expect(after.floor.completedAt).toBeInstanceOf(Date);
     expect(after.floor.freeMachines.map((m) => m.ID)).toEqual([s.free.ID]);
+    expect(after.floor.loadingMachines).toMatchObject([{ ID: s.loading.ID, operatorName: 'Sita' }]);
     expect(after.status).toBe('draft');
 
     // Not twice; a correction after is still fine.
@@ -360,7 +373,7 @@ describe('the plan, when nobody made one', () => {
 
     // The office sees it, and confirms it there.
     const detail = await adminGet(`/shift/shiftPlanById?id=${plan._id}`);
-    expect(detail.body.data).toMatchObject({ status: 'draft', source: 'floor', floor: { completedBy: 'Kumar', freeMachines: [{ ID: s.free.ID }] } });
+    expect(detail.body.data).toMatchObject({ status: 'draft', source: 'floor', floor: { completedBy: 'Kumar', freeMachines: [{ ID: s.free.ID }], loadingMachines: [{ ID: s.loading.ID, operatorName: 'Sita' }] } });
     expect((await adminPost('/shift/confirm-shift-plan', { id: String(plan._id) })).status).toBe(200);
     expect((await adminGet(`/shift/shiftPlanById?id=${plan._id}`)).body.data.status).toBe('confirmed');
   });
@@ -385,6 +398,8 @@ describe('the plan, when nobody made one', () => {
     expect(forced.status).toBe(200);
     expect(forced.body.toEnter).toEqual([other.ID]);
     expect(forced.body.freeMachines.map((m) => m.ID)).toEqual([s.free.ID]);
+    // A loading loom nobody was put on is still recorded, with nobody.
+    expect(forced.body.loadingMachines).toEqual([{ id: String(s.loading._id), ID: s.loading.ID, operatorName: '' }]);
   });
 
   it('is not for a plan the office made', async () => {

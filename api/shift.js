@@ -266,6 +266,7 @@ router.get(
           completedAt:  shiftPlan.floor.completedAt,
           completedBy:  shiftPlan.floor.completedBy || "",
           freeMachines: (shiftPlan.floor.freeMachines || []).map((f) => ({ id: String(f.machine), ID: f.ID, why: f.why || "" })),
+          loadingMachines: (shiftPlan.floor.loadingMachines || []).map((f) => ({ id: String(f.machine), ID: f.ID, operatorName: f.operatorName || "" })),
         } : null,
         totalProduction,
         status:          shiftPlan.status ?? 'confirmed',

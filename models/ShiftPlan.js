@@ -56,8 +56,9 @@ const ShiftPlanSchema = new mongoose.Schema(
     //         the office's say, and the floor cannot change them.
     // floor   made on the floor tablet from the looms entered, one at a
     //         time (services/floorEntry.js). A draft, for the admin to
-    //         confirm; `floor` records when every running loom was in
-    //         and which looms stood free that shift.
+    //         confirm; `floor` records when it was created, which looms
+    //         stood free that shift and which were being loaded (and by
+    //         whom — an operator loading a loom is working too).
     // Plans from before this field count as the office's.
     source: {
       type: String,
@@ -73,6 +74,14 @@ const ShiftPlanSchema = new mongoose.Schema(
           machine: { type: mongoose.Types.ObjectId, ref: "Machine" },
           ID: { type: String },
           why: { type: String, default: "" },
+        },
+      ],
+      loadingMachines: [
+        {
+          _id: false,
+          machine: { type: mongoose.Types.ObjectId, ref: "Machine" },
+          ID: { type: String },
+          operatorName: { type: String, default: "" },
         },
       ],
     },
