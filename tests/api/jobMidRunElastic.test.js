@@ -72,10 +72,14 @@ async function seed({ jobQty = 5000, orderedB = 3000 } = {}) {
   return { order, job, a, b, c, machine, operator };
 }
 
+// Each shift on its own day: a random day collided with the one before
+// it about once in fifteen runs ("a shift plan already exists").
+let shiftDay = 0;
 async function shiftOn(s) {
   const { createShiftPlan } = require('../../services/shiftPlanCreate');
+  shiftDay += 1;
   const { shiftPlan } = await createShiftPlan({
-    date: `2026-10-${String(10 + Math.floor(Math.random() * 15)).padStart(2, '0')}`, shiftType: 'DAY',
+    date: `2026-${String(1 + Math.floor((shiftDay - 1) / 28)).padStart(2, '0')}-${String(1 + ((shiftDay - 1) % 28)).padStart(2, '0')}`, shiftType: 'DAY',
     machines: [{ machine: s.machine._id, operator: s.operator._id }],
   });
   return M.ShiftDetail.findOne({ shiftPlan: shiftPlan._id });

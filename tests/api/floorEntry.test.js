@@ -3,8 +3,8 @@
 //  THE FLOOR-ENTRY SCREEN — api/floor.js, services/floorEntry.js
 //
 //  A supervisor opens one shift with its PIN (made on the shift card),
-//  puts operators on looms — the plan, if nobody made one — scans a
-//  loom's QR label and enters its production. Every rule the signed-in
+//  scans a loom's QR label, says who ran it — which puts it on the
+//  shift, making the plan when nobody did — and enters its production. Every rule the signed-in
 //  screens follow holds here: loading looms, verified entries, finalised
 //  plans and jobs past weaving are refused; an entry is a submission
 //  pending verification. Rotating the PIN ends every open session.
@@ -291,76 +291,188 @@ describe('scanning a loom', () => {
   });
 });
 
-// ── Planning from the floor ───────────────────────────────────────
+// ── The plan, made from the floor ─────────────────────────────────
 
 describe('the plan, when nobody made one', () => {
-  it('is made from the operators the supervisor put on the looms, as a draft from the floor', async () => {
+  it('is made from the first loom entered, a draft from the floor, and every loom after is added to it', async () => {
     const s = await seed();
     const f = floor((await open({ name: 'Kumar' })).body.token);
-    const res = await f.post('/plan', { rows: [
-      { machine: String(s.running._id), operator: String(s.ravi._id) },
-      { machine: String(s.loading._id), operator: String(s.sita._id) },
-    ] });
-    expect(res.status).toBe(201);
-    expect(res.body.planned).toBe(2);
-    const plan = await M.ShiftPlan.findById(res.body.planId).lean();
+    expect((await f.get('/shift')).body.state.plan).toBeNull();
+
+    const first = await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) });
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ added: true, planCreated: true });
+    const plan = await M.ShiftPlan.findOne({}).lean();
     expect(plan.description).toBe('From the floor (Kumar)');
+    expect(plan.status).toBe('draft');
     expect(plan.finalized).toBeFalsy();
     expect(plan.shift).toBe('DAY');
-    const by = Object.fromEntries(res.body.state.machines.map((m) => [m.ID, m]));
+    const detail = await detailOf(plan, s.running);
+    expect(String(detail._id)).toBe(first.body.detailId);
+    expect(detail).toMatchObject({ status: 'open', employee: s.ravi._id, job: s.job._id });
+
+    const second = await f.post('/operator', { machine: String(s.loading._id), operator: String(s.sita._id) });
+    expect(second.body).toMatchObject({ added: true, planCreated: false });
+    expect(await M.ShiftPlan.countDocuments()).toBe(1);
+    expect((await detailOf(plan, s.loading)).status).toBe('loading');
+
+    const { state } = (await f.get('/shift')).body;
+    expect(state.plan).toMatchObject({ id: String(plan._id), status: 'draft' });
+    const by = Object.fromEntries(state.machines.map((m) => [m.ID, m]));
     expect(by[s.running.ID]).toMatchObject({ entry: 'ready', detail: { operator: { name: 'Ravi' } } });
     expect(by[s.loading.ID]).toMatchObject({ entry: 'loading' });
-    expect((await detailOf(plan, s.loading)).status).toBe('loading');
-    expect(res.body.state.counts.toEnter).toBe(1);
+    expect(state.counts.toEnter).toBe(1);
   });
 
-  it('is refused when a plan exists meanwhile, and when the rows are empty or doubled', async () => {
+  it('"Create shift plan": the looms noted become the plan, the free looms written on it for the office to confirm', async () => {
+    const s = await seed();
+    const f = floor((await open({ name: 'Kumar' })).body.token);
+    // Nothing noted yet: nothing to create.
+    expect((await f.post('/complete', {})).status).toBe(409);
+    const detailId = (await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).body.detailId;
+    // Noted but not entered: not yet.
+    const early = await f.post('/complete', {});
+    expect(early.status).toBe(409);
+    expect(early.body.message).toMatch(/No loom has its production entered/);
+
+    // The office can see the draft all along.
+    const plan = await M.ShiftPlan.findOne({}).lean();
+    expect((await adminGet(`/shift/shiftPlanById?id=${plan._id}`)).body.data).toMatchObject({ status: 'draft', source: 'floor', floor: null });
+
+    const entry = await f.post('/entry', { detailId, production: 820, timer: '7:30' });
+    expect(entry.status).toBe(200);
+    expect(entry.body.plan.floor).toBeNull();
+
+    // L1 was the only loom running a job (L3 loading, L2 free).
+    const res = await f.post('/complete', {});
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ entered: 1, toEnter: [], freeMachines: [{ ID: s.free.ID, why: 'No job on this loom.' }] });
+    expect(res.body.plan).toMatchObject({ status: 'draft', fromFloor: true, floor: { completedBy: 'Kumar', freeMachines: [{ ID: s.free.ID }] } });
+    const after = await M.ShiftPlan.findById(plan._id).lean();
+    expect(after.floor.completedAt).toBeInstanceOf(Date);
+    expect(after.floor.freeMachines.map((m) => m.ID)).toEqual([s.free.ID]);
+    expect(after.status).toBe('draft');
+
+    // Not twice; a correction after is still fine.
+    expect((await f.post('/complete', {})).status).toBe(409);
+    expect((await f.post('/entry', { detailId, production: 830 })).status).toBe(200);
+    expect((await f.get('/shift')).body.state.plan.floor.completedBy).toBe('Kumar');
+
+    // The office sees it, and confirms it there.
+    const detail = await adminGet(`/shift/shiftPlanById?id=${plan._id}`);
+    expect(detail.body.data).toMatchObject({ status: 'draft', source: 'floor', floor: { completedBy: 'Kumar', freeMachines: [{ ID: s.free.ID }] } });
+    expect((await adminPost('/shift/confirm-shift-plan', { id: String(plan._id) })).status).toBe(200);
+    expect((await adminGet(`/shift/shiftPlanById?id=${plan._id}`)).body.data.status).toBe('confirmed');
+  });
+
+  it('with looms still to enter it says which, and creates the plan only when told to anyway', async () => {
+    const s = await seed();
+    const other = await M.Machine.create({
+      ID: `L4-${n}`, manufacturer: 'Comez', NoOfHead: 2, NoOfHooks: 8, status: 'running',
+      orderRunning: s.job._id, elastics: [{ head: 0, elastic: s.elastic._id }],
+    });
+    const f = floor((await open()).body.token);
+    const detailId = (await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).body.detailId;
+    await f.post('/entry', { detailId, production: 820 });
+
+    const held = await f.post('/complete', {});
+    expect(held.status).toBe(409);
+    expect(held.body.code).toBe('FLOOR_LOOMS_TO_ENTER');
+    expect(held.body.details.looms).toEqual([{ id: String(other._id), ID: other.ID }]);
+    expect((await M.ShiftPlan.findOne({}).lean()).floor?.completedAt).toBeUndefined();
+
+    const forced = await f.post('/complete', { force: true });
+    expect(forced.status).toBe(200);
+    expect(forced.body.toEnter).toEqual([other.ID]);
+    expect(forced.body.freeMachines.map((m) => m.ID)).toEqual([s.free.ID]);
+  });
+
+  it('is not for a plan the office made', async () => {
+    const s = await seed();
+    await planned(s);
+    const f = floor((await open()).body.token);
+    const res = await f.post('/complete', {});
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/The office made this shift's plan/);
+  });
+
+  it('a loom that is not on record makes no plan', async () => {
     const s = await seed();
     const f = floor((await open()).body.token);
-    expect((await f.post('/plan', { rows: [] })).status).toBe(400);
-    const doubled = await f.post('/plan', { rows: [
-      { machine: String(s.running._id), operator: String(s.ravi._id) },
-      { machine: String(s.running._id), operator: String(s.sita._id) },
-    ] });
-    expect(doubled.status).toBe(400);
-    expect(doubled.body.message).toMatch(/listed twice/);
+    const res = await f.post('/operator', { machine: String(new mongoose.Types.ObjectId()), operator: String(s.ravi._id) });
+    expect(res.status).toBe(404);
+    expect(await M.ShiftPlan.countDocuments()).toBe(0);
+  });
 
-    await planned(s);
-    const again = await f.post('/plan', { rows: [{ machine: String(s.running._id), operator: String(s.ravi._id) }] });
-    expect(again.status).toBe(409);
-    expect(again.body.code).toBe('PLAN_EXISTS');
-    expect(await M.ShiftPlan.countDocuments()).toBe(1);
+  it('the entry itself still needs the loom on the shift', async () => {
+    const s = await seed();
+    const f = floor((await open()).body.token);
+    const res = await f.post('/entry', { detailId: String(new mongoose.Types.ObjectId()), production: 10 });
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/Choose the operator on this loom first/);
+    void s;
   });
 });
 
 describe('putting an operator on a loom', () => {
-  it('adds a loom the plan left out, and changes the operator on one it has', async () => {
+  it('adds a loom the office plan left out, with the operator chosen on the floor', async () => {
     const s = await seed();
     const plan = await planned(s, [{ machine: s.loading._id, operator: s.sita._id }]);
     const f = floor((await open()).body.token);
 
     const added = await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) });
     expect(added.status).toBe(200);
-    expect(added.body.added).toBe(true);
+    expect(added.body).toMatchObject({ added: true, planCreated: false });
     const detail = await detailOf(plan, s.running);
     expect(detail).toMatchObject({ status: 'open', employee: s.ravi._id, job: s.job._id });
     expect(detail.elastics).toHaveLength(2);
     expect((await M.ShiftPlan.findById(plan._id).lean()).plan.map(String)).toContain(String(detail._id));
     expect((await M.JobOrder.findById(s.job._id).lean()).shiftDetails.map(String)).toContain(String(detail._id));
+  });
+
+  it('on a plan the office made, the operator it put on a loom is not the floor\'s to change', async () => {
+    const s = await seed();
+    const plan = await planned(s);
+    const f = floor((await open()).body.token);
+    const detail = await detailOf(plan, s.running);
+
+    const { state } = (await f.get('/shift')).body;
+    expect(state.plan.fromFloor).toBe(false);
+    const row = state.machines.find((m) => m.ID === s.running.ID);
+    expect(row.detail).toMatchObject({ operator: { name: 'Ravi' }, operatorLocked: true });
+
+    const change = await f.post('/operator', { machine: String(s.running._id), operator: String(s.sita._id) });
+    expect(change.status).toBe(409);
+    expect(change.body.message).toMatch(/The office put Ravi on this loom/);
+    // Saying the same operator again is not a change.
+    expect((await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).status).toBe(200);
+
+    const entry = await f.post('/entry', { detailId: String(detail._id), production: 100, operator: String(s.sita._id) });
+    expect(entry.status).toBe(409);
+    expect(entry.body.message).toMatch(/The office put the operator on this loom/);
+    expect((await f.post('/entry', { detailId: String(detail._id), production: 100, operator: String(s.ravi._id) })).status).toBe(200);
+    expect(String((await detailOf(plan, s.running)).employee)).toBe(String(s.ravi._id));
+  });
+
+  it('on a plan made from the floor, the operator can be changed until the entry is verified', async () => {
+    const s = await seed();
+    const f = floor((await open()).body.token);
+    const first = await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) });
+    expect(first.body.planCreated).toBe(true);
+    expect((await f.get('/shift')).body.state.plan.fromFloor).toBe(true);
+    const plan = await M.ShiftPlan.findOne({}).lean();
+    expect(plan.source).toBe('floor');
 
     const changed = await f.post('/operator', { machine: String(s.running._id), operator: String(s.sita._id) });
     expect(changed.status).toBe(200);
-    expect(changed.body).toMatchObject({ added: false, detailId: String(detail._id) });
+    expect(changed.body).toMatchObject({ added: false, detailId: first.body.detailId });
     expect(String((await detailOf(plan, s.running)).employee)).toBe(String(s.sita._id));
+    expect((await f.get('/shift')).body.state.machines.find((m) => m.ID === s.running.ID).detail.operatorLocked).toBe(false);
   });
 
-  it('is refused with no plan, on a verified entry, on a finalised plan, and for nobody on record', async () => {
+  it('is refused on a verified entry, on a finalised plan, and for nobody on record', async () => {
     const s = await seed();
     const f = floor((await open()).body.token);
-    const noPlan = await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) });
-    expect(noPlan.status).toBe(409);
-    expect(noPlan.body.message).toMatch(/Make the shift plan first/);
-
     const plan = await planned(s);
     expect((await f.post('/operator', { machine: String(s.running._id), operator: String(new mongoose.Types.ObjectId()) })).status).toBe(404);
     await M.ShiftDetail.updateOne({ shiftPlan: plan._id, machine: s.running._id }, { status: 'closed' });
@@ -394,9 +506,10 @@ describe('entering production', () => {
 
   it('can be corrected until verified, and takes the operator with it', async () => {
     const s = await seed();
-    const plan = await planned(s);
-    const detail = await detailOf(plan, s.running);
     const f = floor((await open()).body.token);
+    // A plan made from the floor: its operators are the floor's to change.
+    const detailId = (await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).body.detailId;
+    const detail = await M.ShiftDetail.findById(detailId).lean();
     expect((await f.post('/entry', { detailId: String(detail._id), production: 100, timer: '7:00' })).status).toBe(200);
     const again = await f.post('/entry', { detailId: String(detail._id), production: 120, timer: '07:15:30', operator: String(s.sita._id) });
     expect(again.status).toBe(200);
@@ -453,13 +566,6 @@ describe('entering production', () => {
     expect(fin.body.message).toMatch(/finalised/);
   });
 
-  it('with no plan says to make it first', async () => {
-    const s = await seed();
-    const f = floor((await open()).body.token);
-    const res = await f.post('/entry', { detailId: String(new mongoose.Types.ObjectId()), production: 10 });
-    expect(res.status).toBe(409);
-    expect(res.body.message).toMatch(/Make the shift plan first/);
-  });
 });
 
 // ── The timer photo ───────────────────────────────────────────────

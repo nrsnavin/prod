@@ -35,10 +35,11 @@ const { startingStatus } = require('./machineLoading');
  *   shiftType  'DAY' | 'NIGHT'
  *   description
  *   machines   [{ machine, operator }] — ids; rows missing either are skipped
+ *   source     'office' (default) or 'floor' — see models/ShiftPlan.js
  * @returns {Promise<{ shiftPlan, detailCount }>}
  * @throws ErrorHandler 400 for bad input, 409 when the shift already has a plan
  */
-async function createShiftPlan({ date, shiftType, description = '', machines = [] }) {
+async function createShiftPlan({ date, shiftType, description = '', machines = [], source = 'office' }) {
   if (!date || !shiftType) throw new ErrorHandler('date and shiftType are required.', 400);
   if (!Array.isArray(machines) || machines.length === 0) {
     throw new ErrorHandler('At least one machine must be assigned.', 400);
@@ -70,6 +71,7 @@ async function createShiftPlan({ date, shiftType, description = '', machines = [
       [shiftPlan] = await ShiftPlan.create([{
         date: planDate, shift: shiftType,
         description: String(description).trim(), status: 'draft',
+        source: source === 'floor' ? 'floor' : 'office',
       }], { session });
 
       const machineDocs = await Machine.find({ _id: { $in: rows.map((m) => m.machine) } })

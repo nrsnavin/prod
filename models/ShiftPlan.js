@@ -50,6 +50,32 @@ const ShiftPlanSchema = new mongoose.Schema(
         ref: "ShiftDetail",
       },
     ],
+
+    // ── Where the plan came from ───────────────────────────
+    // office  made in the app before the shift: the operators on it are
+    //         the office's say, and the floor cannot change them.
+    // floor   made on the floor tablet from the looms entered, one at a
+    //         time (services/floorEntry.js). A draft, for the admin to
+    //         confirm; `floor` records when every running loom was in
+    //         and which looms stood free that shift.
+    // Plans from before this field count as the office's.
+    source: {
+      type: String,
+      enum: ["office", "floor"],
+      default: "office",
+    },
+    floor: {
+      completedAt: { type: Date },
+      completedBy: { type: String, default: "" },
+      freeMachines: [
+        {
+          _id: false,
+          machine: { type: mongoose.Types.ObjectId, ref: "Machine" },
+          ID: { type: String },
+          why: { type: String, default: "" },
+        },
+      ],
+    },
   },
   { timestamps: true }
 );

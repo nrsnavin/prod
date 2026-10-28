@@ -3,10 +3,11 @@
 //  THE FLOOR-ENTRY SCREEN — a shift's production, loom by loom
 //
 //  A supervisor with the floor tablet opens one shift with its PIN
-//  (models/ShiftPin.js), sees every loom with its job and head map,
-//  puts an operator on each (the shift plan, if nobody made one), then
-//  scans a loom's QR label and enters what it made: the run time (read
-//  off a photo of the display if they like), the metres a head, a note.
+//  (models/ShiftPin.js), scans a loom's QR label, says who ran it and
+//  enters what it made: the run time (read off a photo of the display
+//  if they like), the metres a head, a note. Nobody plans the shift
+//  first: choosing the operator puts the loom on the shift, and the
+//  first loom entered on a shift nobody planned makes the plan.
 //
 //  Nothing here bypasses the rules the signed-in screens follow:
 //
@@ -157,7 +158,7 @@ async function findPlan(dateKey, shift) {
   const candidates = await ShiftPlan.find({
     shift,
     date: { $gte: centre.clone().subtract(36, 'hours').toDate(), $lte: centre.clone().add(36, 'hours').toDate() },
-  }).select('_id date shift status finalized description plan').lean();
+  }).select('_id date shift status finalized description plan source floor').lean();
   return candidates.find((p) => moment(p.date).format('YYYY-MM-DD') === dateKey)
     || candidates.find((p) => new Date(p.date).toISOString().slice(0, 10) === dateKey)
     || null;
@@ -186,6 +187,11 @@ function headMapOf(m) {
  *          'verified'    verified — locked
  *          'locked'      job past weaving, or plan finalised
  */
+const fromFloor = (plan) => plan?.source === 'floor';
+
+/** On a plan the office made, the operator it put on a loom is its say, not the floor's. */
+const operatorLocked = (plan, detail) => !!(plan && !fromFloor(plan) && detail?.employee);
+
 function machineState(m, detail, plan) {
   const job = m.orderRunning && typeof m.orderRunning === 'object' ? m.orderRunning : null;
   const headMap = headMapOf(m);
@@ -219,6 +225,7 @@ function machineState(m, detail, plan) {
       id: String(detail._id),
       status: detail.status,
       operator: detail.employee ? { id: String(detail.employee._id ?? detail.employee), name: detail.employee.name ?? null } : null,
+      operatorLocked: operatorLocked(plan, detail),
       submitted: detail.status === 'pending_verification' || detail.status === 'closed' ? {
         production: detail.status === 'closed' ? (detail.productionMeters ?? null) : (detail.submittedProductionMeters ?? null),
         timer: detail.status === 'closed' ? (detail.timer || null) : (detail.submittedTimer || null),
@@ -229,6 +236,22 @@ function machineState(m, detail, plan) {
     } : null,
     entry,
     why,
+  };
+}
+
+/** The plan as the floor sees it: whose it is, and whether the floor has finished it. */
+function planView(plan) {
+  return {
+    id: String(plan._id),
+    status: plan.status,
+    finalized: !!plan.finalized,
+    description: plan.description || '',
+    fromFloor: fromFloor(plan),
+    floor: plan.floor?.completedAt ? {
+      completedAt: plan.floor.completedAt,
+      completedBy: plan.floor.completedBy || '',
+      freeMachines: (plan.floor.freeMachines || []).map((f) => ({ id: String(f.machine), ID: f.ID, why: f.why || '' })),
+    } : null,
   };
 }
 
@@ -256,7 +279,7 @@ async function shiftState({ dateKey, shift }) {
     label: `${shiftLabel(shift)} shift · ${dateLabel(dateKey)}`,
     // Said on the screen when the shift opened is not the one running now.
     isCurrent: now.dateKey === dateKey && now.shift === shift,
-    plan: plan ? { id: String(plan._id), status: plan.status, finalized: !!plan.finalized, description: plan.description || '' } : null,
+    plan: plan ? planView(plan) : null,
     machines: rows,
     // Weavers first: they are who runs looms. Everyone is offered.
     operators: operators
@@ -314,54 +337,107 @@ async function machineForShift({ dateKey, shift }, code) {
       .select('machine employee status submittedProductionMeters submittedTimer submittedFeedback submittedAt submittedByName productionMeters timer feedback verifiedAt')
       .populate({ path: 'employee', select: 'name department' }).lean()
     : null;
-  return { plan: plan ? { id: String(plan._id), finalized: !!plan.finalized } : null, machine: machineState(m, detail, plan) };
+  return { plan: plan ? planView(plan) : null, machine: machineState(m, detail, plan) };
 }
 
-// ── Planning from the floor ───────────────────────────────────────
+// ── The plan, made from the floor ─────────────────────────────────
 
-/** The plan, from the operators the supervisor put on each loom. */
-async function planFromFloor(session, rows) {
-  const existing = await findPlan(session.dateKey, session.shift);
-  if (existing) {
-    const err = new ErrorHandler('This shift has a plan already — it was made meanwhile. Carry on with it.', 409);
-    err.code = 'PLAN_EXISTS';
-    throw err;
-  }
-  const machines = (rows || []).filter((r) => r && r.machine && r.operator);
-  if (!machines.length) throw new ErrorHandler('Put an operator on at least one loom.', 400);
-  const seen = new Set();
-  for (const r of machines) {
-    if (seen.has(String(r.machine))) throw new ErrorHandler('A loom is listed twice.', 400);
-    seen.add(String(r.machine));
-  }
-  const { shiftPlan, detailCount } = await createShiftPlan({
-    date: session.dateKey, shiftType: session.shift,
-    description: `From the floor (${session.name})`,
-    machines: machines.map((r) => ({ machine: r.machine, operator: r.operator })),
-  });
-  return { planId: String(shiftPlan._id), planned: detailCount };
-}
-
-/** An operator on a loom: added to the plan, or changed on an entry not yet verified. */
+/**
+ * An operator on a loom. When nobody planned the shift, the first loom
+ * entered MAKES the plan — a draft from the floor, with that one loom —
+ * and every loom after is added to it; when the plan exists, the loom
+ * is added to it, or its operator changed on an entry not yet verified.
+ */
 async function setOperator(session, { machine, operator }) {
   if (!mongoose.isValidObjectId(String(machine)) || !mongoose.isValidObjectId(String(operator))) {
     throw new ErrorHandler('Choose the loom and the operator.', 400);
   }
-  const plan = await findPlan(session.dateKey, session.shift);
-  if (!plan) throw new ErrorHandler('Make the shift plan first.', 409);
-  if (plan.finalized) throw new ErrorHandler('This shift is finalised.', 409);
   const emp = await Employee.findById(operator).select('_id').lean();
   if (!emp) throw new ErrorHandler('That operator is not on record.', 404);
   await assertCanWork([operator], session.dateKey);
 
-  const detail = await ShiftDetail.findOne({ shiftPlan: plan._id, machine }).select('status').lean();
+  let plan = await findPlan(session.dateKey, session.shift);
+  if (!plan) {
+    if (!(await Machine.exists({ _id: machine }))) throw new ErrorHandler('Scan the loom again.', 404);
+    try {
+      const { shiftPlan } = await createShiftPlan({
+        date: session.dateKey, shiftType: session.shift,
+        description: `From the floor (${session.name})`,
+        machines: [{ machine, operator }],
+        source: 'floor',
+      });
+      const detail = await ShiftDetail.findOne({ shiftPlan: shiftPlan._id, machine }).select('_id').lean();
+      return { detailId: String(detail._id), added: true, planCreated: true };
+    } catch (err) {
+      // Another tablet made the plan a moment ago: carry on with that one.
+      if (err.statusCode !== 409) throw err;
+      plan = await findPlan(session.dateKey, session.shift);
+      if (!plan) throw err;
+    }
+  }
+  if (plan.finalized) throw new ErrorHandler('This shift is finalised.', 409);
+
+  const detail = await ShiftDetail.findOne({ shiftPlan: plan._id, machine }).select('status employee')
+    .populate({ path: 'employee', select: 'name' }).lean();
   if (!detail) {
     const created = await addMachineToPlan(plan._id, { machine, operator });
-    return { detailId: String(created._id), added: true };
+    return { detailId: String(created._id), added: true, planCreated: false };
   }
   if (detail.status === 'closed') throw new ErrorHandler('That entry is verified; its operator cannot change now.', 409);
+  if (operatorLocked(plan, detail) && String(detail.employee._id) !== String(operator)) {
+    throw new ErrorHandler(`The office put ${detail.employee.name || 'someone'} on this loom; ask the office to change it.`, 409);
+  }
   await ShiftDetail.updateOne({ _id: detail._id, status: { $ne: 'closed' } }, { $set: { employee: operator } });
-  return { detailId: String(detail._id), added: false };
+  return { detailId: String(detail._id), added: false, planCreated: false };
+}
+
+/**
+ * "Create shift plan" — the supervisor says the shift is entered. The
+ * looms noted so far (the draft the office has been able to see all
+ * along) become the shift's plan: the looms that stood free are written
+ * on it, and it waits for the admin to confirm. Pressed with looms
+ * still to enter it is refused, naming them, unless `force`: they stay
+ * on the shift to be entered later.
+ */
+async function completeFloorPlan(session, { force = false } = {}) {
+  const plan = await findPlan(session.dateKey, session.shift);
+  if (!plan) throw new ErrorHandler('Nothing is entered yet. Scan a loom and choose who ran it first.', 409);
+  if (!fromFloor(plan)) throw new ErrorHandler('The office made this shift\'s plan; there is nothing to create.', 409);
+  if (plan.floor?.completedAt) throw new ErrorHandler('The shift plan is created already — the office confirms it.', 409);
+  if (plan.finalized) throw new ErrorHandler('This shift is finalised.', 409);
+
+  const [machines, details] = await Promise.all([
+    Machine.find().select(MACHINE_FIELDS).populate({ path: 'orderRunning', select: 'jobOrderNo status' }).lean(),
+    ShiftDetail.find({ shiftPlan: plan._id }).select('machine status').lean(),
+  ]);
+  const detailByMachine = new Map(details.map((d) => [String(d.machine), d]));
+  const rows = machines.map((m) => ({ m, state: machineState(m, detailByMachine.get(String(m._id)) || null, plan) }));
+  const entered = rows.filter((r) => r.state.entry === 'entered' || r.state.entry === 'verified');
+  if (!entered.length) throw new ErrorHandler('No loom has its production entered yet.', 409);
+  // Still to enter: a loom that runs a job and has no entry yet.
+  const toEnter = rows.filter((r) => r.state.entry === 'ready' || r.state.entry === 'unplanned');
+  if (toEnter.length && !force) {
+    const err = new ErrorHandler(
+      `${toEnter.length} loom${toEnter.length === 1 ? ' is' : 's are'} still to enter: ${toEnter.map((r) => r.m.ID).join(', ')}.`, 409);
+    err.code = 'FLOOR_LOOMS_TO_ENTER';
+    err.details = { looms: toEnter.map((r) => ({ id: String(r.m._id), ID: r.m.ID })) };
+    throw err;
+  }
+  const freeMachines = rows
+    .filter((r) => r.state.entry === 'free' && !detailByMachine.has(String(r.m._id)))
+    .map((r) => ({ machine: r.m._id, ID: r.m.ID, why: r.state.why || '' }));
+  const floor = { completedAt: new Date(), completedBy: session.name, freeMachines };
+  const written = await ShiftPlan.updateOne(
+    { _id: plan._id, 'floor.completedAt': { $exists: false } },
+    { $set: { floor } }
+  );
+  if (!written.modifiedCount) throw new ErrorHandler('The shift plan was created meanwhile.', 409);
+  return {
+    plan: planView({ ...plan, floor }),
+    entered: entered.length,
+    toEnter: toEnter.map((r) => r.m.ID),
+    freeMachines: freeMachines.map((f) => ({ id: String(f.machine), ID: f.ID, why: f.why })),
+  };
 }
 
 // ── Entering production ───────────────────────────────────────────
@@ -369,8 +445,8 @@ async function setOperator(session, { machine, operator }) {
 async function enterProduction(session, { detailId, production, timer, feedback, operator }) {
   if (!mongoose.isValidObjectId(String(detailId))) throw new ErrorHandler('Scan the loom again.', 400);
   const plan = await findPlan(session.dateKey, session.shift);
-  if (!plan) throw new ErrorHandler('Make the shift plan first.', 409);
-  const detail = await ShiftDetail.findOne({ _id: detailId, shiftPlan: plan._id }).select('status machine').lean();
+  if (!plan) throw new ErrorHandler('Choose the operator on this loom first; that puts it on the shift.', 409);
+  const detail = await ShiftDetail.findOne({ _id: detailId, shiftPlan: plan._id }).select('status machine employee').lean();
   if (!detail) throw new ErrorHandler('That loom is not on this shift. Scan it again.', 404);
   if (detail.status === 'loading') throw new ErrorHandler('The loom was being loaded this shift — there is no production to enter.', 409);
   if (detail.status === 'closed') throw new ErrorHandler('This entry is verified already; it cannot be changed from the floor.', 409);
@@ -387,7 +463,10 @@ async function enterProduction(session, { detailId, production, timer, feedback,
     if (minutes > 12 * 60) throw new ErrorHandler('A shift is 12 hours; the run time cannot be more.', 400);
   }
 
-  if (operator && mongoose.isValidObjectId(String(operator))) {
+  if (operator && mongoose.isValidObjectId(String(operator)) && String(operator) !== String(detail.employee || '')) {
+    if (operatorLocked(plan, detail)) {
+      throw new ErrorHandler('The office put the operator on this loom; ask the office to change it.', 409);
+    }
     await assertCanWork([operator], session.dateKey);
     await ShiftDetail.updateOne({ _id: detail._id, status: { $ne: 'closed' } }, { $set: { employee: operator } });
   }
@@ -404,6 +483,6 @@ module.exports = {
   pinFor, rotatePin, shapePin,
   openFloor, sessionFromToken, issueToken,
   shiftState, machineForShift, resolveMachine, findPlan,
-  planFromFloor, setOperator, enterProduction,
+  setOperator, enterProduction, completeFloorPlan,
   SURFACE, TOKEN_HOURS,
 };

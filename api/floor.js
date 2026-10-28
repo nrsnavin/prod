@@ -5,9 +5,13 @@
 //    POST /api/v2/floor/open            { dateKey, shift, pin, name } → token + state
 //    GET  /api/v2/floor/shift            the shift: looms, plan, operators
 //    GET  /api/v2/floor/machine?code=…   one loom, by QR label / ID
-//    POST /api/v2/floor/plan             { rows: [{ machine, operator }] } — no plan yet
-//    POST /api/v2/floor/operator         { machine, operator }
+//    POST /api/v2/floor/operator         { machine, operator } — puts the loom on the
+//                                        shift; the first one makes the plan when
+//                                        nobody did
 //    POST /api/v2/floor/entry            { detailId, production, timer, feedback, operator }
+//    POST /api/v2/floor/complete         { force? } — "Create shift plan": the looms noted
+//                                        become the plan, free looms written on it; refused
+//                                        with looms still to enter unless forced
 //    POST /api/v2/floor/timer-photo      multipart photo + detailId → reading
 //    POST /api/v2/floor/timer-photo/:photoId/use { runTime }
 //
@@ -62,17 +66,6 @@ router.get('/machine', catchAsyncErrors(async (req, res) => {
 }));
 
 router.post(
-  '/plan',
-  validate({ body: z.object({
-    rows: z.array(z.object({ machine: z.string(), operator: z.string() })).max(500),
-  }) }),
-  catchAsyncErrors(async (req, res) => {
-    const out = await floor.planFromFloor(req.floor, req.body.rows);
-    res.status(201).json({ success: true, ...out, state: await floor.shiftState(req.floor) });
-  })
-);
-
-router.post(
   '/operator',
   validate({ body: z.object({ machine: z.string(), operator: z.string() }) }),
   catchAsyncErrors(async (req, res) => {
@@ -92,7 +85,17 @@ router.post(
   }) }),
   catchAsyncErrors(async (req, res) => {
     const out = await floor.enterProduction(req.floor, req.body);
-    res.json({ success: true, ...out, machine: (await floor.machineForShift(req.floor, out.machineId)).machine });
+    const { plan, machine } = await floor.machineForShift(req.floor, out.machineId);
+    res.json({ success: true, ...out, machine, plan });
+  })
+);
+
+router.post(
+  '/complete',
+  validate({ body: z.object({ force: z.boolean().optional() }) }),
+  catchAsyncErrors(async (req, res) => {
+    const out = await floor.completeFloorPlan(req.floor, { force: !!req.body.force });
+    res.json({ success: true, ...out });
   })
 );
 

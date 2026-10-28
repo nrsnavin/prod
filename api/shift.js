@@ -257,6 +257,16 @@ router.get(
         date:            shiftPlan.date,
         shift:           shiftPlan.shift,
         description:     shiftPlan.description,
+        status:          shiftPlan.status,
+        finalized:       !!shiftPlan.finalized,
+        // Whose plan it is, and — made from the floor — when every running
+        // loom was entered and which looms stood free (see models/ShiftPlan.js).
+        source:          shiftPlan.source || "office",
+        floor:           shiftPlan.floor?.completedAt ? {
+          completedAt:  shiftPlan.floor.completedAt,
+          completedBy:  shiftPlan.floor.completedBy || "",
+          freeMachines: (shiftPlan.floor.freeMachines || []).map((f) => ({ id: String(f.machine), ID: f.ID, why: f.why || "" })),
+        } : null,
         totalProduction,
         status:          shiftPlan.status ?? 'confirmed',
         operatorCount:   shiftPlan.plan.length,
