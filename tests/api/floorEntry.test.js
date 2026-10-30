@@ -634,6 +634,63 @@ describe('reading the run time off a photo', () => {
 
 // ── The labels ────────────────────────────────────────────────────
 
+// ── The shift before's timer photo ────────────────────────────────
+
+describe('the timer photo from the shift before', () => {
+  /** A shift on `date`/`shift` for L1 with Ravi, entered with a kept timer photo. */
+  async function before(s, date, shift, { photo = true } = {}) {
+    const { createShiftPlan } = require('../../services/shiftPlanCreate');
+    const { shiftPlan } = await createShiftPlan({ date, shiftType: shift, machines: [{ machine: s.running._id, operator: s.ravi._id }] });
+    const detail = await M.ShiftDetail.findOne({ shiftPlan: shiftPlan._id, machine: s.running._id });
+    await M.ShiftDetail.updateOne({ _id: detail._id }, { $set: { status: 'pending_verification', submittedTimer: '7:45:00' } });
+    if (!photo) return { detail, photo: null };
+    const kept = await M.TimerPhoto.create({
+      shift: detail._id, contentType: 'image/png', size: PNG.length, data: `data:image/png;base64,${PNG.toString('base64')}`,
+      uploadedByName: 'Night Sup', readText: '07:45:12', readKind: 'run_time', used: true, runTimeUsed: '7:45:00',
+    });
+    return { detail, photo: kept };
+  }
+
+  it('a day shift sees the night before; a night shift sees that day\'s day shift', async () => {
+    const s = await seed();
+    const { photo: night } = await before(s, '2026-10-20', 'NIGHT');
+    const day = floor((await open({ date: DATE, shift: 'DAY' })).body.token);
+    const res = await day.get(`/previous-timer-photo?machine=${s.running._id}`);
+    expect(res.status).toBe(200);
+    expect(res.body.previous).toMatchObject({
+      shift: { dateKey: '2026-10-20', shift: 'NIGHT', label: 'Night shift · 20 Oct 2026' },
+      operator: 'Ravi', runTime: '7:45:00',
+      photo: { id: String(night._id), byName: 'Night Sup', readText: '07:45:12', runTimeUsed: '7:45:00', used: true },
+    });
+
+    const { photo: today } = await before(s, DATE, 'DAY');
+    const nightToken = (await open({ date: DATE, shift: 'NIGHT' })).body.token;
+    const night2 = await floor(nightToken).get(`/previous-timer-photo?machine=${s.running._id}`);
+    expect(night2.body.previous).toMatchObject({ shift: { dateKey: DATE, shift: 'DAY' }, photo: { id: String(today._id) } });
+
+    // The photo itself, with the token in the query so an <img> can ask for it.
+    const file = await request(app).get(`/api/v2/floor/timer-photo/${today._id}/file?floorToken=${nightToken}`)
+      .buffer(true).parse((r, cb) => { const b = []; r.on('data', (c) => b.push(c)); r.on('end', () => cb(null, Buffer.concat(b))); });
+    expect(file.status).toBe(200);
+    expect(file.headers['content-type']).toBe('image/png');
+    expect(Buffer.compare(file.body, PNG)).toBe(0);
+    // The day shift may see the night before's photo too, but not one further back.
+    expect((await day.get(`/timer-photo/${night._id}/file`)).status).toBe(200);
+    const { photo: old } = await before(s, '2026-10-18', 'DAY');
+    expect((await day.get(`/timer-photo/${old._id}/file`)).status).toBe(404);
+  });
+
+  it('says so when the shift before had no plan, no entry on this loom, or no photo', async () => {
+    const s = await seed();
+    const f = floor((await open({ date: DATE, shift: 'DAY' })).body.token);
+    expect((await f.get(`/previous-timer-photo?machine=${s.running._id}`)).body.previous).toMatchObject({ shift: { shift: 'NIGHT' }, operator: null, runTime: null, photo: null });
+    await before(s, '2026-10-20', 'NIGHT', { photo: false });
+    expect((await f.get(`/previous-timer-photo?machine=${s.running._id}`)).body.previous).toMatchObject({ operator: 'Ravi', runTime: '7:45:00', photo: null });
+    expect((await f.get(`/previous-timer-photo?machine=${s.free._id}`)).body.previous).toMatchObject({ operator: null, photo: null });
+    expect((await f.get('/previous-timer-photo?machine=nope')).status).toBe(400);
+  });
+});
+
 describe('the QR labels PDF', () => {
   const download = (q = '') => request(app).get(`/api/v2/machine/qr-labels.pdf${q}`).set('Cookie', cookie(admin))
     .buffer(true).parse((r, cb) => { const b = []; r.on('data', (c) => b.push(c)); r.on('end', () => cb(null, Buffer.concat(b))); });

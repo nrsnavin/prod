@@ -14,6 +14,10 @@
 //                                        with looms still to enter unless forced
 //    POST /api/v2/floor/timer-photo      multipart photo + detailId → reading
 //    POST /api/v2/floor/timer-photo/:photoId/use { runTime }
+//    GET  /api/v2/floor/previous-timer-photo?machine=<id>
+//                                        the loom's timer photo from the shift before
+//    GET  /api/v2/floor/timer-photo/:photoId/file  the photo (this shift's or the one before);
+//                                        takes the token as ?floorToken= too, for an <img>
 //
 //  Every route but /open takes the token in `X-Floor-Token`, scoped to
 //  one date and shift. See services/floorEntry.js.
@@ -136,6 +140,23 @@ router.post(
     if (!photo || !(await detailOnShift(req.floor, photo.shift))) return next(new ErrorHandler('Photo not found', 404));
     await markPhotoUsed(photo._id, runTime, { decidedBy: null });
     res.json({ success: true });
+  })
+);
+
+router.get('/previous-timer-photo', catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, previous: await floor.previousTimerPhoto(req.floor, req.query.machine) });
+}));
+
+router.get(
+  '/timer-photo/:photoId/file',
+  catchAsyncErrors(async (req, res, next) => {
+    const photo = await floor.photoOnFloor(req.floor, req.params.photoId);
+    if (!photo) return next(new ErrorHandler('Photo not found', 404));
+    const buffer = Buffer.from(String(photo.data).split(',', 2)[1] || '', 'base64');
+    res.setHeader('Content-Type', photo.contentType);
+    res.setHeader('Content-Length', buffer.length);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(buffer);
   })
 );
 

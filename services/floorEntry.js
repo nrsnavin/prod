@@ -29,6 +29,7 @@ const mongoose = require('mongoose');
 const ShiftPin = require('../models/ShiftPin');
 const ShiftPlan = require('../models/ShiftPlan');
 const ShiftDetail = require('../models/ShiftDetail');
+const TimerPhoto = require('../models/TimerPhoto');
 const Machine = require('../models/Machine');
 const Employee = require('../models/Employee');
 const { assertCanWork, employedFrom } = require('../utils/employeeStatus');
@@ -453,6 +454,56 @@ async function completeFloorPlan(session, { force = false } = {}) {
   };
 }
 
+// ── The shift before, for the timer photo ─────────────────────────
+
+/** The shift before this one: the night before a day shift, the same day's day shift before a night. */
+function shiftBefore({ dateKey, shift }) {
+  return shift === 'DAY'
+    ? { dateKey: moment.utc(dateKey, 'YYYY-MM-DD').subtract(1, 'day').format('YYYY-MM-DD'), shift: 'NIGHT' }
+    : { dateKey, shift: 'DAY' };
+}
+
+/**
+ * The timer photo taken on this loom the shift before (the one the run
+ * time was filled from, else the latest), shown beside the camera so
+ * the supervisor can see what the display read when the last shift
+ * ended. Null parts where there was no shift, no entry, or no photo.
+ */
+async function previousTimerPhoto(session, machine) {
+  if (!mongoose.isValidObjectId(String(machine))) throw new ErrorHandler('Scan the loom again.', 400);
+  const before = shiftBefore(session);
+  const out = { shift: { ...before, label: `${shiftLabel(before.shift)} shift · ${dateLabel(before.dateKey)}` }, operator: null, runTime: null, photo: null };
+  const plan = await findPlan(before.dateKey, before.shift);
+  if (!plan) return out;
+  const detail = await ShiftDetail.findOne({ shiftPlan: plan._id, machine })
+    .select('employee status timer submittedTimer').populate({ path: 'employee', select: 'name' }).lean();
+  if (!detail) return out;
+  out.operator = detail.employee?.name || null;
+  out.runTime = detail.status === 'closed' ? (detail.timer || null) : (detail.submittedTimer || null);
+  const photo = await TimerPhoto.findOne({ shift: detail._id })
+    .sort({ used: -1, createdAt: -1 })
+    .select('createdAt uploadedByName readText runTimeUsed used').lean();
+  if (photo) {
+    out.photo = {
+      id: String(photo._id), takenAt: photo.createdAt, byName: photo.uploadedByName || '',
+      readText: photo.readText || null, runTimeUsed: photo.runTimeUsed || null, used: !!photo.used,
+    };
+  }
+  return out;
+}
+
+/** Whether a kept photo belongs to the open shift or the one before it — the two the floor may see. */
+async function photoOnFloor(session, photoId) {
+  if (!mongoose.isValidObjectId(String(photoId))) return null;
+  const photo = await TimerPhoto.findById(photoId).select('+data shift contentType').lean();
+  if (!photo) return null;
+  const detail = await ShiftDetail.findById(photo.shift).select('shiftPlan').lean();
+  if (!detail?.shiftPlan) return null;
+  const before = shiftBefore(session);
+  const plans = [await findPlan(session.dateKey, session.shift), await findPlan(before.dateKey, before.shift)];
+  return plans.some((p) => p && String(p._id) === String(detail.shiftPlan)) ? photo : null;
+}
+
 // ── Entering production ───────────────────────────────────────────
 
 async function enterProduction(session, { detailId, production, timer, feedback, operator }) {
@@ -497,5 +548,6 @@ module.exports = {
   openFloor, sessionFromToken, issueToken,
   shiftState, machineForShift, resolveMachine, findPlan,
   setOperator, enterProduction, completeFloorPlan,
+  shiftBefore, previousTimerPhoto, photoOnFloor,
   SURFACE, TOKEN_HOURS,
 };
