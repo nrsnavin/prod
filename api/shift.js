@@ -204,6 +204,9 @@ router.get(
     if (!shiftPlan) return next(new ErrorHandler("Shift Plan not found", 404));
 
     let totalProduction = 0;
+    let draftedProduction = 0;
+    let pendingCount = 0;
+    let verifiedCount = 0;
 
     const machines = await Promise.all(
       shiftPlan.plan.map(async (detail) => {
@@ -233,6 +236,28 @@ router.get(
           }
         }
 
+        // Entered (on the floor, by the operator, or off a slip) but not
+        // verified yet: the figures live in the submitted* fields until an
+        // admin verifies them, and the plan page shows them as a draft.
+        // `submitted.production` is PER HEAD, as entered; `draftProduction`
+        // is that across the heads running, the way the verified
+        // `production` is stored (see /verify-production).
+        const pending = detail.status === "pending_verification";
+        const headsRun = pending ? (headsInUse(machine) || 1) : (detail.headsRun || 0);
+        const submitted = pending ? {
+          production: detail.submittedProductionMeters ?? null,
+          timer:      detail.submittedTimer || null,
+          feedback:   detail.submittedFeedback || "",
+          at:         detail.submittedAt || null,
+          byName:     detail.submittedByName || "",
+        } : null;
+        const draftProduction = pending && submitted.production != null
+          ? Math.round(submitted.production * headsRun * 100) / 100
+          : 0;
+        draftedProduction += draftProduction;
+        if (pending) pendingCount += 1;
+        if (detail.status === "closed") verifiedCount += 1;
+
         return {
           machineId: detail.machine._id,
           machineName: detail.machine.ID ||
@@ -245,6 +270,9 @@ router.get(
           production:   detail.productionMeters || 0,
           timer:        detail.timer,
           status:       detail.status,
+          headsRun,
+          submitted,
+          draftProduction,
           id:           detail._id,
         };
       })
@@ -257,6 +285,10 @@ router.get(
         date:            shiftPlan.date,
         shift:           shiftPlan.shift,
         description:     shiftPlan.description,
+        // Entered but not verified: what the total will be once it is.
+        draftedProduction: Math.round(draftedProduction * 100) / 100,
+        pendingCount,
+        verifiedCount,
         status:          shiftPlan.status,
         finalized:       !!shiftPlan.finalized,
         // Whose plan it is, and — made from the floor — when every running

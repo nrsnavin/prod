@@ -634,6 +634,35 @@ describe('reading the run time off a photo', () => {
 
 // ── The labels ────────────────────────────────────────────────────
 
+// ── What the office sees ──────────────────────────────────────────
+
+describe('the plan page, after the floor enters production', () => {
+  it('shows the entered figures as a draft, which the admin verifies from there', async () => {
+    const s = await seed();
+    const f = floor((await open({ name: 'Kumar' })).body.token);
+    const detailId = (await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).body.detailId;
+    expect((await f.post('/entry', { detailId, production: 820, timer: '7:30', feedback: 'beam changed' })).status).toBe(200);
+    const plan = await M.ShiftPlan.findOne({}).lean();
+
+    // Entered on the floor: 820 m a head on the 2 heads running = 1,640 m drafted, nothing verified yet.
+    const before = (await adminGet(`/shift/shiftPlanById?id=${plan._id}`)).body.data;
+    expect(before).toMatchObject({ totalProduction: 0, draftedProduction: 1640, pendingCount: 1, verifiedCount: 0 });
+    const row = before.machines.find((m) => m.machineName === s.running.ID);
+    expect(row).toMatchObject({
+      status: 'pending_verification', operatorName: 'Ravi', production: 0, headsRun: 2, draftProduction: 1640,
+      submitted: { production: 820, timer: '7:30:00', feedback: 'beam changed', byName: 'Kumar' },
+    });
+    expect(row.submitted.at).toBeTruthy();
+
+    // Verified with the entered figures: the plan carries them for good.
+    const verify = await adminPost('/shift/verify-production', { shiftId: detailId, productionMeters: row.submitted.production, timer: row.submitted.timer });
+    expect(verify.status).toBe(200);
+    const after = (await adminGet(`/shift/shiftPlanById?id=${plan._id}`)).body.data;
+    expect(after).toMatchObject({ totalProduction: 1640, draftedProduction: 0, pendingCount: 0, verifiedCount: 1 });
+    expect(after.machines.find((m) => m.machineName === s.running.ID)).toMatchObject({ status: 'closed', production: 1640, timer: '7:30:00', submitted: null, draftProduction: 0 });
+  });
+});
+
 // ── The shift before's timer photo ────────────────────────────────
 
 describe('the timer photo from the shift before', () => {
