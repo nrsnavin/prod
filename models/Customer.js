@@ -51,7 +51,14 @@ const CustomerSchema = new mongoose.Schema(
             required: true,
             default: "",
         },
-       
+        // Billing address — printed on challans and invoices, and the
+        // buyer block of an e-invoice (Addr1 / Loc / Pin / Stcd).
+        address: { type: String, default: "" },
+        city: { type: String, default: "" },
+        pincode: { type: String, default: "" },
+        // Two-digit GST state code; derived from the GSTIN when blank.
+        stateCode: { type: String, default: "" },
+
         purchase: {
             type: {
                 name: {

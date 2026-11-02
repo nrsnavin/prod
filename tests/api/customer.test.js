@@ -152,7 +152,7 @@ describe("GET /api/v2/customer/customerDetail", () => {
   it("returns 200 with customer data", async () => {
     Customer.findById = jest.fn().mockResolvedValue(fakeCustomer());
 
-    const res = await request(app).get("/api/v2/customer/customerDetail?id=cust1");
+    const res = await request(app).get("/api/v2/customer/customerDetail?id=5f1a2b3c4d5e6f7a8b9c0d1e");
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -162,9 +162,18 @@ describe("GET /api/v2/customer/customerDetail", () => {
   it("returns 404 when customer not found", async () => {
     Customer.findById = jest.fn().mockResolvedValue(null);
 
-    const res = await request(app).get("/api/v2/customer/customerDetail?id=bad");
+    const res = await request(app).get("/api/v2/customer/customerDetail?id=5f1a2b3c4d5e6f7a8b9c0d1e");
 
     expect(res.status).toBe(404);
     expect(res.body.message).toMatch(/not found/i);
+  });
+
+  it("an id that is not an id is 404, not a crash", async () => {
+    Customer.findById = jest.fn();
+
+    const res = await request(app).get("/api/v2/customer/customerDetail?id=bad");
+
+    expect(res.status).toBe(404);
+    expect(Customer.findById).not.toHaveBeenCalled();
   });
 });

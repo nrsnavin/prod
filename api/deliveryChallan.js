@@ -17,6 +17,7 @@ const StockMovement   = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { applyMovement } = require("../utils/elasticStock");
 const Customer          = require("../models/Customer");
+const Elastic           = require("../models/Elastic");
 const { enqueue }       = require("../utils/outbox");
 const { nextNumber }    = require("../utils/sequence");
 const { currentFinancialYear } = require("../utils/financialYear");
@@ -175,6 +176,73 @@ function readDcItems(raw, type) {
   });
 }
 
+/**
+ * The elastics a challan's lines name, looked up once.
+ *
+ * Two things only the database can settle: that each id IS an elastic
+ * (an unknown id used to reach applyMovement, which threw a plain Error
+ * — a 500 for a bad line), and the name printed on the challan. The
+ * name was taken from the client, so a line sent with an id and no name
+ * printed blank; it is the catalogue's name now, whatever was sent.
+ */
+async function resolveElasticLines(items, type) {
+  if (type !== "elastic") return items;
+  const ids = [...new Set(items.map((i) => String(i.elastic)))];
+  const found = await Elastic.find({ _id: { $in: ids } }).select("name").lean();
+  const byId = new Map(found.map((e) => [String(e._id), e]));
+  items.forEach((item, i) => {
+    const e = byId.get(String(item.elastic));
+    if (!e) {
+      throw new ErrorHandler(
+        `Line ${i + 1}${item.elasticName ? ` ("${item.elasticName}")` : ""}: that elastic does not exist`, 400);
+    }
+    item.elasticName = e.name;
+  });
+  return items;
+}
+
+/** A date from the request, or an error: an unreadable one used to be stored as Invalid Date. */
+function readDate(value, label) {
+  if (value === undefined || value === null || value === "") return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) throw new ErrorHandler(`${label} is not a date`, 400);
+  return d;
+}
+
+/**
+ * Would these lines ship more than is on the shelf? Read-only, before a
+ * challan number is drawn: the number comes off an atomic counter that
+ * no transaction can roll back, so a challan refused for stock (the
+ * commonest refusal) used to burn one and leave a gap in a numbered
+ * series. The check inside the transaction stays authoritative.
+ */
+async function previewShortfalls(items, shortfallReason) {
+  const ids = [...new Set(items.map((i) => String(i.elastic)))];
+  const stocks = new Map((await Elastic.find({ _id: { $in: ids } }).select("stock").lean())
+    .map((e) => [String(e._id), Number(e.stock) || 0]));
+  const wanted = new Map();
+  for (const i of items) wanted.set(String(i.elastic), (wanted.get(String(i.elastic)) || 0) + i.quantity);
+  const shortfalls = [];
+  for (const item of items) {
+    const onHand = stocks.get(String(item.elastic)) ?? 0;
+    const shipping = wanted.get(String(item.elastic));
+    if (shipping > onHand && !shortfalls.some((s) => String(s.elastic) === String(item.elastic))) {
+      shortfalls.push({ elastic: item.elastic, name: item.elasticName || "", shipping, onHand, short: Math.round((shipping - onHand) * 1000) / 1000 });
+    }
+  }
+  if (shortfalls.length && String(shortfallReason || "").trim().length < MIN_SHORTFALL_REASON) {
+    const err = new ErrorHandler(
+      "Not enough in stock for this challan — " +
+        shortfalls.map((s) => `${s.name || "an elastic"}: shipping ${s.shipping}, ${s.onHand} in stock`).join("; ") +
+        `. To send it anyway, give a reason (at least ${MIN_SHORTFALL_REASON} characters).`,
+      409
+    );
+    err.code = "DC_STOCK_SHORT";
+    err.details = { shortfalls, minReasonLength: MIN_SHORTFALL_REASON };
+    throw err;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 //  Undo one despatched DC item: goods back on the shelf, and the
 //  promise the despatch discharged put back on the order.
@@ -305,6 +373,9 @@ function orderInfoPayload(order) {
       phone:   order.customer?.phoneNumber  ?? "",
       gstin:   order.customer?.gstin        ?? "",
       contact: order.customer?.contactName  ?? "",
+      // So the consignee's address travels with the goods without
+      // being typed again on every challan.
+      address: order.customer?.address      ?? "",
     },
     elastics: (order.elasticOrdered ?? []).map((e) => ({
       elasticId:   e.elastic?._id,
@@ -316,7 +387,7 @@ function orderInfoPayload(order) {
 }
 
 const populateOrderForDc = (q) => q
-  .populate("customer", "name phoneNumber gstin contactName")
+  .populate("customer", "name phoneNumber gstin contactName address")
   .populate("elasticOrdered.elastic", "name weaveType");
 
 router.get(
@@ -492,13 +563,13 @@ router.get(
 const MIN_SHORTFALL_REASON = 8;
 
 async function _applyDcItems(session, dc, userId, { shortfallReason } = {}) {
+  if (dc.type !== "elastic") return;
     // What each line asked to take out, against what the shelf held at
     // that moment. Stock stops at zero, so without this check a challan
     // could say 500 m left while stock fell by 300 (including when two
     // challans take the last stock at the same time: the second finds
     // it gone). Collected here, decided after the loop.
     const shortfalls = [];
-  if (dc.type !== "elastic") return;
     // Resolve the parent order once. Only Approved/InProgress
     // orders participate in reservation consumption — per
     // user-confirmed scope decision.
@@ -651,8 +722,10 @@ router.post(
       return next(new ErrorHandler("customerName is required", 400));
     }
     let processedItems;
+    let dispatchAt;
     try {
-      processedItems = readDcItems(items, type);
+      processedItems = await resolveElasticLines(readDcItems(items, type), type);
+      dispatchAt = readDate(dispatchDate, "dispatchDate");
     } catch (err) {
       return next(err);
     }
@@ -677,6 +750,11 @@ router.post(
     }
     const resolvedOrderNo = linkedOrder ? linkedOrder.orderNo : undefined;
 
+    // Refused for stock BEFORE a number is drawn (see previewShortfalls).
+    if (type === "elastic") {
+      try { await previewShortfalls(processedItems, req.body?.stockShortfallReason); } catch (err) { return next(err); }
+    }
+
     const financialYear = currentFinancialYear();
     const sequence      = await nextSeq(type, financialYear);
     const dcNumber      = buildDcNumber(type, financialYear, sequence);
@@ -697,7 +775,7 @@ router.post(
           customerPhone:   customerPhone   || "",
           customerGstin:   customerGstin   || "",
           customerAddress: customerAddress || "",
-          dispatchDate:    dispatchDate ? new Date(dispatchDate) : new Date(),
+          dispatchDate:    dispatchAt || new Date(),
           vehicleNo:       vehicleNo   || "",
           driverName:      driverName  || "",
           transporter:     transporter || "",
@@ -851,7 +929,7 @@ router.put(
           // exact hole /create closes: an elastic line with no id moves
           // no stock and never reaches the order, so an edit could turn
           // a working challan into one the system does not see.
-          const nextItems = readDcItems(items, dc.type);
+          const nextItems = await resolveElasticLines(readDcItems(items, dc.type), dc.type);
 
           // 1. Put back everything this challan took. Same reversal the
           //    cancel path uses, so the two cannot disagree.
@@ -874,8 +952,8 @@ router.put(
         // ── The despatch detail ─────────────────────────────────────
         if (customerName !== undefined) dc.customerName = String(customerName).trim();
         if (dispatchDate !== undefined) {
-          const d = dispatchDate ? new Date(dispatchDate) : null;
-          if (d && !isNaN(d.getTime())) dc.dispatchDate = d;
+          const d = readDate(dispatchDate, "dispatchDate");
+          if (d) dc.dispatchDate = d;
         }
         if (vehicleNo   !== undefined) dc.vehicleNo   = String(vehicleNo).trim();
         if (driverName  !== undefined) dc.driverName  = String(driverName).trim();
@@ -972,6 +1050,11 @@ router.get(
 router.get(
   "/detail",
   catchAsyncErrors(async (req, res, next) => {
+    // An id that is not one used to reach findById and come back as a
+    // cast error — a 500 for a bad link.
+    if (!mongoose.Types.ObjectId.isValid(String(req.query.id || ""))) {
+      return next(new ErrorHandler("Delivery Challan not found", 404));
+    }
     const dc = await DeliveryChallan.findById(req.query.id)
       .populate("order",         "orderNo status")
       .populate("items.elastic", "name weaveType")
@@ -1201,6 +1284,9 @@ router.post(
 router.delete(
   "/delete",
   catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(String(req.query.id || ""))) {
+      return next(new ErrorHandler("Delivery Challan not found", 404));
+    }
     const session = await mongoose.startSession();
     try {
       let resp;

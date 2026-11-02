@@ -20,6 +20,7 @@ router.use(isAuthenticated, isAdmin('admin', 'accounts'));
 // can't overwrite protected state.
 const CUSTOMER_FIELDS = [
   "name", "email", "gstin", "status", "contactName", "phoneNumber",
+  "address", "city", "pincode", "stateCode",
   "purchase", "accountant", "merchandiser", "paymentTerms",
 ];
 function pickCustomer(body) {
@@ -156,6 +157,9 @@ router.patch(
 router.get(
   "/customerDetail",
   catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(String(req.query.id || ""))) {
+      return next(new ErrorHandler("Customer not found", 404));
+    }
     const customer = await Customer.findById(req.query.id);
     if (!customer) return next(new ErrorHandler("Customer not found", 404));
     res.status(200).json({ success: true, customer });
