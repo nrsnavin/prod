@@ -1,0 +1,83 @@
+"use strict";
+// ══════════════════════════════════════════════════════════════════
+//  EXPENSE
+//
+//  Money spent that is not a stock purchase: transport, electricity,
+//  rent, repairs, tea. Entered by whoever spent it (with the receipt
+//  photographed), approved by the office when the category or the
+//  amount asks for it, and paid — from the petty-cash box at once, or
+//  later by a payment voucher that settles it like a bill.
+//
+//    pending → approved → paid
+//            ↘ rejected       (and any of them → cancelled)
+//
+//  GST on the expense is kept per line so the input credit is known
+//  where the category allows it.
+// ══════════════════════════════════════════════════════════════════
+
+const mongoose = require("mongoose");
+const { TaxLineSchema, TotalsSchema, AttachmentSchema, FingerprintSchema } = require("./accountsShared");
+
+const ExpenseSchema = new mongoose.Schema(
+  {
+    expenseNo:     { type: String, required: true, unique: true, trim: true },
+    financialYear: { type: String, required: true },
+    sequence:      { type: Number, required: true },
+    requestId:     { type: String, unique: true, sparse: true },
+
+    date:     { type: Date, required: true, default: Date.now },
+    category: { type: mongoose.Types.ObjectId, ref: "ExpenseCategory", required: true },
+    categoryName: { type: String, default: "" },
+    description:  { type: String, required: true, trim: true, maxlength: 200 },
+
+    // Who was paid: a supplier on file, or just a name.
+    supplier:   { type: mongoose.Types.ObjectId, ref: "Supplier" },
+    payeeName:  { type: String, default: "", trim: true, maxlength: 120 },
+    payeeGstin: { type: String, default: "", trim: true },
+    // The payee's bill / receipt number, when there is one.
+    refNo:      { type: String, default: "", trim: true, maxlength: 40 },
+
+    supplyType: { type: String, enum: ["intra", "inter"], default: "intra" },
+    lines:  { type: [TaxLineSchema], default: [] },
+    totals: { type: TotalsSchema, default: () => ({}) },
+    itc: {
+      eligible: { type: Boolean, default: false },
+      amount:   { type: Number, default: 0 },
+    },
+
+    status: { type: String, enum: ["pending", "approved", "rejected", "paid", "cancelled"], default: "pending" },
+    approval: {
+      required: { type: Boolean, default: true },
+      by:       { type: mongoose.Types.ObjectId, ref: "User" },
+      byName:   { type: String, default: "" },
+      at:       { type: Date },
+      note:     { type: String, default: "" },
+    },
+    // Paid at once (petty cash, UPI from the phone) — the voucher that
+    // records it; or settled later by a payment voucher's allocation.
+    paidAmount: { type: Number, default: 0 },
+    paidFrom:   { type: mongoose.Types.ObjectId, ref: "BankAccount" },
+    paidAt:     { type: Date },
+
+    submittedBy:     { type: mongoose.Types.ObjectId, ref: "User" },
+    submittedByName: { type: String, default: "" },
+    notes:       { type: String, default: "", trim: true, maxlength: 500 },
+    attachments: { type: [AttachmentSchema], default: [] },
+    source:      { type: String, default: "manual" },
+    aiSuggestion: { type: mongoose.Types.ObjectId, ref: "AiSuggestion" },
+
+    fingerprints: { type: [FingerprintSchema], default: [] },
+  },
+  { timestamps: true }
+);
+
+ExpenseSchema.index({ financialYear: 1, sequence: 1 });
+ExpenseSchema.index({ status: 1, date: -1 });
+ExpenseSchema.index({ category: 1, date: -1 });
+ExpenseSchema.index({ supplier: 1, date: -1 });
+
+ExpenseSchema.methods.outstanding = function outstanding() {
+  return Math.round(((this.totals?.grand || 0) - this.paidAmount) * 100) / 100;
+};
+
+module.exports = mongoose.model("Expense", ExpenseSchema);

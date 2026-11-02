@@ -19,6 +19,10 @@ const Quote           = require("../models/Quote");
 const StockCount      = require("../models/StockCount");
 const DeliveryChallan = require("../models/DeliveryChallan");
 const Invoice         = require("../models/Invoice");
+const SupplierBill    = require("../models/SupplierBill");
+const Expense         = require("../models/Expense");
+const AccountNote     = require("../models/AccountNote");
+const Payment         = require("../models/Payment");
 const MaterialGroup   = require("../models/MaterialGroup");
 const AccessEvent     = require("../models/AccessEvent");
 
@@ -59,12 +63,16 @@ router.get(
     // neither collection was listed here, so the record existed and was
     // invisible. An audit trail that omits a whole document type is worse
     // than none — it reads as complete.
-    const [orders, jobs, pos, dcs, invoices, quotes, counts, groups] = await Promise.all([
+    const [orders, jobs, pos, dcs, invoices, bills, expenses, notes, vouchers, quotes, counts, groups] = await Promise.all([
       recentFrom(Order,           "Order",           "orderNo",    limit),
       recentFrom(JobOrder,        "JobOrder",        "jobOrderNo", limit),
       recentFrom(PurchaseOrder,   "PurchaseOrder",   "poNo",       limit),
       recentFrom(DeliveryChallan, "DeliveryChallan", "dcNumber",   limit),
       recentFrom(Invoice,         "Invoice",         "invoiceNumber", limit),
+      recentFrom(SupplierBill,    "SupplierBill",    "billNo",     limit),
+      recentFrom(Expense,         "Expense",         "expenseNo",  limit),
+      recentFrom(AccountNote,     "AccountNote",     "noteNo",     limit),
+      recentFrom(Payment,         "Payment",         "voucherNo",  limit),
       recentFrom(Quote,           "Quote",           "quoteNo",    limit),
       recentFrom(StockCount,      "StockCount",      "countNo",    limit),
       // Groups have no document number — `code` is their stable handle,
@@ -87,7 +95,7 @@ router.get(
       reason: null,
     }));
 
-    const entries = [...orders, ...jobs, ...pos, ...dcs, ...invoices, ...quotes, ...counts, ...groups, ...access]
+    const entries = [...orders, ...jobs, ...pos, ...dcs, ...invoices, ...bills, ...expenses, ...notes, ...vouchers, ...quotes, ...counts, ...groups, ...access]
       .filter((e) => e.at)
       .sort((a, b) => new Date(b.at) - new Date(a.at))
       .slice(0, limit);

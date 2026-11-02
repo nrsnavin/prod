@@ -39,6 +39,7 @@ const { getDocumentSettings, getPdfBranding } = require("../services/documentSet
 const { computeInvoice, amountInWords, stateCodeFromGstin } = require("../services/gst");
 const { buildEinvoiceJson, readiness } = require("../services/einvoice");
 const { getProvider } = require("../services/einvoiceProvider");
+const partyLedger = require("../services/partyLedger");
 
 const Invoice         = require("../models/Invoice");
 const Order           = require("../models/Order");
@@ -288,6 +289,8 @@ router.post(
       invoiceNumber: number, requestId: requestId ? String(requestId) : undefined, financialYear: fy, sequence,
       invoiceDate: when,
       order: order._id, orderNo: order.orderNo, customer: order.customer._id, customerPo: order.po || "",
+      // The customer's payment terms ("30" days) decide when it falls due.
+      dueDate: new Date(when.getTime() + (Math.max(0, parseInt(order.customer.paymentTerms, 10) || 0)) * 86_400_000),
       seller, buyer,
       shipTo: String(req.body.shipTo ?? "").trim().slice(0, 300) || shipToFor(chosen, buyer),
       supplyType: priced.supplyType, placeOfSupply: priced.placeOfSupply,
@@ -316,6 +319,11 @@ router.post(
       }
       throw err;
     }
+    // On the customer's account from the day it is issued.
+    await partyLedger.post({
+      partyType: "customer", party: doc.customer, date: doc.invoiceDate, docType: "Invoice", doc: doc._id,
+      docNo: doc.invoiceNumber, debit: doc.totals.grand, narration: `Sales — order #${order.orderNo}`,
+    });
     res.status(201).json({ success: true, invoice: publicInvoice(doc) });
   })
 );
@@ -474,6 +482,13 @@ router.post(
     const inv = await loadInvoice(req.params.id, next);
     if (!inv) return;
     if (inv.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
+    // Money has been received or credited against it: that has to be
+    // undone first, or the receipt would settle an invoice that no
+    // longer exists.
+    if ((inv.paidAmount || 0) > 0 || (inv.creditedAmount || 0) > 0) {
+      return next(new ErrorHandler(
+        "Receipts or credit notes are allocated to this invoice — cancel those first.", 409));
+    }
     const reason = String(req.body?.reason || req.body?.auditReason || "").trim();
     if (reason.length < MIN_REASON) {
       return next(new ErrorHandler(`Give a reason for cancelling (at least ${MIN_REASON} characters)`, 400));
@@ -502,6 +517,7 @@ router.post(
     }
     inv.status = "cancelled";
     inv.cancel = { reason, at: new Date(), by: req.user?._id };
+    await partyLedger.reverse("Invoice", inv._id);
     inv.fingerprints.push(buildFingerprint(ACTION_CODES.INVOICE_CANCELLED, {
       entityId: inv._id, actor: actorFromRequest(req),
       meta: { invoiceNumber: inv.invoiceNumber, reason, irn: inv.einvoice.irn || "" },

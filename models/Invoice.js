@@ -80,6 +80,11 @@ const InvoiceSchema = new mongoose.Schema(
     sequence:      { type: Number, required: true },
 
     invoiceDate:   { type: Date, required: true, default: Date.now },
+    // Invoice date + the customer's payment terms; what ageing counts from.
+    dueDate:       { type: Date },
+    // Settled so far: receipts allocated to it, and credit notes against it.
+    paidAmount:     { type: Number, default: 0 },
+    creditedAmount: { type: Number, default: 0 },
 
     order:    { type: mongoose.Types.ObjectId, ref: "Order", required: true },
     orderNo:  { type: Number },
