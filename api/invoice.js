@@ -40,6 +40,7 @@ const { computeInvoice, amountInWords, stateCodeFromGstin } = require("../servic
 const { buildEinvoiceJson, readiness } = require("../services/einvoice");
 const { getProvider } = require("../services/einvoiceProvider");
 const partyLedger = require("../services/partyLedger");
+const { assertOpen } = require("../services/booksLock");
 
 const Invoice         = require("../models/Invoice");
 const Order           = require("../models/Order");
@@ -244,6 +245,7 @@ router.post(
       when = new Date(invoiceDate);
       if (Number.isNaN(when.getTime())) return next(new ErrorHandler("invoiceDate is not a date", 400));
     }
+    try { await assertOpen(when, req); } catch (err) { return next(err); }
 
     if (requestId) {
       const dup = await Invoice.findOne({ requestId: String(requestId) });
@@ -485,10 +487,11 @@ router.post(
     // Money has been received or credited against it: that has to be
     // undone first, or the receipt would settle an invoice that no
     // longer exists.
-    if ((inv.paidAmount || 0) > 0 || (inv.creditedAmount || 0) > 0) {
+    if ((inv.paidAmount || 0) > 0 || (inv.creditedAmount || 0) > 0 || (inv.debitedAmount || 0) > 0) {
       return next(new ErrorHandler(
-        "Receipts or credit notes are allocated to this invoice — cancel those first.", 409));
+        "Receipts or credit / debit notes are allocated to this invoice — cancel those first.", 409));
     }
+    try { await assertOpen(inv.invoiceDate, req, { cancelling: true }); } catch (err) { return next(err); }
     const reason = String(req.body?.reason || req.body?.auditReason || "").trim();
     if (reason.length < MIN_REASON) {
       return next(new ErrorHandler(`Give a reason for cancelling (at least ${MIN_REASON} characters)`, 400));

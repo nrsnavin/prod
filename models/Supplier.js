@@ -53,6 +53,9 @@ const supplierSchema = new mongoose.Schema(
       type: String,
     },
 
+    // Days after the bill date its bills fall due (and its expenses).
+    paymentTermsDays: { type: Number, default: 30, min: 0, max: 365 },
+
     contactPerson: {
       type: String,
     },

@@ -22,12 +22,17 @@ const { AttachmentSchema, FingerprintSchema } = require("./accountsShared");
 
 const AllocationSchema = new mongoose.Schema(
   {
-    docType: { type: String, enum: ["Invoice", "SupplierBill", "Expense"], required: true },
+    docType: { type: String, enum: ["Invoice", "SupplierBill", "Expense", "OpeningBalance"], required: true },
     doc:     { type: mongoose.Types.ObjectId, required: true },
     docNo:   { type: String, required: true },
     amount:  { type: Number, required: true, min: 0 },
-    // The TDS deducted on this document's share of the voucher.
+    // The TDS deducted on this document's share of the voucher, and the
+    // value it was deducted on (the share net of GST).
     tds:     { type: Number, default: 0, min: 0 },
+    tdsBase: { type: Number, default: 0, min: 0 },
+    // Set when the allocation was made later, from what the voucher
+    // left on account (an advance applied to a later invoice).
+    appliedAt: { type: Date },
   },
   { _id: false }
 );
@@ -60,13 +65,32 @@ const PaymentSchema = new mongoose.Schema(
       section: { type: String, default: "", trim: true },
       rate:    { type: Number, default: 0, min: 0, max: 100 },
       amount:  { type: Number, default: 0, min: 0 },
+      // What it was deducted on: the bills' value net of GST.
+      base:    { type: Number, default: 0, min: 0 },
+    },
+
+    // Settled besides the money: bank charges the bank kept, a discount,
+    // TDS the customer deducted, a round-off, an amount written off.
+    adjustments: {
+      type: [new mongoose.Schema({
+        kind:   { type: String, enum: ["bank_charges", "discount", "tds_by_customer", "round_off", "write_off"], required: true },
+        label:  { type: String, default: "" },
+        amount: { type: Number, required: true, min: 0 },
+        note:   { type: String, default: "" },
+      }, { _id: false })],
+      default: [],
     },
 
     allocations: { type: [AllocationSchema], default: [] },
-    // amount + tds − allocated: what stays on account.
+    // amount + tds + adjustments − allocated: what stays on account,
+    // to be applied to a later document (POST /accounts/credits/apply).
     unallocated: { type: Number, default: 0 },
 
+    // Bank reconciliation: the day the bank's statement showed it.
+    clearedOn: { type: Date },
+
     status: { type: String, enum: ["posted", "cancelled"], default: "posted" },
+    tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date } },
     cancel: { reason: { type: String, default: "" }, at: { type: Date }, by: { type: mongoose.Types.ObjectId, ref: "User" } },
 
     narration:   { type: String, default: "", trim: true, maxlength: 300 },

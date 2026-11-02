@@ -85,6 +85,9 @@ const InvoiceSchema = new mongoose.Schema(
     // Settled so far: receipts allocated to it, and credit notes against it.
     paidAmount:     { type: Number, default: 0 },
     creditedAmount: { type: Number, default: 0 },
+    // Raised by debit notes to the customer (charged more afterwards).
+    debitedAmount:  { type: Number, default: 0 },
+    tally:          { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date } },
 
     order:    { type: mongoose.Types.ObjectId, ref: "Order", required: true },
     orderNo:  { type: Number },

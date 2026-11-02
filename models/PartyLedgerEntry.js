@@ -25,7 +25,7 @@ const PartyLedgerEntrySchema = new mongoose.Schema(
     partyType: { type: String, enum: ["customer", "supplier"], required: true },
     party:     { type: mongoose.Types.ObjectId, required: true },
     date:      { type: Date, required: true },
-    docType:   { type: String, enum: ["Invoice", "SupplierBill", "Expense", "AccountNote", "Payment"], required: true },
+    docType:   { type: String, enum: ["Invoice", "SupplierBill", "Expense", "AccountNote", "Payment", "OpeningBalance"], required: true },
     doc:       { type: mongoose.Types.ObjectId, required: true },
     docNo:     { type: String, required: true },
     debit:     { type: Number, default: 0 },

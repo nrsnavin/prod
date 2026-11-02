@@ -25,6 +25,8 @@ const BankAccountSchema = new mongoose.Schema(
     float:     { type: Number, default: 0, min: 0 },
     active:    { type: Boolean, default: true },
     isDefault: { type: Boolean, default: false },
+    // The ledger this account is in Tally ("Kotak Bank CA", "Cash").
+    tallyLedger: { type: String, trim: true, default: "", maxlength: 80 },
   },
   { timestamps: true }
 );

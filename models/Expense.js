@@ -26,6 +26,8 @@ const ExpenseSchema = new mongoose.Schema(
     requestId:     { type: String, unique: true, sparse: true },
 
     date:     { type: Date, required: true, default: Date.now },
+    // When it is to be paid — the payee's terms, or the date on the bill.
+    dueDate:  { type: Date },
     category: { type: mongoose.Types.ObjectId, ref: "ExpenseCategory", required: true },
     categoryName: { type: String, default: "" },
     description:  { type: String, required: true, trim: true, maxlength: 200 },
@@ -63,6 +65,7 @@ const ExpenseSchema = new mongoose.Schema(
     submittedByName: { type: String, default: "" },
     notes:       { type: String, default: "", trim: true, maxlength: 500 },
     attachments: { type: [AttachmentSchema], default: [] },
+    tally:       { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date } },
     source:      { type: String, default: "manual" },
     aiSuggestion: { type: mongoose.Types.ObjectId, ref: "AiSuggestion" },
 

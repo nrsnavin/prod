@@ -282,19 +282,23 @@ describe('receipts and payments', () => {
     const bill = (await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'JW/9', kind: 'service', lines: [{ description: 'Job work', quantity: 1, rate: 50000, gstPercent: 5 }], tds: { applicable: true, section: '194C', rate: 2 } })).body.bill; // 52,500
     const docs = await get(`/accounts/payments/open-docs?partyType=supplier&party=${s.supplier._id}`);
     expect(docs.body.docs[0]).toMatchObject({ docNo: 'PB/2026-27/0001', outstanding: 52500, tds: { section: '194C', rate: 2 } });
-    // Settle 52,500 gross: TDS 1,050 deducted, 51,450 paid.
-    const res = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51450, mode: 'bank', account: cash._id, tds: { section: '194C', rate: 2 },
+    // Settle 52,500 gross. TDS is on the value net of GST (CBDT circular
+    // 23/2017): 2% of 50,000 = 1,000 deducted, 51,500 paid.
+    const over = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51450, mode: 'bank', account: cash._id, tds: { section: '194C', rate: 2 },
+      allocations: [{ docType: 'SupplierBill', doc: bill._id, amount: 52500 }], date: '2026-07-20' });
+    expect(over.status).toBe(400); // 1,050 off the gross would be wrong; the cash falls 50 short
+    const res = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51500, mode: 'bank', account: cash._id, tds: { section: '194C', rate: 2 },
       allocations: [{ docType: 'SupplierBill', doc: bill._id, amount: 52500 }], date: '2026-07-20' });
     expect(res.status).toBe(201);
-    expect(res.body.payment).toMatchObject({ voucherNo: 'PAY/2026-27/0001', tds: { section: '194C', rate: 2, amount: 1050 }, unallocated: 0 });
-    expect(res.body.payment.allocations[0]).toMatchObject({ amount: 52500, tds: 1050 });
+    expect(res.body.payment).toMatchObject({ voucherNo: 'PAY/2026-27/0001', tds: { section: '194C', rate: 2, amount: 1000, base: 50000 }, unallocated: 0 });
+    expect(res.body.payment.allocations[0]).toMatchObject({ amount: 52500, tds: 1000, tdsBase: 50000 });
     const b = await M.SupplierBill.findById(bill._id).lean();
-    expect(b).toMatchObject({ paidAmount: 51450, tdsAmount: 1050, status: 'paid' });
+    expect(b).toMatchObject({ paidAmount: 51500, tdsAmount: 1000, status: 'paid' });
     const st = await get(`/accounts/statement?partyType=supplier&party=${s.supplier._id}`);
     expect(st.body.closing).toBe(0);
     const tds = await get('/accounts/reports/tds?from=2026-07-01&to=2026-07-31');
-    expect(tds.body.rows).toEqual([expect.objectContaining({ partyName: s.supplier.name, section: '194C', gross: 52500, tds: 1050 })]);
-    expect(tds.body.total).toEqual({ gross: 52500, tds: 1050 });
+    expect(tds.body.rows).toEqual([expect.objectContaining({ partyName: s.supplier.name, section: '194C', gross: 52500, base: 50000, tds: 1000 })]);
+    expect(tds.body.total).toEqual({ gross: 52500, base: 50000, tds: 1000 });
     // A payment that leaves part open marks the bill part-paid.
     const bill2 = (await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'JW/10', lines: [{ description: 'Yarn', quantity: 1, rate: 1000, gstPercent: 5 }] })).body.bill;
     await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 500, mode: 'cash', account: cash._id, allocations: [{ docType: 'SupplierBill', doc: bill2._id, amount: 500 }] });

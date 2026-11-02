@@ -51,6 +51,7 @@ const SupplierBill    = require("../models/SupplierBill");
 const Expense         = require("../models/Expense");
 const AccountNote     = require("../models/AccountNote");
 const Payment         = require("../models/Payment");
+const Contra          = require("../models/Contra");
 const Invoice         = require("../models/Invoice");
 const Supplier        = require("../models/Supplier");
 const Customer        = require("../models/Customer");
@@ -59,22 +60,18 @@ const MaterialInward  = require("../models/MaterialInward");
 const RawMaterial     = require("../models/RawMaterial");
 const { ATTACHMENT_TYPES, MAX_ATTACHMENT_BYTES } = require("../models/accountsShared");
 
-const MIN_REASON = 8;
-const DAY = 86_400_000;
-const isId = (v) => mongoose.Types.ObjectId.isValid(String(v || ""));
-const r2 = round2;
+const {
+  DAY, isId, r2, readDate, reasonFrom, fp, withTxn, paging,
+} = require("../services/accountsHelpers");
+const settle = require("../services/settle");
+const credits = require("../services/credits");
+const bankBalances = require("../services/bankBalances");
+const { assertOpen } = require("../services/booksLock");
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 } });
 const scanUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 4 } });
 
 // ── Helpers ───────────────────────────────────────────────────────
-function readDate(value, label, fallback = null) {
-  if (value === undefined || value === null || value === "") return fallback;
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) throw new ErrorHandler(`${label} is not a date`, 400);
-  return d;
-}
-
 /** The seller's state, off Settings. */
 async function sellerStateCode() {
   const s = await getDocumentSettings();
@@ -115,42 +112,7 @@ function priced(lines, sellerState, partyState) {
   };
 }
 
-const reasonFrom = (req) => {
-  const reason = String(req.body?.reason || req.body?.auditReason || "").trim();
-  if (reason.length < MIN_REASON) throw new ErrorHandler(`Give a reason (at least ${MIN_REASON} characters)`, 400);
-  return reason;
-};
-
-const fp = (code, doc, req, meta) => buildFingerprint(code, { entityId: doc._id, actor: actorFromRequest(req), meta });
-
-// withTransaction RETRIES the callback on a transient error, so every
-// callback here is written to run twice safely: documents are created
-// inside it from plain data (never .save() on a doc built outside), and
-// existing documents are changed by updateOne or loaded inside it.
-async function withTxn(fn) {
-  const session = await mongoose.startSession();
-  try {
-    let out;
-    await session.withTransaction(async () => { out = await fn(session); });
-    return out;
-  } finally {
-    session.endSession();
-  }
-}
-
 const dataUrl = (file) => `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
-
-/** A list query's paging and date range. */
-function paging(req) {
-  const page = Math.max(1, Number(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
-  const range = {};
-  const from = readDate(req.query.from, "from");
-  const to = readDate(req.query.to, "to");
-  if (from) range.$gte = from;
-  if (to) range.$lte = new Date(to.getTime() + DAY - 1);
-  return { page, limit, skip: (page - 1) * limit, range: from || to ? range : null };
-}
 
 // ══════════════════════════════════════════════════════════════════
 //  MASTERS
@@ -158,22 +120,11 @@ function paging(req) {
 router.get("/bank-accounts", catchAsyncErrors(async (_req, res) => {
   await ensureSeed();
   const accounts = await BankAccount.find({}).sort({ isDefault: -1, name: 1 }).lean();
-  // The book balance per account: opening + receipts − payments.
-  const sums = await Payment.aggregate([
-    { $match: { status: "posted" } },
-    { $group: { _id: "$account", receipts: { $sum: { $cond: [{ $eq: ["$kind", "receipt"] }, "$amount", 0] } }, payments: { $sum: { $cond: [{ $eq: ["$kind", "payment"] }, "$amount", 0] } } } },
-  ]);
-  const by = new Map(sums.map((s) => [String(s._id), s]));
-  res.json({
-    success: true,
-    accounts: accounts.map((a) => {
-      const s = by.get(String(a._id)) || { receipts: 0, payments: 0 };
-      return { ...a, balance: r2((a.openingBalance || 0) + s.receipts - s.payments), receipts: r2(s.receipts), payments: r2(s.payments) };
-    }),
-  });
+  // The book balance per account: opening + money in − money out, contras both ways.
+  res.json({ success: true, accounts: await bankBalances.withBalances(accounts) });
 }));
 
-const ACCOUNT_FIELDS = ["name", "kind", "bankName", "accountNo", "ifsc", "upiId", "openingBalance", "openingDate", "float", "active", "isDefault"];
+const ACCOUNT_FIELDS = ["name", "kind", "bankName", "accountNo", "ifsc", "upiId", "openingBalance", "openingDate", "float", "active", "isDefault", "tallyLedger"];
 function pickAccount(body) {
   const out = {};
   for (const f of ACCOUNT_FIELDS) if (body[f] !== undefined) out[f] = body[f];
@@ -313,7 +264,8 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
   let billDate, dueDate, lines;
   try {
     billDate = readDate(b.billDate, "billDate", new Date());
-    dueDate = readDate(b.dueDate, "dueDate", new Date(billDate.getTime() + 30 * DAY));
+    await assertOpen(billDate, req);
+    dueDate = readDate(b.dueDate, "dueDate", new Date(billDate.getTime() + (supplier.paymentTermsDays ?? 30) * DAY));
     lines = readLines(b.lines, { defaultGst: (await getDocumentSettings()).invoice?.defaultGstPercent ?? 5 });
   } catch (err) { return next(err); }
   let po = null;
@@ -377,7 +329,7 @@ router.post("/bills/:id/cancel", catchAsyncErrors(async (req, res, next) => {
     return next(new ErrorHandler("Payments or debit notes are allocated to this bill — cancel those first.", 409));
   }
   let reason;
-  try { reason = reasonFrom(req); } catch (err) { return next(err); }
+  try { reason = reasonFrom(req); await assertOpen(bill.billDate, req, { cancelling: true }); } catch (err) { return next(err); }
   const cancel = { reason, at: new Date(), by: req.user?._id };
   const mark = fp(ACTION_CODES.BILL_CANCELLED, bill, req, { billNo: bill.billNo, reason });
   await withTxn(async (session) => {
@@ -463,6 +415,7 @@ async function payExpense(expenseId, { account, mode, reference, date, req, vouc
   if (amount <= 0) throw new ErrorHandler("Nothing left to pay on this expense", 409);
   const when = date || new Date();
   const { financialYear, sequence, number } = voucherNo;
+  if (expense.status !== "approved") throw new ErrorHandler(`Only an approved expense can be paid (this one is ${expense.status})`, 409);
   const partyType = expense.supplier ? "supplier" : "other";
   const vId = new mongoose.Types.ObjectId();
   const voucherData = {
@@ -475,10 +428,8 @@ async function payExpense(expenseId, { account, mode, reference, date, req, vouc
     fingerprints: [fp(ACTION_CODES.PAYMENT_POSTED, { _id: vId }, req, { voucherNo: number, amount, expense: expense.expenseNo })],
   };
   const [voucher] = await Payment.create([voucherData], { session });
-  await Expense.updateOne({ _id: expense._id }, {
-    $set: { paidAmount: r2(expense.paidAmount + amount), paidFrom: acct._id, paidAt: when, status: "paid" },
-    $push: { fingerprints: fp(ACTION_CODES.EXPENSE_PAID, expense, req, { voucherNo: number, amount, account: acct.name }) },
-  }, { session });
+  await settle.apply("Expense", expense._id, { paidAmount: amount }, session, { docNo: expense.expenseNo, extraSet: { paidFrom: acct._id, paidAt: when } });
+  await Expense.updateOne({ _id: expense._id }, { $push: { fingerprints: fp(ACTION_CODES.EXPENSE_PAID, expense, req, { voucherNo: number, amount, account: acct.name }) } }, { session });
   if (expense.supplier) {
     await partyLedger.post({ partyType: "supplier", party: expense.supplier, date: when, docType: "Payment", doc: vId, docNo: number, debit: amount, narration: voucherData.narration }, session);
   }
@@ -496,9 +447,10 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
   if (!category) return next(new ErrorHandler("Category not found", 404));
   const description = String(b.description || "").trim();
   if (!description) return next(new ErrorHandler("description is required", 400));
-  let date, lines;
+  let date, lines, dueDate;
   try {
     date = readDate(b.date, "date", new Date());
+    await assertOpen(date, req);
     // A plain amount is one line; itemised bills send lines.
     const raw = Array.isArray(b.lines) && b.lines.length ? b.lines : [{ description, quantity: 1, rate: b.amount, gstPercent: b.gstPercent ?? 0 }];
     lines = readLines(raw, { defaultGst: 0 });
@@ -509,6 +461,9 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
     supplier = await Supplier.findById(b.supplier).lean();
     if (!supplier) return next(new ErrorHandler("Supplier not found", 404));
   }
+  try {
+    dueDate = readDate(b.dueDate, "dueDate", new Date(date.getTime() + (supplier ? (supplier.paymentTermsDays ?? 30) : 0) * DAY));
+  } catch (err) { return next(err); }
   const payeeGstin = String(b.payeeGstin || supplier?.gstin || "").trim().toUpperCase();
   const p = priced(lines, await sellerStateCode(), stateCodeFromGstin(payeeGstin));
   const itcEligible = b.itcEligible === undefined ? !!category.itcEligible && p.totals.tax > 0 : !!b.itcEligible;
@@ -518,7 +473,7 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
   const _id = new mongoose.Types.ObjectId();
   const data = {
     _id, expenseNo: number, financialYear, sequence, requestId: b.requestId ? String(b.requestId) : undefined,
-    date, category: category._id, categoryName: category.name, description: description.slice(0, 200),
+    date, dueDate, category: category._id, categoryName: category.name, description: description.slice(0, 200),
     supplier: supplier?._id, payeeName: String(b.payeeName || supplier?.name || "").trim().slice(0, 120), payeeGstin,
     refNo: String(b.refNo || "").trim().slice(0, 40),
     supplyType: p.supplyType, lines: p.lines, totals: p.totals,
@@ -614,7 +569,7 @@ router.post("/expenses/:id/pay", catchAsyncErrors(async (req, res, next) => {
   if (e.status !== "approved") return next(new ErrorHandler(`Only an approved expense can be paid (this one is ${e.status})`, 409));
   if (!isId(req.body?.account)) return next(new ErrorHandler("account is required", 400));
   let date;
-  try { date = readDate(req.body?.date, "date", new Date()); } catch (err) { return next(err); }
+  try { date = readDate(req.body?.date, "date", new Date()); await assertOpen(date, req); } catch (err) { return next(err); }
   let voucher;
   const payNo = await payVoucherNo(date);
   try {
@@ -634,7 +589,7 @@ router.post("/expenses/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   if (e.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
   if (e.paidAmount > 0) return next(new ErrorHandler("This expense has been paid — cancel the payment voucher first.", 409));
   let reason;
-  try { reason = reasonFrom(req); } catch (err) { return next(err); }
+  try { reason = reasonFrom(req); await assertOpen(e.date, req, { cancelling: true }); } catch (err) { return next(err); }
   const mark = fp(ACTION_CODES.EXPENSE_CANCELLED, e, req, { expenseNo: e.expenseNo, reason });
   await withTxn(async (session) => {
     await Expense.updateOne({ _id: e._id }, { $set: { status: "cancelled" }, $push: { fingerprints: mark } }, { session });
@@ -646,6 +601,14 @@ router.post("/expenses/:id/cancel", catchAsyncErrors(async (req, res, next) => {
 // ══════════════════════════════════════════════════════════════════
 //  CREDIT / DEBIT NOTES
 // ══════════════════════════════════════════════════════════════════
+//  credit → customer, against an invoice: lowers what they owe
+//  debit  → supplier, against a bill:     lowers what we owe
+//  debit  → customer, against an invoice: raises what they owe
+//
+//  A note that lowers is applied to its document up to what that still
+//  owes; the rest is unapplied credit on the party, applied later
+//  (POST /credits/apply). It can never come to more than the document
+//  was for, less the notes already against it.
 router.get("/notes", catchAsyncErrors(async (req, res) => {
   const { page, limit, skip, range } = paging(req);
   const q = {};
@@ -657,7 +620,7 @@ router.get("/notes", catchAsyncErrors(async (req, res) => {
   const search = String(req.query.search || "").trim();
   if (search) {
     const re = new RegExp(escapeRegex(search), "i");
-    q.$or = [{ noteNo: re }, { partyName: re }, { "against.docNo": re }, { reason: re }];
+    q.$or = [{ noteNo: re }, { partyName: re }, { "against.docNo": re }, { reason: re }, { partyNoteNo: re }];
   }
   const [total, notes] = await Promise.all([
     AccountNote.countDocuments(q),
@@ -677,6 +640,8 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
   const b = req.body || {};
   const kind = b.kind === "debit" ? "debit" : b.kind === "credit" ? "credit" : null;
   if (!kind) return next(new ErrorHandler("kind must be credit or debit", 400));
+  // A credit note is to a customer; a debit note to a supplier unless it says customer.
+  const partyType = kind === "credit" ? "customer" : b.partyType === "customer" ? "customer" : "supplier";
   if (b.requestId) {
     const dup = await AccountNote.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
     if (dup) return res.status(200).json({ success: true, note: dup, replay: true });
@@ -684,89 +649,104 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
   const reason = String(b.reason || "").trim();
   if (reason.length < 3) return next(new ErrorHandler("reason is required", 400));
   if (!isId(b.against?.doc)) return next(new ErrorHandler("against.doc is required", 400));
-  // A credit note is against our invoice; a debit note against their bill.
-  const docType = kind === "credit" ? "Invoice" : "SupplierBill";
-  const target = docType === "Invoice"
-    ? await Invoice.findById(b.against.doc)
-    : await SupplierBill.findById(b.against.doc);
+  const docType = partyType === "customer" ? "Invoice" : "SupplierBill";
+  const target = docType === "Invoice" ? await Invoice.findById(b.against.doc).lean() : await SupplierBill.findById(b.against.doc).lean();
   if (!target) return next(new ErrorHandler(`${docType === "Invoice" ? "Invoice" : "Bill"} not found`, 404));
   if (docType === "Invoice" && target.status !== "issued") return next(new ErrorHandler("That invoice is cancelled", 409));
   if (docType === "SupplierBill" && target.status === "cancelled") return next(new ErrorHandler("That bill is cancelled", 409));
   let date, lines;
   try {
     date = readDate(b.date, "date", new Date());
+    await assertOpen(date, req);
     lines = readLines(b.lines, { defaultGst: target.lines?.[0]?.gstPercent ?? 5 });
   } catch (err) { return next(err); }
-  const partyType = kind === "credit" ? "customer" : "supplier";
   const partyState = docType === "Invoice" ? target.buyer?.stateCode : target.supplierStateCode;
   const p = priced(lines, await sellerStateCode(), partyState);
   const party = docType === "Invoice" ? target.customer : target.supplier;
   const partyName = docType === "Invoice" ? target.buyer?.name : target.supplierName;
   const partyGstin = docType === "Invoice" ? target.buyer?.gstin : target.supplierGstin;
+  const docNo = docType === "Invoice" ? target.invoiceNumber : target.billNo;
+  // Raises: a debit note to a customer. Lowers: the other two.
+  const raises = kind === "debit" && partyType === "customer";
+  let applied = p.totals.grand;
+  if (!raises) {
+    const earlier = await AccountNote.aggregate([
+      { $match: { "against.doc": target._id, kind, status: "issued" } },
+      { $group: { _id: null, total: { $sum: "$totals.grand" } } },
+    ]);
+    const room = r2((target.totals?.grand || 0) + (target.debitedAmount && docType === "Invoice" ? target.debitedAmount : 0) - (earlier[0]?.total || 0));
+    if (p.totals.grand > room + 0.005) {
+      return next(new ErrorHandler(`${docNo} is for ₹${r2(target.totals?.grand).toFixed(2)}${earlier[0]?.total ? ` and already has notes for ₹${r2(earlier[0].total).toFixed(2)}` : ""} — a note can be for at most ₹${Math.max(0, room).toFixed(2)}`, 400));
+    }
+    applied = Math.min(p.totals.grand, Math.max(0, settle.outstanding(docType, target)));
+  }
+  applied = r2(applied);
+  const unapplied = r2(p.totals.grand - applied);
 
   const { financialYear, sequence, number } = await allocate(AccountNote, kind === "credit" ? "CN" : "DN", { extra: { kind }, at: date });
   const _id = new mongoose.Types.ObjectId();
   const data = {
     _id, kind, noteNo: number, financialYear, sequence, requestId: b.requestId ? String(b.requestId) : undefined, date,
     partyType, customer: partyType === "customer" ? party : undefined, supplier: partyType === "supplier" ? party : undefined,
-    partyName, partyGstin: partyGstin || "",
-    against: { docType, doc: target._id, docNo: docType === "Invoice" ? target.invoiceNumber : target.billNo },
+    partyName, partyGstin: partyGstin || "", partyNoteNo: String(b.partyNoteNo || "").trim().slice(0, 40),
+    against: { docType, doc: target._id, docNo },
     reason: reason.slice(0, 200), supplyType: p.supplyType, lines: p.lines, totals: p.totals,
-    notes: String(b.notes || "").trim().slice(0, 500), createdBy: req.user?._id,
+    applied, unapplied, notes: String(b.notes || "").trim().slice(0, 500), createdBy: req.user?._id,
   };
-  data.fingerprints = [fp(ACTION_CODES.NOTE_ISSUED, { _id }, req, { noteNo: number, against: data.against.docNo, grand: p.totals.grand, reason })];
-  let note;
+  data.fingerprints = [fp(ACTION_CODES.NOTE_ISSUED, { _id }, req, { noteNo: number, against: docNo, grand: p.totals.grand, unapplied, reason })];
   try {
     await withTxn(async (session) => {
-      [note] = await AccountNote.create([data], { session });
-      if (docType === "Invoice") {
-        await Invoice.updateOne({ _id: target._id }, { $inc: { creditedAmount: p.totals.grand } }, { session });
-      } else {
-        const bill = await SupplierBill.findById(target._id).session(session);
-        const next_ = r2(bill.debitedAmount + p.totals.grand);
-        const left = r2(bill.totals.grand - bill.paidAmount - bill.tdsAmount - next_);
-        await SupplierBill.updateOne({ _id: bill._id }, { $set: { debitedAmount: next_, status: left <= 0.005 ? "paid" : (bill.paidAmount + bill.tdsAmount > 0 ? "part_paid" : "open") } }, { session });
+      await AccountNote.create([data], { session });
+      if (applied > 0) {
+        const field = raises ? "debitedAmount" : docType === "Invoice" ? "creditedAmount" : "debitedAmount";
+        await settle.apply(docType, target._id, { [field]: applied }, session, { docNo });
       }
-      await partyLedger.post({
-        partyType, party, date, docType: "AccountNote", doc: _id, docNo: number,
-        ...(kind === "credit" ? { credit: p.totals.grand } : { debit: p.totals.grand }), narration: `${reason} (${note.against.docNo})`,
-      }, session);
+      // Lowers what a customer owes / what we owe a supplier, or raises a customer's.
+      const side = partyType === "customer" ? (raises ? "debit" : "credit") : "debit";
+      await partyLedger.post({ partyType, party, date, docType: "AccountNote", doc: _id, docNo: number, [side]: p.totals.grand, narration: `${reason} (${docNo})` }, session);
     });
   } catch (err) {
     if (err?.code === 11000 && b.requestId) {
       const dup = await AccountNote.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
       if (dup) return res.status(200).json({ success: true, note: dup, replay: true });
     }
+    if (err instanceof ErrorHandler) return next(err);
     throw err;
   }
-  res.status(201).json({ success: true, note: note.toObject() });
+  res.status(201).json({ success: true, note: await AccountNote.findById(_id).select("-attachments.data").lean() });
 }));
+
+/** The field a note moves on the document it is applied to. */
+function noteField(note, docType) {
+  if (docType === "OpeningBalance") return "settledAmount";
+  if (note.kind === "debit" && note.partyType === "customer") return "debitedAmount";
+  return docType === "Invoice" ? "creditedAmount" : "debitedAmount";
+}
 
 router.post("/notes/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Note not found", 404));
-  const note = await AccountNote.findById(req.params.id);
+  const note = await AccountNote.findById(req.params.id).lean();
   if (!note) return next(new ErrorHandler("Note not found", 404));
   if (note.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
   let reason;
-  try { reason = reasonFrom(req); } catch (err) { return next(err); }
+  try { reason = reasonFrom(req); await assertOpen(note.date, req, { cancelling: true }); } catch (err) { return next(err); }
   const cancel = { reason, at: new Date(), by: req.user?._id };
   const mark = fp(ACTION_CODES.NOTE_CANCELLED, note, req, { noteNo: note.noteNo, reason });
-  await withTxn(async (session) => {
-    await AccountNote.updateOne({ _id: note._id }, { $set: { status: "cancelled", cancel }, $push: { fingerprints: mark } }, { session });
-    const amt = note.totals.grand;
-    if (note.against.docType === "Invoice") {
-      await Invoice.updateOne({ _id: note.against.doc }, { $inc: { creditedAmount: -amt } }, { session });
-    } else {
-      const bill = await SupplierBill.findById(note.against.doc).session(session);
-      if (bill) {
-        const debited = r2(bill.debitedAmount - amt);
-        const left = r2(bill.totals.grand - bill.paidAmount - bill.tdsAmount - debited);
-        const status = bill.status === "cancelled" ? "cancelled" : left <= 0.005 ? "paid" : (bill.paidAmount + bill.tdsAmount > 0 ? "part_paid" : "open");
-        await SupplierBill.updateOne({ _id: bill._id }, { $set: { debitedAmount: debited, status } }, { session });
+  // What it applied to its own document — older notes carry no `applied`: all of it.
+  const onAgainst = note.applied === undefined || note.applied === null || (note.applied === 0 && !note.unapplied) ? note.totals.grand : note.applied;
+  try {
+    await withTxn(async (session) => {
+      await AccountNote.updateOne({ _id: note._id }, { $set: { status: "cancelled", cancel, unapplied: 0 }, $push: { fingerprints: mark } }, { session });
+      if (onAgainst > 0) await settle.apply(note.against.docType, note.against.doc, { [noteField(note, note.against.docType)]: -onAgainst }, session);
+      for (const a of note.applications || []) {
+        await settle.apply(a.docType, a.doc, { [noteField(note, a.docType)]: -a.amount }, session);
       }
-    }
-    await partyLedger.reverse("AccountNote", note._id, session);
-  });
+      await partyLedger.reverse("AccountNote", note._id, session);
+    });
+  } catch (err) {
+    if (err instanceof ErrorHandler) return next(err);
+    throw err;
+  }
   res.json({ success: true, note: await AccountNote.findById(note._id).select("-attachments.data").lean() });
 }));
 
@@ -774,21 +754,14 @@ router.post("/notes/:id/cancel", catchAsyncErrors(async (req, res, next) => {
 //  RECEIPTS AND PAYMENTS
 // ══════════════════════════════════════════════════════════════════
 
-/** The open documents a voucher for this party could settle. */
+/** The open documents a voucher for this party could settle, and the credits it has. */
 router.get("/payments/open-docs", catchAsyncErrors(async (req, res, next) => {
   const partyType = req.query.partyType;
   if (!isId(req.query.party)) return next(new ErrorHandler("party is required", 400));
-  if (partyType === "customer") {
-    const rows = await outstanding.receivables({ customer: req.query.party });
-    const balance = (await partyLedger.balances("customer", [req.query.party])).get(String(req.query.party)) || 0;
-    return res.json({ success: true, docs: rows, balance });
-  }
-  if (partyType === "supplier") {
-    const rows = await outstanding.payables({ supplier: req.query.party });
-    const balance = (await partyLedger.balances("supplier", [req.query.party])).get(String(req.query.party)) || 0;
-    return res.json({ success: true, docs: rows, balance });
-  }
-  return next(new ErrorHandler("partyType must be customer or supplier", 400));
+  if (partyType !== "customer" && partyType !== "supplier") return next(new ErrorHandler("partyType must be customer or supplier", 400));
+  const rows = partyType === "customer" ? await outstanding.receivables({ customer: req.query.party }) : await outstanding.payables({ supplier: req.query.party });
+  const balance = (await partyLedger.balances(partyType, [req.query.party])).get(String(req.query.party)) || 0;
+  res.json({ success: true, docs: rows, balance, credits: await credits.openFor(partyType, req.query.party) });
 }));
 
 router.get("/payments", catchAsyncErrors(async (req, res) => {
@@ -819,17 +792,23 @@ router.get("/payments/:id", catchAsyncErrors(async (req, res, next) => {
   res.json({ success: true, payment });
 }));
 
-const DOC_MODELS = { Invoice, SupplierBill, Expense };
-const docNoOf = (docType, d) => (docType === "Invoice" ? d.invoiceNumber : docType === "SupplierBill" ? d.billNo : d.expenseNo);
-const docOutstanding = (docType, d) =>
-  docType === "Invoice" ? r2(d.totals.grand - (d.paidAmount || 0) - (d.creditedAmount || 0))
-  : docType === "SupplierBill" ? r2(d.totals.grand - d.paidAmount - d.tdsAmount - d.debitedAmount)
-  : r2(d.totals.grand - d.paidAmount);
+// What a short payment can be settled by, besides the money.
+const ADJUSTMENTS = {
+  receipt: ["bank_charges", "discount", "tds_by_customer", "round_off", "write_off"],
+  payment: ["discount", "round_off", "write_off"],
+};
+const ADJUSTMENT_LABELS = { bank_charges: "Bank charges", discount: "Discount", tds_by_customer: "TDS deducted by customer", round_off: "Round off", write_off: "Written off" };
+
+/** The field a voucher's allocation moves on each kind of document. */
+const VOUCHER_FIELD = { Invoice: "paidAmount", SupplierBill: "paidAmount", Expense: "paidAmount", OpeningBalance: "settledAmount" };
 
 /**
  * Post a receipt or payment voucher from a request body. Throws an
  * ErrorHandler for anything the caller got wrong; returns the voucher
  * (or the one a replayed requestId already made).
+ *
+ * Settled on the documents = money + TDS + adjustments. TDS on a
+ * payment is deducted on each document's value net of GST.
  */
 async function createVoucher(b, req) {
   const kind = b.kind === "receipt" ? "receipt" : b.kind === "payment" ? "payment" : null;
@@ -844,8 +823,8 @@ async function createVoucher(b, req) {
   if (!isId(b.account)) throw new ErrorHandler("account is required", 400);
   const account = await BankAccount.findById(b.account).lean();
   if (!account || !account.active) throw new ErrorHandler("Account not found", 404);
-  let date;
-  date = readDate(b.date, "date", new Date());
+  const date = readDate(b.date, "date", new Date());
+  await assertOpen(date, req);
 
   // The party.
   const partyType = b.partyType;
@@ -874,10 +853,22 @@ async function createVoucher(b, req) {
   if (tdsRate < 0 || tdsRate > 100) throw new ErrorHandler("TDS rate must be between 0 and 100", 400);
   const tdsSection = String(b.tds?.section || "").trim().slice(0, 8);
 
+  // Adjustments: what settles the documents besides the money.
+  const adjustments = [];
+  for (const [i, a] of (Array.isArray(b.adjustments) ? b.adjustments : []).entries()) {
+    const amt = r2(a?.amount);
+    if (!amt) continue;
+    if (!ADJUSTMENTS[kind].includes(a?.kind)) throw new ErrorHandler(`Adjustment ${i + 1}: a ${kind} cannot carry "${a?.kind || "?"}"`, 400);
+    if (amt < 0) throw new ErrorHandler(`Adjustment ${i + 1}: amount must be more than 0`, 400);
+    if (a.kind === "write_off" && req.user?.role !== "admin") throw new ErrorHandler("Only an admin can write an amount off", 403);
+    adjustments.push({ kind: a.kind, label: ADJUSTMENT_LABELS[a.kind], amount: amt, note: String(a.note || "").trim().slice(0, 80) });
+  }
+  const adjTotal = r2(adjustments.reduce((s, a) => s + a.amount, 0));
+
   // The allocations: each names an open document of this party, for a
   // GROSS amount (what the document is settled by); TDS comes off it.
   const rawAlloc = Array.isArray(b.allocations) ? b.allocations : [];
-  const allowedTypes = partyType === "customer" ? ["Invoice"] : partyType === "supplier" ? ["SupplierBill", "Expense"] : ["Expense"];
+  const allowedTypes = partyType === "customer" ? ["Invoice", "OpeningBalance"] : partyType === "supplier" ? ["SupplierBill", "Expense", "OpeningBalance"] : ["Expense"];
   const allocations = [];
   const seen = new Set();
   for (const [i, a] of rawAlloc.entries()) {
@@ -887,24 +878,32 @@ async function createVoucher(b, req) {
     seen.add(String(a.doc));
     const gross = r2(a.amount);
     if (!(gross > 0)) throw new ErrorHandler(`Allocation ${i + 1}: amount must be more than 0`, 400);
-    const doc = await DOC_MODELS[a.docType].findById(a.doc);
+    const doc = await settle.load(a.docType, a.doc);
     if (!doc) throw new ErrorHandler(`Allocation ${i + 1}: document not found`, 404);
-    const docParty = a.docType === "Invoice" ? doc.customer : doc.supplier;
-    if (party && String(docParty) !== String(party._id)) throw new ErrorHandler(`Allocation ${i + 1}: ${docNoOf(a.docType, doc)} belongs to another party`, 400);
-    const open = (a.docType === "Invoice" && doc.status === "issued") || (a.docType === "SupplierBill" && ["open", "part_paid"].includes(doc.status)) || (a.docType === "Expense" && doc.status === "approved");
-    if (!open) throw new ErrorHandler(`Allocation ${i + 1}: ${docNoOf(a.docType, doc)} is not open`, 409);
-    const left = docOutstanding(a.docType, doc);
-    if (gross > left + 0.005) throw new ErrorHandler(`Allocation ${i + 1}: ${docNoOf(a.docType, doc)} has only ${left.toFixed(2)} outstanding`, 400);
-    const tds = a.docType === "SupplierBill" && (doc.tds?.applicable || tdsRate > 0) ? r2(gross * (tdsRate || doc.tds?.rate || 0) / 100) : (tdsRate > 0 && a.docType === "Expense" ? r2(gross * tdsRate / 100) : 0);
-    allocations.push({ docType: a.docType, doc: doc._id, docNo: docNoOf(a.docType, doc), amount: gross, tds });
+    const docNo = settle.numberOf(a.docType, doc);
+    const docParty = settle.kindOf(a.docType).party(doc);
+    if (party && String(docParty) !== String(party._id)) throw new ErrorHandler(`Allocation ${i + 1}: ${docNo} belongs to another party`, 400);
+    // An expense to a supplier on file is paid to that supplier, so it is on their account.
+    if (!party && docParty) throw new ErrorHandler(`Allocation ${i + 1}: ${docNo} is to a supplier on file — pay it as a payment to that supplier`, 400);
+    if (a.docType === "OpeningBalance" && doc.partyType !== partyType) throw new ErrorHandler(`Allocation ${i + 1}: ${docNo} belongs to another party`, 400);
+    if (!settle.isOpen(a.docType, doc)) throw new ErrorHandler(`Allocation ${i + 1}: ${docNo} is not open`, 409);
+    const left = settle.outstanding(a.docType, doc);
+    if (gross > left + 0.005) throw new ErrorHandler(`Allocation ${i + 1}: ${docNo} has only ${left.toFixed(2)} outstanding`, 400);
+    let rate = 0;
+    if (kind === "payment") rate = a.docType === "SupplierBill" ? (tdsRate || (doc.tds?.applicable ? doc.tds.rate : 0)) : tdsRate;
+    const tdsBase = rate > 0 ? r2(gross * (a.docType === "OpeningBalance" ? 1 : outstanding.ratio(doc.totals))) : 0;
+    const tds = rate > 0 ? r2(tdsBase * rate / 100) : 0;
+    allocations.push({ docType: a.docType, doc: doc._id, docNo, amount: gross, tds, tdsBase });
   }
   const tdsAmount = r2(allocations.reduce((s, a) => s + a.tds, 0));
+  const tdsBase = r2(allocations.reduce((s, a) => s + a.tdsBase, 0));
   const gross = r2(allocations.reduce((s, a) => s + a.amount, 0));
-  const cashNeeded = r2(gross - tdsAmount);
-  if (cashNeeded > amount + 0.005) {
-    throw new ErrorHandler(`The allocations need ${cashNeeded.toFixed(2)} but the voucher is for ${amount.toFixed(2)}`, 400);
+  if (adjTotal > 0 && adjTotal > gross + 0.005) throw new ErrorHandler("Adjustments settle documents — tick the documents they settle", 400);
+  const settledTotal = r2(amount + tdsAmount + adjTotal);
+  if (gross > settledTotal + 0.005) {
+    throw new ErrorHandler(`The allocations need ${r2(gross - tdsAmount - adjTotal).toFixed(2)} but the voucher is for ${amount.toFixed(2)}`, 400);
   }
-  const unallocated = r2(amount + tdsAmount - gross);
+  const unallocated = r2(settledTotal - gross);
 
   const { financialYear, sequence, number } = await allocate(Payment, kind === "receipt" ? "RCT" : "PAY", { extra: { kind }, at: date });
   const _id = new mongoose.Types.ObjectId();
@@ -912,42 +911,33 @@ async function createVoucher(b, req) {
     _id, kind, voucherNo: number, financialYear, sequence, requestId: b.requestId ? String(b.requestId) : undefined, date,
     partyType, customer: partyType === "customer" ? party._id : undefined, supplier: partyType === "supplier" ? party._id : undefined, partyName,
     amount, mode: b.mode, account: account._id, accountName: account.name, reference: String(b.reference || "").trim().slice(0, 60),
-    tds: { section: tdsAmount > 0 ? tdsSection : "", rate: tdsAmount > 0 ? tdsRate : 0, amount: tdsAmount },
-    allocations, unallocated, narration: String(b.narration || "").trim().slice(0, 300),
+    tds: { section: tdsAmount > 0 ? tdsSection || "" : "", rate: tdsAmount > 0 ? tdsRate : 0, amount: tdsAmount, base: tdsBase },
+    adjustments, allocations, unallocated, narration: String(b.narration || "").trim().slice(0, 300),
     source: b.source === "statement" ? "statement" : "manual", statementLine: String(b.statementLine || "").slice(0, 200),
+    clearedOn: b.clearedOn ? readDate(b.clearedOn, "clearedOn") : undefined,
     createdBy: req.user?._id,
   };
-  data.fingerprints = [fp(ACTION_CODES.PAYMENT_POSTED, { _id }, req, { voucherNo: number, amount, tds: tdsAmount, docs: allocations.map((a) => a.docNo) })];
+  data.fingerprints = [fp(ACTION_CODES.PAYMENT_POSTED, { _id }, req, { voucherNo: number, amount, tds: tdsAmount, adjustments: adjTotal, docs: allocations.map((a) => a.docNo) })];
 
   let voucher;
   try {
     await withTxn(async (session) => {
       [voucher] = await Payment.create([data], { session });
       for (const a of allocations) {
-        if (a.docType === "Invoice") {
-          await Invoice.updateOne({ _id: a.doc }, { $inc: { paidAmount: a.amount } }, { session });
-        } else if (a.docType === "SupplierBill") {
-          const bill = await SupplierBill.findById(a.doc).session(session);
-          const paid = r2(bill.paidAmount + a.amount - a.tds);
-          const tds = r2(bill.tdsAmount + a.tds);
-          const left = r2(bill.totals.grand - paid - tds - bill.debitedAmount);
-          await SupplierBill.updateOne({ _id: bill._id }, { $set: { paidAmount: paid, tdsAmount: tds, status: left <= 0.005 ? "paid" : "part_paid" } }, { session });
+        if (a.docType === "SupplierBill") {
+          await settle.apply("SupplierBill", a.doc, { paidAmount: r2(a.amount - a.tds), tdsAmount: a.tds }, session, { docNo: a.docNo });
+        } else if (a.docType === "Expense") {
+          await settle.apply("Expense", a.doc, { paidAmount: a.amount }, session, { docNo: a.docNo, extraSet: { paidFrom: account._id, paidAt: date } });
+          await Expense.updateOne({ _id: a.doc }, { $push: { fingerprints: fp(ACTION_CODES.EXPENSE_PAID, { _id: a.doc }, req, { voucherNo: number, amount: a.amount }) } }, { session });
         } else {
-          const e = await Expense.findById(a.doc).session(session);
-          const paid = r2(e.paidAmount + a.amount);
-          const done = r2(e.totals.grand - paid) <= 0.005;
-          await Expense.updateOne({ _id: e._id }, {
-            $set: { paidAmount: paid, ...(done ? { status: "paid", paidFrom: account._id, paidAt: date } : {}) },
-            $push: { fingerprints: fp(ACTION_CODES.EXPENSE_PAID, e, req, { voucherNo: number, amount: a.amount }) },
-          }, { session });
+          await settle.apply(a.docType, a.doc, { [VOUCHER_FIELD[a.docType]]: a.amount }, session, { docNo: a.docNo });
         }
       }
       if (party) {
-        const settled = r2(amount + tdsAmount);
         await partyLedger.post({
           partyType, party: party._id, date, docType: "Payment", doc: _id, docNo: number,
-          ...(kind === "receipt" ? { credit: settled } : { debit: settled }),
-          narration: data.narration || `${kind === "receipt" ? "Received" : "Paid"} by ${b.mode}${data.reference ? ` · ${data.reference}` : ""}`,
+          ...(kind === "receipt" ? { credit: settledTotal } : { debit: settledTotal }),
+          narration: data.narration || `${kind === "receipt" ? "Received" : "Paid"} by ${b.mode}${data.reference ? ` · ${data.reference}` : ""}${adjTotal ? ` · adjusted ₹${adjTotal.toFixed(2)}` : ""}`,
         }, session);
       }
     });
@@ -970,40 +960,55 @@ router.post("/payments", catchAsyncErrors(async (req, res, next) => {
 
 router.post("/payments/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Voucher not found", 404));
-  const v = await Payment.findById(req.params.id);
+  const v = await Payment.findById(req.params.id).lean();
   if (!v) return next(new ErrorHandler("Voucher not found", 404));
   if (v.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
   let reason;
-  try { reason = reasonFrom(req); } catch (err) { return next(err); }
+  try { reason = reasonFrom(req); await assertOpen(v.date, req, { cancelling: true }); } catch (err) { return next(err); }
   const cancel = { reason, at: new Date(), by: req.user?._id };
   const mark = fp(ACTION_CODES.PAYMENT_CANCELLED, v, req, { voucherNo: v.voucherNo, reason });
-  await withTxn(async (session) => {
-    await Payment.updateOne({ _id: v._id }, { $set: { status: "cancelled", cancel }, $push: { fingerprints: mark } }, { session });
-    for (const a of v.allocations) {
-      if (a.docType === "Invoice") {
-        await Invoice.updateOne({ _id: a.doc }, { $inc: { paidAmount: -a.amount } }, { session });
-      } else if (a.docType === "SupplierBill") {
-        const bill = await SupplierBill.findById(a.doc).session(session);
-        if (bill) {
-          const paid = r2(bill.paidAmount - (a.amount - a.tds));
-          const tds = r2(bill.tdsAmount - a.tds);
-          const left = r2(bill.totals.grand - paid - tds - bill.debitedAmount);
-          const status = bill.status === "cancelled" ? "cancelled" : left <= 0.005 ? "paid" : (paid + tds + bill.debitedAmount > 0 ? "part_paid" : "open");
-          await SupplierBill.updateOne({ _id: bill._id }, { $set: { paidAmount: paid, tdsAmount: tds, status } }, { session });
-        }
-      } else {
-        const e = await Expense.findById(a.doc).session(session);
-        if (e) {
-          const paid = r2(e.paidAmount - a.amount);
-          const update = { $set: { paidAmount: paid } };
-          if (e.status === "paid") { update.$set.status = "approved"; update.$unset = { paidFrom: 1, paidAt: 1 }; }
-          await Expense.updateOne({ _id: e._id }, update, { session });
+  try {
+    await withTxn(async (session) => {
+      await Payment.updateOne({ _id: v._id }, { $set: { status: "cancelled", cancel }, $push: { fingerprints: mark } }, { session });
+      for (const a of v.allocations) {
+        if (a.docType === "SupplierBill") {
+          await settle.apply("SupplierBill", a.doc, { paidAmount: -r2(a.amount - (a.tds || 0)), tdsAmount: -(a.tds || 0) }, session);
+        } else if (a.docType === "Expense") {
+          await settle.apply("Expense", a.doc, { paidAmount: -a.amount }, session);
+          await Expense.updateOne({ _id: a.doc, status: "approved" }, { $unset: { paidFrom: 1, paidAt: 1 } }, { session });
+        } else {
+          await settle.apply(a.docType, a.doc, { [VOUCHER_FIELD[a.docType]]: -a.amount }, session);
         }
       }
-    }
-    await partyLedger.reverse("Payment", v._id, session);
-  });
+      await partyLedger.reverse("Payment", v._id, session);
+    });
+  } catch (err) {
+    if (err instanceof ErrorHandler) return next(err);
+    throw err;
+  }
   res.json({ success: true, payment: await Payment.findById(v._id).select("-attachments.data").lean() });
+}));
+
+// ══════════════════════════════════════════════════════════════════
+//  CREDITS: ADVANCES, UNAPPLIED NOTES, OPENING ADVANCES
+// ══════════════════════════════════════════════════════════════════
+//  GET  /credits?partyType=&party=   what a party has on account
+//  POST /credits/apply               set some of it against open documents
+router.get("/credits", catchAsyncErrors(async (req, res, next) => {
+  const partyType = req.query.partyType;
+  if (partyType !== "customer" && partyType !== "supplier") return next(new ErrorHandler("partyType must be customer or supplier", 400));
+  if (!isId(req.query.party)) return next(new ErrorHandler("party is required", 400));
+  res.json({ success: true, credits: await credits.openFor(partyType, req.query.party) });
+}));
+
+router.post("/credits/apply", catchAsyncErrors(async (req, res, next) => {
+  try {
+    const out = await credits.apply(req.body || {}, req);
+    res.json({ success: true, ...out });
+  } catch (err) {
+    if (err instanceof ErrorHandler) return next(err);
+    throw err;
+  }
 }));
 
 // ══════════════════════════════════════════════════════════════════
@@ -1049,16 +1054,12 @@ router.get("/overview", catchAsyncErrors(async (_req, res) => {
     SupplierBill.aggregate([{ $match: { status: { $ne: "cancelled" }, billDate: { $gte: monthStart } } }, { $group: { _id: null, amount: { $sum: "$totals.grand" }, itc: { $sum: "$itc.amount" }, count: { $sum: 1 } } }]),
     Payment.find({ status: "posted" }).select("kind voucherNo date partyName amount mode accountName").sort({ date: -1, createdAt: -1 }).limit(8).lean(),
   ]);
-  const sums = await Payment.aggregate([
-    { $match: { status: "posted" } },
-    { $group: { _id: "$account", receipts: { $sum: { $cond: [{ $eq: ["$kind", "receipt"] }, "$amount", 0] } }, payments: { $sum: { $cond: [{ $eq: ["$kind", "payment"] }, "$amount", 0] } } } },
-  ]);
-  const by = new Map(sums.map((s) => [String(s._id), s]));
+  const balances = await bankBalances.withBalances(accounts);
   res.json({
     success: true,
     receivables: { ...outstanding.totals(recv), top: outstanding.byParty(recv).slice(0, 5) },
     payables: { ...outstanding.totals(pay), top: outstanding.byParty(pay).slice(0, 5) },
-    accounts: accounts.map((a) => { const s = by.get(String(a._id)) || { receipts: 0, payments: 0 }; return { _id: a._id, name: a.name, kind: a.kind, balance: r2((a.openingBalance || 0) + s.receipts - s.payments) }; }),
+    accounts: balances.map((a) => ({ _id: a._id, name: a.name, kind: a.kind, balance: a.balance })),
     pendingExpenses,
     month: {
       from: monthStart,
@@ -1130,14 +1131,16 @@ router.get("/reports/tds", catchAsyncErrors(async (req, res, next) => {
   const byDeductee = new Map();
   for (const v of vouchers) {
     const key = `${v.supplier || v.partyName}|${v.tds.section}`;
-    const g = byDeductee.get(key) || { supplier: v.supplier, partyName: v.partyName, section: v.tds.section, rate: v.tds.rate, gross: 0, tds: 0, vouchers: [] };
+    const g = byDeductee.get(key) || { supplier: v.supplier, partyName: v.partyName, section: v.tds.section, rate: v.tds.rate, gross: 0, base: 0, tds: 0, vouchers: [] };
     const gross = r2(v.amount + v.tds.amount);
-    g.gross = r2(g.gross + gross); g.tds = r2(g.tds + v.tds.amount);
-    g.vouchers.push({ _id: v._id, voucherNo: v.voucherNo, date: v.date, gross, tds: v.tds.amount, docs: v.allocations.map((a) => a.docNo) });
+    // What it was deducted on: the bills' value net of GST (older vouchers: the gross).
+    const base = r2(v.tds.base || gross);
+    g.gross = r2(g.gross + gross); g.base = r2(g.base + base); g.tds = r2(g.tds + v.tds.amount);
+    g.vouchers.push({ _id: v._id, voucherNo: v.voucherNo, date: v.date, gross, base, tds: v.tds.amount, docs: v.allocations.map((a) => a.docNo) });
     byDeductee.set(key, g);
   }
   const rows = [...byDeductee.values()];
-  res.json({ success: true, from: r.from, to: r.to, rows, total: { gross: r2(rows.reduce((s, g) => s + g.gross, 0)), tds: r2(rows.reduce((s, g) => s + g.tds, 0)) } });
+  res.json({ success: true, from: r.from, to: r.to, rows, total: { gross: r2(rows.reduce((s, g) => s + g.gross, 0)), base: r2(rows.reduce((s, g) => s + g.base, 0)), tds: r2(rows.reduce((s, g) => s + g.tds, 0)) } });
 }));
 
 router.get("/reports/expenses", catchAsyncErrors(async (req, res, next) => {
@@ -1169,17 +1172,24 @@ router.get("/reports/cashbook", catchAsyncErrors(async (req, res, next) => {
   if (!account) return next(new ErrorHandler("Account not found", 404));
   let r;
   try { r = rangeOf(req); } catch (err) { return next(err); }
-  const before = await Payment.aggregate([
-    { $match: { status: "posted", account: account._id, date: { $lt: r.from } } },
-    { $group: { _id: null, receipts: { $sum: { $cond: [{ $eq: ["$kind", "receipt"] }, "$amount", 0] } }, payments: { $sum: { $cond: [{ $eq: ["$kind", "payment"] }, "$amount", 0] } } } },
+  const opening = await bankBalances.balanceBefore(account, r.from);
+  const [vouchers, contras] = await Promise.all([
+    Payment.find({ status: "posted", account: account._id, date: { $gte: r.from, $lte: r.to } })
+      .select("kind voucherNo date partyName amount mode reference narration allocations clearedOn createdAt").lean(),
+    Contra.find({ status: "posted", $or: [{ from: account._id }, { to: account._id }], date: { $gte: r.from, $lte: r.to } }).lean(),
   ]);
-  const opening = r2((account.openingBalance || 0) + (before[0]?.receipts || 0) - (before[0]?.payments || 0));
-  const vouchers = await Payment.find({ status: "posted", account: account._id, date: { $gte: r.from, $lte: r.to } })
-    .select("kind voucherNo date partyName amount mode reference narration allocations").sort({ date: 1, createdAt: 1 }).lean();
+  // A contra is a row like a voucher: in when the money came to this account.
+  const moves = [
+    ...vouchers.map((v) => ({ ...v, docType: "Payment", inflow: v.kind === "receipt" ? v.amount : 0, outflow: v.kind === "payment" ? v.amount : 0 })),
+    ...contras.map((c) => {
+      const incoming = String(c.to) === String(account._id);
+      return { _id: c._id, docType: "Contra", kind: "contra", voucherNo: c.contraNo, date: c.date, createdAt: c.createdAt, partyName: incoming ? `From ${c.fromName}` : `To ${c.toName}`, amount: c.amount, mode: c.mode, reference: c.reference, narration: c.narration, allocations: [], clearedOn: incoming ? c.toClearedOn : c.fromClearedOn, inflow: incoming ? c.amount : 0, outflow: incoming ? 0 : c.amount };
+    }),
+  ].sort((a, b) => new Date(a.date) - new Date(b.date) || new Date(a.createdAt) - new Date(b.createdAt));
   let running = opening;
-  const rows = vouchers.map((v) => {
-    running = r2(running + (v.kind === "receipt" ? v.amount : -v.amount));
-    return { ...v, inflow: v.kind === "receipt" ? v.amount : 0, outflow: v.kind === "payment" ? v.amount : 0, balance: running };
+  const rows = moves.map((v) => {
+    running = r2(running + v.inflow - v.outflow);
+    return { ...v, balance: running };
   });
   res.json({ success: true, account: { _id: account._id, name: account.name, kind: account.kind }, from: r.from, to: r.to, opening, rows, closing: running,
     inflow: r2(rows.reduce((s, x) => s + x.inflow, 0)), outflow: r2(rows.reduce((s, x) => s + x.outflow, 0)) });
@@ -1343,6 +1353,9 @@ router.post("/collections/send", catchAsyncErrors(async (req, res, next) => {
   const result = await sendWhatsApp(to, message.slice(0, 1500));
   res.json({ success: true, ...result, to });
 }));
+
+// Contras, opening balances, settings and the lock.
+router.use(require("./accountsBooks"));
 
 module.exports = router;
 module.exports.createVoucher = createVoucher;

@@ -22,7 +22,6 @@ const Customer     = require("../models/Customer");
 const Supplier     = require("../models/Supplier");
 const Expense      = require("../models/Expense");
 const BankAccount  = require("../models/BankAccount");
-const Payment      = require("../models/Payment");
 const outstanding  = require("../services/outstanding");
 const partyLedger  = require("../services/partyLedger");
 const { escapeRegex } = require("../utils/escapeRegex");
@@ -152,12 +151,8 @@ const TOOLS = {
   },
   async get_cash_position() {
     const accounts = await BankAccount.find({ active: true }).lean();
-    const sums = await Payment.aggregate([
-      { $match: { status: "posted" } },
-      { $group: { _id: "$account", receipts: { $sum: { $cond: [{ $eq: ["$kind", "receipt"] }, "$amount", 0] } }, payments: { $sum: { $cond: [{ $eq: ["$kind", "payment"] }, "$amount", 0] } } } },
-    ]);
-    const by = new Map(sums.map((x) => [String(x._id), x]));
-    return accounts.map((a) => { const x = by.get(String(a._id)) || { receipts: 0, payments: 0 }; return { account: a.name, kind: a.kind, balance: Math.round(((a.openingBalance || 0) + x.receipts - x.payments) * 100) / 100 }; });
+    const rows = await require("../services/bankBalances").withBalances(accounts);
+    return rows.map((a) => ({ account: a.name, kind: a.kind, balance: a.balance }));
   },
 
   async get_machine_status() {

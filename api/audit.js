@@ -23,6 +23,8 @@ const SupplierBill    = require("../models/SupplierBill");
 const Expense         = require("../models/Expense");
 const AccountNote     = require("../models/AccountNote");
 const Payment         = require("../models/Payment");
+const Contra = require("../models/Contra");
+const OpeningBalance = require("../models/OpeningBalance");
 const MaterialGroup   = require("../models/MaterialGroup");
 const AccessEvent     = require("../models/AccessEvent");
 
@@ -73,6 +75,8 @@ router.get(
       recentFrom(Expense,         "Expense",         "expenseNo",  limit),
       recentFrom(AccountNote,     "AccountNote",     "noteNo",     limit),
       recentFrom(Payment,         "Payment",         "voucherNo",  limit),
+      recentFrom(Contra,          "Contra",          "contraNo",   limit),
+      recentFrom(OpeningBalance,  "OpeningBalance",  "docNo",      limit),
       recentFrom(Quote,           "Quote",           "quoteNo",    limit),
       recentFrom(StockCount,      "StockCount",      "countNo",    limit),
       // Groups have no document number — `code` is their stable handle,

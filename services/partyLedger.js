@@ -71,6 +71,26 @@ async function balances(partyType, partyIds) {
   return new Map(rows.map((x) => [String(x._id), balanceOf(partyType, x)]));
 }
 
+/** What a voucher settles on the party: the money, the TDS and any adjustment. */
+function settledBy(p) {
+  return r2((p.amount || 0) + (p.tds?.amount || 0) + (p.adjustments || []).reduce((s, a) => s + (a.amount || 0), 0));
+}
+
+/**
+ * The row for an opening balance: a due raises what the party owes
+ * (customer debit, supplier credit); an advance is the other side.
+ */
+function openingEntry(o) {
+  const party = o.partyType === 'customer' ? o.customer : o.supplier;
+  const raises = o.kind === 'due';
+  const debitSide = (o.partyType === 'customer') === raises;
+  return {
+    partyType: o.partyType, party, date: o.date, docType: 'OpeningBalance', doc: o._id, docNo: o.docNo,
+    ...(debitSide ? { debit: o.amount } : { credit: o.amount }),
+    narration: `Opening balance${o.refNo ? ` · ${o.refNo}` : ''}${o.kind === 'advance' ? ' (advance)' : ''}`,
+  };
+}
+
 /**
  * Every row from the documents. Issued invoices and bills, approved
  * and paid expenses with a supplier, issued notes, posted vouchers.
@@ -81,9 +101,14 @@ async function rebuild() {
   const Expense = require('../models/Expense');
   const AccountNote = require('../models/AccountNote');
   const Payment = require('../models/Payment');
+  const OpeningBalance = require('../models/OpeningBalance');
 
   await PartyLedgerEntry.deleteMany({});
   let n = 0;
+  for (const o of await OpeningBalance.find({ status: 'posted' }).lean()) {
+    await post(openingEntry(o));
+    n++;
+  }
   for (const inv of await Invoice.find({ status: 'issued' }).select('customer invoiceDate invoiceNumber totals').lean()) {
     await post({ partyType: 'customer', party: inv.customer, date: inv.invoiceDate, docType: 'Invoice', doc: inv._id, docNo: inv.invoiceNumber, debit: inv.totals?.grand || 0, narration: 'Sales' });
     n++;
@@ -105,9 +130,9 @@ async function rebuild() {
     });
     n++;
   }
-  for (const p of await Payment.find({ status: 'posted', partyType: { $in: ['customer', 'supplier'] } }).select('kind partyType customer supplier date voucherNo amount tds narration').lean()) {
+  for (const p of await Payment.find({ status: 'posted', partyType: { $in: ['customer', 'supplier'] } }).select('kind partyType customer supplier date voucherNo amount tds adjustments narration').lean()) {
     const party = p.partyType === 'customer' ? p.customer : p.supplier;
-    const settled = r2(p.amount + (p.tds?.amount || 0));
+    const settled = settledBy(p);
     await post({
       partyType: p.partyType, party, date: p.date, docType: 'Payment', doc: p._id, docNo: p.voucherNo,
       ...(p.kind === 'receipt' ? { credit: settled } : { debit: settled }), narration: p.narration || (p.kind === 'receipt' ? 'Receipt' : 'Payment'),
@@ -117,4 +142,4 @@ async function rebuild() {
   return n;
 }
 
-module.exports = { post, reverse, statement, balances, balanceOf, rebuild };
+module.exports = { post, reverse, statement, balances, balanceOf, rebuild, settledBy, openingEntry };
