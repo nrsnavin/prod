@@ -1924,4 +1924,143 @@ router.get(
   })
 );
 
+// ══════════════════════════════════════════════════════════════════
+//  STOCK TAKE ON A SHEET
+//
+//    GET  /stock-take.xlsx?ids=a,b&category=   the count sheet: Ref,
+//         Material, Category, Unit, and a blank "Counted stock" column
+//         to fill on the rack (the figures the system holds are left
+//         off on purpose — a blind count)
+//    POST /stock-take/preview   multipart "file" — the filled sheet,
+//         read back: each row matched to its material (by Ref, else by
+//         name), the counted figure beside the live stock and the
+//         difference. Writes nothing: the screen shows the differences
+//         and posts them through /bulk-adjust-stock, each a ledger entry,
+//         as the on-screen stock take does.
+// ══════════════════════════════════════════════════════════════════
+const ExcelJS = require("exceljs");
+const multer = require("multer");
+const { keepRequestContext } = require("../middleware/userContext");
+
+const SHEET_NAME = "Stock take";
+const SHEET_COLUMNS = ["Ref", "Material", "Category", "Unit", "Counted stock"];
+const sheetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 1 } });
+
+/** The materials a sheet covers: everything not archived, narrowed by category or ids. */
+function stockTakeFilter(query) {
+  const filter = { archived: { $ne: true } };
+  const category = String(query.category || "").trim();
+  if (category && category !== "all") filter.category = category;
+  const ids = String(query.ids || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (ids.length) {
+    if (ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) throw new ErrorHandler("ids contains an invalid id", 400);
+    filter._id = { $in: ids };
+  }
+  return filter;
+}
+
+router.get(
+  "/stock-take.xlsx",
+  catchAsyncErrors(async (req, res, next) => {
+    let filter;
+    try { filter = stockTakeFilter(req.query); } catch (err) { return next(err); }
+    const materials = await RawMaterial.find(filter).select("name category unit").sort({ category: 1, name: 1 }).lean();
+    if (!materials.length) return next(new ErrorHandler("No materials to count — nothing matched.", 400));
+
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet(SHEET_NAME, { views: [{ state: "frozen", ySplit: 1 }] });
+    ws.columns = [
+      { header: "Ref", key: "ref", width: 28 },
+      { header: "Material", key: "name", width: 40 },
+      { header: "Category", key: "category", width: 16 },
+      { header: "Unit", key: "unit", width: 8 },
+      { header: "Counted stock", key: "counted", width: 16 },
+    ];
+    ws.getRow(1).font = { bold: true };
+    for (const m of materials) {
+      const row = ws.addRow({ ref: String(m._id), name: m.name, category: m.category || "", unit: m.unit || "kg", counted: null });
+      // The one column to fill, shaded so it is obvious on paper too.
+      row.getCell("counted").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF4CC" } };
+      row.getCell("ref").font = { color: { argb: "FF888888" }, size: 9 };
+    }
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="stock-take-${stamp}.xlsx"`);
+    res.send(Buffer.from(await wb.xlsx.writeBuffer()));
+  })
+);
+
+const cellText = (v) => {
+  if (v === undefined || v === null) return "";
+  if (typeof v === "object") {
+    if (typeof v.text === "string") v = v.text;
+    else if ("result" in v) v = v.result;
+    else if (Array.isArray(v.richText)) v = v.richText.map((t) => t.text).join("");
+    else if (v instanceof Date) v = v.toISOString();
+  }
+  return String(v).trim();
+};
+
+router.post(
+  "/stock-take/preview",
+  keepRequestContext(sheetUpload.single("file")),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!req.file?.buffer) return next(new ErrorHandler('Attach the filled sheet (field name "file").', 400));
+    const wb = new ExcelJS.Workbook();
+    try { await wb.xlsx.load(req.file.buffer); } catch (_) {
+      return next(new ErrorHandler("Could not read the file as an .xlsx workbook.", 400));
+    }
+    const ws = wb.getWorksheet(SHEET_NAME) || wb.worksheets[0];
+    if (!ws) return next(new ErrorHandler("The workbook has no sheet.", 400));
+
+    // The header row as the export wrote it; a sheet somebody made by
+    // hand is read the same way as long as it names the columns.
+    const col = {};
+    ws.getRow(1).eachCell((cell, c) => { col[cellText(cell.value).toLowerCase()] = c; });
+    const nameCol = col["material"] ?? col["name"];
+    const countedCol = col["counted stock"] ?? col["counted"] ?? col["stock"];
+    const refCol = col["ref"];
+    if (!nameCol || !countedCol) {
+      return next(new ErrorHandler('The sheet needs a "Material" column and a "Counted stock" column (download the sheet from here to get them).', 400));
+    }
+
+    const all = await RawMaterial.find({}).select("name category unit stock archived").lean();
+    const byId = new Map(all.map((m) => [String(m._id), m]));
+    const byName = new Map(all.map((m) => [String(m.name || "").trim().toLowerCase(), m]));
+
+    const rows = [];
+    const unknown = [];
+    const errors = [];
+    let blank = 0;
+    const seen = new Set();
+    ws.eachRow((row, rn) => {
+      if (rn === 1) return;
+      const name = cellText(row.getCell(nameCol).value);
+      const ref = refCol ? cellText(row.getCell(refCol).value) : "";
+      if (!name && !ref) return;
+      const m = (ref && mongoose.Types.ObjectId.isValid(ref) && byId.get(ref)) || byName.get(name.toLowerCase());
+      if (!m) { unknown.push({ row: rn, name: name || ref }); return; }
+      const raw = cellText(row.getCell(countedCol).value);
+      if (raw === "") { blank += 1; return; }
+      const counted = Number(raw.replace(/,/g, ""));
+      if (!Number.isFinite(counted) || counted < 0) { errors.push({ row: rn, name: m.name, error: `"${raw}" is not a quantity` }); return; }
+      if (seen.has(String(m._id))) { errors.push({ row: rn, name: m.name, error: "listed twice on the sheet" }); return; }
+      seen.add(String(m._id));
+      const systemStock = Number(m.stock) || 0;
+      rows.push({
+        _id: String(m._id), name: m.name, category: m.category || "", unit: m.unit || "kg", archived: !!m.archived,
+        systemStock, counted: Math.round(counted * 10000) / 10000,
+        adjustment: Math.round((counted - systemStock) * 10000) / 10000,
+      });
+    });
+
+    res.json({
+      success: true,
+      file: req.file.originalname || "",
+      rows, blank, unknown, errors,
+      changed: rows.filter((r) => r.adjustment !== 0).length,
+    });
+  })
+);
+
 module.exports = router;
