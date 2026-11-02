@@ -41,6 +41,7 @@ const AccountsSettingsSchema = new mongoose.Schema(
       discountAllowed:  ledger("Discount Allowed"),
       discountReceived: ledger("Discount Received"),
       badDebts:         ledger("Bad Debts Written Off"),
+      writtenBack:      ledger("Sundry Balances Written Back"),
       sundryExpenses:   ledger("Sundry Expenses"),
       debtorsGroup:     ledger("Sundry Debtors"),
       creditorsGroup:   ledger("Sundry Creditors"),

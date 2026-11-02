@@ -19,6 +19,7 @@ const ExcelJS = require('exceljs');
 const Customer = require('../models/Customer');
 const Supplier = require('../models/Supplier');
 const Payment = require('../models/Payment');
+const Contra = require('../models/Contra');
 const outstanding = require('./outstanding');
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 const { promptVersion } = require('../utils/aiPrompts');
@@ -96,7 +97,8 @@ function columnsOf(header) {
   const amount = find(/^amount|^amt|transaction amount/);
   const drcr = find(/dr\s*\/\s*cr|cr\s*\/\s*dr|^type$|debit\/credit/);
   const ref = find(/ref|cheque|chq|utr|instrument/);
-  return { date, narration, debit, credit, amount, drcr, ref };
+  const balance = find(/balance/);
+  return { date, narration, debit, credit, amount, drcr, ref, balance };
 }
 
 /**
@@ -136,12 +138,31 @@ async function parse(buffer, mimetype, filename = '') {
       if (a !== 0) { amount = Math.abs(a); direction = t.startsWith('c') || (!t && a > 0) ? 'in' : 'out'; }
     }
     if (!direction || amount <= 0) continue;
+    const bal = cols.balance >= 0 && String(r[cols.balance] ?? '').trim() !== '' ? money(r[cols.balance]) : null;
     rows.push({
       index: rows.length, date, narration: String(r[cols.narration] || '').trim().slice(0, 300),
       ref: cols.ref >= 0 ? String(r[cols.ref] || '').trim().slice(0, 60) : '', amount: r2(amount), direction,
+      balance: bal === null ? null : r2(bal),
     });
   }
   return rows;
+}
+
+/** A line's identity: the same line in two uploads has the same key. */
+function lineKey(row) {
+  const d = new Date(row.date);
+  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return [day, row.direction, r2(row.amount).toFixed(2), String(row.narration || '').toUpperCase().replace(/\s+/g, ' ').trim(), String(row.ref || '').toUpperCase().trim()].join('|');
+}
+
+/** The bank's balance after the chronologically last line, when the file has one. */
+function closingOf(rows) {
+  const withBal = rows.filter((r) => r.balance !== null && r.balance !== undefined);
+  if (!withBal.length) return null;
+  // Statements run oldest-first or newest-first; follow the dates.
+  const ascending = new Date(rows[0].date) <= new Date(rows[rows.length - 1].date);
+  const last = ascending ? withBal[withBal.length - 1] : withBal[0];
+  return last.balance;
 }
 
 // ── Matching ──────────────────────────────────────────────────────
@@ -192,17 +213,31 @@ async function match(rows, accountId, { useModel = true } = {}) {
   const recvByParty = outstanding.byParty(recv);
   const payByParty = outstanding.byParty(pay);
   const dates = rows.map((r) => r.date.getTime());
-  const recorded = rows.length ? await Payment.find({
-    status: 'posted', account: accountId,
-    date: { $gte: new Date(Math.min(...dates) - 7 * DAY), $lte: new Date(Math.max(...dates) + 7 * DAY) },
-  }).select('kind date amount reference voucherNo partyName').lean() : [];
+  const window = rows.length ? { $gte: new Date(Math.min(...dates) - 7 * DAY), $lte: new Date(Math.max(...dates) + 7 * DAY) } : null;
+  const [vouchers, contras] = rows.length ? await Promise.all([
+    Payment.find({ status: 'posted', account: accountId, date: window }).select('kind date amount reference voucherNo partyName').lean(),
+    Contra.find({ status: 'posted', $or: [{ from: accountId }, { to: accountId }], date: window }).select('from to date amount reference contraNo fromName toName').lean(),
+  ]) : [[], []];
+  // A contra is money in on the account it went to and out on the one it left.
+  const recorded = [
+    ...vouchers.map((v) => ({ ...v, voucherType: 'Payment' })),
+    ...contras.map((c) => {
+      const incoming = String(c.to) === String(accountId);
+      return { _id: c._id, voucherType: 'Contra', kind: incoming ? 'receipt' : 'payment', date: c.date, amount: c.amount, reference: c.reference || '', voucherNo: c.contraNo, partyName: incoming ? `From ${c.fromName}` : `To ${c.toName}` };
+    }),
+  ];
+  // One book entry answers one statement line.
+  const used = new Set();
 
   const out = rows.map((row) => {
     const kind = row.direction === 'in' ? 'receipt' : 'payment';
     // Already in the books?
-    const dup = recorded.find((v) => v.kind === kind && Math.abs(v.amount - row.amount) < 0.01 && Math.abs(new Date(v.date) - row.date) <= 5 * DAY
+    const dup = recorded.find((v) => !used.has(String(v._id)) && v.kind === kind && Math.abs(v.amount - row.amount) < 0.01 && Math.abs(new Date(v.date) - row.date) <= 5 * DAY
       && (!row.ref || !v.reference || v.reference.toUpperCase().includes(row.ref.toUpperCase()) || row.ref.toUpperCase().includes(v.reference.toUpperCase())));
-    if (dup) return { ...row, status: 'recorded', suggestion: null, recorded: { _id: dup._id, voucherNo: dup.voucherNo, partyName: dup.partyName } };
+    if (dup) {
+      used.add(String(dup._id));
+      return { ...row, status: 'recorded', suggestion: null, recorded: { _id: dup._id, voucherType: dup.voucherType, voucherNo: dup.voucherNo, partyName: dup.partyName } };
+    }
 
     const partyType = row.direction === 'in' ? 'customer' : 'supplier';
     const groups = row.direction === 'in' ? recvByParty : payByParty;
@@ -280,4 +315,4 @@ async function match(rows, accountId, { useModel = true } = {}) {
   return out;
 }
 
-module.exports = { parse, parseCsv, parseDate, columnsOf, match, nameScore, subsetFor, fifo };
+module.exports = { parse, parseCsv, parseDate, columnsOf, match, nameScore, subsetFor, fifo, lineKey, closingOf };

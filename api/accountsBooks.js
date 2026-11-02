@@ -359,5 +359,9 @@ router.post("/lock", isAdmin("admin"), catchAsyncErrors(async (req, res, next) =
   res.json({ success: true, settings });
 }));
 
+// Bank reconciliation and the Tally export.
+router.use(require("./accountsBank"));
+router.use(require("./accountsTally"));
+
 module.exports = router;
 module.exports.postOpening = postOpening;

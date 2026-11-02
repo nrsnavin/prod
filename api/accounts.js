@@ -58,6 +58,8 @@ const Customer        = require("../models/Customer");
 const PurchaseOrder   = require("../models/PurchaseOrder");
 const MaterialInward  = require("../models/MaterialInward");
 const RawMaterial     = require("../models/RawMaterial");
+const BankStatement   = require("../models/BankStatement");
+const reconcile       = require("../services/reconcile");
 const { ATTACHMENT_TYPES, MAX_ATTACHMENT_BYTES } = require("../models/accountsShared");
 
 const {
@@ -1297,9 +1299,29 @@ router.post("/bank/statement", keepRequestContext(upload.single("file")), catchA
   }
   if (!rows.length) return next(new ErrorHandler("No transactions found in the file", 400));
   const matched = await bankStatement.match(rows, account._id, { useModel: req.body?.useModel !== "false" });
+  // A line set aside in an earlier upload stays set aside.
+  const keys = matched.map((r) => bankStatement.lineKey(r));
+  const earlier = await BankStatement.find({ account: account._id, "lines.key": { $in: keys } }).select("lines.key lines.status lines.note").lean();
+  const ignored = new Map();
+  for (const st of earlier) for (const l of st.lines) if (l.status === "ignored" && keys.includes(l.key)) ignored.set(l.key, l.note);
+  for (const [i, r] of matched.entries()) {
+    if (r.status !== "recorded" && ignored.has(keys[i])) { r.status = "ignored"; r.note = ignored.get(keys[i]); r.suggestion = null; }
+  }
+  const dates = rows.map((r) => r.date.getTime());
+  const statement = await BankStatement.create({
+    account: account._id, accountName: account.name, file: req.file.originalname || "",
+    from: new Date(Math.min(...dates)), to: new Date(Math.max(...dates)), closingBalance: bankStatement.closingOf(rows),
+    uploadedBy: req.user?._id, uploadedByName: req.user?.name || "",
+    lines: matched.map((r, i) => ({
+      index: r.index, date: r.date, narration: r.narration, ref: r.ref, amount: r.amount, direction: r.direction, balance: r.balance ?? null, key: keys[i],
+      status: r.status, voucherType: r.recorded?.voucherType || null, voucher: r.recorded?._id || null, voucherNo: r.recorded?.voucherNo || "", note: r.note || "",
+    })),
+  });
+  // What the bank shows is cleared in the books.
+  for (const r of matched) if (r.status === "recorded" && r.recorded) await reconcile.markCleared(r.recorded.voucherType, r.recorded._id, account._id, r.date);
   const counts = { recorded: 0, matched: 0, unmatched: 0 };
   for (const r of matched) counts[r.status] = (counts[r.status] || 0) + 1;
-  res.json({ success: true, account: { _id: account._id, name: account.name }, rows: matched, counts, file: req.file.originalname });
+  res.json({ success: true, statement: statement._id, account: { _id: account._id, name: account.name }, rows: matched, counts, file: req.file.originalname, closingBalance: statement.closingBalance });
 }));
 
 router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
@@ -1307,6 +1329,7 @@ router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
   if (!rows.length) return next(new ErrorHandler("No lines to post", 400));
   if (rows.length > 500) return next(new ErrorHandler("At most 500 lines at a time", 400));
+  const statementId = isId(req.body?.statement) ? req.body.statement : null;
   const results = [];
   for (const [i, r] of rows.entries()) {
     try {
@@ -1317,9 +1340,13 @@ router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
         ...(partyType === "customer" ? { customer: r.party } : partyType === "supplier" ? { supplier: r.party } : { partyName: r.partyName || r.narration || "Bank" }),
         amount: r.amount, mode: r.mode || "bank", account: req.body.account, reference: r.ref || "",
         allocations: Array.isArray(r.allocations) ? r.allocations.map((a) => ({ docType: a.docType, doc: a.doc, amount: a.amount })) : [],
+        adjustments: Array.isArray(r.adjustments) ? r.adjustments : [],
         narration: r.narration || "", source: "statement", statementLine: `${r.date || ""} ${r.narration || ""}`.trim().slice(0, 200),
-        requestId: r.requestId,
+        clearedOn: r.date, requestId: r.requestId,
       }, req);
+      if (statementId && Number.isInteger(r.index)) {
+        await BankStatement.updateOne({ _id: statementId, "lines.index": r.index }, { $set: { "lines.$.status": "posted", "lines.$.voucherType": "Payment", "lines.$.voucher": voucher._id, "lines.$.voucherNo": voucher.voucherNo } });
+      }
       results.push({ index: i, ok: true, voucherNo: voucher.voucherNo, _id: voucher._id, replay: !!replay });
     } catch (err) {
       results.push({ index: i, ok: false, error: err.message });
