@@ -22,6 +22,7 @@ const CUSTOMER_FIELDS = [
   "name", "email", "gstin", "status", "contactName", "phoneNumber",
   "address", "city", "pincode", "stateCode",
   "purchase", "accountant", "merchandiser", "paymentTerms",
+  "creditLimit", "maxOverdueDays",
 ];
 function pickCustomer(body) {
   const out = {};
@@ -62,6 +63,19 @@ router.put(
     );
     if (!customer) await explainMiss(Customer, id, req, "Customer not found");
     res.status(200).json({ success: true, data: customer });
+  })
+);
+
+// ── GET /credit/:id ─────────────────────────────────────────────
+// Where a customer stands against their credit limit — read by the
+// order, challan and invoice screens before they commit.
+router.get(
+  "/credit/:id",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!require("mongoose").Types.ObjectId.isValid(String(req.params.id))) return next(new ErrorHandler("Customer not found", 404));
+    const pos = await require("../services/creditControl").check(req.params.id);
+    if (!pos) return next(new ErrorHandler("Customer not found", 404));
+    res.json({ success: true, ...pos });
   })
 );
 

@@ -103,6 +103,9 @@ const CustomerSchema = new mongoose.Schema(
             required: true,
             default: "30"
         },
+        // Credit control (services/creditControl.js): 0 = no limit.
+        creditLimit:    { type: Number, default: 0, min: 0 },
+        maxOverdueDays: { type: Number, default: 0, min: 0 },
         
     },
     { timestamps: true }

@@ -5,6 +5,7 @@ const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { assertVersion } = require("../utils/versioning");
+const creditControl = require("../services/creditControl");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { requireReason } = require("../utils/auditReason");
@@ -743,10 +744,15 @@ router.post(
       if (!mongoose.Types.ObjectId.isValid(orderId)) {
         return next(new ErrorHandler("Invalid order id", 400));
       }
-      linkedOrder = await Order.findById(orderId).select("orderNo").lean();
+      linkedOrder = await Order.findById(orderId).select("orderNo customer").lean();
       if (!linkedOrder) {
         return next(new ErrorHandler("Order not found", 404));
       }
+    }
+    // Goods do not leave for a customer on credit hold (services/creditControl.js).
+    let creditOverride = null;
+    if (linkedOrder?.customer) {
+      try { creditOverride = await creditControl.enforce(linkedOrder.customer, req, "this challan"); } catch (err) { return next(err); }
     }
     const resolvedOrderNo = linkedOrder ? linkedOrder.orderNo : undefined;
 
@@ -769,6 +775,7 @@ router.post(
           financialYear,
           sequence,
           ...(requestId ? { requestId } : {}),
+          ...(creditOverride ? { creditOverride } : {}),
           order:           orderId   || undefined,
           orderNo:         resolvedOrderNo,
           customerName:    customerName.trim(),

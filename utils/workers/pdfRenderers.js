@@ -21,6 +21,8 @@ const RENDERERS = Object.freeze({
   elasticSpec:    ['../elasticSheetsPdf', 'buildElasticSpecPdf'],
   elasticPrices:  ['../elasticSheetsPdf', 'buildElasticPriceListPdf'],
   invoice:        ['../invoicePdf', 'buildInvoicePdf'],
+  voucher:        ['../accountsPdf', 'buildVoucherPdf'],
+  partyStatement: ['../accountsPdf', 'buildStatementPdf'],
 });
 
 async function render(name, args) {

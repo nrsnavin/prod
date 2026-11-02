@@ -9,6 +9,7 @@ const Order = require("../models/Order.js");
 const Job = require("../models/JobOrder.js");
 const Elastic = require("../models/Elastic.js");
 const { computeMaterialRequirement } = require("../utils/materialRequirement.js");
+const creditControl = require("../services/creditControl");
 const ErrorHandler = require("../utils/ErrorHandler.js");
 const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 const { buildOrderStatusReport } = require("../services/orderStatusReport.js");
@@ -317,6 +318,10 @@ router.post(
       const customerError = await assertCustomerExists(customer, Customer);
       if (customerError) return next(new ErrorHandler(customerError, 400));
 
+      // A customer over their credit limit or too long overdue is on hold.
+      let creditOverride = null;
+      try { creditOverride = await creditControl.enforce(customer, req, "this order"); } catch (err) { return next(err); }
+
       const elasticError = await assertElasticsExist(parsed.lines, Elastic);
       if (elasticError) return next(new ErrorHandler(elasticError, 400));
 
@@ -330,6 +335,7 @@ router.post(
         date, po, customer, supplyDate, description,
         elasticOrdered: parsed.lines, producedElastic, packedElastic,
         pendingElastic, rawMaterialRequired, status: "Open",
+        ...(creditOverride ? { creditOverride } : {}),
       });
 
       const fp = buildFingerprint(ACTION_CODES.ORDER_CREATED, {

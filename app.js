@@ -585,6 +585,7 @@ app.use("/api/v2/customer",    gate('accounts'),
   // Sibling screens need the customer PICKER, not the customer file.
   requireFeatureReadPaths(['/customers'], {
     '/all-customers': ['/orders', '/elastic-groups', '/analytics'],
+    '/credit': ['/orders', '/delivery-challans', '/invoices', '/accounts'],
   }),
   customer);
 // HR's Leave page reads an employee's record; only Employees itself writes.
@@ -788,6 +789,8 @@ app.use("/api/v2/bonus",       gate('accounts', 'production'), bonus);
 app.use("/api/v2/machine-issue", gate('production', 'accounts'), machineIssue);
 app.use("/api/v2/announcement", gate('production', 'accounts'), announcement);
 app.use("/api/v2/feedback",    gate('production', 'accounts'), feedback);
+// Expense claims: anyone signed in enters what they spent; Accounts approves.
+app.use("/api/v2/claims",      gate('production', 'accounts'), require("./api/claims.js"));
 app.use("/api/v2/dashboard",   gate('production', 'accounts'), dashboard);
 // AI Advisor aggregates across every router. Being admin-ROLE is not
 // enough: /advisor is a revocable feature, so an admin-department

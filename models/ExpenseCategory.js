@@ -17,6 +17,8 @@ const ExpenseCategorySchema = new mongoose.Schema(
     // TDS section that usually applies to payees under this head
     // ("194C" job work / transport, "194I" rent, "194J" professional).
     tdsSection: { type: String, trim: true, default: "", maxlength: 8 },
+    // Most one person may claim under this head in a day; 0 = no limit.
+    claimDailyLimit: { type: Number, default: 0, min: 0 },
     active: { type: Boolean, default: true },
   },
   { timestamps: true }

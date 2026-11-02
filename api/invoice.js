@@ -41,6 +41,7 @@ const { buildEinvoiceJson, readiness } = require("../services/einvoice");
 const { getProvider } = require("../services/einvoiceProvider");
 const partyLedger = require("../services/partyLedger");
 const { assertOpen } = require("../services/booksLock");
+const creditControl = require("../services/creditControl");
 
 const Invoice         = require("../models/Invoice");
 const Order           = require("../models/Order");
@@ -255,6 +256,8 @@ router.post(
     const order = await populateOrder(Order.findById(orderId).select("orderNo po customer status elasticOrdered")).lean();
     if (!order) return next(new ErrorHandler("Order not found", 404));
     if (!order.customer) return next(new ErrorHandler("The order has no customer", 409));
+    let creditOverride = null;
+    try { creditOverride = await creditControl.enforce(order.customer._id || order.customer, req, "this invoice"); } catch (err) { return next(err); }
 
     const all = await invoiceableDcs(order);
     const wanted = new Set(dcIds.map(String));
@@ -290,6 +293,7 @@ router.post(
     const doc = new Invoice({
       invoiceNumber: number, requestId: requestId ? String(requestId) : undefined, financialYear: fy, sequence,
       invoiceDate: when,
+      ...(creditOverride ? { creditOverride } : {}),
       order: order._id, orderNo: order.orderNo, customer: order.customer._id, customerPo: order.po || "",
       // The customer's payment terms ("30" days) decide when it falls due.
       dueDate: new Date(when.getTime() + (Math.max(0, parseInt(order.customer.paymentTerms, 10) || 0)) * 86_400_000),
@@ -577,3 +581,5 @@ router.get(
 );
 
 module.exports = router;
+module.exports.sellerFrom = sellerFrom;
+module.exports.buyerFrom = buyerFrom;

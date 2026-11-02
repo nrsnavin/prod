@@ -53,6 +53,10 @@ const supplierSchema = new mongoose.Schema(
       type: String,
     },
 
+    // What the supplier may charge: a composition dealer or an
+    // unregistered supplier charges no GST (services/billChecks.js).
+    gstRegistration: { type: String, enum: ["regular", "composition", "unregistered"], default: "regular" },
+
     // Days after the bill date its bills fall due (and its expenses).
     paymentTermsDays: { type: Number, default: 30, min: 0, max: 365 },
 

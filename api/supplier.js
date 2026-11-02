@@ -101,7 +101,7 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const {
       name, phoneNumber, email, address, gstin,
-      leadTimeDays, minOrderQty, packSize,
+      leadTimeDays, minOrderQty, packSize, gstRegistration, paymentTermsDays,
     } = req.body || {};
     if (!name || !String(name).trim()) {
       return next(new ErrorHandler("name is required", 400));
@@ -123,6 +123,8 @@ router.post(
         leadTimeDays: Math.max(0, Number(leadTimeDays) || 0),
         minOrderQty:  Math.max(0, Number(minOrderQty)  || 0),
         packSize:     Math.max(0, Number(packSize)     || 0),
+        ...(["regular", "composition", "unregistered"].includes(gstRegistration) ? { gstRegistration } : {}),
+        ...(paymentTermsDays !== undefined && paymentTermsDays !== "" ? { paymentTermsDays: Math.min(365, Math.max(0, Number(paymentTermsDays) || 0)) } : {}),
       });
       res.status(201).json({ success: true, supplier });
     } catch (error) {
@@ -964,6 +966,8 @@ const SUPPLIER_FIELDS = [
   // fields that submit nothing — the reorder point's most important
   // input, silently unsettable.
   "leadTimeDays", "minOrderQty", "packSize",
+  // Accounts: what GST it may charge, and when its bills fall due.
+  "gstRegistration", "paymentTermsDays",
 ];
 router.put(
   "/edit-supplier",

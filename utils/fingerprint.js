@@ -119,6 +119,7 @@ const ACTION_CODES = Object.freeze({
   CREDIT_APPLIED:           'CREDIT_APPLIED',
   BOOKS_LOCKED:             'BOOKS_LOCKED',
   TALLY_EXPORTED:           'TALLY_EXPORTED',
+  NOTE_IRN_REGISTERED:      'NOTE_IRN_REGISTERED',
 
   MATERIAL_GROUP_CREATED:   'MATERIAL_GROUP_CREATED',
   MATERIAL_GROUP_UPDATED:   'MATERIAL_GROUP_UPDATED',
@@ -214,6 +215,7 @@ const ACTION_LABELS = Object.freeze({
   CREDIT_APPLIED:           'Credit Applied',
   BOOKS_LOCKED:             'Books Locked',
   TALLY_EXPORTED:           'Sent to Tally',
+  NOTE_IRN_REGISTERED:      'Note IRN Registered',
   LOGIN_CREATED:            'Login Created',
   LOGIN_UPDATED:            'Login Edited',
   LOGIN_DELETED:            'Login Deleted',

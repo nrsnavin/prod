@@ -45,8 +45,10 @@ const AttachmentSchema = new mongoose.Schema(
     filename:    { type: String, trim: true, default: "" },
     contentType: { type: String, enum: ATTACHMENT_TYPES, required: true },
     size:        { type: Number, required: true, min: 0 },
-    /** data:<mime>;base64,<payload> — listed with .select("-attachments.data"). */
-    data:        { type: String, required: true },
+    /** Where the bytes are (models/AccountFile.js). */
+    file:        { type: mongoose.Types.ObjectId, ref: "AccountFile" },
+    /** Older attachments: data:<mime>;base64,<payload> inline. */
+    data:        { type: String },
     uploadedAt:  { type: Date, default: Date.now },
   },
   { _id: true }

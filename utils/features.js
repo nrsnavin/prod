@@ -70,6 +70,7 @@ const FEATURES = [
 
   { key: "/announcements",       label: "Announcements",       section: "Communication",  depts: "all" },
   { key: "/feedback",            label: "Feedback",            section: "Communication",  depts: "all" },
+  { key: "/claims",              label: "Expense Claims",      section: "Communication",  depts: "all" },
   { key: "/machine-issues",      label: "Machine Issues",      section: "Communication",  depts: "all" },
   { key: "/notification-settings", label: "Notifications",     section: "Communication",  depts: ["admin"] },
 

@@ -89,7 +89,7 @@ async function build({ from, to, fresh = true, L }) {
   const notSent2 = fresh ? { $or: [{ 'tally.batch': { $exists: false } }, { 'tally.batch': null }] } : {};
   const [invoices, bills, expenses, notes, payments, contras, accounts, categories] = await Promise.all([
     Invoice.find({ status: 'issued', invoiceDate: range, ...notSent2 }).select('invoiceNumber invoiceDate buyer customerPo orderNo totals tally').lean(),
-    SupplierBill.find({ status: { $ne: 'cancelled' }, billDate: range, ...notSent2 }).select('billNo supplierBillNo billDate supplierName kind category totals itc poNo tally').lean(),
+    SupplierBill.find({ status: { $ne: 'cancelled' }, billDate: range, ...notSent2 }).select('billNo supplierBillNo billDate supplierName kind category totals itc poNo tally reverseCharge rcm').lean(),
     Expense.find({ status: { $in: ['approved', 'paid'] }, date: range, ...notSent2 }).select('expenseNo date supplier payeeName refNo category categoryName description totals itc tally').lean(),
     AccountNote.find({ status: 'issued', date: range, ...notSent2 }).select('kind noteNo date partyType partyName against reason totals partyNoteNo tally').lean(),
     Payment.find({ status: 'posted', date: range, ...notSent2 }).lean(),
@@ -140,6 +140,11 @@ async function build({ from, to, fresh = true, L }) {
     const itc = b.itc?.eligible !== false;
     v.dr(ledger, itc ? t.taxable : r2((t.taxable || 0) + (t.tax || 0)));
     if (itc) taxLines(v, t, 'dr', L, true);
+    // Reverse charge: we owe the tax (output) and claim it (input).
+    if (b.reverseCharge && b.rcm?.tax) {
+      if (itc) taxLines(v, b.rcm, 'dr', L, true); else v.dr(ledger, b.rcm.tax);
+      taxLines(v, b.rcm, 'cr', L, false);
+    }
     v.dr(L.roundOff, t.roundOff || 0);
     finish(v);
   }

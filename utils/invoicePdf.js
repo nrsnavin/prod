@@ -107,7 +107,8 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   const signedQr = registered && inv.einvoice.signedQr
     ? await QRCode.toBuffer(String(inv.einvoice.signedQr), { margin: 0, width: 400, errorCorrectionLevel: 'M' })
     : null;
-  const upi = bank.upiId
+  // A credit note, or a note we send a supplier, asks for no payment.
+  const upi = bank.upiId && !inv.hideUpi
     ? await QRCode.toBuffer(
         `upi://pay?pa=${encodeURIComponent(bank.upiId)}&pn=${encodeURIComponent(company.slice(0, 40))}` +
         `&am=${(Number(t.grand) || 0).toFixed(2)}&cu=INR&tn=${encodeURIComponent(String(inv.invoiceNumber || 'Invoice').slice(0, 40))}`,
@@ -140,20 +141,21 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
     text('signed QR', R - titleW, ty + 34, { size: 7.5, color: MUTED, width: titleW - 70, align: 'right' });
     ty += 70;
   }
-  text('TAX INVOICE', R - titleW, Math.max(ty, ly - 26), { bold: true, size: 22, width: titleW, align: 'right' });
+  text(inv.docTitle || 'TAX INVOICE', R - titleW, Math.max(ty, ly - 26), { bold: true, size: 22, width: titleW, align: 'right' });
   if (cancelled) text('CANCELLED', R - titleW, Math.max(ty, ly - 26) + 26, { bold: true, size: 9, color: ALERT, width: titleW, align: 'right' });
   y = Math.max(ly, Math.max(ty, ly - 26) + 30, logoDrawn ? y + 66 : 0) + 4;
 
   // ── Invoice detail grid ───────────────────────────────────────
   const rowH = 14;
   const half = W / 2;
-  const leftRows = [
+  // A credit or debit note brings its own rows (the invoice it is against).
+  const leftRows = inv.detailRows?.left || [
     ['#', inv.invoiceNumber || '—'],
     ['Invoice Date', ddmmyyyy(inv.invoiceDate)],
     ['P.O.#', inv.customerPo || (inv.orderNo != null ? `Order #${inv.orderNo}` : '—')],
     ['Delivery Challan', (inv.dcs || []).map((d) => d.dcNumber).join(', ') || '—'],
   ];
-  const rightRows = [
+  const rightRows = inv.detailRows?.right || [
     ['Place Of Supply', inv.placeOfSupply ? `${stateName(inv.placeOfSupply)} (${inv.placeOfSupply})` : '—'],
     ['Total Boxes', Number(inv.totalBoxes) > 0 ? String(inv.totalBoxes) : '—'],
     ['Tax', inter ? 'IGST (inter-state)' : 'CGST + SGST (intra-state)'],

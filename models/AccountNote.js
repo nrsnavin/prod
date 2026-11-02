@@ -61,6 +61,17 @@ const AccountNoteSchema = new mongoose.Schema(
 
     status: { type: String, enum: ["issued", "cancelled"], default: "issued" },
     tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date } },
+    // A credit or debit note to a registered buyer is an e-invoice too.
+    einvoice: {
+      status:       { type: String, enum: ["pending", "registered", "cancelled"], default: "pending" },
+      irn:          { type: String, default: "" },
+      ackNo:        { type: String, default: "" },
+      ackDate:      { type: Date },
+      signedQr:     { type: String, default: "" },
+      provider:     { type: String, default: "" },
+      registeredAt: { type: Date },
+      registeredBy: { type: mongoose.Types.ObjectId, ref: "User" },
+    },
     cancel: { reason: { type: String, default: "" }, at: { type: Date }, by: { type: mongoose.Types.ObjectId, ref: "User" } },
 
     notes:       { type: String, default: "", trim: true, maxlength: 500 },

@@ -10,6 +10,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Customer = require('../models/Customer');
+const CollectionNote = require('../models/CollectionNote');
 const outstanding = require('./outstanding');
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 const { promptVersion } = require('../utils/aiPrompts');
@@ -18,14 +19,36 @@ const ledger = require('./aiLedger');
 const money = (n) => (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const day = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 
-async function overdue() {
+/**
+ * The escalation ladder: a gentle reminder first, a firm one at three
+ * weeks past due, and a phone call past six.
+ */
+function nextStep(oldestDays) {
+  if (oldestDays > 45) return { action: 'call', tone: 'firm', label: 'Call them' };
+  if (oldestDays > 21) return { action: 'remind', tone: 'firm', label: 'Firm reminder' };
+  return { action: 'remind', tone: 'gentle', label: 'Gentle reminder' };
+}
+
+async function overdue({ includeHeld = false } = {}) {
   const rows = await outstanding.receivables();
   const groups = outstanding.byParty(rows).filter((g) => g.overdue > 0);
   const ids = groups.map((g) => g.party);
-  const customers = await Customer.find({ _id: { $in: ids } }).select('name phoneNumber contactName email accountant purchase paymentTerms').lean();
+  const [customers, notes] = await Promise.all([
+    Customer.find({ _id: { $in: ids } }).select('name phoneNumber contactName email accountant purchase paymentTerms').lean(),
+    CollectionNote.aggregate([
+      { $match: { customer: { $in: ids } } },
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: '$customer', last: { $first: '$$ROOT' }, promises: { $push: { $cond: [{ $eq: ['$kind', 'promise'] }, '$$ROOT', '$$REMOVE'] } } } },
+    ]),
+  ]);
   const byId = new Map(customers.map((c) => [String(c._id), c]));
-  return groups.map((g) => {
+  const history = new Map(notes.map((n) => [String(n._id), n]));
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const out = groups.map((g) => {
     const c = byId.get(String(g.party)) || {};
+    const h = history.get(String(g.party));
+    const promise = h?.promises?.[0] || null;
+    const promiseLive = !!(promise && promise.promiseDate && new Date(promise.promiseDate) >= today);
     // Overdue rupees × days: a small old debt and a big new one rank near each other.
     const priority = g.docs.reduce((s, d) => s + (d.overdueDays > 0 ? d.outstanding * d.overdueDays : 0), 0);
     return {
@@ -33,8 +56,28 @@ async function overdue() {
       docs: g.docs.filter((d) => d.overdueDays > 0),
       contact: { name: c.contactName || '', phone: c.phoneNumber || '', email: c.email || '', accountant: c.accountant?.name ? `${c.accountant.name}${c.accountant.mobile ? ` · ${c.accountant.mobile}` : ''}` : '', accountantPhone: c.accountant?.mobile || '', paymentTerms: c.paymentTerms || '' },
       priority: Math.round(priority),
+      lastContact: h?.last ? { kind: h.last.kind, at: h.last.createdAt, byName: h.last.byName, note: h.last.note || '', channel: h.last.channel || '' } : null,
+      promise: promise ? { date: promise.promiseDate, amount: promise.promiseAmount || 0, note: promise.note || '', live: promiseLive, broken: !promiseLive } : null,
+      // Contacted in the last 7 days: give them the week.
+      recentlyContacted: !!(h?.last && Date.now() - new Date(h.last.createdAt).getTime() < 7 * 86_400_000),
+      held: promiseLive,
+      next: nextStep(g.oldestDays),
     };
-  }).sort((a, b) => b.priority - a.priority);
+  }).sort((a, b) => (a.held - b.held) || (a.recentlyContacted - b.recentlyContacted) || (b.priority - a.priority));
+  return includeHeld ? out : out.filter((r) => !r.held);
+}
+
+/** Record a contact; returns the note. */
+async function log({ customer, kind, channel = '', tone = '', to = '', message = '', note = '', promiseDate = null, promiseAmount = 0, result = '', user = null }) {
+  return CollectionNote.create({
+    customer, kind, channel, tone, to, message: String(message || '').slice(0, 2000), note: String(note || '').slice(0, 500),
+    promiseDate: promiseDate || undefined, promiseAmount: Number(promiseAmount) || 0, result,
+    by: user?._id, byName: user?.name || '',
+  });
+}
+
+async function historyOf(customer, limit = 30) {
+  return CollectionNote.find({ customer }).sort({ createdAt: -1 }).limit(limit).lean();
 }
 
 function template(entry, company) {
@@ -85,4 +128,4 @@ function e164(phone) {
   return `+${digits}`;
 }
 
-module.exports = { overdue, draft, template, e164 };
+module.exports = { overdue, draft, template, e164, log, historyOf, nextStep };

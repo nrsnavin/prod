@@ -34,7 +34,8 @@ function buildEinvoiceJson(inv) {
   return {
     Version: '1.1',
     TranDtls: { TaxSch: 'GST', SupTyp: 'B2B', RegRev: 'N', IgstOnIntra: 'N' },
-    DocDtls: { Typ: 'INV', No: docNo, Dt: ddmmyyyy(inv.invoiceDate) },
+    // INV for an invoice; CRN / DBN for a credit or debit note to the buyer.
+    DocDtls: { Typ: inv.einvoiceType || 'INV', No: docNo, Dt: ddmmyyyy(inv.invoiceDate) },
     SellerDtls: {
       Gstin: s.gstin || '', LglNm: s.name || '', Addr1: s.address || '', Loc: s.city || '',
       Pin: Number(s.pincode) || 0, Stcd: s.stateCode || '',
@@ -66,10 +67,12 @@ function buildEinvoiceJson(inv) {
       AssVal: num(t.taxable), CgstVal: num(t.cgst), SgstVal: num(t.sgst), IgstVal: num(t.igst),
       RndOffAmt: num(t.roundOff), TotInvVal: num(t.grand),
     },
-    ...(inv.customerPo || inv.orderNo != null ? {
+    ...(inv.customerPo || inv.orderNo != null || inv.precedingDoc ? {
       RefDtls: {
         ...(inv.customerPo ? { DocPerdDtls: undefined, ContrDtls: [{ PoRefr: String(inv.customerPo).slice(0, 16) }] } : {}),
         ...(inv.orderNo != null ? { InvRm: `Order #${inv.orderNo}` } : {}),
+        // A note names the invoice it adjusts.
+        ...(inv.precedingDoc ? { PrecDocDtls: [{ InvNo: String(inv.precedingDoc.no), InvDt: ddmmyyyy(inv.precedingDoc.date) }] } : {}),
       },
     } : {}),
   };
@@ -93,7 +96,7 @@ function readiness(inv) {
     if (!l.hsn) problems.push(`Line ${i + 1} (${l.name}) has no HSN code.`);
     if (!(Number(l.rate) > 0)) problems.push(`Line ${i + 1} (${l.name}) has no rate.`);
   });
-  if (inv.status === 'cancelled') problems.push('The invoice is cancelled.');
+  if (inv.status === 'cancelled') problems.push(`The ${inv.einvoiceType && inv.einvoiceType !== 'INV' ? 'note' : 'invoice'} is cancelled.`);
   return problems;
 }
 

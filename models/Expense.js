@@ -61,6 +61,11 @@ const ExpenseSchema = new mongoose.Schema(
     paidFrom:   { type: mongoose.Types.ObjectId, ref: "BankAccount" },
     paidAt:     { type: Date },
 
+    // A claim: someone spent their own money and is to be paid back.
+    claimant: {
+      user: { type: mongoose.Types.ObjectId, ref: "User" },
+      name: { type: String, default: "" },
+    },
     submittedBy:     { type: mongoose.Types.ObjectId, ref: "User" },
     submittedByName: { type: String, default: "" },
     notes:       { type: String, default: "", trim: true, maxlength: 500 },

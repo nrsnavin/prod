@@ -139,6 +139,8 @@ const OrderSchema = new mongoose.Schema(
     customer:    { type: mongoose.Types.ObjectId, ref: "Customer", required: true },
     supplyDate:  { type: Date, required: true },
     description: { type: String, default: "" },
+    // An admin released this past a credit hold (services/creditControl.js).
+    creditOverride: { type: mongoose.Schema.Types.Mixed, default: undefined },
 
     elasticOrdered:      { type: [OrderedElasticSchema], default: [] },
     producedElastic:     { type: [ElasticQtySchema], default: [] },

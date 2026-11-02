@@ -66,6 +66,9 @@ const {
   DAY, isId, r2, readDate, reasonFrom, fp, withTxn, paging,
 } = require("../services/accountsHelpers");
 const settle = require("../services/settle");
+const billChecks = require("../services/billChecks");
+const attachments = require("../services/attachments");
+const { getSettings: getBooksSettings } = require("../services/booksLock");
 const credits = require("../services/credits");
 const bankBalances = require("../services/bankBalances");
 const { assertOpen } = require("../services/booksLock");
@@ -114,7 +117,6 @@ function priced(lines, sellerState, partyState) {
   };
 }
 
-const dataUrl = (file) => `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;
 
 // ══════════════════════════════════════════════════════════════════
 //  MASTERS
@@ -157,7 +159,7 @@ router.get("/categories", catchAsyncErrors(async (_req, res) => {
   res.json({ success: true, categories: await ExpenseCategory.find({}).sort({ name: 1 }).lean() });
 }));
 
-const CATEGORY_FIELDS = ["name", "ledger", "itcEligible", "approvalAbove", "tdsSection", "active"];
+const CATEGORY_FIELDS = ["name", "ledger", "itcEligible", "approvalAbove", "tdsSection", "active", "claimDailyLimit"];
 router.post("/categories", isAdmin("admin"), catchAsyncErrors(async (req, res, next) => {
   const body = {};
   for (const f of CATEGORY_FIELDS) if (req.body?.[f] !== undefined) body[f] = req.body[f];
@@ -285,6 +287,19 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
   const supplierState = stateCodeFromGstin(supplier.gstin);
   const p = priced(lines, await sellerStateCode(), supplierState);
   const itcEligible = b.itcEligible !== false;
+  const reverseCharge = !!b.reverseCharge;
+  let gst;
+  try { gst = billChecks.gstRules({ supplier, priced: p, reverseCharge, itcEligible }); } catch (err) { return next(err); }
+  // The three-way match: rate against the PO, quantity against what was received.
+  const tolerance = (await getBooksSettings()).bills?.rateVariancePercent ?? 2;
+  const variance = await billChecks.variance({ lines: p.lines, po: po?._id, inwards: inwardIds, tolerancePercent: tolerance });
+  const varianceNote = String(b.varianceNote || "").trim();
+  if (variance.lines.length && varianceNote.length < 8) {
+    const err = new ErrorHandler(`This bill does not match the PO or the receipts (₹${variance.total.toFixed(2)} more than expected) — add a note saying why it is right`, 409);
+    err.code = "BILL_VARIANCE";
+    err.details = variance;
+    return next(err);
+  }
   const tdsRate = Number(b.tds?.rate) || 0;
   const tds = { applicable: !!b.tds?.applicable && tdsRate > 0, section: String(b.tds?.section || "").trim().slice(0, 8), rate: tdsRate };
   if (tds.applicable && (tdsRate < 0 || tdsRate > 100)) return next(new ErrorHandler("TDS rate must be between 0 and 100", 400));
@@ -297,17 +312,19 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     supplierBillNo: supplierBillNo.slice(0, 40), billDate, dueDate,
     purchaseOrder: po?._id, poNo: po?.poNo, inwards: inwardIds,
     kind: b.kind === "service" ? "service" : "goods", category: isId(b.category) ? b.category : undefined,
-    supplyType: p.supplyType, lines: p.lines, totals: p.totals,
-    itc: { eligible: itcEligible, amount: itcEligible ? p.totals.tax : 0 },
+    supplyType: p.supplyType, lines: p.lines, totals: gst.totals,
+    reverseCharge, ...(gst.rcm ? { rcm: gst.rcm } : {}),
+    itc: { eligible: itcEligible, amount: gst.itcAmount },
+    ...(variance.lines.length ? { variance: { ...variance, note: varianceNote.slice(0, 300) } } : {}),
     tds, notes: String(b.notes || "").trim().slice(0, 500), source: b.source === "scan" ? "scan" : "manual",
     aiSuggestion: isId(b.aiSuggestion) ? b.aiSuggestion : undefined, createdBy: req.user?._id,
-    fingerprints: [fp(ACTION_CODES.BILL_CREATED, { _id }, req, { billNo: number, supplierBillNo, supplier: supplier.name, grand: p.totals.grand })],
+    fingerprints: [fp(ACTION_CODES.BILL_CREATED, { _id }, req, { billNo: number, supplierBillNo, supplier: supplier.name, grand: gst.totals.grand, ...(variance.lines.length ? { variance: variance.total, note: varianceNote } : {}), ...(reverseCharge ? { reverseCharge: true } : {}) })],
   };
   let doc;
   try {
     await withTxn(async (session) => {
       [doc] = await SupplierBill.create([data], { session });
-      await partyLedger.post({ partyType: "supplier", party: supplier._id, date: billDate, docType: "SupplierBill", doc: _id, docNo: number, credit: p.totals.grand, narration: `Bill ${supplierBillNo}${po ? ` · PO #${po.poNo}` : ""}` }, session);
+      await partyLedger.post({ partyType: "supplier", party: supplier._id, date: billDate, docType: "SupplierBill", doc: _id, docNo: number, credit: gst.totals.grand, narration: `Bill ${supplierBillNo}${po ? ` · PO #${po.poNo}` : ""}${reverseCharge ? " · reverse charge" : ""}` }, session);
     });
   } catch (err) {
     if (err?.code === 11000) {
@@ -345,29 +362,23 @@ router.post("/bills/:id/cancel", catchAsyncErrors(async (req, res, next) => {
 const ATTACHABLE = { bills: SupplierBill, expenses: Expense, notes: AccountNote, payments: Payment };
 
 router.post("/:kind(bills|expenses|notes|payments)/:id/attachments", keepRequestContext(upload.single("file")), catchAsyncErrors(async (req, res, next) => {
-  const Model = ATTACHABLE[req.params.kind];
   if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));
-  if (!req.file) return next(new ErrorHandler("Attach a file (image or PDF)", 400));
-  if (!ATTACHMENT_TYPES.includes(req.file.mimetype)) return next(new ErrorHandler("Only JPEG, PNG, WebP or PDF", 400));
-  const doc = await Model.findById(req.params.id).select("attachments");
-  if (!doc) return next(new ErrorHandler("Not found", 404));
-  if (doc.attachments.length >= 5) return next(new ErrorHandler("At most 5 attachments", 400));
-  doc.attachments.push({ filename: req.file.originalname || "", contentType: req.file.mimetype, size: req.file.size, data: dataUrl(req.file) });
-  await doc.save();
-  const a = doc.attachments[doc.attachments.length - 1];
-  res.status(201).json({ success: true, attachment: { _id: a._id, filename: a.filename, contentType: a.contentType, size: a.size, uploadedAt: a.uploadedAt } });
+  try {
+    const attachment = await attachments.attach(ATTACHABLE[req.params.kind], req.params.kind, req.params.id, req.file);
+    res.status(201).json({ success: true, attachment });
+  } catch (err) {
+    if (err instanceof ErrorHandler) return next(err);
+    throw err;
+  }
 }));
 
 router.get("/:kind(bills|expenses|notes|payments)/:id/attachments/:aid", catchAsyncErrors(async (req, res, next) => {
-  const Model = ATTACHABLE[req.params.kind];
   if (!isId(req.params.id) || !isId(req.params.aid)) return next(new ErrorHandler("Not found", 404));
-  const doc = await Model.findById(req.params.id).select("attachments").lean();
-  const a = doc?.attachments?.find((x) => String(x._id) === String(req.params.aid));
-  if (!a) return next(new ErrorHandler("Not found", 404));
-  const base64 = String(a.data).split(",")[1] || "";
-  res.setHeader("Content-Type", a.contentType);
-  res.setHeader("Content-Disposition", `inline; filename="${(a.filename || "attachment").replace(/"/g, "")}"`);
-  res.send(Buffer.from(base64, "base64"));
+  const f = await attachments.read(ATTACHABLE[req.params.kind], req.params.id, req.params.aid);
+  if (!f) return next(new ErrorHandler("Not found", 404));
+  res.setHeader("Content-Type", f.contentType);
+  res.setHeader("Content-Disposition", `inline; filename="${(f.filename || "attachment").replace(/"/g, "")}"`);
+  res.send(f.buffer);
 }));
 
 // ══════════════════════════════════════════════════════════════════
@@ -1103,24 +1114,26 @@ router.get("/reports/gst", catchAsyncErrors(async (req, res, next) => {
     return [...out.values()].sort((a, b) => a.rate - b.rate);
   };
   const sum = (rows) => rows.reduce((t, g) => ({ taxable: r2(t.taxable + g.taxable), cgst: r2(t.cgst + g.cgst), sgst: r2(t.sgst + g.sgst), igst: r2(t.igst + g.igst), tax: r2(t.tax + g.tax) }), { taxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0 });
-  const [invoices, creditNotes, bills, debitNotes, expenses] = await Promise.all([
+  const [invoices, creditNotes, bills, debitNotes, expenses, rcmBills] = await Promise.all([
     Invoice.find({ status: "issued", invoiceDate: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
     AccountNote.find({ kind: "credit", status: "issued", date: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
     SupplierBill.find({ status: { $ne: "cancelled" }, "itc.eligible": true, billDate: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
     AccountNote.find({ kind: "debit", status: "issued", date: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
     Expense.find({ status: { $in: ["approved", "paid"] }, "itc.eligible": true, date: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
+    // Reverse charge: tax we owe on what the supplier did not charge.
+    SupplierBill.find({ status: { $ne: "cancelled" }, reverseCharge: true, billDate: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
   ]);
-  const output = { sales: byRate(invoices), creditNotes: byRate(creditNotes) };
+  const output = { sales: byRate(invoices), creditNotes: byRate(creditNotes), reverseCharge: byRate(rcmBills) };
   const input = { purchases: byRate(bills), debitNotes: byRate(debitNotes), expenses: byRate(expenses) };
-  const outputTotal = sum(output.sales); const cnTotal = sum(output.creditNotes);
+  const outputTotal = sum(output.sales); const cnTotal = sum(output.creditNotes); const rcmTotal = sum(output.reverseCharge);
   const inputTotal = sum(input.purchases); const dnTotal = sum(input.debitNotes); const expTotal = sum(input.expenses);
-  const netOutput = { cgst: r2(outputTotal.cgst - cnTotal.cgst), sgst: r2(outputTotal.sgst - cnTotal.sgst), igst: r2(outputTotal.igst - cnTotal.igst) };
+  const netOutput = { cgst: r2(outputTotal.cgst - cnTotal.cgst + rcmTotal.cgst), sgst: r2(outputTotal.sgst - cnTotal.sgst + rcmTotal.sgst), igst: r2(outputTotal.igst - cnTotal.igst + rcmTotal.igst) };
   const netInput = { cgst: r2(inputTotal.cgst - dnTotal.cgst + expTotal.cgst), sgst: r2(inputTotal.sgst - dnTotal.sgst + expTotal.sgst), igst: r2(inputTotal.igst - dnTotal.igst + expTotal.igst) };
   res.json({
     success: true, from: r.from, to: r.to, output, input,
-    totals: { output: outputTotal, creditNotes: cnTotal, purchases: inputTotal, debitNotes: dnTotal, expenses: expTotal, netOutput, netInput,
+    totals: { output: outputTotal, creditNotes: cnTotal, reverseCharge: rcmTotal, purchases: inputTotal, debitNotes: dnTotal, expenses: expTotal, netOutput, netInput,
       payable: { cgst: r2(netOutput.cgst - netInput.cgst), sgst: r2(netOutput.sgst - netInput.sgst), igst: r2(netOutput.igst - netInput.igst) } },
-    counts: { invoices: invoices.length, creditNotes: creditNotes.length, bills: bills.length, debitNotes: debitNotes.length, expenses: expenses.length },
+    counts: { invoices: invoices.length, creditNotes: creditNotes.length, bills: bills.length, debitNotes: debitNotes.length, expenses: expenses.length, reverseCharge: rcmBills.length },
   });
 }));
 
@@ -1358,18 +1371,20 @@ router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
 // ══════════════════════════════════════════════════════════════════
 //  AI: COLLECTION FOLLOW-UPS
 // ══════════════════════════════════════════════════════════════════
-router.get("/collections", catchAsyncErrors(async (_req, res) => {
-  const rows = await collections.overdue();
+router.get("/collections", catchAsyncErrors(async (req, res) => {
+  const rows = await collections.overdue({ includeHeld: req.query.held === "true" });
   res.json({ success: true, rows, total: r2(rows.reduce((s, r) => s + r.overdue, 0)), whatsapp: whatsappConfigured() });
 }));
 
 router.post("/collections/draft", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.body?.customer)) return next(new ErrorHandler("customer is required", 400));
-  const entry = (await collections.overdue()).find((r) => String(r.party) === String(req.body.customer));
+  const entry = (await collections.overdue({ includeHeld: true })).find((r) => String(r.party) === String(req.body.customer));
   if (!entry) return next(new ErrorHandler("Nothing overdue for this customer", 404));
   const settings = await getDocumentSettings();
-  const out = await collections.draft(entry, { company: settings.companyName || "Balu Elastics", tone: req.body?.tone === "firm" ? "firm" : "gentle" });
-  res.json({ success: true, ...out, to: collections.e164(entry.contact.accountantPhone || entry.contact.phone), entry });
+  // The ladder picks the tone unless the person did.
+  const tone = req.body?.tone === "firm" || req.body?.tone === "gentle" ? req.body.tone : entry.next.tone;
+  const out = await collections.draft(entry, { company: settings.companyName || "Balu Elastics", tone });
+  res.json({ success: true, ...out, tone, to: collections.e164(entry.contact.accountantPhone || entry.contact.phone), entry });
 }));
 
 router.post("/collections/send", catchAsyncErrors(async (req, res, next) => {
@@ -1378,7 +1393,29 @@ router.post("/collections/send", catchAsyncErrors(async (req, res, next) => {
   if (!to) return next(new ErrorHandler("A phone number is required", 400));
   if (message.length < 20) return next(new ErrorHandler("The message is too short to send", 400));
   const result = await sendWhatsApp(to, message.slice(0, 1500));
+  // Remembered against the customer, so tomorrow's list knows.
+  if (isId(req.body?.customer)) {
+    await collections.log({ customer: req.body.customer, kind: "reminder", channel: "whatsapp", tone: String(req.body?.tone || ""), to, message, result: result.sent ? "sent" : result.dryRun ? "dry run" : String(result.error || "failed"), user: req.user });
+  }
   res.json({ success: true, ...result, to });
+}));
+
+/** A call made, a promise to pay, or a note — by hand. */
+router.post("/collections/log", catchAsyncErrors(async (req, res, next) => {
+  const b = req.body || {};
+  if (!isId(b.customer)) return next(new ErrorHandler("customer is required", 400));
+  if (!["call", "promise", "note", "reminder"].includes(b.kind)) return next(new ErrorHandler("kind must be call, promise, note or reminder", 400));
+  let promiseDate = null;
+  try { promiseDate = readDate(b.promiseDate, "promiseDate", null); } catch (err) { return next(err); }
+  if (b.kind === "promise" && !promiseDate) return next(new ErrorHandler("When did they promise to pay?", 400));
+  if (b.kind !== "promise" && String(b.note || "").trim().length < 3) return next(new ErrorHandler("Say what happened", 400));
+  const note = await collections.log({ customer: b.customer, kind: b.kind, channel: String(b.channel || (b.kind === "call" ? "phone" : "")), note: b.note, promiseDate, promiseAmount: b.promiseAmount, user: req.user });
+  res.status(201).json({ success: true, note });
+}));
+
+router.get("/collections/:customer/history", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.customer)) return next(new ErrorHandler("Customer not found", 404));
+  res.json({ success: true, history: await collections.historyOf(req.params.customer) });
 }));
 
 // Contras, opening balances, settings and the lock.

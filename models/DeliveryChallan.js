@@ -67,6 +67,9 @@ const DeliveryChallanSchema = new mongoose.Schema(
       sparse: true,
     },
 
+    // An admin released this past a credit hold (services/creditControl.js).
+    creditOverride: { type: mongoose.Schema.Types.Mixed, default: undefined },
+
     type: {
       type: String,
       enum: ["elastic", "machine_part"],

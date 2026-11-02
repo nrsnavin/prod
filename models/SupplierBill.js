@@ -58,6 +58,28 @@ const SupplierBillSchema = new mongoose.Schema(
       rate:       { type: Number, default: 0, min: 0, max: 100 },
     },
 
+    // Reverse charge: the supplier charged no GST and we pay it. `totals`
+    // are what the supplier is owed; this is the tax we owe and claim.
+    reverseCharge: { type: Boolean, default: false },
+    rcm: {
+      cgst: { type: Number, default: 0 }, sgst: { type: Number, default: 0 },
+      igst: { type: Number, default: 0 }, tax: { type: Number, default: 0 },
+    },
+
+    // The three-way match: lines whose rate is off the PO or whose
+    // quantity is more than was received, and the note that let it in.
+    variance: {
+      lines: {
+        type: [new mongoose.Schema({
+          description: String, rawMaterial: { type: mongoose.Types.ObjectId, ref: "RawMaterial" },
+          poRate: Number, billRate: Number, receivedQty: Number, billedQty: Number, rateOffPercent: Number, amount: Number,
+        }, { _id: false })],
+        default: [],
+      },
+      total: { type: Number, default: 0 },
+      note:  { type: String, default: "" },
+    },
+
     // Settled so far — by vouchers, TDS deducted on them, debit notes.
     paidAmount:    { type: Number, default: 0 },
     tdsAmount:     { type: Number, default: 0 },
