@@ -70,6 +70,8 @@ const documentSettingsSchema = new mongoose.Schema(
         account: { type: String, trim: true, default: "", maxlength: 30 },
         ifsc:    { type: String, trim: true, default: "", maxlength: 11 },
         branch:  { type: String, trim: true, default: "", maxlength: 80 },
+        // Printed, and turned into the "scan to pay" QR on the invoice.
+        upiId:   { type: String, trim: true, default: "", maxlength: 60 },
       },
       declaration: {
         type: String, trim: true, maxlength: 500,

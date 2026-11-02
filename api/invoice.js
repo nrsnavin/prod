@@ -80,12 +80,19 @@ function buyerFrom(customer) {
   };
 }
 
+/** Where the goods went: the challans' consignee address, else the buyer's. */
+function shipToFor(dcs, buyer) {
+  const onChallan = (dcs || []).map((d) => String(d.customerAddress || "").trim()).find(Boolean);
+  if (onChallan) return onChallan;
+  return [buyer.address, [buyer.city, buyer.pincode].filter(Boolean).join(" - ")].filter(Boolean).join(", ");
+}
+
 /** The challans of this order that can go on an invoice: goods left, not yet invoiced. */
 async function invoiceableDcs(order) {
   const match = [{ order: order._id }];
   if (order.orderNo != null) match.push({ orderNo: order.orderNo });
   const dcs = await DeliveryChallan.find({ $or: match, type: "elastic" })
-    .select("dcNumber status dispatchDate items totalQuantity")
+    .select("dcNumber status dispatchDate items totalQuantity customerAddress")
     .sort({ dispatchDate: 1, createdAt: 1 })
     .lean();
   const onInvoices = await Invoice.find({ order: order._id, status: "issued" })
@@ -137,6 +144,7 @@ async function buildLines(order, dcs, settings, overrides = {}) {
     return {
       elastic: row.elastic, name: e.name || row.name || "Elastic", unit: row.unit, quantity: row.quantity,
       rate, hsn, gstPercent, dcNumbers: row.dcNumbers,
+      boxes: o.boxes !== undefined && o.boxes !== null && o.boxes !== "" ? Number(o.boxes) : 0,
       // Where the figure came from, for the form to say so.
       rateSource: o.rate !== undefined && o.rate !== "" ? "entered" : (orderRate.get(key) ? "order" : (row.dcRate ? "challan" : "none")),
     };
@@ -149,10 +157,11 @@ function readOverrides(raw) {
   raw.forEach((l, i) => {
     if (!l || !isId(l.elastic)) throw new ErrorHandler(`Line ${i + 1}: elastic id is missing`, 400);
     const o = {};
-    for (const k of ["rate", "gstPercent"]) {
+    for (const k of ["rate", "gstPercent", "boxes"]) {
       if (l[k] === undefined || l[k] === null || l[k] === "") continue;
       const n = Number(l[k]);
       if (!Number.isFinite(n) || n < 0) throw new ErrorHandler(`Line ${i + 1}: ${k} must be a number of 0 or more`, 400);
+      if (k === "boxes" && !Number.isInteger(n)) throw new ErrorHandler(`Line ${i + 1}: boxes must be a whole number`, 400);
       o[k] = n;
     }
     if (l.hsn !== undefined && l.hsn !== null) {
@@ -203,6 +212,7 @@ router.get(
       success: true,
       order: { _id: order._id, orderNo: order.orderNo, po: order.po, status: order.status, customer: order.customer?._id },
       seller, buyer,
+      shipTo: shipToFor(eligible, buyer),
       supplyType: priced.supplyType,
       placeOfSupply: priced.placeOfSupply,
       dcs: dcs.map((d) => ({
@@ -279,12 +289,14 @@ router.post(
       invoiceDate: when,
       order: order._id, orderNo: order.orderNo, customer: order.customer._id, customerPo: order.po || "",
       seller, buyer,
+      shipTo: String(req.body.shipTo ?? "").trim().slice(0, 300) || shipToFor(chosen, buyer),
       supplyType: priced.supplyType, placeOfSupply: priced.placeOfSupply,
       dcs: chosen.map((d) => ({ dc: d._id, dcNumber: d.dcNumber, dispatchDate: d.dispatchDate })),
       lines: priced.lines.map((l) => ({
-        elastic: l.elastic, name: l.name, hsn: l.hsn, unit: l.unit, quantity: l.quantity, rate: l.rate,
+        elastic: l.elastic, name: l.name, hsn: l.hsn, unit: l.unit, quantity: l.quantity, boxes: l.boxes || 0, rate: l.rate,
         taxable: l.taxable, gstPercent: l.gstPercent, cgst: l.cgst, sgst: l.sgst, igst: l.igst, amount: l.amount, dcNumbers: l.dcNumbers,
       })),
+      totalBoxes: priced.lines.reduce((a, l) => a + (l.boxes || 0), 0),
       totals: priced.totals,
       amountInWords: amountInWords(priced.totals.grand),
       notes: String(notes || "").trim().slice(0, 500),

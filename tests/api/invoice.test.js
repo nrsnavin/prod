@@ -59,7 +59,7 @@ const seller = (over = {}) => put('/settings/document', {
   companyName: 'Balu Elastics', gstin: '33AAECB1234F1Z5', addressLines: ['12 Mill Road', 'Perundurai'],
   phone: '9876543210',
   invoice: { city: 'Erode', pincode: '638052', defaultHsn: '5806', defaultGstPercent: 5,
-    bank: { name: 'SBI', account: '1234567890', ifsc: 'SBIN0001234', branch: 'Erode' }, ...over },
+    bank: { name: 'SBI', account: '1234567890', ifsc: 'SBIN0001234', branch: 'Erode', upiId: 'balu@sbi' }, ...over },
 });
 
 let seq = 0;
@@ -109,6 +109,8 @@ describe('what an invoice for this order would hold', () => {
     expect(res.body.supplyType).toBe('intra');
     expect(res.body.seller).toMatchObject({ gstin: '33AAECB1234F1Z5', stateCode: '33', city: 'Erode', pincode: '638052' });
     expect(res.body.buyer).toMatchObject({ name: 'Sunrise Garments', stateCode: '33', pincode: '641604' });
+    // No consignee address on the challans: the goods went to the billing address.
+    expect(res.body.shipTo).toBe('4 Kongu Nagar, Tiruppur - 641604');
     const lines = Object.fromEntries(res.body.lines.map((l) => [l.name, l]));
     // Merged across the two challans; HSN and GST from Settings unless the elastic says otherwise.
     expect(lines[a.name]).toMatchObject({ quantity: 1000, rate: 12.5, hsn: '5806', gstPercent: 5, rateSource: 'order' });
@@ -125,10 +127,15 @@ describe('what an invoice for this order would hold', () => {
 describe('raising an invoice', () => {
   it('draws INV/<FY>/0001, snapshots both parties and splits CGST + SGST in-state', async () => {
     const { order, dc1, dc2, a, b, customer } = await scene();
-    const res = await post('/invoice/create', { orderId: order._id, dcIds: [dc1._id, dc2._id], invoiceDate: '2026-07-12', requestId: 'r1' });
+    const res = await post('/invoice/create', {
+      orderId: order._id, dcIds: [dc1._id, dc2._id], invoiceDate: '2026-07-12', requestId: 'r1',
+      shipTo: 'Gate 2, Kongu Nagar, Tiruppur', lines: [{ elastic: b._id, boxes: 3 }],
+    });
     expect(res.status).toBe(201);
     const inv = res.body.invoice;
     expect(inv.invoiceNumber).toBe('INV/2026-27/0001');
+    expect(inv.shipTo).toBe('Gate 2, Kongu Nagar, Tiruppur');
+    expect(inv.totalBoxes).toBe(3);
     expect(inv.status).toBe('issued');
     expect(inv.supplyType).toBe('intra');
     expect(inv.placeOfSupply).toBe('33');
@@ -141,7 +148,7 @@ describe('raising an invoice', () => {
     // 1000 × 12.5 = 12,500 at 5% → 312.50 CGST + 312.50 SGST
     expect(la).toMatchObject({ quantity: 1000, rate: 12.5, taxable: 12500, gstPercent: 5, cgst: 312.5, sgst: 312.5, igst: 0, amount: 13125 });
     // 300 × 40 = 12,000 at 12% → 720 + 720
-    expect(lb).toMatchObject({ taxable: 12000, gstPercent: 12, cgst: 720, sgst: 720, amount: 13440 });
+    expect(lb).toMatchObject({ taxable: 12000, gstPercent: 12, cgst: 720, sgst: 720, amount: 13440, boxes: 3 });
     expect(inv.totals).toMatchObject({ taxable: 24500, cgst: 1032.5, sgst: 1032.5, igst: 0, tax: 2065, roundOff: 0, grand: 26565 });
     expect(inv.amountInWords).toBe('Rupees Twenty Six Thousand Five Hundred Sixty Five Only');
     expect(inv.einvoice.status).toBe('pending');
@@ -285,7 +292,8 @@ describe('the IRN', () => {
 
     const pdf = await asPdf(get(`/invoice/${inv._id}/pdf`));
     const text = pdfText(pdf.body);
-    expect(text).toMatch(/IRN registered/);
+    expect(text).toMatch(/IRN/);
+    expect(text).toMatch(/Ack No/);
     expect(text).toMatch(new RegExp(irn));
     expect(text).toMatch(/112010012345678/);
     // The QR is an image on the page.
@@ -363,7 +371,7 @@ describe('invoice settings', () => {
     const res = await seller({ gsp: { provider: 'http-json', baseUrl: 'https://gsp.example/api', clientId: 'id-1', clientSecret: 's3cret' } });
     expect(res.status).toBe(200);
     expect(res.body.settings.invoice).toMatchObject({ defaultHsn: '5806', defaultGstPercent: 5, city: 'Erode', pincode: '638052' });
-    expect(res.body.settings.invoice.bank.ifsc).toBe('SBIN0001234');
+    expect(res.body.settings.invoice.bank).toMatchObject({ ifsc: 'SBIN0001234', upiId: 'balu@sbi' });
     expect(res.body.settings.invoice.gsp).toMatchObject({ provider: 'http-json', clientId: 'id-1', configured: true });
     expect(res.body.settings.invoice.gsp.clientSecret).toBeUndefined();
 

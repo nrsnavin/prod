@@ -33,7 +33,7 @@ const HEX = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 // touched when a new value is typed (a blank secret means "keep it").
 const INVOICE_TEXT = {
   "invoice.defaultHsn": 8, "invoice.city": 60, "invoice.pincode": 6, "invoice.stateCode": 2,
-  "invoice.bank.name": 80, "invoice.bank.account": 30, "invoice.bank.ifsc": 11, "invoice.bank.branch": 80,
+  "invoice.bank.name": 80, "invoice.bank.account": 30, "invoice.bank.ifsc": 11, "invoice.bank.branch": 80, "invoice.bank.upiId": 60,
   "invoice.declaration": 500,
   "invoice.gsp.provider": 40, "invoice.gsp.baseUrl": 200, "invoice.gsp.username": 120, "invoice.gsp.clientId": 120,
 };

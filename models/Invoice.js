@@ -43,6 +43,8 @@ const LineSchema = new mongoose.Schema(
     hsn:        { type: String, default: "", trim: true },
     unit:       { type: String, default: "m" },
     quantity:   { type: Number, required: true, min: 0 },
+    // Cartons the line went out in, as the packing slip counts them.
+    boxes:      { type: Number, default: 0, min: 0 },
     rate:       { type: Number, required: true, min: 0 },
     taxable:    { type: Number, required: true },
     gstPercent: { type: Number, required: true, min: 0 },
@@ -87,6 +89,10 @@ const InvoiceSchema = new mongoose.Schema(
 
     seller: { type: PartySchema, default: () => ({}) },
     buyer:  { type: PartySchema, default: () => ({}) },
+    // Where the goods went (the challans' consignee address); the
+    // buyer's billing address when the challans carry none.
+    shipTo: { type: String, default: "", trim: true },
+    totalBoxes: { type: Number, default: 0 },
 
     // "intra": CGST + SGST; "inter": IGST. From the two state codes.
     supplyType:    { type: String, enum: ["intra", "inter"], required: true },

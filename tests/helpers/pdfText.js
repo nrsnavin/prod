@@ -4,9 +4,12 @@
 // on what the sheet SAYS rather than on its byte length.
 //
 // pdfkit writes each page's content as a Flate-compressed stream of
-// operators; the text lands in `[<hex> kern <hex>] TJ` arrays, encoded
-// WinAnsi by the built-in Helvetica. Decompress, pull the hex runs, and
-// map the bytes back to characters.
+// operators; the text lands in `[<hex> kern <hex>] TJ` arrays. With the
+// built-in Helvetica the hex is WinAnsi, one byte a character. With an
+// embedded TrueType font (the invoice, for its rupee sign) it is glyph
+// ids, two bytes each, and the font's ToUnicode CMap says which
+// character each one is — so the runs are decoded through whichever
+// font the stream had selected (`/F2 8.5 Tf`) when they were drawn.
 //
 // This is the only way these tests can catch the failure that matters
 // with a printed document: a figure that is present in the data and
@@ -21,6 +24,82 @@ const WINANSI_HIGH = {
   0xa0: ' ', 0xb7: '·', 0xb9: '¹',
 };
 
+const winAnsi = (bytes) => {
+  let s = '';
+  for (const b of bytes) s += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : (WINANSI_HIGH[b] ?? '');
+  return s;
+};
+
+/** The bytes of object `num`'s stream, inflated; null when there is none. */
+function streamOf(pdf, num) {
+  const re = new RegExp(`(?:^|\\n)${num} 0 obj\\b([\\s\\S]*?)endobj`);
+  const m = re.exec(pdf);
+  if (!m) return null;
+  const s = /stream\r?\n([\s\S]*?)endstream/.exec(m[1]);
+  if (!s) return null;
+  try { return zlib.inflateSync(Buffer.from(s[1], 'latin1')).toString('latin1'); } catch { return s[1]; }
+}
+
+/** The dictionary text of object `num`. */
+function dictOf(pdf, num) {
+  const m = new RegExp(`(?:^|\\n)${num} 0 obj\\s*<<([\\s\\S]*?)>>\\s*(?:stream|endobj)`).exec(pdf);
+  return m ? m[1] : '';
+}
+
+// A glyph that stands for several characters (a ligature, "fl") is
+// written as `<0066 006C>`, the units separated by spaces.
+const utf16 = (hex) => {
+  const buf = Buffer.from(hex.replace(/\s+/g, ''), 'hex');
+  let s = '';
+  for (let i = 0; i + 1 < buf.length; i += 2) s += String.fromCharCode((buf[i] << 8) | buf[i + 1]);
+  return s;
+};
+
+/** code → character, from a ToUnicode CMap (bfchar, bfrange, and pdfkit's array bfrange). */
+function parseCmap(text) {
+  const map = new Map();
+  for (const sect of text.matchAll(/beginbfchar([\s\S]*?)endbfchar/g)) {
+    for (const m of sect[1].matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f\s]+)>/g)) map.set(parseInt(m[1], 16), utf16(m[2]));
+  }
+  for (const sect of text.matchAll(/beginbfrange([\s\S]*?)endbfrange/g)) {
+    for (const m of sect[1].matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(\[[^\]]*\]|<[0-9A-Fa-f]+>)/g)) {
+      const lo = parseInt(m[1], 16);
+      const hi = parseInt(m[2], 16);
+      if (m[3].startsWith('[')) {
+        const items = [...m[3].matchAll(/<([0-9A-Fa-f\s]+)>/g)].map((x) => utf16(x[1]));
+        items.forEach((ch, i) => map.set(lo + i, ch));
+      } else {
+        const base = parseInt(m[3].slice(1, -1), 16);
+        for (let c = lo; c <= hi; c++) map.set(c, String.fromCharCode(base + (c - lo)));
+      }
+    }
+  }
+  return map;
+}
+
+/** Font resource name (F1, F2 …) → ToUnicode map, for the embedded fonts only. */
+function fontMaps(pdf) {
+  const maps = new Map();
+  for (const m of pdf.matchAll(/\/(F\d+)\s+(\d+)\s+0\s+R/g)) {
+    const [, name, num] = m;
+    if (maps.has(name)) continue;
+    const dict = dictOf(pdf, num);
+    const tu = /\/ToUnicode\s+(\d+)\s+0\s+R/.exec(dict);
+    if (!tu) { maps.set(name, null); continue; }
+    const cmap = streamOf(pdf, tu[1]);
+    maps.set(name, cmap ? parseCmap(cmap) : null);
+  }
+  return maps;
+}
+
+function decodeHex(hex, cmap) {
+  const bytes = Buffer.from(hex, 'hex');
+  if (!cmap) return winAnsi(bytes);
+  let s = '';
+  for (let i = 0; i + 1 < bytes.length; i += 2) s += cmap.get((bytes[i] << 8) | bytes[i + 1]) ?? '';
+  return s;
+}
+
 /**
  * Every drawn text run, IN DRAW ORDER.
  *
@@ -32,33 +111,28 @@ const WINANSI_HIGH = {
  * because the same number is in the job table's total.
  */
 function pdfRuns(buffer) {
+  const pdf = buffer.toString('latin1');
+  const fonts = fontMaps(pdf);
   const out = [];
   const re = /stream\r?\n([\s\S]*?)endstream/g;
   let m;
-  while ((m = re.exec(buffer.toString('latin1'))) !== null) {
+  while ((m = re.exec(pdf)) !== null) {
     let body;
     try {
       body = zlib.inflateSync(Buffer.from(m[1], 'latin1')).toString('latin1');
     } catch {
       continue; // not a Flate stream (fonts, images) — skip it
     }
-    // Every hex run inside a TJ array is a piece of shown text.
-    for (const t of body.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+    if (!/\bT[Jj]\b/.test(body)) continue; // a CMap or an image, not a page
+    let cmap = null;
+    // Font selections and text shows, in the order the stream has them.
+    for (const t of body.matchAll(/\/(F\d+)\s+[\d.]+\s+Tf|\[([^\]]*)\]\s*TJ|<([0-9A-Fa-f]+)>\s*Tj/g)) {
+      if (t[1]) { cmap = fonts.get(t[1]) ?? null; continue; }
       let line = '';
-      for (const h of t[1].matchAll(/<([0-9A-Fa-f]+)>/g)) {
-        const bytes = Buffer.from(h[1], 'hex');
-        for (const b of bytes) {
-          line += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : (WINANSI_HIGH[b] ?? '');
-        }
-      }
-      if (line.trim()) out.push(line);
-    }
-    // Single-run shows: (text) Tj
-    for (const t of body.matchAll(/<([0-9A-Fa-f]+)>\s*Tj/g)) {
-      const bytes = Buffer.from(t[1], 'hex');
-      let line = '';
-      for (const b of bytes) {
-        line += b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : (WINANSI_HIGH[b] ?? '');
+      if (t[2] !== undefined) {
+        for (const h of t[2].matchAll(/<([0-9A-Fa-f]+)>/g)) line += decodeHex(h[1], cmap);
+      } else {
+        line = decodeHex(t[3], cmap);
       }
       if (line.trim()) out.push(line);
     }
