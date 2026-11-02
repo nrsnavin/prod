@@ -56,6 +56,7 @@ const Notification         = require("../models/Notification.js");
 const { approveOrderTxn }  = require("../services/orderService.js");
 const WarpingBatch         = require("../models/WarpingBatch.js");
 const DeliveryChallan      = require("../models/DeliveryChallan.js");
+const { draftedForJobs }   = require("../services/floorDrafts.js");
 const { plannedLotsByJob, distinctLots, emptyTrail } = require("../services/yarnLotTrail.js");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient.js");
 // ETA forecast engine lives in its own service (Phase 4 god-file split).
@@ -540,6 +541,22 @@ router.get(
     }
     const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
 
+    // ── Entered on the floor, not verified yet ──────────────────────
+    // What `produced` will become once the office verifies the floor's
+    // entries (services/floorDrafts.js). Shown beside the verified
+    // figure, never added to it. Per job here, summed per elastic for
+    // the order's own rows below.
+    const orderJobIds = (order.jobs || [])
+      .map((ref) => (ref.job && typeof ref.job === "object" ? ref.job._id : ref.job))
+      .filter(Boolean);
+    const draftsByJob = await draftedForJobs(orderJobIds);
+    const draftedByElastic = new Map();
+    let draftShifts = 0;
+    for (const { shifts, byElastic } of draftsByJob.values()) {
+      draftShifts += shifts;
+      for (const [eid, m] of byElastic) draftedByElastic.set(eid, round3((draftedByElastic.get(eid) || 0) + m));
+    }
+
     const elastics = order.elasticOrdered.map((e) => {
       const id = String(e.elastic ?? "");
       return {
@@ -547,6 +564,7 @@ router.get(
         name:     elasticNames.get(id) ?? "Unknown elastic",
         ordered:  e.quantity,
         produced: qtyFor(order.producedElastic, id) || 0,
+        drafted:  draftedByElastic.get(id) || 0,
         packed:   qtyFor(order.packedElastic, id)   || 0,
         // Two questions that were long conflated under "pending":
         //   notAssigned — ordered minus what jobs have been raised for.
@@ -600,12 +618,14 @@ router.get(
       };
       const produced = qtyBy(job.producedElastic);
       const packed   = qtyBy(job.packedElastic);
+      const jobDrafts = draftsByJob.get(String(job._id));
 
       const elasticSummary = (job.elastics || []).map((e) => {
         const id = String(e.elastic?._id ?? e.elastic ?? "");
         const planned = e.quantity || 0;
         const made    = produced.get(id) || 0;
         return {
+          drafted: jobDrafts?.byElastic.get(id) || 0,
           id,
           // Falls back to the order's own naming when the job's elastic ref
           // no longer resolves (deleted master), rather than dropping the row.
@@ -708,6 +728,8 @@ router.get(
         date:        order.date,
         supplyDate:  order.supplyDate,
         description: order.description,
+        // Floor entries on this order's jobs waiting to be verified.
+        draftShifts,
         customer:    order.customer,
         elastics,
         jobs,

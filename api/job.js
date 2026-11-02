@@ -18,6 +18,7 @@ const Wastage     = require('../models/Wastage');
 const Machine     = require('../models/Machine');
 const { recomputePending } = require('../services/orderPending.js');
 const ShiftDetail = require('../models/ShiftDetail');
+const { draftedForJobs } = require('../services/floorDrafts');
 const { refreshOpenShiftHeads } = require('../utils/machineHeads');
 const { setMachineLoading } = require('../services/machineLoading');
 
@@ -1152,15 +1153,22 @@ router.get(
       .populate('packedElastic.elastic', 'name')
       .populate('wastageElastic.elastic', 'name');
     if (!job) return next(new ErrorHandler('Job not found', 404));
+    // Entered on the floor, not verified yet (services/floorDrafts.js):
+    // shown beside the verified figure, never added to it.
+    const drafts = (await draftedForJobs([job._id])).get(String(job._id));
     const summary = job.elastics.map(e => {
       const find = arr => arr.find(x => x.elastic._id.toString() === e.elastic._id.toString())?.quantity || 0;
       const planned  = e.quantity;
       const produced = find(job.producedElastic);
       const packed   = find(job.packedElastic);
       const wasted   = find(job.wastageElastic);
+      const drafted  = drafts?.byElastic.get(String(e.elastic._id)) || 0;
       return {
         elasticId: e.elastic._id, elasticName: e.elastic.name,
         planned, produced, packed, wasted,
+        // Metres entered on the floor and waiting to be verified. What
+        // `produced` will become once they are; a claim until then.
+        drafted,
         // Changed mid-run (services/jobMidRun.js): a frozen line is
         // complete as it stands; an added one came in with a reason.
         frozen: !!e.frozen, plannedBeforeFreeze: e.plannedBeforeFreeze ?? null, addedMidRun: !!e.addedMidRun,
@@ -1183,7 +1191,11 @@ router.get(
         packingPct: planned > 0 ? Math.round((packed / planned) * 100) : 0,
       };
     });
-    res.json({ success: true, jobId: job._id, jobNo: job.jobOrderNo, status: job.status, summary });
+    res.json({
+      success: true, jobId: job._id, jobNo: job.jobOrderNo, status: job.status, summary,
+      // How many floor entries on this job are waiting to be verified.
+      draftShifts: drafts?.shifts || 0,
+    });
   })
 );
 
