@@ -38,6 +38,12 @@ const { allocate } = require("../services/docNumbers");
 const partyLedger  = require("../services/partyLedger");
 const outstanding  = require("../services/outstanding");
 const { ensureSeed } = require("../services/accountsSeed");
+const { readBill }  = require("../utils/billOcr");
+const bankStatement = require("../services/bankStatement");
+const collections   = require("../services/collections");
+const { sendWhatsApp, isConfigured: whatsappConfigured } = require("../utils/whatsapp");
+const aiLedger      = require("../services/aiLedger");
+const { promptVersion } = require("../utils/aiPrompts");
 
 const BankAccount     = require("../models/BankAccount");
 const ExpenseCategory = require("../models/ExpenseCategory");
@@ -59,6 +65,7 @@ const isId = (v) => mongoose.Types.ObjectId.isValid(String(v || ""));
 const r2 = round2;
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 } });
+const scanUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 4 } });
 
 // ── Helpers ───────────────────────────────────────────────────────
 function readDate(value, label, fallback = null) {
@@ -819,48 +826,52 @@ const docOutstanding = (docType, d) =>
   : docType === "SupplierBill" ? r2(d.totals.grand - d.paidAmount - d.tdsAmount - d.debitedAmount)
   : r2(d.totals.grand - d.paidAmount);
 
-router.post("/payments", catchAsyncErrors(async (req, res, next) => {
-  const b = req.body || {};
+/**
+ * Post a receipt or payment voucher from a request body. Throws an
+ * ErrorHandler for anything the caller got wrong; returns the voucher
+ * (or the one a replayed requestId already made).
+ */
+async function createVoucher(b, req) {
   const kind = b.kind === "receipt" ? "receipt" : b.kind === "payment" ? "payment" : null;
-  if (!kind) return next(new ErrorHandler("kind must be receipt or payment", 400));
+  if (!kind) throw new ErrorHandler("kind must be receipt or payment", 400);
   if (b.requestId) {
     const dup = await Payment.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
-    if (dup) return res.status(200).json({ success: true, payment: dup, replay: true });
+    if (dup) return { voucher: dup, replay: true };
   }
   const amount = r2(b.amount);
-  if (!(amount > 0)) return next(new ErrorHandler("amount must be more than 0", 400));
-  if (!["cash", "bank", "upi", "cheque"].includes(b.mode)) return next(new ErrorHandler("mode must be cash, bank, upi or cheque", 400));
-  if (!isId(b.account)) return next(new ErrorHandler("account is required", 400));
+  if (!(amount > 0)) throw new ErrorHandler("amount must be more than 0", 400);
+  if (!["cash", "bank", "upi", "cheque"].includes(b.mode)) throw new ErrorHandler("mode must be cash, bank, upi or cheque", 400);
+  if (!isId(b.account)) throw new ErrorHandler("account is required", 400);
   const account = await BankAccount.findById(b.account).lean();
-  if (!account || !account.active) return next(new ErrorHandler("Account not found", 404));
+  if (!account || !account.active) throw new ErrorHandler("Account not found", 404);
   let date;
-  try { date = readDate(b.date, "date", new Date()); } catch (err) { return next(err); }
+  date = readDate(b.date, "date", new Date());
 
   // The party.
   const partyType = b.partyType;
   let party = null;
   let partyName = String(b.partyName || "").trim();
   if (partyType === "customer") {
-    if (kind !== "receipt") return next(new ErrorHandler("A customer is paid by a receipt voucher", 400));
-    if (!isId(b.customer)) return next(new ErrorHandler("customer is required", 400));
+    if (kind !== "receipt") throw new ErrorHandler("A customer is paid by a receipt voucher", 400);
+    if (!isId(b.customer)) throw new ErrorHandler("customer is required", 400);
     party = await Customer.findById(b.customer).select("name").lean();
-    if (!party) return next(new ErrorHandler("Customer not found", 404));
+    if (!party) throw new ErrorHandler("Customer not found", 404);
     partyName = party.name;
   } else if (partyType === "supplier") {
-    if (kind !== "payment") return next(new ErrorHandler("A supplier is paid by a payment voucher", 400));
-    if (!isId(b.supplier)) return next(new ErrorHandler("supplier is required", 400));
+    if (kind !== "payment") throw new ErrorHandler("A supplier is paid by a payment voucher", 400);
+    if (!isId(b.supplier)) throw new ErrorHandler("supplier is required", 400);
     party = await Supplier.findById(b.supplier).select("name").lean();
-    if (!party) return next(new ErrorHandler("Supplier not found", 404));
+    if (!party) throw new ErrorHandler("Supplier not found", 404);
     partyName = party.name;
   } else if (partyType === "other") {
-    if (!partyName) return next(new ErrorHandler("partyName is required for an other-party voucher", 400));
+    if (!partyName) throw new ErrorHandler("partyName is required for an other-party voucher", 400);
   } else {
-    return next(new ErrorHandler("partyType must be customer, supplier or other", 400));
+    throw new ErrorHandler("partyType must be customer, supplier or other", 400);
   }
 
   // TDS, on payments only.
   const tdsRate = kind === "payment" ? Number(b.tds?.rate) || 0 : 0;
-  if (tdsRate < 0 || tdsRate > 100) return next(new ErrorHandler("TDS rate must be between 0 and 100", 400));
+  if (tdsRate < 0 || tdsRate > 100) throw new ErrorHandler("TDS rate must be between 0 and 100", 400);
   const tdsSection = String(b.tds?.section || "").trim().slice(0, 8);
 
   // The allocations: each names an open document of this party, for a
@@ -870,20 +881,20 @@ router.post("/payments", catchAsyncErrors(async (req, res, next) => {
   const allocations = [];
   const seen = new Set();
   for (const [i, a] of rawAlloc.entries()) {
-    if (!allowedTypes.includes(a?.docType)) return next(new ErrorHandler(`Allocation ${i + 1}: a ${kind} to this party cannot settle a ${a?.docType || "?"}`, 400));
-    if (!isId(a.doc)) return next(new ErrorHandler(`Allocation ${i + 1}: doc is required`, 400));
-    if (seen.has(String(a.doc))) return next(new ErrorHandler(`Allocation ${i + 1}: the same document twice`, 400));
+    if (!allowedTypes.includes(a?.docType)) throw new ErrorHandler(`Allocation ${i + 1}: a ${kind} to this party cannot settle a ${a?.docType || "?"}`, 400);
+    if (!isId(a.doc)) throw new ErrorHandler(`Allocation ${i + 1}: doc is required`, 400);
+    if (seen.has(String(a.doc))) throw new ErrorHandler(`Allocation ${i + 1}: the same document twice`, 400);
     seen.add(String(a.doc));
     const gross = r2(a.amount);
-    if (!(gross > 0)) return next(new ErrorHandler(`Allocation ${i + 1}: amount must be more than 0`, 400));
+    if (!(gross > 0)) throw new ErrorHandler(`Allocation ${i + 1}: amount must be more than 0`, 400);
     const doc = await DOC_MODELS[a.docType].findById(a.doc);
-    if (!doc) return next(new ErrorHandler(`Allocation ${i + 1}: document not found`, 404));
+    if (!doc) throw new ErrorHandler(`Allocation ${i + 1}: document not found`, 404);
     const docParty = a.docType === "Invoice" ? doc.customer : doc.supplier;
-    if (party && String(docParty) !== String(party._id)) return next(new ErrorHandler(`Allocation ${i + 1}: ${docNoOf(a.docType, doc)} belongs to another party`, 400));
+    if (party && String(docParty) !== String(party._id)) throw new ErrorHandler(`Allocation ${i + 1}: ${docNoOf(a.docType, doc)} belongs to another party`, 400);
     const open = (a.docType === "Invoice" && doc.status === "issued") || (a.docType === "SupplierBill" && ["open", "part_paid"].includes(doc.status)) || (a.docType === "Expense" && doc.status === "approved");
-    if (!open) return next(new ErrorHandler(`Allocation ${i + 1}: ${docNoOf(a.docType, doc)} is not open`, 409));
+    if (!open) throw new ErrorHandler(`Allocation ${i + 1}: ${docNoOf(a.docType, doc)} is not open`, 409);
     const left = docOutstanding(a.docType, doc);
-    if (gross > left + 0.005) return next(new ErrorHandler(`Allocation ${i + 1}: ${docNoOf(a.docType, doc)} has only ${left.toFixed(2)} outstanding`, 400));
+    if (gross > left + 0.005) throw new ErrorHandler(`Allocation ${i + 1}: ${docNoOf(a.docType, doc)} has only ${left.toFixed(2)} outstanding`, 400);
     const tds = a.docType === "SupplierBill" && (doc.tds?.applicable || tdsRate > 0) ? r2(gross * (tdsRate || doc.tds?.rate || 0) / 100) : (tdsRate > 0 && a.docType === "Expense" ? r2(gross * tdsRate / 100) : 0);
     allocations.push({ docType: a.docType, doc: doc._id, docNo: docNoOf(a.docType, doc), amount: gross, tds });
   }
@@ -891,7 +902,7 @@ router.post("/payments", catchAsyncErrors(async (req, res, next) => {
   const gross = r2(allocations.reduce((s, a) => s + a.amount, 0));
   const cashNeeded = r2(gross - tdsAmount);
   if (cashNeeded > amount + 0.005) {
-    return next(new ErrorHandler(`The allocations need ${cashNeeded.toFixed(2)} but the voucher is for ${amount.toFixed(2)}`, 400));
+    throw new ErrorHandler(`The allocations need ${cashNeeded.toFixed(2)} but the voucher is for ${amount.toFixed(2)}`, 400);
   }
   const unallocated = r2(amount + tdsAmount - gross);
 
@@ -943,11 +954,18 @@ router.post("/payments", catchAsyncErrors(async (req, res, next) => {
   } catch (err) {
     if (err?.code === 11000 && b.requestId) {
       const dup = await Payment.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
-      if (dup) return res.status(200).json({ success: true, payment: dup, replay: true });
+      if (dup) return { voucher: dup, replay: true };
     }
     throw err;
   }
-  res.status(201).json({ success: true, payment: voucher.toObject() });
+  return { voucher, replay: false };
+}
+
+router.post("/payments", catchAsyncErrors(async (req, res, next) => {
+  let out;
+  try { out = await createVoucher(req.body || {}, req); } catch (err) { if (err instanceof ErrorHandler) return next(err); throw err; }
+  const v = out.voucher.toObject ? out.voucher.toObject() : out.voucher;
+  res.status(out.replay ? 200 : 201).json({ success: true, payment: v, ...(out.replay ? { replay: true } : {}) });
 }));
 
 router.post("/payments/:id/cancel", catchAsyncErrors(async (req, res, next) => {
@@ -1190,4 +1208,141 @@ router.get("/reports/daybook", catchAsyncErrors(async (req, res, next) => {
     } });
 }));
 
+// ══════════════════════════════════════════════════════════════════
+//  AI: A BILL PHOTO INTO A DRAFT
+// ══════════════════════════════════════════════════════════════════
+//  POST /scan  multipart "files" (1–4 photos / PDF) → the fields a
+//  draft bill or expense needs, the supplier on file it matches (by
+//  GSTIN, then by name), and that supplier's POs with unbilled
+//  receipts. Nothing is saved: the form opens filled in, the person
+//  checks every figure, and what they save is a bill like any other.
+router.post("/scan", keepRequestContext(scanUpload.array("files", 4)), catchAsyncErrors(async (req, res, next) => {
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (!files.length) return next(new ErrorHandler("Attach the bill — a photo (JPEG, PNG) or a PDF", 400));
+  let read;
+  const startedAt = Date.now();
+  try {
+    read = await readBill(files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype })));
+  } catch (err) {
+    if (err.code === "ANTHROPIC_KEY_MISSING") return next(new ErrorHandler("Bill scanning is not configured on this server (no AI key).", 503));
+    if (err.code) return next(new ErrorHandler(err.message, 400));
+    await aiLedger.record({ surface: "bill-ocr", model: "?", promptVersion: promptVersion("bill-ocr"), latencyMs: Date.now() - startedAt, error: err.message });
+    return next(new ErrorHandler(`The bill could not be read: ${err.message}`, 502));
+  }
+  const suggestionId = await aiLedger.record({
+    surface: "bill-ocr", model: read.model, promptVersion: promptVersion("bill-ocr"),
+    proposed: { kind: read.kind, supplierName: read.supplierName, supplierGstin: read.supplierGstin, billNo: read.billNo, billDate: read.billDate, lines: read.lines, totals: read.totals, confidence: read.confidence },
+    latencyMs: read.latencyMs, usage: read.usage,
+  });
+  if (read.problem) {
+    return res.json({ success: true, read, supplier: null, purchaseOrders: [], aiSuggestion: suggestionId });
+  }
+  // Who it is, on file: the GSTIN settles it; a name is a guess to confirm.
+  let supplier = null;
+  let matchedBy = null;
+  if (read.supplierGstin) {
+    supplier = await Supplier.findOne({ gstin: read.supplierGstin }).select("name gstin").lean();
+    if (supplier) matchedBy = "gstin";
+  }
+  if (!supplier && read.supplierName) {
+    const words = read.supplierName.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3);
+    if (words.length) {
+      const re = new RegExp(words.map((w) => `(?=.*${escapeRegex(w)})`).join(""), "i");
+      supplier = await Supplier.findOne({ name: re }).select("name gstin").lean();
+      if (supplier) matchedBy = "name";
+    }
+  }
+  const already = read.billNo && supplier
+    ? await SupplierBill.findOne({ supplier: supplier._id, supplierBillNo: read.billNo, status: { $ne: "cancelled" } }).select("billNo").lean()
+    : null;
+  // The supplier's POs with something still to bill.
+  let purchaseOrders = [];
+  if (supplier) {
+    const pos = await PurchaseOrder.find({ supplier: supplier._id, status: { $ne: "Cancelled" } }).select("poNo date status").sort({ date: -1 }).limit(10).lean();
+    const billed = new Set((await SupplierBill.find({ purchaseOrder: { $in: pos.map((p) => p._id) }, status: { $ne: "cancelled" } }).select("inwards").lean()).flatMap((b) => (b.inwards || []).map(String)));
+    for (const po of pos) {
+      const inwards = await MaterialInward.find({ purchaseOrder: po._id }).select("quantity").lean();
+      const unbilled = inwards.filter((i) => !billed.has(String(i._id)));
+      purchaseOrders.push({ _id: po._id, poNo: po.poNo, date: po.date, status: po.status, receipts: inwards.length, unbilledReceipts: unbilled.length });
+    }
+  }
+  res.json({ success: true, read, supplier: supplier ? { ...supplier, matchedBy } : null, alreadyEntered: already ? already.billNo : null, purchaseOrders, aiSuggestion: suggestionId });
+}));
+
+// ══════════════════════════════════════════════════════════════════
+//  AI: A BANK STATEMENT MATCHED TO THE BOOKS
+// ══════════════════════════════════════════════════════════════════
+//  POST /bank/statement       multipart "file" (CSV / Excel) + account
+//  POST /bank/statement/post  the lines the person confirmed → vouchers
+router.post("/bank/statement", keepRequestContext(upload.single("file")), catchAsyncErrors(async (req, res, next) => {
+  if (!req.file) return next(new ErrorHandler("Attach the statement as CSV or Excel", 400));
+  if (!isId(req.body?.account)) return next(new ErrorHandler("account is required", 400));
+  const account = await BankAccount.findById(req.body.account).lean();
+  if (!account) return next(new ErrorHandler("Account not found", 404));
+  let rows;
+  try {
+    rows = await bankStatement.parse(req.file.buffer, req.file.mimetype, req.file.originalname);
+  } catch (err) {
+    return next(new ErrorHandler(err.message, 400));
+  }
+  if (!rows.length) return next(new ErrorHandler("No transactions found in the file", 400));
+  const matched = await bankStatement.match(rows, account._id, { useModel: req.body?.useModel !== "false" });
+  const counts = { recorded: 0, matched: 0, unmatched: 0 };
+  for (const r of matched) counts[r.status] = (counts[r.status] || 0) + 1;
+  res.json({ success: true, account: { _id: account._id, name: account.name }, rows: matched, counts, file: req.file.originalname });
+}));
+
+router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.body?.account)) return next(new ErrorHandler("account is required", 400));
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  if (!rows.length) return next(new ErrorHandler("No lines to post", 400));
+  if (rows.length > 500) return next(new ErrorHandler("At most 500 lines at a time", 400));
+  const results = [];
+  for (const [i, r] of rows.entries()) {
+    try {
+      const kind = r.direction === "in" ? "receipt" : "payment";
+      const partyType = r.partyType === "customer" || r.partyType === "supplier" ? r.partyType : "other";
+      const { voucher, replay } = await createVoucher({
+        kind, date: r.date, partyType,
+        ...(partyType === "customer" ? { customer: r.party } : partyType === "supplier" ? { supplier: r.party } : { partyName: r.partyName || r.narration || "Bank" }),
+        amount: r.amount, mode: r.mode || "bank", account: req.body.account, reference: r.ref || "",
+        allocations: Array.isArray(r.allocations) ? r.allocations.map((a) => ({ docType: a.docType, doc: a.doc, amount: a.amount })) : [],
+        narration: r.narration || "", source: "statement", statementLine: `${r.date || ""} ${r.narration || ""}`.trim().slice(0, 200),
+        requestId: r.requestId,
+      }, req);
+      results.push({ index: i, ok: true, voucherNo: voucher.voucherNo, _id: voucher._id, replay: !!replay });
+    } catch (err) {
+      results.push({ index: i, ok: false, error: err.message });
+    }
+  }
+  res.json({ success: true, results, posted: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length });
+}));
+
+// ══════════════════════════════════════════════════════════════════
+//  AI: COLLECTION FOLLOW-UPS
+// ══════════════════════════════════════════════════════════════════
+router.get("/collections", catchAsyncErrors(async (_req, res) => {
+  const rows = await collections.overdue();
+  res.json({ success: true, rows, total: r2(rows.reduce((s, r) => s + r.overdue, 0)), whatsapp: whatsappConfigured() });
+}));
+
+router.post("/collections/draft", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.body?.customer)) return next(new ErrorHandler("customer is required", 400));
+  const entry = (await collections.overdue()).find((r) => String(r.party) === String(req.body.customer));
+  if (!entry) return next(new ErrorHandler("Nothing overdue for this customer", 404));
+  const settings = await getDocumentSettings();
+  const out = await collections.draft(entry, { company: settings.companyName || "Balu Elastics", tone: req.body?.tone === "firm" ? "firm" : "gentle" });
+  res.json({ success: true, ...out, to: collections.e164(entry.contact.accountantPhone || entry.contact.phone), entry });
+}));
+
+router.post("/collections/send", catchAsyncErrors(async (req, res, next) => {
+  const to = collections.e164(req.body?.to);
+  const message = String(req.body?.message || "").trim();
+  if (!to) return next(new ErrorHandler("A phone number is required", 400));
+  if (message.length < 20) return next(new ErrorHandler("The message is too short to send", 400));
+  const result = await sendWhatsApp(to, message.slice(0, 1500));
+  res.json({ success: true, ...result, to });
+}));
+
 module.exports = router;
+module.exports.createVoucher = createVoucher;

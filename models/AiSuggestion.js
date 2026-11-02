@@ -58,6 +58,14 @@ const AI_SURFACES = Object.freeze([
   // before it fills the field; settle() records what they used.
   'timer-ocr',
   'production-slip-ocr',
+  // A supplier's bill or an expense receipt read from a photo or PDF
+  // into a draft bill; what was entered after is what settles it.
+  'bill-ocr',
+  // A bank statement line resolved to a party when the narration had
+  // no exact number or document in it.
+  'bank-statement-match',
+  // A payment reminder drafted for a customer; sent as edited, or not.
+  'collection-reminder',
   // The beam weights written by hand on a printed covering programme,
   // read from a photo; each row is checked on screen before it is saved.
   'covering-beam-ocr',

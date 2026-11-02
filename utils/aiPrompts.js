@@ -119,6 +119,22 @@ const PROMPTS = Object.freeze({
       '- Do not create a theme for a single complaint unless it is plainly distinct from all others.',
   },
 
+  'bill-ocr': {
+    version: 'v1.0',
+    notes: 'Reads a supplier bill / expense receipt into a draft. Lives in utils/billOcr.js. Amounts are copied, never computed.',
+    system: null,
+  },
+  'bank-statement-match': {
+    version: 'v1.0',
+    notes: 'Names the party behind a statement narration from a list of names. Lives in services/bankStatement.js.',
+    system: null,
+  },
+  'collection-reminder': {
+    version: 'v1.0',
+    notes: 'Drafts a short payment reminder from the overdue invoices given to it. Lives in services/collections.js.',
+    system: null,
+  },
+
   'assistant-answer': {
     version: 'v1.0',
     notes: 'Read-only tool-calling agent over whitelisted queries.',

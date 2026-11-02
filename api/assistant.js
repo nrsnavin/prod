@@ -18,6 +18,14 @@ const Wastage      = require("../models/Wastage");
 const RawMaterial  = require("../models/RawMaterial");
 const Elastic      = require("../models/Elastic");
 const MachineModel = require("../models/Machine");
+const Customer     = require("../models/Customer");
+const Supplier     = require("../models/Supplier");
+const Expense      = require("../models/Expense");
+const BankAccount  = require("../models/BankAccount");
+const Payment      = require("../models/Payment");
+const outstanding  = require("../services/outstanding");
+const partyLedger  = require("../services/partyLedger");
+const { escapeRegex } = require("../utils/escapeRegex");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { isAuthenticated } = require("../middleware/auth");
@@ -105,6 +113,53 @@ const TOOLS = {
     }));
   },
 
+  // ── The books (Accounts) ──
+  async get_receivables({ customer } = {}) {
+    const rows = await outstanding.receivables();
+    const groups = outstanding.byParty(rows);
+    const pick = customer ? groups.filter((g) => new RegExp(escapeRegex(String(customer)), "i").test(g.partyName)) : groups;
+    return {
+      totals: outstanding.totals(customer ? pick.flatMap((g) => g.docs) : rows),
+      byCustomer: pick.slice(0, 15).map((g) => ({ customer: g.partyName, outstanding: g.total, overdue: g.overdue, oldestDays: g.oldestDays, invoices: g.docs.slice(0, 8).map((d) => ({ no: d.docNo, date: String(d.date).slice(0, 10), outstanding: d.outstanding, overdueDays: d.overdueDays })) })),
+    };
+  },
+  async get_payables({ supplier } = {}) {
+    const rows = await outstanding.payables();
+    const groups = outstanding.byParty(rows);
+    const pick = supplier ? groups.filter((g) => new RegExp(escapeRegex(String(supplier)), "i").test(g.partyName)) : groups;
+    return {
+      totals: outstanding.totals(supplier ? pick.flatMap((g) => g.docs) : rows),
+      bySupplier: pick.slice(0, 15).map((g) => ({ supplier: g.partyName, outstanding: g.total, overdue: g.overdue, oldestDays: g.oldestDays, bills: g.docs.slice(0, 8).map((d) => ({ no: d.docNo, theirNo: d.refNo || "", date: String(d.date).slice(0, 10), outstanding: d.outstanding, overdueDays: d.overdueDays })) })),
+    };
+  },
+  async get_party_statement({ name, partyType = "customer", days = 90 } = {}) {
+    const Model = partyType === "supplier" ? Supplier : Customer;
+    const party = await Model.findOne({ name: new RegExp(escapeRegex(String(name || "")), "i") }).select("name").lean();
+    if (!party) return { error: `No ${partyType} matching "${name}"` };
+    const from = new Date(Date.now() - Number(days) * 86_400_000);
+    const st = await partyLedger.statement(partyType, party._id, { from });
+    return { party: party.name, partyType, opening: st.opening, closing: st.closing, rows: st.rows.slice(-40).map((r) => ({ date: String(r.date).slice(0, 10), doc: r.docNo, narration: r.narration, debit: r.debit, credit: r.credit, balance: r.balance })) };
+  },
+  async get_expense_summary({ days = 30 } = {}) {
+    const since = new Date(Date.now() - Number(days) * 86_400_000);
+    const rows = await Expense.aggregate([
+      { $match: { status: { $in: ["approved", "paid"] }, date: { $gte: since } } },
+      { $group: { _id: "$categoryName", amount: { $sum: "$totals.grand" }, count: { $sum: 1 } } },
+      { $sort: { amount: -1 } },
+    ]);
+    const pending = await Expense.countDocuments({ status: "pending" });
+    return { days: Number(days), total: rows.reduce((s, r) => s + r.amount, 0), byHead: rows.map((r) => ({ head: r._id, amount: r.amount, count: r.count })), waitingApproval: pending };
+  },
+  async get_cash_position() {
+    const accounts = await BankAccount.find({ active: true }).lean();
+    const sums = await Payment.aggregate([
+      { $match: { status: "posted" } },
+      { $group: { _id: "$account", receipts: { $sum: { $cond: [{ $eq: ["$kind", "receipt"] }, "$amount", 0] } }, payments: { $sum: { $cond: [{ $eq: ["$kind", "payment"] }, "$amount", 0] } } } },
+    ]);
+    const by = new Map(sums.map((x) => [String(x._id), x]));
+    return accounts.map((a) => { const x = by.get(String(a._id)) || { receipts: 0, payments: 0 }; return { account: a.name, kind: a.kind, balance: Math.round(((a.openingBalance || 0) + x.receipts - x.payments) * 100) / 100 }; });
+  },
+
   async get_machine_status() {
     const machines = await MachineModel.find({}).select("ID status").lean();
     const summary = { free: 0, running: 0, maintenance: 0 };
@@ -126,6 +181,16 @@ const TOOL_SCHEMAS = [
     input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
   { name: "get_machine_status", description: "Count of machines by status (free/running/maintenance) and each machine's current status.",
     input_schema: { type: "object", properties: {} } },
+  { name: "get_receivables", description: "What customers owe on issued invoices, with ageing; optionally one customer by (partial) name.",
+    input_schema: { type: "object", properties: { customer: { type: "string" } } } },
+  { name: "get_payables", description: "What we owe suppliers on open bills and approved expenses, with ageing; optionally one supplier by (partial) name.",
+    input_schema: { type: "object", properties: { supplier: { type: "string" } } } },
+  { name: "get_party_statement", description: "A customer's or supplier's statement of account over the last N days (default 90): every invoice, bill, note and voucher with the running balance.",
+    input_schema: { type: "object", properties: { name: { type: "string" }, partyType: { type: "string", enum: ["customer", "supplier"] }, days: { type: "number" } }, required: ["name"] } },
+  { name: "get_expense_summary", description: "Expenses by head over the last N days (default 30), and how many are waiting for approval.",
+    input_schema: { type: "object", properties: { days: { type: "number" } } } },
+  { name: "get_cash_position", description: "The book balance of every cash and bank account.",
+    input_schema: { type: "object", properties: {} } },
 ];
 
 // Every tool reads a specific module's data, so Jarvis has to answer with
@@ -141,6 +206,11 @@ const TOOL_FEATURES = {
   get_materials_to_reorder: ['/materials'],
   find_material:            ['/materials'],
   get_machine_status:       ['/machines'],
+  get_receivables:          ['/accounts'],
+  get_payables:             ['/accounts'],
+  get_party_statement:      ['/accounts'],
+  get_expense_summary:      ['/accounts'],
+  get_cash_position:        ['/accounts'],
 };
 
 // Same allow rule as requireFeature, and it has to stay the same or
@@ -156,7 +226,8 @@ function allowedToolNames(user) {
 
 const SYSTEM =
   "You are Jarvis, the operations assistant for an elastic (narrow-fabric) manufacturing ERP. " +
-  "Answer the admin's questions about orders, production, wastage, machines and materials by calling " +
+  "Answer the admin's questions about orders, production, wastage, machines, materials and the books " +
+  "(receivables, payables, statements, expenses, cash) by calling " +
   "the provided read-only tools, then giving a concise, direct answer with the actual numbers. " +
   "Prefer a tool call over guessing. If the data shows nothing, say so. Keep answers short (a few " +
   "sentences or a tight list). You cannot change anything — recommend actions, but note the admin must do them.";
