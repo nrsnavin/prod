@@ -363,6 +363,7 @@ router.post("/lock", isAdmin("admin"), catchAsyncErrors(async (req, res, next) =
 router.use(require("./accountsBank"));
 router.use(require("./accountsTally"));
 router.use(require("./accountsDocs"));
+router.use(require("./accountsInsights"));
 
 module.exports = router;
 module.exports.postOpening = postOpening;

@@ -149,6 +149,20 @@ const TOOLS = {
     const pending = await Expense.countDocuments({ status: "pending" });
     return { days: Number(days), total: rows.reduce((s, r) => s + r.amount, 0), byHead: rows.map((r) => ({ head: r._id, amount: r.amount, count: r.count })), waitingApproval: pending };
   },
+  async get_cash_forecast({ weeks = 6 } = {}) {
+    const f = await require("../services/accountsInsights").forecast({ weeks: Math.min(13, Math.max(2, Number(weeks) || 6)) });
+    return {
+      openingCash: f.opening, firstShortWeek: f.firstShortWeek,
+      weeks: f.weeks.map((w) => ({ from: w.from, inflow: w.inflow, outflow: w.outflow, closing: w.closing, biggest: w.top.slice(0, 3) })),
+      note: "Receipts are expected when each customer has actually paid in the past, not on the invoice due date.",
+    };
+  },
+  async get_close_checklist({ month } = {}) {
+    const d = new Date(); const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+    const m = /^\d{4}-\d{2}$/.test(String(month || "")) ? month : `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+    const c = await require("../services/accountsInsights").closeChecklist(m);
+    return { month: c.month, done: c.done, total: c.total, items: c.items.map((i) => ({ item: i.label, done: i.ok, detail: i.detail, amount: i.amount })) };
+  },
   async get_cash_position() {
     const accounts = await BankAccount.find({ active: true }).lean();
     const rows = await require("../services/bankBalances").withBalances(accounts);
@@ -186,6 +200,10 @@ const TOOL_SCHEMAS = [
     input_schema: { type: "object", properties: { days: { type: "number" } } } },
   { name: "get_cash_position", description: "The book balance of every cash and bank account.",
     input_schema: { type: "object", properties: {} } },
+  { name: "get_cash_forecast", description: "Cash in and out for the coming weeks and the week cash would run short, from how each customer actually pays, bills due and recurring expenses.",
+    input_schema: { type: "object", properties: { weeks: { type: "number", description: "How many weeks ahead (2–13, default 6)" } } } },
+  { name: "get_close_checklist", description: "What is left before a month's books can be closed: bank lines, uncleared cheques, bills without copies, pending approvals, TDS to deposit, documents not sent to Tally, the lock.",
+    input_schema: { type: "object", properties: { month: { type: "string", description: "YYYY-MM; default last month" } } } },
 ];
 
 // Every tool reads a specific module's data, so Jarvis has to answer with
@@ -206,6 +224,8 @@ const TOOL_FEATURES = {
   get_party_statement:      ['/accounts'],
   get_expense_summary:      ['/accounts'],
   get_cash_position:        ['/accounts'],
+  get_cash_forecast:        ['/accounts'],
+  get_close_checklist:      ['/accounts'],
 };
 
 // Same allow rule as requireFeature, and it has to stay the same or

@@ -850,6 +850,36 @@ app.post("/api/v2/notify/cron/run-evening-report", async (req, res) => {
   }
 });
 
+// Cron-triggerable month-end checklist — on the 1st, the owner gets what is
+// left before last month's books can close. Same shared-secret pattern.
+//   curl -X POST -H "x-cron-secret: $CRON_SECRET" \
+//        http://host/api/v2/notify/cron/run-close-checklist
+app.post("/api/v2/notify/cron/run-close-checklist", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) {
+    return res.status(503).json({ success: false, message: "CRON_SECRET not configured" });
+  }
+  if (!safeEqual(req.get("x-cron-secret"), secret)) {
+    return res.status(401).json({ success: false, message: "bad cron secret" });
+  }
+  try {
+    const insights = require("./services/accountsInsights");
+    const { getDocumentSettings } = require("./services/documentSettings");
+    const NotificationSettings = require("./models/NotificationSettings.js");
+    const { sendWhatsApp } = require("./utils/whatsapp");
+    const d = new Date(); const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+    const month = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+    const checklist = await insights.closeChecklist(month);
+    const text = insights.checklistText(checklist, (await getDocumentSettings()).companyName || "Balu Elastics");
+    const settings = await NotificationSettings.load();
+    const sent = [];
+    if (settings.enabled) for (const to of settings.recipients || []) sent.push(await sendWhatsApp(to, text));
+    return res.json({ success: true, month, preview: text, sent: sent.length });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Public inbound WhatsApp webhook — Twilio POSTs replies here.
 // Twilio sends application/x-www-form-urlencoded, so we don't need
 // the JSON parser, but the body parser is already mounted at app

@@ -336,6 +336,13 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     }
     throw err;
   }
+  // What the person kept of the scan: the AI's accuracy, field by field.
+  if (data.aiSuggestion) {
+    aiLedger.settle(data.aiSuggestion, {
+      accepted: { supplierGstin: data.supplierGstin, billNo: data.supplierBillNo, billDate: billDate.toISOString().slice(0, 10), lines: data.lines.map((l) => ({ description: l.description, hsn: l.hsn, quantity: l.quantity, unit: l.unit, rate: l.rate, gstPercent: l.gstPercent })), totals: { taxable: data.totals.taxable, grand: data.totals.grand } },
+      decidedBy: req.user?._id, expectSurface: "bill-ocr", ignoreMissing: true,
+    }).catch(() => {});
+  }
   res.status(201).json({ success: true, bill: doc.toObject() });
 }));
 
@@ -523,6 +530,12 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
     throw err;
   }
   const expense = await Expense.findById(_id).select("-attachments.data").lean();
+  if (data.aiSuggestion) {
+    aiLedger.settle(data.aiSuggestion, {
+      accepted: { supplierGstin: payeeGstin, billNo: data.refNo, billDate: date.toISOString().slice(0, 10), lines: data.lines.map((l) => ({ description: l.description, quantity: l.quantity, rate: l.rate, gstPercent: l.gstPercent })), totals: { taxable: data.totals.taxable, grand: data.totals.grand } },
+      decidedBy: req.user?._id, expectSurface: "bill-ocr", ignoreMissing: true,
+    }).catch(() => {});
+  }
   res.status(201).json({ success: true, expense, voucher: voucher ? { _id: voucher._id, voucherNo: voucher.voucherNo } : null });
 }));
 
