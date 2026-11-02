@@ -26,6 +26,8 @@ const FEATURES = [
   { key: "/orders",              label: "Orders",              section: "Sales",          depts: ["admin", "finance"] },
   { key: "/jobs",                label: "Job Orders",          section: "Sales",          depts: ["admin", "production", "packing"] },
   { key: "/delivery-challans",   label: "Delivery Challans",   section: "Sales",          depts: ["admin", "finance"] },
+  // Tax invoices raised against an order's challans, with the IRN.
+  { key: "/invoices",            label: "Invoices",            section: "Sales",          depts: ["admin", "finance"] },
   // Sample requests are raised by sales and worked by production, so
   // both default sets carry them — the log is only worth keeping if the
   // people who know what happened can write in it.

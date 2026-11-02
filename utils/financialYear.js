@@ -14,4 +14,16 @@ function currentFinancialYear(at = new Date()) {
   return `${String(fyStart).slice(-2)}/${String(fyStart + 1).slice(-2)}`;
 }
 
-module.exports = { currentFinancialYear };
+/**
+ * The same year written out, "2026-27", as an invoice number carries
+ * it: a tax invoice is read by people outside the company, and "26/27"
+ * with slashes inside INV/.../0001 is one slash too many.
+ */
+function financialYearLong(at = new Date()) {
+  const month   = at.getMonth();
+  const year    = at.getFullYear();
+  const fyStart = month >= 3 ? year : year - 1;
+  return `${fyStart}-${String(fyStart + 1).slice(-2)}`;
+}
+
+module.exports = { currentFinancialYear, financialYearLong };

@@ -82,6 +82,7 @@ const covering = require("./api/covering.js");
 const packing  = require("./api/packing.js");
 const bonus    = require("./api/bonus.js");
 const deliveryChallanRouter = require("./api/deliveryChallan.js");
+const invoiceRouter = require("./api/invoice.js");
 const production  = require("./api/production.js");
 const wastage     = require("./api/wastage.js");
 const attendence  = require("./api/attendence.js");
@@ -613,6 +614,12 @@ app.use("/api/v2/dc",          gate('accounts'),
   requireFeature('/delivery-challans'),
   requireFeatureRead('/delivery-challans', '/analytics'),
   deliveryChallanRouter);
+// The order and customer pages show their invoices, so those screens
+// may read here; raising, registering and cancelling need /invoices.
+app.use("/api/v2/invoice",     gate('accounts'),
+  requireFeature('/invoices'),
+  requireFeatureRead('/invoices', '/orders', '/customers'),
+  invoiceRouter);
 // Purchase orders live on the supplier router, so /purchase-orders writes
 // (and Materials' stock-ops reads) land here too.
 app.use("/api/v2/supplier",    gate('accounts'),

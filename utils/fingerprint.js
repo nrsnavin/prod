@@ -96,6 +96,10 @@ const ACTION_CODES = Object.freeze({
   DC_DELIVERED:             'DC_DELIVERED',
   DC_CANCELLED:             'DC_CANCELLED',
   DC_DELETED:               'DC_DELETED',
+  // Tax-invoice lifecycle
+  INVOICE_CREATED:          'INVOICE_CREATED',
+  INVOICE_IRN_REGISTERED:   'INVOICE_IRN_REGISTERED',
+  INVOICE_CANCELLED:        'INVOICE_CANCELLED',
 
   MATERIAL_GROUP_CREATED:   'MATERIAL_GROUP_CREATED',
   MATERIAL_GROUP_UPDATED:   'MATERIAL_GROUP_UPDATED',
@@ -170,6 +174,9 @@ const ACTION_LABELS = Object.freeze({
   DC_DELIVERED:             'DC Delivered',
   DC_CANCELLED:             'DC Cancelled',
   DC_DELETED:               'DC Deleted',
+  INVOICE_CREATED:          'Invoice Raised',
+  INVOICE_IRN_REGISTERED:   'Invoice IRN Registered',
+  INVOICE_CANCELLED:        'Invoice Cancelled',
   LOGIN_CREATED:            'Login Created',
   LOGIN_UPDATED:            'Login Edited',
   LOGIN_DELETED:            'Login Deleted',

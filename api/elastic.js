@@ -1130,10 +1130,15 @@ router.put(
       const fieldsToCopy = [
         "name", "weaveType", "pick", "noOfHook", "weight",
         "spandexEnds", "warpSpandex", "weftYarn", "spandexCovering",
-        "warpYarn", "testingParameters", "minStock",
+        "warpYarn", "testingParameters", "minStock", "hsn",
       ];
       for (const field of fieldsToCopy) {
         if (elasticData[field] !== undefined) elastic[field] = elasticData[field];
+      }
+      // null / "" clears the override back to the Settings default.
+      if (elasticData.gstPercent !== undefined) {
+        elastic.gstPercent = elasticData.gstPercent === null || elasticData.gstPercent === ""
+          ? null : Number(elasticData.gstPercent);
       }
       if (elasticData.pick        !== undefined) elastic.pick        = Number(elasticData.pick);
       if (elasticData.noOfHook    !== undefined) elastic.noOfHook    = Number(elasticData.noOfHook);

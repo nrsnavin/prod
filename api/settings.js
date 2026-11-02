@@ -27,12 +27,74 @@ const EDITABLE = [
 
 const HEX = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
+// ── Invoice settings ──────────────────────────────────────────
+// Sent as a nested `invoice` object and written as dot-paths, so a save
+// of the HSN cannot wipe the bank details, and the GSP secrets are only
+// touched when a new value is typed (a blank secret means "keep it").
+const INVOICE_TEXT = {
+  "invoice.defaultHsn": 8, "invoice.city": 60, "invoice.pincode": 6, "invoice.stateCode": 2,
+  "invoice.bank.name": 80, "invoice.bank.account": 30, "invoice.bank.ifsc": 11, "invoice.bank.branch": 80,
+  "invoice.declaration": 500,
+  "invoice.gsp.provider": 40, "invoice.gsp.baseUrl": 200, "invoice.gsp.username": 120, "invoice.gsp.clientId": 120,
+};
+const INVOICE_SECRETS = { "invoice.gsp.clientSecret": 300, "invoice.gsp.password": 120 };
+
+function readInvoiceSettings(body) {
+  const inv = body.invoice;
+  if (inv === undefined) return {};
+  if (!inv || typeof inv !== "object" || Array.isArray(inv)) {
+    throw new ErrorHandler("invoice must be an object", 400);
+  }
+  const at = (path) => path.split(".").slice(1).reduce((o, k) => (o == null ? undefined : o[k]), inv);
+  const set = {};
+  for (const [path, max] of Object.entries(INVOICE_TEXT)) {
+    const v = at(path);
+    if (v === undefined) continue;
+    set[path] = String(v ?? "").trim().slice(0, max);
+  }
+  for (const [path, max] of Object.entries(INVOICE_SECRETS)) {
+    const v = at(path);
+    if (v === undefined || v === null || String(v) === "") continue; // keep what is stored
+    set[path] = String(v).slice(0, max);
+  }
+  if (inv.defaultGstPercent !== undefined) {
+    const pct = Number(inv.defaultGstPercent);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+      throw new ErrorHandler("defaultGstPercent must be between 0 and 100", 400);
+    }
+    set["invoice.defaultGstPercent"] = pct;
+  }
+  if (set["invoice.pincode"] && !/^\d{6}$/.test(set["invoice.pincode"])) {
+    throw new ErrorHandler("pincode must be 6 digits", 400);
+  }
+  if (set["invoice.stateCode"] && !/^\d{2}$/.test(set["invoice.stateCode"])) {
+    throw new ErrorHandler("stateCode must be the 2-digit GST state code", 400);
+  }
+  if (set["invoice.defaultHsn"] && !/^\d{4,8}$/.test(set["invoice.defaultHsn"])) {
+    throw new ErrorHandler("defaultHsn must be 4 to 8 digits", 400);
+  }
+  return set;
+}
+
+/** Whether a GSP has credentials, without ever sending them. */
+async function gspConfigured() {
+  const row = await DocumentSettings.findOne({ key: "document" })
+    .select("+invoice.gsp.clientSecret +invoice.gsp.password invoice.gsp.provider")
+    .lean();
+  const g = row?.invoice?.gsp || {};
+  return !!(g.provider && (g.clientSecret || g.password));
+}
+
 router.get(
   "/document",
   isAuthenticated,
   catchAsyncErrors(async (_req, res) => {
     const settings = await getDocumentSettings();
-    res.status(200).json({ success: true, settings });
+    const out = { ...settings, invoice: { ...(settings.invoice || {}), gsp: { ...((settings.invoice || {}).gsp || {}) } } };
+    delete out.invoice.gsp.clientSecret;
+    delete out.invoice.gsp.password;
+    out.invoice.gsp.configured = await gspConfigured();
+    res.status(200).json({ success: true, settings: out });
   })
 );
 
@@ -60,15 +122,26 @@ router.put(
     if (update.logo !== undefined && update.logo && !/^data:image\/(png|jpe?g|webp);base64,/.test(String(update.logo))) {
       return next(new ErrorHandler("logo must be a PNG/JPEG/WebP data URL", 400));
     }
+    let invoiceSet;
+    try {
+      invoiceSet = readInvoiceSettings(req.body);
+    } catch (err) {
+      return next(err);
+    }
 
     const settings = await DocumentSettings.findOneAndUpdate(
       { key: "document" },
-      { $set: update, $setOnInsert: { key: "document" } },
+      { $set: { ...update, ...invoiceSet }, $setOnInsert: { key: "document" } },
       { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
     ).lean();
 
     invalidate(); // PDF layer picks up the change on its next render
 
+    if (settings.invoice?.gsp) {
+      delete settings.invoice.gsp.clientSecret;
+      delete settings.invoice.gsp.password;
+      settings.invoice.gsp.configured = await gspConfigured();
+    }
     res.status(200).json({ success: true, settings });
   })
 );

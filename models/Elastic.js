@@ -122,6 +122,12 @@ const ElasticSchema = new mongoose.Schema(
 
     quantityProduced: { type: Number, default: 0 },
 
+    // Tax classification for the invoice. Blank / null means "use the
+    // defaults in Settings → Invoice" (one HSN and one rate cover the
+    // whole catalogue); set here only for an elastic taxed differently.
+    hsn:        { type: String, trim: true, default: "" },
+    gstPercent: { type: Number, default: null, min: 0, max: 100 },
+
     costing: { type: mongoose.Types.ObjectId, ref: "Costing" },
 
     stock: { type: Number, default: 0 },

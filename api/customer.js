@@ -207,6 +207,59 @@ router.get(
 );
 
 // ─────────────────────────────────────────────────────────────────
+// GET /api/v2/customer/:id/recent — the customer's recent paperwork
+// in one read: latest orders, the challans that went out on them,
+// and the invoices raised. A challan carries no customer reference
+// (only the order's), so it is reached through the orders.
+router.get(
+  "/:id/recent",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid customer id", 400));
+    }
+    const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 6));
+    const DeliveryChallan = require("../models/DeliveryChallan");
+    const Invoice = require("../models/Invoice");
+
+    const orders = await Order.find({ customer: id })
+      .select("orderNo po status supplyDate createdAt")
+      .sort({ createdAt: -1 })
+      .lean();
+    const orderIds = orders.map((o) => o._id);
+    const orderNos = orders.map((o) => o.orderNo).filter((n) => n != null);
+    const dcMatch = [{ order: { $in: orderIds } }];
+    if (orderNos.length) dcMatch.push({ orderNo: { $in: orderNos } });
+
+    const [dcs, dcTotal, invoices, invoiceTotal, invoiced] = await Promise.all([
+      orderIds.length
+        ? DeliveryChallan.find({ $or: dcMatch })
+            .select("dcNumber status type dispatchDate totalQuantity orderNo order createdAt")
+            .sort({ createdAt: -1 }).limit(limit).lean()
+        : [],
+      orderIds.length ? DeliveryChallan.countDocuments({ $or: dcMatch }) : 0,
+      Invoice.find({ customer: id })
+        .select("invoiceNumber invoiceDate status totals.grand einvoice.status einvoice.irn orderNo order createdAt")
+        .sort({ createdAt: -1 }).limit(limit).lean(),
+      Invoice.countDocuments({ customer: id }),
+      Invoice.aggregate([
+        { $match: { customer: new mongoose.Types.ObjectId(id), status: "issued" } },
+        { $group: { _id: null, amount: { $sum: "$totals.grand" }, count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    res.json({
+      success: true,
+      orders: orders.slice(0, limit),
+      orderTotal: orders.length,
+      dcs, dcTotal,
+      invoices, invoiceTotal,
+      invoiced: { amount: invoiced[0]?.amount || 0, count: invoiced[0]?.count || 0 },
+    });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────────
 // Portal user provisioning — admins create the first login for a
 // customer. The customer can then invite additional users from
 // inside the portal (Phase 2). Self-registration is intentionally

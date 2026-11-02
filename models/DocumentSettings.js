@@ -52,6 +52,41 @@ const documentSettingsSchema = new mongoose.Schema(
       default: "",
       maxlength: 400_000, // ~300KB image
     },
+
+    // ── Invoicing ─────────────────────────────────────────────
+    // One HSN and one GST rate cover the whole catalogue unless an
+    // elastic overrides them (models/Elastic.js hsn / gstPercent).
+    invoice: {
+      defaultHsn:        { type: String, trim: true, default: "5806", maxlength: 8 },
+      defaultGstPercent: { type: Number, default: 5, min: 0, max: 100 },
+      // Seller address for the e-invoice: the address lines above are
+      // free text, and the schema wants city, PIN and state apart.
+      city:      { type: String, trim: true, default: "", maxlength: 60 },
+      pincode:   { type: String, trim: true, default: "", maxlength: 6 },
+      // Two-digit GST state code; worked out from the GSTIN when blank.
+      stateCode: { type: String, trim: true, default: "", maxlength: 2 },
+      bank: {
+        name:    { type: String, trim: true, default: "", maxlength: 80 },
+        account: { type: String, trim: true, default: "", maxlength: 30 },
+        ifsc:    { type: String, trim: true, default: "", maxlength: 11 },
+        branch:  { type: String, trim: true, default: "", maxlength: 80 },
+      },
+      declaration: {
+        type: String, trim: true, maxlength: 500,
+        default: "We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.",
+      },
+      // The GSP (GST Suvidha Provider) that registers IRNs. Blank
+      // provider = none connected: the IRN is pasted in from the
+      // portal. Credentials never leave the server (select: false).
+      gsp: {
+        provider:     { type: String, trim: true, default: "", maxlength: 40 },
+        baseUrl:      { type: String, trim: true, default: "", maxlength: 200 },
+        username:     { type: String, trim: true, default: "", maxlength: 120 },
+        clientId:     { type: String, trim: true, default: "", maxlength: 120 },
+        clientSecret: { type: String, default: "", maxlength: 300, select: false },
+        password:     { type: String, default: "", maxlength: 120, select: false },
+      },
+    },
   },
   { timestamps: true }
 );
