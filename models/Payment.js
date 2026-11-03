@@ -33,6 +33,8 @@ const AllocationSchema = new mongoose.Schema(
     // Set when the allocation was made later, from what the voucher
     // left on account (an advance applied to a later invoice).
     appliedAt: { type: Date },
+    // The Tally batch whose journal carried this later application.
+    tallyBatch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" },
   },
   { _id: false }
 );
@@ -90,7 +92,7 @@ const PaymentSchema = new mongoose.Schema(
     clearedOn: { type: Date },
 
     status: { type: String, enum: ["posted", "cancelled"], default: "posted" },
-    tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date } },
+    tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date }, cancelBatch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, cancelAt: { type: Date } },
     cancel: { reason: { type: String, default: "" }, at: { type: Date }, by: { type: mongoose.Types.ObjectId, ref: "User" } },
 
     narration:   { type: String, default: "", trim: true, maxlength: 300 },

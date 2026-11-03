@@ -87,7 +87,7 @@ const InvoiceSchema = new mongoose.Schema(
     creditedAmount: { type: Number, default: 0 },
     // Raised by debit notes to the customer (charged more afterwards).
     debitedAmount:  { type: Number, default: 0 },
-    tally:          { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date } },
+    tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date }, cancelBatch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, cancelAt: { type: Date } },
     // An admin released this past a credit hold (services/creditControl.js).
     creditOverride: { type: mongoose.Schema.Types.Mixed, default: undefined },
 

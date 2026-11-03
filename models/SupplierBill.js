@@ -90,7 +90,7 @@ const SupplierBillSchema = new mongoose.Schema(
 
     notes:       { type: String, default: "", trim: true, maxlength: 500 },
     attachments: { type: [AttachmentSchema], default: [] },
-    tally:       { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date } },
+    tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date }, cancelBatch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, cancelAt: { type: Date } },
     // "manual", or "scan" when the bill photo was read by the model.
     source:      { type: String, default: "manual" },
     aiSuggestion: { type: mongoose.Types.ObjectId, ref: "AiSuggestion" },

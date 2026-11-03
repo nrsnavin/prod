@@ -60,7 +60,7 @@ const AccountNoteSchema = new mongoose.Schema(
     applications: { type: [ApplicationSchema], default: [] },
 
     status: { type: String, enum: ["issued", "cancelled"], default: "issued" },
-    tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date } },
+    tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date }, cancelBatch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, cancelAt: { type: Date } },
     // A credit or debit note to a registered buyer is an e-invoice too.
     einvoice: {
       status:       { type: String, enum: ["pending", "registered", "cancelled"], default: "pending" },

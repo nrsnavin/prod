@@ -324,8 +324,11 @@ router.get("/opening-balances/template.xlsx", catchAsyncErrors(async (_req, res)
 // ══════════════════════════════════════════════════════════════════
 //  SETTINGS AND THE LOCK
 // ══════════════════════════════════════════════════════════════════
+/** Settings as the screens see them: the connector's key hash never leaves the server. */
+const publicSettings = (s) => { if (!s) return s; const { connector, ...rest } = s; return { ...rest, connector: { configured: !!connector?.keyHash, lastSeenAt: connector?.lastSeenAt || null } }; };
+
 router.get("/settings", catchAsyncErrors(async (_req, res) => {
-  res.json({ success: true, settings: await getSettings() });
+  res.json({ success: true, settings: publicSettings(await getSettings()) });
 }));
 
 router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
@@ -340,7 +343,7 @@ router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
   }
   await getSettings();
   const settings = await AccountsSettings.findOneAndUpdate({ key: "accounts" }, { $set: set }, { new: true }).lean();
-  res.json({ success: true, settings });
+  res.json({ success: true, settings: publicSettings(settings) });
 }));
 
 /** Close the books up to a date (or reopen: lockDate null). Admin only. */
@@ -362,6 +365,7 @@ router.post("/lock", isAdmin("admin"), catchAsyncErrors(async (req, res, next) =
 // Bank reconciliation and the Tally export.
 router.use(require("./accountsBank"));
 router.use(require("./accountsTally"));
+router.use(require("./accountsHealth"));
 router.use(require("./accountsDocs"));
 router.use(require("./accountsInsights"));
 

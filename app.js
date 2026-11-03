@@ -542,6 +542,9 @@ app.use("/api/v2/user/verify-otp", otpLimiter);
 // `user` is the one exception: it can't be mount-gated because it hosts
 // the public login / OTP / forgot-password endpoints, so it self-gates.
 app.use("/api/v2/user", user);
+// The program on the Tally computer: it signs in with its own key, not a
+// person's session, so it sits outside the role gates (api/tallyConnector.js).
+app.use("/api/v2/tally-connector", require("./api/tallyConnector.js"));
 // The employee's own work (their shift, loom, elastics, history). Open to
 // any login linked to an employee; every route reads the employee from
 // the login and takes no id, so there is no role or feature gate to pass.

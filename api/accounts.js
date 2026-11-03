@@ -63,7 +63,7 @@ const reconcile       = require("../services/reconcile");
 const { ATTACHMENT_TYPES, MAX_ATTACHMENT_BYTES } = require("../models/accountsShared");
 
 const {
-  DAY, isId, r2, readDate, reasonFrom, fp, withTxn, paging,
+  DAY, isId, r2, readDate, businessDay, reasonFrom, fp, withTxn, paging,
 } = require("../services/accountsHelpers");
 const settle = require("../services/settle");
 const billChecks = require("../services/billChecks");
@@ -567,7 +567,7 @@ router.post("/expenses/:id/approve", isAdmin("admin", "accounts"), catchAsyncErr
         await partyLedger.post({ partyType: "supplier", party: e.supplier, date: e.date, docType: "Expense", doc: e._id, docNo: e.expenseNo, credit: e.totals.grand, narration: `${e.categoryName}: ${e.description}` }, session);
       }
       if (payNow) {
-        voucher = await payExpense(e._id, { account: payNow.account, mode: payNow.mode, reference: payNow.reference, date: new Date(), req, voucherNo: payNo }, session);
+        voucher = await payExpense(e._id, { account: payNow.account, mode: payNow.mode, reference: payNow.reference, date: businessDay(new Date()), req, voucherNo: payNo }, session);
       }
     });
   } catch (err) {
@@ -760,7 +760,12 @@ router.post("/notes/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   const cancel = { reason, at: new Date(), by: req.user?._id };
   const mark = fp(ACTION_CODES.NOTE_CANCELLED, note, req, { noteNo: note.noteNo, reason });
   // What it applied to its own document — older notes carry no `applied`: all of it.
-  const onAgainst = note.applied === undefined || note.applied === null || (note.applied === 0 && !note.unapplied) ? note.totals.grand : note.applied;
+  // Only when nothing shows where it went: applied 0, nothing left and no
+  // later application. A note applied 0 then set wholly against another
+  // invoice is not that — reversing its total off its own document took
+  // credit off an invoice that never had it.
+  const legacy = note.applied === undefined || note.applied === null || (note.applied === 0 && !note.unapplied && !(note.applications || []).length);
+  const onAgainst = legacy ? note.totals.grand : note.applied;
   try {
     await withTxn(async (session) => {
       await AccountNote.updateOne({ _id: note._id }, { $set: { status: "cancelled", cancel, unapplied: 0 }, $push: { fingerprints: mark } }, { session });

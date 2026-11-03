@@ -8,6 +8,8 @@ const supplierSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    // The ledger's name in Tally when it is not `name` exactly.
+    tallyName: { type: String, trim: true, default: "", maxlength: 120 },
 
     gstin: {
       type: String,

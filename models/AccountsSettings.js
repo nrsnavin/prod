@@ -51,6 +51,18 @@ const AccountsSettingsSchema = new mongoose.Schema(
       creditorsGroup:   ledger("Sundry Creditors"),
     },
 
+    // The program on the Tally computer: its key (only the hash), and
+    // when it last called in.
+    connector: {
+      keyHash:      { type: String, default: "" },
+      keyHint:      { type: String, default: "" },
+      createdAt:    { type: Date },
+      lastSeenAt:   { type: Date },
+      lastSeenFrom: { type: String, default: "" },
+      tallyOk:      { type: Boolean, default: false },
+      version:      { type: String, default: "" },
+    },
+
     bills: {
       // Percent a billed rate may differ from the PO rate before it needs a note.
       rateVariancePercent: { type: Number, default: 2, min: 0, max: 100 },

@@ -19,7 +19,7 @@ router.use(isAuthenticated, isAdmin('admin', 'accounts'));
 // (audit fields, anything future/internal) is ignored so the raw body
 // can't overwrite protected state.
 const CUSTOMER_FIELDS = [
-  "name", "email", "gstin", "status", "contactName", "phoneNumber",
+  "name", "tallyName", "email", "gstin", "status", "contactName", "phoneNumber",
   "address", "city", "pincode", "stateCode",
   "purchase", "accountant", "merchandiser", "paymentTerms",
   "creditLimit", "maxOverdueDays",

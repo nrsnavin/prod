@@ -117,6 +117,7 @@ router.post(
         email:       email       ? String(email).trim()       : undefined,
         address:     address     ? String(address).trim()     : undefined,
         gstin:       gstin       ? String(gstin).trim()       : undefined,
+        tallyName:   req.body?.tallyName ? String(req.body.tallyName).trim().slice(0, 120) : undefined,
         // 0 is meaningful — it means "no terms recorded", which is what
         // the forecast falls back on. So these are read as numbers
         // rather than gated on truthiness.
@@ -967,7 +968,7 @@ router.get(
 // Whitelist the client-settable fields; spreading the raw body let a
 // caller inject arbitrary/internal fields.
 const SUPPLIER_FIELDS = [
-  "name", "gstin", "phoneNumber", "email", "address", "contactPerson", "isActive",
+  "name", "tallyName", "gstin", "phoneNumber", "email", "address", "contactPerson", "isActive",
   // Replenishment terms. Whitelisted here or the form renders three
   // fields that submit nothing — the reorder point's most important
   // input, silently unsettable.

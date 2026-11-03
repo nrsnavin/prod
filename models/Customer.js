@@ -9,6 +9,10 @@ const CustomerSchema = new mongoose.Schema(
             min: 2,
             max: 100,
         },
+        // The ledger's name in Tally, when it is not `name` exactly
+        // ("SUNRISE GARMENTS (TPR)"). Every voucher to Tally uses it, so
+        // a rename here never opens a second ledger there.
+        tallyName: { type: String, trim: true, default: "", maxlength: 120 },
         email: {
             type: String,
             

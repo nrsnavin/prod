@@ -28,6 +28,8 @@ const ApplicationSchema = new mongoose.Schema(
     amount:  { type: Number, required: true, min: 0 },
     at:      { type: Date, default: Date.now },
     by:      { type: mongoose.Types.ObjectId, ref: "User" },
+    // The Tally batch whose journal carried this application.
+    tallyBatch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" },
   },
   { _id: false }
 );

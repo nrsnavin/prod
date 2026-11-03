@@ -37,6 +37,7 @@ const { financialYearLong } = require("../utils/financialYear");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { getDocumentSettings, getPdfBranding } = require("../services/documentSettings");
 const { computeInvoice, amountInWords, stateCodeFromGstin } = require("../services/gst");
+const { readDate } = require("../services/accountsHelpers");
 const { buildEinvoiceJson, readiness } = require("../services/einvoice");
 const { getProvider } = require("../services/einvoiceProvider");
 const partyLedger = require("../services/partyLedger");
@@ -241,11 +242,10 @@ router.post(
     if (dcIds.some((id) => !isId(id))) return next(new ErrorHandler("A challan id is not valid", 400));
     let overrides;
     try { overrides = readOverrides(req.body.lines); } catch (err) { return next(err); }
-    let when = new Date();
-    if (invoiceDate !== undefined && invoiceDate !== null && invoiceDate !== "") {
-      when = new Date(invoiceDate);
-      if (Number.isNaN(when.getTime())) return next(new ErrorHandler("invoiceDate is not a date", 400));
-    }
+    // The day in India, kept as that day's UTC midnight: an invoice raised
+    // at 1 am on the 1st belongs to the 1st in the GST return and in Tally.
+    let when;
+    try { when = readDate(invoiceDate, "invoiceDate", new Date()); } catch (err) { return next(err); }
     try { await assertOpen(when, req); } catch (err) { return next(err); }
 
     if (requestId) {

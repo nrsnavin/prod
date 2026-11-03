@@ -35,7 +35,7 @@ const ContraSchema = new mongoose.Schema(
 
     status: { type: String, enum: ["posted", "cancelled"], default: "posted" },
     cancel: { reason: { type: String, default: "" }, at: { type: Date }, by: { type: mongoose.Types.ObjectId, ref: "User" } },
-    tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date } },
+    tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date }, cancelBatch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, cancelAt: { type: Date } },
 
     createdBy:    { type: mongoose.Types.ObjectId, ref: "User" },
     fingerprints: { type: [FingerprintSchema], default: [] },
