@@ -135,6 +135,37 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'claim-receipt-ocr': {
+    version: 'v1.0',
+    notes: 'The bill reader (utils/billOcr.js) on a staff claim receipt; amount, date and description are taken from its read, the head from past expenses to that payee.',
+    system: null,
+  },
+  'complaint-intake': {
+    version: 'v1.0',
+    notes: 'Reads a customer complaint message into category, elastic hints and the job it most likely is, from candidates given. Lives in services/complaintIntake.js.',
+    system: null,
+  },
+  'complaint-reply': {
+    version: 'v1.0',
+    notes: 'Drafts a reply to the customer from the complaint, the trace and the root-cause figures; never promises credit or dates not given. Lives in services/complaintIntake.js.',
+    system: null,
+  },
+  'machine-issue-intake': {
+    version: 'v1.0',
+    notes: 'A worker\'s words (often Tamil, from speech) or a photo, written up as a machine issue. Lives in services/machineIssueIntake.js.',
+    system: null,
+  },
+  'lr-ocr': {
+    version: 'v1.0',
+    notes: 'A lorry receipt / transporter slip: LR number, date, vehicle, transporter, GSTIN, packages, freight. Lives in utils/lrOcr.js.',
+    system: null,
+  },
+  'party-card-ocr': {
+    version: 'v1.0',
+    notes: 'A visiting card or letterhead read into name, contact, phone, email, address, GSTIN. Lives in utils/partyCardOcr.js.',
+    system: null,
+  },
+
   'assistant-answer': {
     version: 'v1.0',
     notes: 'Read-only tool-calling agent over whitelisted queries.',

@@ -36,8 +36,17 @@ const Complaint = require("../models/Complaints");
 const { CATEGORIES, STATUSES } = require("../models/Complaints");
 const JobOrder  = require("../models/JobOrder");
 
+const multer = require("multer");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { keepRequestContext } = require("../middleware/userContext");
+const intakeService = require("../services/complaintIntake");
+const aiLedger = require("../services/aiLedger");
+const { getDocumentSettings } = require("../services/documentSettings");
+const Customer = require("../models/Customer");
+
+const PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const photos = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 3 } });
 
 const { trace }  = require("../services/complaintTrace");
 const themes     = require("../services/complaintThemes");
@@ -105,7 +114,40 @@ router.post(
       attachments: Array.isArray(attachments) ? attachments : [],
     });
 
+    // Filled in from the customer's message: what was filed scores the read.
+    if (isId(req.body.aiSuggestion)) {
+      aiLedger.settle(req.body.aiSuggestion, {
+        accepted: { category, reason: reason.trim(), job: String(job), elastic: elastic ? String(elastic) : null },
+        decidedBy: req.user?._id, expectSurface: "complaint-intake", ignoreMissing: true,
+      }).catch(() => {});
+    }
+
     res.status(201).json({ success: true, data: doc });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+// POST /intake   { customer, text } + up to 3 "photos"
+//   What the customer sent, read into the form: category, the
+//   complaint in plain English, the likely jobs (from theirs), and the
+//   elastic only when they named it. Nothing is saved.
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/intake",
+  keepRequestContext(photos.array("photos", 3)),
+  catchAsyncErrors(async (req, res, next) => {
+    const customer = req.body?.customer;
+    if (!isId(customer)) return next(new ErrorHandler("Pick the customer first", 400));
+    const text = String(req.body?.text || "").slice(0, 4000);
+    const files = (Array.isArray(req.files) ? req.files : []).filter((f) => PHOTO_TYPES.has(f.mimetype));
+    if (!text.trim() && !files.length) return next(new ErrorHandler("Paste what the customer sent, or add a photo", 400));
+    try {
+      const out = await intakeService.intake({ customer, text, images: files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype })) });
+      res.json({ success: true, data: out });
+    } catch (err) {
+      if (err.status === 404) return next(new ErrorHandler(err.message, 404));
+      throw err;
+    }
   })
 );
 
@@ -152,6 +194,49 @@ router.get(
       return next(new ErrorHandler("Complaint not found", 404));
     }
     res.json({ success: true, data: result });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+// GET /:id/reply-draft   a reply to the customer, to edit and send
+// POST /:id/reply        { text, aiSuggestion } — what was sent, kept
+//                        on the complaint's notes
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/:id/reply-draft",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!isId(req.params.id)) return next(new ErrorHandler("Invalid complaint id", 400));
+    let found = null;
+    try { found = await trace(req.params.id); } catch { found = null; }
+    const settings = await getDocumentSettings().catch(() => ({}));
+    try {
+      const draft = await intakeService.draftReply(req.params.id, { company: settings?.companyName || "Balu Elastics", trace: found });
+      const c = await Complaint.findById(req.params.id).select("customer").lean();
+      const cust = c ? await Customer.findById(c.customer).select("phoneNumber").lean() : null;
+      res.json({ success: true, data: { ...draft, phone: cust?.phoneNumber || "" } });
+    } catch (err) {
+      if (err.status === 404) return next(new ErrorHandler(err.message, 404));
+      throw err;
+    }
+  })
+);
+
+router.post(
+  "/:id/reply",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!isId(req.params.id)) return next(new ErrorHandler("Invalid complaint id", 400));
+    const text = String(req.body?.text || "").trim();
+    if (text.length < 10) return next(new ErrorHandler("The reply is empty", 400));
+    const c = await Complaint.findById(req.params.id).select("feedback").lean();
+    if (!c) return next(new ErrorHandler("Complaint not found", 404));
+    const stamp = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    const note = `Reply sent ${stamp}${req.user?.name ? ` by ${req.user.name}` : ""}:\n${text.slice(0, 2000)}`;
+    const feedback = c.feedback ? `${c.feedback}\n\n${note}` : note;
+    await Complaint.updateOne({ _id: c._id }, { $set: { feedback } });
+    if (isId(req.body?.aiSuggestion)) {
+      aiLedger.settle(req.body.aiSuggestion, { accepted: { text }, decidedBy: req.user?._id, expectSurface: "complaint-reply", ignoreMissing: true }).catch(() => {});
+    }
+    res.json({ success: true, data: { feedback } });
   })
 );
 

@@ -76,6 +76,23 @@ const AI_SURFACES = Object.freeze([
   // applies to every surface — and because a clustering pass that stops
   // returning usable JSON should show up somewhere other than a log.
   'complaint-themes',
+  // A staff claim's receipt read from a phone photo: amount, date, what
+  // for and the head; what the claimant sends is what settles it.
+  'claim-receipt-ocr',
+  // A customer's complaint message (and photos) read into the complaint
+  // form: category, the elastic, and which job it most likely is.
+  'complaint-intake',
+  // A reply to the customer about a complaint, drafted from what the
+  // trace and the root-cause figures say; sent as edited, or not.
+  'complaint-reply',
+  // What a worker said (or photographed) about a machine, written up as
+  // an issue: title, description in English, severity.
+  'machine-issue-intake',
+  // A transporter's lorry receipt read from a photo: LR number, vehicle,
+  // freight — onto the dispatch, and a freight expense drafted.
+  'lr-ocr',
+  // A visiting card or letterhead read into a customer or supplier form.
+  'party-card-ocr',
 ]);
 
 /** How a suggestion ended up. */

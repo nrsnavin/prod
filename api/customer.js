@@ -40,6 +40,13 @@ router.post(
       return next(new ErrorHandler("Customer name is required", 400));
     }
     const customer = await Customer.create(customerData);
+    // Filled from a card: what was saved scores the read.
+    if (mongoose.Types.ObjectId.isValid(String(req.body?.aiSuggestion || ""))) {
+      require("../services/aiLedger").settle(req.body.aiSuggestion, {
+        accepted: { name: customer.name, contactName: customer.contactName || "", phone: customer.phoneNumber || "", email: customer.email || "", gstin: customer.gstin || "", address: customer.address || "", city: customer.city || "", pincode: customer.pincode || "" },
+        decidedBy: req.user?._id, expectSurface: "party-card-ocr", ignoreMissing: true,
+      }).catch(() => {});
+    }
     res.status(201).json({ success: true, data: customer });
   })
 );
@@ -340,5 +347,8 @@ router.get(
     return res.json({ success: true, users });
   })
 );
+
+// A card or letterhead into the form, and who on file looks the same.
+require("./partyIntake").mountPartyIntake(router, Customer, { kind: "customer" });
 
 module.exports = router;

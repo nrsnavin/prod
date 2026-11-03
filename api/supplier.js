@@ -126,6 +126,12 @@ router.post(
         ...(["regular", "composition", "unregistered"].includes(gstRegistration) ? { gstRegistration } : {}),
         ...(paymentTermsDays !== undefined && paymentTermsDays !== "" ? { paymentTermsDays: Math.min(365, Math.max(0, Number(paymentTermsDays) || 0)) } : {}),
       });
+      if (mongoose.Types.ObjectId.isValid(String(req.body?.aiSuggestion || ""))) {
+        require("../services/aiLedger").settle(req.body.aiSuggestion, {
+          accepted: { name: supplier.name, phone: supplier.phoneNumber || "", email: supplier.email || "", gstin: supplier.gstin || "", address: supplier.address || "" },
+          decidedBy: req.user?._id, expectSurface: "party-card-ocr", ignoreMissing: true,
+        }).catch(() => {});
+      }
       res.status(201).json({ success: true, supplier });
     } catch (error) {
       return next(new ErrorHandler(error.message, 400));
@@ -1076,5 +1082,8 @@ router.get(
   })
 );
 
+
+// A card or letterhead into the form, and who on file looks the same.
+require("./partyIntake").mountPartyIntake(router, Supplier, { kind: "supplier" });
 
 module.exports = router;

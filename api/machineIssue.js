@@ -25,6 +25,13 @@ const { capped } = require("../utils/listLimit");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 const { resolveEmployeeId } = require("../utils/resolveEmployee");
+const multer = require("multer");
+const { keepRequestContext } = require("../middleware/userContext");
+const issueIntake = require("../services/machineIssueIntake");
+const aiLedger = require("../services/aiLedger");
+
+const PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const photo = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 1 } });
 
 // Every machine-issue route requires login. Staff routes additionally
 // chain isAdmin('admin', 'production', 'accounts') in-line below.
@@ -32,6 +39,32 @@ router.use(isAuthenticated);
 
 const SEVERITIES = ["low", "medium", "high", "critical"];
 const STATUSES   = ["open", "acknowledged", "in_progress", "resolved", "rejected"];
+
+// ─────────────────────────────────────────────────────────────
+//  POST /machine-issue/intake   { machineId, text } + optional "photo"
+//
+//  What the worker said (speech turned to text, Tamil or English) or
+//  photographed, written up: title, English description, severity, and
+//  the machine's open issues with any that look like the same fault.
+//  Nothing is saved.
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/intake",
+  keepRequestContext(photo.single("photo")),
+  catchAsyncErrors(async (req, res, next) => {
+    const { machineId } = req.body || {};
+    if (!mongoose.Types.ObjectId.isValid(String(machineId || ""))) return next(new ErrorHandler("Pick the machine first", 400));
+    const text = String(req.body?.text || "").slice(0, 3000);
+    const image = req.file && PHOTO_TYPES.has(req.file.mimetype) ? { buffer: req.file.buffer, mimetype: req.file.mimetype } : null;
+    if (!text.trim() && !image) return next(new ErrorHandler("Say what is wrong, or add a photo", 400));
+    try {
+      res.json({ success: true, data: await issueIntake.intake({ machineId, text, image }) });
+    } catch (err) {
+      if (err.status === 404) return next(new ErrorHandler(err.message, 404));
+      throw err;
+    }
+  })
+);
 
 router.post(
   "/",
@@ -78,6 +111,14 @@ router.post(
       severity,
       attachments: Array.isArray(attachments) ? attachments : [],
     });
+
+    // Written up from what the worker said: what was filed scores it.
+    if (mongoose.Types.ObjectId.isValid(String(req.body.aiSuggestion || ""))) {
+      aiLedger.settle(req.body.aiSuggestion, {
+        accepted: { title: title.trim(), description: description.trim(), severity },
+        decidedBy: req.user?._id, expectSurface: "machine-issue-intake", ignoreMissing: true,
+      }).catch(() => {});
+    }
 
     res.status(201).json({ success: true, data: issue });
   })

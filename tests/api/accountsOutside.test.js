@@ -197,7 +197,10 @@ describe('collections remember', () => {
   it('logs a reminder sent, takes a customer with a live promise off the list, and climbs the ladder', async () => {
     const { customer } = await customerWithInvoice({ invoiceDate: '2026-01-01' });
     let list = (await get('/accounts/collections')).body.rows;
-    expect(list[0]).toMatchObject({ partyName: customer.name, next: { action: 'call', tone: 'firm' }, lastContact: null, recentlyContacted: false });
+    // Over ninety days past due: past reminders, to the owner, with new orders held.
+    expect(list[0]).toMatchObject({ partyName: customer.name, next: { action: 'escalate', tone: 'firm', label: 'Owner to call; hold new orders' }, lastContact: null, recentlyContacted: false });
+    const { nextStep } = require('../../services/collections');
+    expect([10, 30, 60, 120].map((d) => nextStep(d).action)).toEqual(['remind', 'remind', 'call', 'escalate']);
     const draft = await post('/accounts/collections/draft', { customer: customer._id });
     expect(draft.body.tone).toBe('firm');
     await post('/accounts/collections/send', { customer: customer._id, to: draft.body.to, message: draft.body.message, tone: 'firm' });

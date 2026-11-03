@@ -21,9 +21,12 @@ const day = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', mon
 
 /**
  * The escalation ladder: a gentle reminder first, a firm one at three
- * weeks past due, and a phone call past six.
+ * weeks past due, a phone call past six — and past ninety days, the
+ * owner's call and no new goods until it is settled: another reminder
+ * from the office is not what moves a debt that old.
  */
 function nextStep(oldestDays) {
+  if (oldestDays > 90) return { action: 'escalate', tone: 'firm', label: 'Owner to call; hold new orders' };
   if (oldestDays > 45) return { action: 'call', tone: 'firm', label: 'Call them' };
   if (oldestDays > 21) return { action: 'remind', tone: 'firm', label: 'Firm reminder' };
   return { action: 'remind', tone: 'gentle', label: 'Gentle reminder' };

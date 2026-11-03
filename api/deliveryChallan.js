@@ -1421,4 +1421,116 @@ router.get(
   })
 );
 
+// ─────────────────────────────────────────────────────────────
+//  THE LORRY RECEIPT
+//    POST /dc/:id/lr/scan     multipart "file" → what the LR says, the
+//                             transporter on file it matches, and a
+//                             check that it is this challan's (nothing saved)
+//    POST /dc/:id/transport   { lrNumber, vehicleNo, transporter, driverName,
+//                             aiSuggestion } → onto the challan
+//
+//  The transport detail is not what the customer signs for, so it can be
+//  filled in after despatch and after delivery, like the paper LR that
+//  comes back days later. A cancelled challan is left alone.
+// ─────────────────────────────────────────────────────────────
+const lrUpload = require("multer")({ storage: require("multer").memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 2 } });
+const { keepRequestContext } = require("../middleware/userContext");
+const { readLr } = require("../utils/lrOcr");
+const aiLedger = require("../services/aiLedger");
+const { promptVersion } = require("../utils/aiPrompts");
+const Supplier = require("../models/Supplier");
+
+async function dcFor(req, next) {
+  if (!mongoose.Types.ObjectId.isValid(String(req.params.id))) { next(new ErrorHandler("Challan not found", 404)); return null; }
+  const dc = await DeliveryChallan.findById(req.params.id).select("dcNumber customerName status dispatchDate items totalQuantity lrNumber vehicleNo transporter driverName").lean();
+  if (!dc) { next(new ErrorHandler("Challan not found", 404)); return null; }
+  return dc;
+}
+
+const loose = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+router.post(
+  "/:id/lr/scan",
+  keepRequestContext(lrUpload.array("files", 2)),
+  catchAsyncErrors(async (req, res, next) => {
+    const dc = await dcFor(req, next);
+    if (!dc) return;
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return next(new ErrorHandler("Photograph the lorry receipt", 400));
+    const startedAt = Date.now();
+    let read;
+    try {
+      read = await readLr(files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype })));
+    } catch (err) {
+      if (err.code === "ANTHROPIC_KEY_MISSING") return next(new ErrorHandler("Reading lorry receipts is not set up on this server — type the LR details in.", 503));
+      if (err.code) return next(new ErrorHandler(err.message, 400));
+      await aiLedger.record({ surface: "lr-ocr", model: "?", promptVersion: promptVersion("lr-ocr"), latencyMs: Date.now() - startedAt, error: err.message });
+      return next(new ErrorHandler(`The receipt could not be read: ${err.message}`, 502));
+    }
+    if (read.problem) return res.json({ success: true, read, transporter: null, checks: [], aiSuggestion: null });
+
+    // The transporter on file: the GSTIN settles it, the name is a guess to confirm.
+    let transporter = null;
+    if (read.transporterGstin) transporter = await Supplier.findOne({ gstin: read.transporterGstin }).select("name gstin gstRegistration").lean();
+    if (!transporter && read.transporterName) {
+      const words = read.transporterName.split(/\s+/).filter((w) => w.length >= 3).slice(0, 2);
+      if (words.length) transporter = await Supplier.findOne({ name: new RegExp(words.map((w) => `(?=.*${escapeRegex(w)})`).join(""), "i") }).select("name gstin gstRegistration").lean();
+    }
+    // Does it look like this challan's? Said plainly, not refused.
+    const checks = [];
+    if (read.consignee && dc.customerName) {
+      const a = loose(read.consignee); const b = loose(dc.customerName);
+      const first = (x) => x.split(" ")[0] || "";
+      if (!(a.includes(first(b)) || b.includes(first(a)))) checks.push(`The LR is to "${read.consignee}"; this challan is to ${dc.customerName}.`);
+    }
+    if (read.lrDate && dc.dispatchDate) {
+      const days = Math.round((new Date(`${read.lrDate}T00:00:00`) - new Date(dc.dispatchDate).setHours(0, 0, 0, 0)) / 86_400_000);
+      if (days < -1 || days > 5) checks.push(`The LR is dated ${read.lrDate}, ${Math.abs(days)} days ${days < 0 ? "before" : "after"} the challan.`);
+    }
+    if (dc.lrNumber && read.lrNumber && loose(dc.lrNumber) !== loose(read.lrNumber)) checks.push(`The challan already has LR ${dc.lrNumber}.`);
+    const other = read.lrNumber ? await DeliveryChallan.findOne({ _id: { $ne: dc._id }, lrNumber: read.lrNumber, status: { $ne: "cancelled" } }).select("dcNumber").lean() : null;
+    if (other) checks.push(`LR ${read.lrNumber} is already on challan ${other.dcNumber}.`);
+
+    const aiSuggestion = await aiLedger.record({
+      surface: "lr-ocr", model: read.model, promptVersion: promptVersion("lr-ocr"), refType: "DeliveryChallan", refId: dc._id,
+      proposed: { lrNumber: read.lrNumber, vehicleNo: read.vehicleNo, transporter: transporter?.name || read.transporterName },
+      latencyMs: read.latencyMs, usage: read.usage,
+    });
+    res.json({ success: true, read, transporter, checks, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
+  })
+);
+
+router.post(
+  "/:id/transport",
+  catchAsyncErrors(async (req, res, next) => {
+    const dc = await dcFor(req, next);
+    if (!dc) return;
+    if (dc.status === "cancelled") return next(new ErrorHandler(`DC ${dc.dcNumber} is cancelled`, 409));
+    const b = req.body || {};
+    const set = {};
+    for (const [k, n] of [["lrNumber", 40], ["vehicleNo", 20], ["transporter", 120], ["driverName", 80]]) {
+      if (b[k] !== undefined) set[k] = String(b[k] ?? "").trim().slice(0, n);
+    }
+    if (!Object.keys(set).length) return next(new ErrorHandler("Nothing to save", 400));
+    if (set.vehicleNo) set.vehicleNo = set.vehicleNo.toUpperCase();
+    const fp = buildFingerprint(ACTION_CODES.DC_STATUS_UPDATED, {
+      entityId: dc._id, actor: actorFromRequest(req),
+      meta: { change: "transport", dcNumber: dc.dcNumber, before: { lrNumber: dc.lrNumber, vehicleNo: dc.vehicleNo, transporter: dc.transporter, driverName: dc.driverName }, after: set },
+    });
+    const updated = await DeliveryChallan.findOneAndUpdate(
+      { _id: dc._id, status: { $ne: "cancelled" } },
+      { $set: set, $push: { fingerprints: fp }, $inc: { __v: 1 } },
+      { new: true }
+    ).select("dcNumber lrNumber vehicleNo transporter driverName status").lean();
+    if (!updated) return next(new ErrorHandler("The challan was cancelled meanwhile", 409));
+    if (mongoose.Types.ObjectId.isValid(String(b.aiSuggestion || ""))) {
+      aiLedger.settle(b.aiSuggestion, {
+        accepted: { lrNumber: updated.lrNumber, vehicleNo: updated.vehicleNo, transporter: updated.transporter },
+        decidedBy: req.user?._id, expectSurface: "lr-ocr", ignoreMissing: true,
+      }).catch(() => {});
+    }
+    res.json({ success: true, dc: updated });
+  })
+);
+
 module.exports = router;

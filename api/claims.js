@@ -13,6 +13,8 @@
 //    GET  /claims/:id             one of mine
 //    POST /claims                 { category, description, amount, date, note }
 //    POST /claims/:id/photo       multipart "file"
+//    POST /claims/scan            multipart "file" → the claim filled in
+//                                 from the receipt (nothing is saved)
 //    POST /claims/:id/withdraw    while it waits for approval
 // ══════════════════════════════════════════════════════════════════
 
@@ -33,6 +35,10 @@ const { isId, r2, readDate, fp, DAY } = require("../services/accountsHelpers");
 const { MAX_ATTACHMENT_BYTES } = require("../models/accountsShared");
 const Expense = require("../models/Expense");
 const ExpenseCategory = require("../models/ExpenseCategory");
+const { readBill } = require("../utils/billOcr");
+const aiLedger = require("../services/aiLedger");
+const { promptVersion } = require("../utils/aiPrompts");
+const { suggestCategory } = require("../services/accountsInsights");
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 } });
 const PUBLIC = "expenseNo date dueDate categoryName description payeeName totals.grand status approval.byName approval.note approval.at paidAmount paidAt attachments.filename attachments._id attachments.contentType attachments.size createdAt";
@@ -55,6 +61,60 @@ async function mine(req, next) {
   if (!claim) { next(new ErrorHandler("Claim not found", 404)); return null; }
   return claim;
 }
+
+// ── A receipt photo into a claim ───────────────────────────────────
+// The bill reader does the reading; the head comes from what this payee's
+// expenses were before. Nothing is saved: the form opens filled in, the
+// claimant checks it, and what they send settles the AI ledger row.
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+router.post("/scan", keepRequestContext(upload.single("file")), catchAsyncErrors(async (req, res, next) => {
+  if (!req.file) return next(new ErrorHandler("Photograph the receipt", 400));
+  const startedAt = Date.now();
+  let read;
+  try {
+    read = await readBill([{ buffer: req.file.buffer, mimetype: req.file.mimetype }]);
+  } catch (err) {
+    if (err.code === "ANTHROPIC_KEY_MISSING") return next(new ErrorHandler("Reading receipts is not set up on this server — fill the claim in by hand.", 503));
+    if (err.code) return next(new ErrorHandler(err.message, 400));
+    await aiLedger.record({ surface: "claim-receipt-ocr", model: "?", promptVersion: promptVersion("claim-receipt-ocr"), latencyMs: Date.now() - startedAt, error: err.message });
+    return next(new ErrorHandler(`The receipt could not be read: ${err.message}`, 502));
+  }
+  if (read.problem) {
+    return res.json({ success: true, problem: read.problem, draft: null, aiSuggestion: null });
+  }
+  const lineTotal = r2(read.lines.reduce((s, l) => s + (l.amount ?? (l.quantity || 1) * (l.rate || 0)), 0));
+  const amount = r2(read.totals?.grand ?? lineTotal);
+  const what = read.lines.map((l) => l.description).filter(Boolean).slice(0, 2).join(", ");
+  const description = [what, read.supplierName].filter(Boolean).join(" — ").slice(0, 200);
+  const suggestion = await suggestCategory({ payee: read.supplierName, description: what });
+  const usable = suggestion ? await ExpenseCategory.findOne({ _id: suggestion.category, active: { $ne: false } }).select("name").lean() : null;
+  const draft = {
+    amount: amount > 0 ? amount : null,
+    date: read.billDate,
+    description,
+    refNo: read.billNo || "",
+    category: usable ? String(usable._id) : null,
+  };
+  // The same receipt claimed before, by its number or its amount that day.
+  const already = await Expense.findOne({
+    "claimant.user": req.user._id, status: { $nin: ["rejected", "cancelled"] },
+    $or: [
+      ...(draft.refNo ? [{ refNo: draft.refNo }] : []),
+      ...(draft.amount && draft.date ? [{ "totals.grand": { $gte: draft.amount - 0.5, $lte: draft.amount + 0.5 }, date: { $gte: new Date(`${draft.date}T00:00:00`), $lt: new Date(new Date(`${draft.date}T00:00:00`).getTime() + DAY) } }] : []),
+    ],
+  }).select("expenseNo").lean();
+  const aiSuggestion = await aiLedger.record({
+    surface: "claim-receipt-ocr", model: read.model, promptVersion: promptVersion("claim-receipt-ocr"),
+    proposed: draft, latencyMs: read.latencyMs, usage: read.usage,
+  });
+  res.json({
+    success: true, problem: null, draft,
+    categoryName: usable?.name || null, categoryReason: usable ? suggestion.reason : null,
+    payee: read.supplierName || "", confidence: read.confidence,
+    alreadyClaimed: already && (draft.refNo || draft.amount) ? already.expenseNo : null,
+    aiSuggestion,
+  });
+}));
 
 router.get("/:id", catchAsyncErrors(async (req, res, next) => {
   const claim = await mine(req, next);
@@ -112,6 +172,13 @@ router.post("/", catchAsyncErrors(async (req, res, next) => {
       if (dup) return res.json({ success: true, claim: dup, replay: true });
     }
     throw err;
+  }
+  // Filled in from the receipt: what was sent is how the read is scored.
+  if (isId(b.aiSuggestion)) {
+    aiLedger.settle(b.aiSuggestion, {
+      accepted: { amount, date: ymd(date), description: description.slice(0, 200), refNo: String(b.refNo || "").trim().slice(0, 40), category: String(category._id) },
+      decidedBy: req.user._id, expectSurface: "claim-receipt-ocr", ignoreMissing: true,
+    }).catch(() => {});
   }
   res.status(201).json({ success: true, claim: await Expense.findById(_id).select(PUBLIC).lean() });
 }));
