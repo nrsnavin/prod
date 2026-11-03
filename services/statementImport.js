@@ -10,9 +10,12 @@
 //  proposed for each line, so it can be confirmed and posted later from
 //  the stored statement without uploading it again.
 //
-//  For a mailed statement, lines already brought in by an earlier mail
-//  are left out (the bank's daily statements overlap), and a statement
-//  with nothing new is not kept at all.
+//  For a statement the bank sends (by mail or SFTP), lines already
+//  brought in earlier are left out (the bank's daily statements
+//  overlap), and a statement with nothing new is not kept at all.
+//
+//  An MT940 file names its account; one put into a different account
+//  is refused rather than booked to the wrong bank.
 // ══════════════════════════════════════════════════════════════════
 
 const BankStatement = require('../models/BankStatement');
@@ -22,12 +25,29 @@ const reconcile = require('./reconcile');
 /**
  * @returns { statement, rows, counts, closingBalance, newLines, total } — statement null when nothing new
  */
-async function importStatement({ account, buffer, mimetype, filename = '', by = null, byName = '', source = 'upload', messageId = '', useModel = true }) {
-  const parsed = await bankStatement.parse(buffer, mimetype, filename);
+const digits = (v) => String(v || '').replace(/\D/g, '');
+
+/** Is the account number the file names this account's? Last digits are enough when one side is shortened. */
+function sameAccount(fileNo, account) {
+  const a = digits(fileNo);
+  const b = digits(account.accountNo);
+  if (!a || !b) return true; // nothing to compare
+  const n = Math.min(a.length, b.length, 10);
+  return n >= 4 && a.slice(-n) === b.slice(-n);
+}
+
+async function importStatement({ account, buffer, mimetype, filename = '', rows: given = null, accountNo = '', by = null, byName = '', source = 'upload', messageId = '', useModel = true }) {
+  const detail = given ? { rows: given, accountNo } : await bankStatement.parseDetailed(buffer, mimetype, filename);
+  const parsed = detail.rows.map((r, index) => ({ ...r, index }));
   if (!parsed.length) { const e = new Error('No transactions found in the file'); e.status = 400; throw e; }
+  if (!sameAccount(detail.accountNo, account)) {
+    const e = new Error(`This statement is for account ending ${digits(detail.accountNo).slice(-4)}, not ${account.name}`);
+    e.status = 400; e.code = 'STATEMENT_ACCOUNT';
+    throw e;
+  }
   let rows = parsed;
   const allKeys = rows.map((r) => bankStatement.lineKey(r));
-  if (source === 'email') {
+  if (source !== 'upload') {
     // Overlapping daily statements: only lines this account has not seen.
     const seen = new Set();
     for (const st of await BankStatement.find({ account: account._id, 'lines.key': { $in: allKeys } }).select('lines.key').lean()) for (const l of st.lines) seen.add(l.key);
@@ -61,4 +81,4 @@ async function importStatement({ account, buffer, mimetype, filename = '', by = 
   return { statement, rows: matched, counts, closingBalance: statement.closingBalance, newLines: matched.length, total: parsed.length };
 }
 
-module.exports = { importStatement };
+module.exports = { importStatement, sameAccount };

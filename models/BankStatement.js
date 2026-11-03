@@ -52,7 +52,7 @@ const BankStatementSchema = new mongoose.Schema(
     uploadedByName: { type: String, default: "" },
     // "upload": a person; "email": the bank's scheduled statement, read
     // from the statements mailbox (messageId says which mail).
-    source:      { type: String, enum: ["upload", "email"], default: "upload" },
+    source:      { type: String, enum: ["upload", "email", "sftp"], default: "upload" },
     messageId:   { type: String, default: "" },
   },
   { timestamps: true }

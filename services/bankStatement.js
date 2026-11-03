@@ -3,7 +3,8 @@
 //  BANK STATEMENT → VOUCHERS
 //
 //  parse()  a CSV or Excel statement, whatever the bank calls its
-//           columns, into { date, narration, ref, amount, direction }
+//           columns, or an MT940 file (services/mt940.js), into
+//           { date, narration, ref, amount, direction }
 //  match()  each line to what the books expect: a voucher already
 //           recorded for it, an open invoice or bill it settles (by a
 //           document number in the narration, an exact amount, or the
@@ -24,6 +25,7 @@ const outstanding = require('./outstanding');
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 const { promptVersion } = require('../utils/aiPrompts');
 const ledger = require('./aiLedger');
+const mt940 = require('./mt940');
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const DAY = 86_400_000;
@@ -105,7 +107,35 @@ function columnsOf(header) {
  * @returns rows [{ index, date, narration, ref, amount, direction: 'in'|'out' }]
  */
 async function parse(buffer, mimetype, filename = '') {
+  return (await parseDetailed(buffer, mimetype, filename)).rows;
+}
+
+/**
+ * parse(), and what else the file says: its format and, for MT940, the
+ * account number the bank wrote in it.
+ * @returns { rows, format: 'mt940'|'sheet'|'csv', accountNo }
+ */
+async function parseDetailed(buffer, mimetype, filename = '') {
   const isSheet = /spreadsheetml|excel/.test(mimetype || '') || /\.xlsx?$/i.test(filename);
+  if (!isSheet) {
+    const text = buffer.toString('utf8');
+    if (mt940.isMt940(text)) {
+      const statements = mt940.parseMt940(text);
+      const accounts = [...new Set(statements.map((st) => st.account).filter(Boolean))];
+      if (accounts.length > 1) {
+        const e = new Error(`This MT940 file holds statements for ${accounts.length} accounts; upload one account's file at a time`);
+        e.code = 'STATEMENT_ACCOUNTS'; e.status = 400;
+        throw e;
+      }
+      const rows = statements.flatMap((st) => st.rows).map((r, index) => ({ ...r, index }));
+      return { rows, format: 'mt940', accountNo: accounts[0] || '' };
+    }
+  }
+  const rows = await parseTable(buffer, isSheet);
+  return { rows, format: isSheet ? 'sheet' : 'csv', accountNo: '' };
+}
+
+async function parseTable(buffer, isSheet) {
   const table = isSheet ? await sheetRows(buffer) : parseCsv(buffer.toString('utf8').replace(/^﻿/, ''));
   // The header is the first row with a date column and a narration column.
   let headerAt = -1;
@@ -115,7 +145,7 @@ async function parse(buffer, mimetype, filename = '') {
     if (c.date >= 0 && c.narration >= 0 && (c.debit >= 0 || c.credit >= 0 || c.amount >= 0)) { headerAt = i; cols = c; break; }
   }
   if (!cols) {
-    const e = new Error('Could not find the statement columns (date, narration, debit / credit). Export the statement as CSV or Excel from the bank\'s site.');
+    const e = new Error('Could not find the statement columns (date, narration, debit / credit). Export the statement as CSV, Excel or MT940 from the bank\'s site.');
     e.code = 'STATEMENT_COLUMNS';
     throw e;
   }
@@ -315,4 +345,4 @@ async function match(rows, accountId, { useModel = true } = {}) {
   return out;
 }
 
-module.exports = { parse, parseCsv, parseDate, columnsOf, match, nameScore, subsetFor, fifo, lineKey, closingOf };
+module.exports = { parse, parseDetailed, parseCsv, parseDate, columnsOf, match, nameScore, subsetFor, fifo, lineKey, closingOf };

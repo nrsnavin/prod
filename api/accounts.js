@@ -1297,7 +1297,7 @@ router.post("/scan", keepRequestContext(scanUpload.array("files", 4)), catchAsyn
 //  POST /bank/statement       multipart "file" (CSV / Excel) + account
 //  POST /bank/statement/post  the lines the person confirmed → vouchers
 router.post("/bank/statement", keepRequestContext(upload.single("file")), catchAsyncErrors(async (req, res, next) => {
-  if (!req.file) return next(new ErrorHandler("Attach the statement as CSV or Excel", 400));
+  if (!req.file) return next(new ErrorHandler("Attach the statement as CSV, Excel or MT940", 400));
   if (!isId(req.body?.account)) return next(new ErrorHandler("account is required", 400));
   const account = await BankAccount.findById(req.body.account).lean();
   if (!account) return next(new ErrorHandler("Account not found", 404));
