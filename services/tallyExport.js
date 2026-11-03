@@ -33,6 +33,7 @@ const Payment = require('../models/Payment');
 const Contra = require('../models/Contra');
 const BankAccount = require('../models/BankAccount');
 const ExpenseCategory = require('../models/ExpenseCategory');
+const Supplier = require('../models/Supplier');
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const tallyDate = (d) => { const x = new Date(d); return `${x.getFullYear()}${String(x.getMonth() + 1).padStart(2, '0')}${String(x.getDate()).padStart(2, '0')}`; };
@@ -70,12 +71,16 @@ function balance(v, roundOffLedger) {
   return sum === 0;
 }
 
-/** GST lines: input on the debit side, output on the credit side. */
-function taxLines(v, t, side, L, input) {
+/**
+ * GST lines: input on the debit side, output on the credit side.
+ * `rcm`: tax owed under reverse charge, to its own ledgers when set.
+ */
+function taxLines(v, t, side, L, input, rcm = false) {
   const put = side === 'dr' ? v.dr : v.cr;
-  put(input ? L.inputCgst : L.outputCgst, t.cgst || 0);
-  put(input ? L.inputSgst : L.outputSgst, t.sgst || 0);
-  put(input ? L.inputIgst : L.outputIgst, t.igst || 0);
+  const out = (k) => (rcm && L[`rcm${k}`]) || L[`output${k}`];
+  put(input ? L.inputCgst : out('Cgst'), t.cgst || 0);
+  put(input ? L.inputSgst : out('Sgst'), t.sgst || 0);
+  put(input ? L.inputIgst : out('Igst'), t.igst || 0);
 }
 
 /**
@@ -117,8 +122,12 @@ async function build({ from, to, fresh = true, L }) {
   const notesBills = noteRefBill.size ? await SupplierBill.find({ _id: { $in: [...noteRefBill] } }).select('supplierBillNo billNo').lean() : [];
   for (const b of notesBills) billRef.set(String(b._id), b.supplierBillNo || b.billNo);
 
+  const supplierIds = [...new Set(expenses.filter((e) => e.supplier).map((e) => String(e.supplier)))];
+  const supplierName = new Map((supplierIds.length ? await Supplier.find({ _id: { $in: supplierIds } }).select('name').lean() : []).map((s) => [String(s._id), s.name]));
+
   const out = [];
   const problems = [];
+  const warnings = [];
   const finish = (v) => { if (!balance(v, L.roundOff)) problems.push(`${v.number} does not balance`); out.push(v); };
 
   for (const inv of invoices) {
@@ -143,8 +152,9 @@ async function build({ from, to, fresh = true, L }) {
     // Reverse charge: we owe the tax (output) and claim it (input).
     if (b.reverseCharge && b.rcm?.tax) {
       if (itc) taxLines(v, b.rcm, 'dr', L, true); else v.dr(ledger, b.rcm.tax);
-      taxLines(v, b.rcm, 'cr', L, false);
+      taxLines(v, b.rcm, 'cr', L, false, true);
     }
+    if (b.kind === 'service' && !b.category) warnings.push(`${b.billNo} (${b.supplierName}) is a service bill with no expense head — it posts to ${L.purchase}`);
     v.dr(L.roundOff, t.roundOff || 0);
     finish(v);
   }
@@ -152,7 +162,9 @@ async function build({ from, to, fresh = true, L }) {
   for (const e of expenses) {
     if (!e.supplier) continue; // its payment debits the head
     const t = e.totals || {};
-    const party = e.payeeName || 'Supplier';
+    // The supplier's ledger is its name on file; the payee typed on the
+    // expense may be spelt another way, and Tally would take it as new.
+    const party = supplierName.get(String(e.supplier)) || e.payeeName || 'Supplier';
     const v = voucher('Journal', { docType: 'Expense', doc: e._id, number: e.expenseNo, date: e.date, party, partyType: 'supplier', reference: e.refNo || '', narration: `${e.categoryName}: ${e.description}` });
     v.cr(party, t.grand, [{ name: e.refNo || e.expenseNo, type: 'New Ref', amount: t.grand }]);
     const itc = !!e.itc?.eligible;
@@ -246,7 +258,7 @@ async function build({ from, to, fresh = true, L }) {
   }
 
   out.sort((a, b) => new Date(a.date) - new Date(b.date) || a.number.localeCompare(b.number));
-  return { vouchers: out, problems };
+  return { vouchers: out, problems, warnings };
 }
 
 /** Parties that appear, by side, for optional ledger masters. */

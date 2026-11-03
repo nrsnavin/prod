@@ -141,6 +141,16 @@ describe('the three-way match, and what a supplier may charge', () => {
     const tally = (await get('/accounts/tally/preview?from=2026-07-01&to=2026-07-31')).body;
     const v = tally.sample.find((x) => x.type === 'Purchase' && x.lines.some((l) => l.ledger === 'Output CGST'));
     expect(v.lines).toEqual(expect.arrayContaining([expect.objectContaining({ ledger: 'Input CGST', debit: 250 }), expect.objectContaining({ ledger: 'Output CGST', credit: 250 })]));
+    // A service bill with no head is flagged, not blocked.
+    expect(tally.warnings).toEqual([expect.stringMatching(/service bill with no expense head — it posts to Purchase/)]);
+
+    // With reverse-charge ledgers named, the tax we owe goes there.
+    expect((await request(app).put('/api/v2/accounts/settings').set('Cookie', cookie()).send({ tally: { rcmCgst: 'RCM CGST Payable', rcmSgst: 'RCM SGST Payable' } })).status).toBe(200);
+    const named = (await get('/accounts/tally/preview?from=2026-07-01&to=2026-07-31')).body;
+    const rv = named.sample.find((x) => x.number === rcm.body.bill.billNo);
+    expect(rv.lines).toEqual(expect.arrayContaining([expect.objectContaining({ ledger: 'Input CGST', debit: 250 }), expect.objectContaining({ ledger: 'RCM CGST Payable', credit: 250 }), expect.objectContaining({ ledger: 'RCM SGST Payable', credit: 250 })]));
+    expect(rv.lines.some((l) => l.ledger === 'Output CGST')).toBe(false);
+    await request(app).put('/api/v2/accounts/settings').set('Cookie', cookie()).send({ tally: { rcmCgst: '', rcmSgst: '' } });
   });
 });
 

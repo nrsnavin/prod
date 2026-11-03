@@ -34,6 +34,10 @@ const AccountsSettingsSchema = new mongoose.Schema(
       inputCgst:        ledger("Input CGST"),
       inputSgst:        ledger("Input SGST"),
       inputIgst:        ledger("Input IGST"),
+      // Tax owed under reverse charge. Blank: it posts with the output tax.
+      rcmCgst:          ledger(""),
+      rcmSgst:          ledger(""),
+      rcmIgst:          ledger(""),
       roundOff:         ledger("Round Off"),
       tdsPayable:       ledger("TDS Payable"),
       tdsReceivable:    ledger("TDS Receivable"),

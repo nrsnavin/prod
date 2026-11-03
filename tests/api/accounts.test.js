@@ -326,7 +326,10 @@ describe('ageing, overview and reports', () => {
     const { customer } = await customerScene();                     // due 1 Jul 2026, long overdue
     const { customer: c2 } = await customerScene(5000, { dueDate: new Date(Date.now() + 10 * 86_400_000) }); // not due
     const s = await supplierScene();
-    await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'A/1', billDate: new Date().toISOString(), lines: [{ description: 'x', quantity: 1, rate: 1000, gstPercent: 5 }] });
+    // The overview's month is last month until the 10th.
+    const d = new Date();
+    const inMonth = d.getDate() < 10 ? new Date(d.getFullYear(), d.getMonth() - 1, 15) : d;
+    await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'A/1', billDate: inMonth.toISOString(), lines: [{ description: 'x', quantity: 1, rate: 1000, gstPercent: 5 }] });
     const recv = await get('/accounts/outstanding?type=receivable');
     expect(recv.body.totals).toMatchObject({ total: 15500, overdue: 10500 });
     expect(recv.body.totals.ageing.over90).toBe(10500);
@@ -338,6 +341,7 @@ describe('ageing, overview and reports', () => {
     expect(ov.body.payables.total).toBe(1050);
     expect(ov.body.accounts.find((a) => a.kind === 'cash')).toMatchObject({ balance: 0 });
     expect(ov.body.month.purchases).toMatchObject({ amount: 1050, inputCredit: 50, count: 1 });
+    expect(ov.body.month.current).toBe(d.getDate() >= 10);
   });
 
   it('the GST report sets output tax against input credit, and the cash book runs a balance', async () => {

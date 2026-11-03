@@ -63,7 +63,7 @@ router.get("/tally/preview", catchAsyncErrors(async (req, res, next) => {
     success: true, from: p.from, to: p.to,
     counts: tally.countOf(fresh.vouchers), vouchers: fresh.vouchers.length,
     alreadySent: all.vouchers.length - fresh.vouchers.length,
-    ledgers: tally.ledgersOf(fresh.vouchers), problems: fresh.problems,
+    ledgers: tally.ledgersOf(fresh.vouchers), problems: fresh.problems, warnings: fresh.warnings,
     sample: fresh.vouchers.slice(0, 20).map((v) => ({ type: v.type, number: v.number, date: v.date, party: v.party, lines: v.lines.map((l) => ({ ledger: l.ledger, debit: l.amount > 0 ? l.amount : 0, credit: l.amount < 0 ? -l.amount : 0 })) })),
   });
 }));

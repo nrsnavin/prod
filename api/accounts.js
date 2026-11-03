@@ -70,6 +70,7 @@ const billChecks = require("../services/billChecks");
 const attachments = require("../services/attachments");
 const { getSettings: getBooksSettings } = require("../services/booksLock");
 const credits = require("../services/credits");
+const gstSummary = require("../services/gstSummary");
 const bankBalances = require("../services/bankBalances");
 const { assertOpen } = require("../services/booksLock");
 
@@ -1069,26 +1070,37 @@ router.get("/outstanding", catchAsyncErrors(async (req, res, next) => {
 router.get("/overview", catchAsyncErrors(async (_req, res) => {
   await ensureSeed();
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  // The first days of a month are spent finishing the last one: until the
+  // 10th, the month figures are last month's.
+  const back = now.getDate() < 10 ? 1 : 0;
+  const monthStart = new Date(now.getFullYear(), now.getMonth() - back, 1);
+  const monthEnd = new Date(now.getFullYear(), now.getMonth() - back + 1, 0, 23, 59, 59, 999);
+  const inMonth = { $gte: monthStart, $lte: monthEnd };
   const [recv, pay, accounts, pendingExpenses, monthExpenses, monthInvoices, monthBills, recentPayments] = await Promise.all([
     outstanding.receivables(),
     outstanding.payables(),
     BankAccount.find({ active: true }).lean(),
     Expense.countDocuments({ status: "pending" }),
-    Expense.aggregate([{ $match: { status: { $in: ["approved", "paid"] }, date: { $gte: monthStart } } }, { $group: { _id: null, amount: { $sum: "$totals.grand" }, count: { $sum: 1 } } }]),
-    Invoice.aggregate([{ $match: { status: "issued", invoiceDate: { $gte: monthStart } } }, { $group: { _id: null, amount: { $sum: "$totals.grand" }, tax: { $sum: "$totals.tax" }, count: { $sum: 1 } } }]),
-    SupplierBill.aggregate([{ $match: { status: { $ne: "cancelled" }, billDate: { $gte: monthStart } } }, { $group: { _id: null, amount: { $sum: "$totals.grand" }, itc: { $sum: "$itc.amount" }, count: { $sum: 1 } } }]),
+    Expense.aggregate([{ $match: { status: { $in: ["approved", "paid"] }, date: inMonth } }, { $group: { _id: null, amount: { $sum: "$totals.grand" }, count: { $sum: 1 } } }]),
+    Invoice.aggregate([{ $match: { status: "issued", invoiceDate: inMonth } }, { $group: { _id: null, amount: { $sum: "$totals.grand" }, tax: { $sum: "$totals.tax" }, count: { $sum: 1 } } }]),
+    SupplierBill.aggregate([{ $match: { status: { $ne: "cancelled" }, billDate: inMonth } }, { $group: { _id: null, amount: { $sum: "$totals.grand" }, itc: { $sum: "$itc.amount" }, count: { $sum: 1 } } }]),
     Payment.find({ status: "posted" }).select("kind voucherNo date partyName amount mode accountName").sort({ date: -1, createdAt: -1 }).limit(8).lean(),
   ]);
-  const balances = await bankBalances.withBalances(accounts);
+  const [balances, customerCredits, supplierCredits] = await Promise.all([
+    bankBalances.withBalances(accounts), credits.byParty("customer"), credits.byParty("supplier"),
+  ]);
+  // What a party paid ahead, or was paid ahead, sits beside what is open:
+  // the documents stay open until the credit is set against them.
+  const withAhead = (groups, map) => groups.map((g) => ({ ...g, paidAhead: map.get(String(g.party))?.available || 0 }));
+  const aheadTotal = (rows, map) => { const parties = new Set(rows.map((x) => String(x.party))); return r2([...map.entries()].filter(([k]) => parties.has(k)).reduce((s, [, v]) => s + v.available, 0)); };
   res.json({
     success: true,
-    receivables: { ...outstanding.totals(recv), top: outstanding.byParty(recv).slice(0, 5) },
-    payables: { ...outstanding.totals(pay), top: outstanding.byParty(pay).slice(0, 5) },
+    receivables: { ...outstanding.totals(recv), paidAhead: aheadTotal(recv, customerCredits), top: withAhead(outstanding.byParty(recv).slice(0, 5), customerCredits) },
+    payables: { ...outstanding.totals(pay), paidAhead: aheadTotal(pay, supplierCredits), top: withAhead(outstanding.byParty(pay).slice(0, 5), supplierCredits) },
     accounts: balances.map((a) => ({ _id: a._id, name: a.name, kind: a.kind, balance: a.balance })),
     pendingExpenses,
     month: {
-      from: monthStart,
+      from: monthStart, to: monthEnd, current: back === 0,
       expenses: { amount: r2(monthExpenses[0]?.amount || 0), count: monthExpenses[0]?.count || 0 },
       sales: { amount: r2(monthInvoices[0]?.amount || 0), outputTax: r2(monthInvoices[0]?.tax || 0), count: monthInvoices[0]?.count || 0 },
       purchases: { amount: r2(monthBills[0]?.amount || 0), inputCredit: r2(monthBills[0]?.itc || 0), count: monthBills[0]?.count || 0 },
@@ -1115,39 +1127,7 @@ function rangeOf(req) {
 router.get("/reports/gst", catchAsyncErrors(async (req, res, next) => {
   let r;
   try { r = rangeOf(req); } catch (err) { return next(err); }
-  const byRate = (docs, lineKey = "lines") => {
-    const out = new Map();
-    for (const d of docs) for (const l of d[lineKey] || []) {
-      const k = Number(l.gstPercent) || 0;
-      const g = out.get(k) || { rate: k, taxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0 };
-      g.taxable = r2(g.taxable + l.taxable); g.cgst = r2(g.cgst + l.cgst); g.sgst = r2(g.sgst + l.sgst); g.igst = r2(g.igst + l.igst);
-      g.tax = r2(g.cgst + g.sgst + g.igst);
-      out.set(k, g);
-    }
-    return [...out.values()].sort((a, b) => a.rate - b.rate);
-  };
-  const sum = (rows) => rows.reduce((t, g) => ({ taxable: r2(t.taxable + g.taxable), cgst: r2(t.cgst + g.cgst), sgst: r2(t.sgst + g.sgst), igst: r2(t.igst + g.igst), tax: r2(t.tax + g.tax) }), { taxable: 0, cgst: 0, sgst: 0, igst: 0, tax: 0 });
-  const [invoices, creditNotes, bills, debitNotes, expenses, rcmBills] = await Promise.all([
-    Invoice.find({ status: "issued", invoiceDate: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
-    AccountNote.find({ kind: "credit", status: "issued", date: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
-    SupplierBill.find({ status: { $ne: "cancelled" }, "itc.eligible": true, billDate: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
-    AccountNote.find({ kind: "debit", status: "issued", date: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
-    Expense.find({ status: { $in: ["approved", "paid"] }, "itc.eligible": true, date: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
-    // Reverse charge: tax we owe on what the supplier did not charge.
-    SupplierBill.find({ status: { $ne: "cancelled" }, reverseCharge: true, billDate: { $gte: r.from, $lte: r.to } }).select("lines").lean(),
-  ]);
-  const output = { sales: byRate(invoices), creditNotes: byRate(creditNotes), reverseCharge: byRate(rcmBills) };
-  const input = { purchases: byRate(bills), debitNotes: byRate(debitNotes), expenses: byRate(expenses) };
-  const outputTotal = sum(output.sales); const cnTotal = sum(output.creditNotes); const rcmTotal = sum(output.reverseCharge);
-  const inputTotal = sum(input.purchases); const dnTotal = sum(input.debitNotes); const expTotal = sum(input.expenses);
-  const netOutput = { cgst: r2(outputTotal.cgst - cnTotal.cgst + rcmTotal.cgst), sgst: r2(outputTotal.sgst - cnTotal.sgst + rcmTotal.sgst), igst: r2(outputTotal.igst - cnTotal.igst + rcmTotal.igst) };
-  const netInput = { cgst: r2(inputTotal.cgst - dnTotal.cgst + expTotal.cgst), sgst: r2(inputTotal.sgst - dnTotal.sgst + expTotal.sgst), igst: r2(inputTotal.igst - dnTotal.igst + expTotal.igst) };
-  res.json({
-    success: true, from: r.from, to: r.to, output, input,
-    totals: { output: outputTotal, creditNotes: cnTotal, reverseCharge: rcmTotal, purchases: inputTotal, debitNotes: dnTotal, expenses: expTotal, netOutput, netInput,
-      payable: { cgst: r2(netOutput.cgst - netInput.cgst), sgst: r2(netOutput.sgst - netInput.sgst), igst: r2(netOutput.igst - netInput.igst) } },
-    counts: { invoices: invoices.length, creditNotes: creditNotes.length, bills: bills.length, debitNotes: debitNotes.length, expenses: expenses.length, reverseCharge: rcmBills.length },
-  });
+  res.json({ success: true, ...(await gstSummary.summary({ from: r.from, to: r.to })) });
 }));
 
 /** What was deducted, from whom, under which section. */

@@ -51,22 +51,32 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
     Expense.find({ status: "pending" }).select("expenseNo date categoryName description totals.grand submittedBy submittedByName source").sort({ date: 1 }).limit(50).lean(),
     Expense.find({ status: "approved", source: "claim" }).select("expenseNo date description payeeName totals.grand paidAmount").sort({ date: 1 }).limit(20).lean(),
     SupplierBill.find({ status: { $in: ["open", "part_paid"] }, "variance.total": { $gt: 0 }, billDate: { $gte: new Date(now.getTime() - 60 * DAY) } }).select("billNo supplierName variance.total variance.note billDate").sort({ billDate: -1 }).limit(10).lean(),
-    BankStatement.find({ "lines.status": "unmatched", createdAt: { $gte: new Date(now.getTime() - 90 * DAY) } }).select("accountName lines.status lines.key").lean(),
+    // Every statement of the last 90 days: a line counts as placed when any
+    // upload of it was placed, since the same line comes again in the next one.
+    BankStatement.find({ createdAt: { $gte: new Date(now.getTime() - 90 * DAY) } }).select("account accountName createdAt lines.status lines.key lines.amount").sort({ createdAt: -1 }).lean(),
     collections.overdue(),
     collections.overdue({ includeHeld: true }),
   ]);
   const dueThisWeek = payables.filter((p) => new Date(p.dueDate) <= weekEnd).sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
   const waitingOnMe = canApprove ? pendingExpenses.filter((e) => String(e.submittedBy || "") !== mine || req.user?.role === "admin") : [];
-  const unplaced = new Set();
-  for (const s of statements) for (const l of s.lines) if (l.status === "unmatched") unplaced.add(l.key);
+  // A suggested match ("matched") is not in the books until someone posts it.
+  const placed = new Set();
+  for (const s of statements) for (const l of s.lines) if (["recorded", "posted", "ignored"].includes(l.status)) placed.add(l.key);
+  const unplaced = new Map();
+  let latest = null;
+  for (const s of statements) for (const l of s.lines) {
+    if (placed.has(l.key) || unplaced.has(l.key)) continue;
+    unplaced.set(l.key, l.amount || 0);
+    if (!latest) latest = { statement: s._id, account: s.account, accountName: s.accountName };
+  }
   const today = new Date(now); today.setHours(0, 0, 0, 0);
   const promised = promisesDue.filter((r) => r.promise?.live && new Date(r.promise.date) <= new Date(today.getTime() + DAY - 1));
   res.json({
     success: true,
-    billsDue: { count: dueThisWeek.length, amount: r2(dueThisWeek.reduce((s, x) => s + x.outstanding, 0)), top: dueThisWeek.slice(0, 6) },
+    billsDue: { count: dueThisWeek.length, overdue: dueThisWeek.filter((x) => x.overdueDays > 0).length, amount: r2(dueThisWeek.reduce((s, x) => s + x.outstanding, 0)), top: dueThisWeek.slice(0, 6) },
     approvals: { count: waitingOnMe.length, amount: r2(waitingOnMe.reduce((s, e) => s + (e.totals?.grand || 0), 0)), top: waitingOnMe.slice(0, 6) },
     claimsToPay: { count: claimsToPay.length, amount: r2(claimsToPay.reduce((s, e) => s + (e.totals?.grand || 0) - (e.paidAmount || 0), 0)), top: claimsToPay.slice(0, 6) },
-    bankLines: { count: unplaced.size },
+    bankLines: { count: unplaced.size, amount: r2([...unplaced.values()].reduce((s, a) => s + a, 0)), ...(latest || {}) },
     toChase: { count: chase.filter((c) => !c.recentlyContacted).length, amount: r2(chase.filter((c) => !c.recentlyContacted).reduce((s, c) => s + c.overdue, 0)), top: chase.filter((c) => !c.recentlyContacted).slice(0, 5).map((c) => ({ party: c.party, partyName: c.partyName, overdue: c.overdue, oldestDays: c.oldestDays, next: c.next })) },
     promisesDue: { count: promised.length, top: promised.slice(0, 5).map((c) => ({ party: c.party, partyName: c.partyName, promise: c.promise })) },
     variances: { count: varianceBills.length, top: varianceBills },

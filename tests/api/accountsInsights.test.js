@@ -31,7 +31,7 @@ beforeAll(async () => {
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   M = {};
-  for (const n of ['User', 'Customer', 'Supplier', 'Invoice', 'SupplierBill', 'Expense', 'Payment', 'BankAccount', 'ExpenseCategory', 'RawMaterial', 'RecurringExpense', 'AiSuggestion']) {
+  for (const n of ['User', 'Customer', 'Supplier', 'Invoice', 'SupplierBill', 'Expense', 'Payment', 'BankAccount', 'ExpenseCategory', 'RawMaterial', 'RecurringExpense', 'AiSuggestion', 'BankStatement']) {
     M[n] = require(`../../models/${n}.js`);
   }
   admin = await M.User.create({ name: 'Owner', email: 'ins@t.co', password: 'pass1234', role: 'admin', department: 'admin' });
@@ -113,6 +113,47 @@ describe('the cash forecast', () => {
     const inWeek = f.weeks.findIndex((w) => w.top.some((x) => x.docNo === 'INV/2026-27/0092'));
     expect(inWeek).toBeLessThanOrEqual(2);
     expect(f.firstShortWeek).not.toBeNull();
+    expect(all.find((x) => x.docNo === 'INV/2026-27/0092').basis).toMatch(/\(1 payment\)/);
+  });
+
+  it('counts what no bill shows: expenses paid directly, salaries, TDS, GST — and what a supplier was paid ahead', async () => {
+    const now = new Date();
+    const s = await supplier();
+    // A bill of ₹20,000 due in a month; we paid them ₹10,000 ahead.
+    const bill = await post('/accounts/bills', { supplier: s._id, supplierBillNo: 'ADV/1', billDate: iso(now), lines: [{ description: 'Yarn', quantity: 1, rate: 20000, gstPercent: 0 }] });
+    expect(bill.status).toBe(201);
+    await require('../../models/OpeningBalance').create({ docNo: `OB/T/${n}`, financialYear: '2025-26', sequence: n, partyType: 'supplier', supplier: s._id, partyName: s.name, kind: 'advance', date: new Date(now.getTime() - 200 * DAY), amount: 10000, unapplied: 10000, status: 'posted' });
+    // An electricity bill waiting for approval, paid straight to the board.
+    const eb = await category('Electricity');
+    const e = await post('/accounts/expenses', { category: eb._id, description: 'HT bill', payeeName: 'TNEB', amount: 84500 }, clerk);
+    expect(e.status).toBe(201);
+    await M.Expense.updateMany({ payeeName: 'TNEB' }, { status: 'pending' });
+    // Last month's payroll, not yet paid.
+    const Payroll = require('../../models/Payroll');
+    const last = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    await Payroll.create({ employee: new mongoose.Types.ObjectId(), year: last.getFullYear(), month: last.getMonth() + 1, netPay: 50000, status: 'finalized' });
+    // TDS deducted this month.
+    await M.Payment.collection.insertOne({ status: 'posted', kind: 'payment', date: now, amount: 0, tds: { amount: 400, section: '194C' }, allocations: [] });
+    // A sale this month with ₹50 of GST on it.
+    n += 1;
+    const c = await M.Customer.create({ name: `GST ${n}`, contactName: 'R', gstin: `33AAEPS${1000 + n}F1Z2`, phoneNumber: '9' });
+    await M.Invoice.create({ invoiceNumber: `INV/T/${n}`, financialYear: '2026-27', sequence: n, invoiceDate: now, order: new mongoose.Types.ObjectId(), customer: c._id, buyer: { name: c.name }, supplyType: 'intra', status: 'issued', totals: { taxable: 1000, tax: 50, grand: 1050 }, lines: [{ name: 'Elastic', quantity: 1, rate: 1000, taxable: 1000, gstPercent: 5, cgst: 25, sgst: 25, igst: 0, amount: 1050 }] });
+
+    const f = (await get('/accounts/forecast?weeks=10')).body;
+    const all = f.weeks.flatMap((w) => w.items);
+    const by = (docNo) => all.find((x) => x.docNo === docNo);
+    expect(by(bill.body.bill.billNo)).toMatchObject({ direction: 'out', amount: 10000, basis: expect.stringMatching(/less ₹10,000 paid ahead/) });
+    expect(all.find((x) => x.party === 'TNEB')).toMatchObject({ direction: 'out', amount: 84500, basis: 'expense waiting for approval' });
+    expect(all.find((x) => x.basis === 'payroll not yet paid')).toMatchObject({ party: 'Salaries', amount: 50000 });
+    expect(all.find((x) => /^estimate: /.test(x.basis))).toMatchObject({ party: 'Salaries', amount: 50000 });
+    expect(all.find((x) => x.party === 'Income tax (TDS)')).toMatchObject({ amount: 400 });
+    expect(all.find((x) => x.party === 'GST')).toMatchObject({ amount: 50 });
+    // Every week lists all it holds; `top` is the biggest five.
+    for (const w of f.weeks) expect(w.top).toEqual(w.items.slice(0, 5));
+
+    const ov = (await get('/accounts/overview')).body;
+    expect(ov.payables.paidAhead).toBe(10000);
+    expect(ov.payables.top.find((p) => String(p.party) === String(s._id))).toMatchObject({ paidAhead: 10000 });
   });
 });
 
@@ -155,6 +196,43 @@ describe('month end, recurring expenses, the inbox, Excel', () => {
     expect(ws.getRow(1).values.slice(1, 4)).toEqual(['Bill', 'Supplier', 'Their no.']);
     expect(ws.getRow(2).getCell(9).value).toBe(1050);
     expect((await get('/accounts/export/nothing')).status).toBe(404);
+  });
+
+  it('the checklist does not wait on expenses Tally never gets as their own voucher', async () => {
+    const d = new Date(); const prev = new Date(d.getFullYear(), d.getMonth() - 1, 10);
+    const month = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
+    const eb = await category('Electricity');
+    const e = await post('/accounts/expenses', { category: eb._id, description: 'Tea', payeeName: 'Stall', amount: 300, date: iso(prev) });
+    expect(e.status).toBe(201);
+    await M.Expense.updateOne({ _id: e.body.expense?._id || e.body.row?._id || e.body._id }, { status: 'approved' });
+    expect(await M.Expense.countDocuments({ status: 'approved', supplier: null })).toBe(1);
+    const c = (await get(`/accounts/close?month=${month}`)).body;
+    expect(c.items.find((i) => i.key === 'tally')).toMatchObject({ ok: true, count: 0 });
+  });
+
+  it('the inbox counts a suggested bank line until it is posted, once across uploads', async () => {
+    await get('/accounts/bank-accounts');
+    const bank = await M.BankAccount.findOne({});
+    const line = (index, key, status, amount) => ({ index, date: new Date(), narration: key, amount, direction: 'in', key, status });
+    const older = await M.BankStatement.create({ account: bank._id, accountName: bank.name, file: 'oct.csv', lines: [line(0, 'k1', 'matched', 5000), line(1, 'k2', 'recorded', 700), line(2, 'k3', 'ignored', 90)] });
+    await new Promise((r) => setTimeout(r, 20));
+    await M.BankStatement.create({ account: bank._id, accountName: bank.name, file: 'oct-again.csv', lines: [line(0, 'k2', 'unmatched', 700), line(1, 'k4', 'unmatched', 1200)] });
+    const inbox = (await get('/accounts/inbox')).body;
+    expect(inbox.bankLines).toMatchObject({ count: 2, amount: 6200, account: String(bank._id) });
+    expect(inbox.bankLines.statement).not.toBe(String(older._id));
+  });
+
+  it('an expense to a supplier goes to Tally under the supplier\'s own name, however the payee was typed', async () => {
+    const s = await supplier();
+    const eb = await category('Electricity');
+    const e = await post('/accounts/expenses', { category: eb._id, supplier: s._id, description: 'Cones', payeeName: 'sri yarn (typo)', amount: 500, date: iso(Date.now()) });
+    expect(e.status).toBe(201);
+    await M.Expense.updateMany({ supplier: s._id }, { status: 'approved' });
+    const from = iso(Date.now() - DAY); const to = iso(Date.now() + DAY);
+    const t = (await get(`/accounts/tally/preview?from=${from}&to=${to}`)).body;
+    const j = t.sample.find((v) => v.type === 'Journal');
+    expect(j.party).toBe(s.name);
+    expect(j.lines.map((l) => l.ledger)).toContain(s.name);
   });
 
   it('scores a scanned bill\'s draft against what was saved', async () => {

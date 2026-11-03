@@ -28,7 +28,10 @@ const BankAccount = require('../models/BankAccount');
 const BankStatement = require('../models/BankStatement');
 const RecurringExpense = require('../models/RecurringExpense');
 const AccountNote = require('../models/AccountNote');
+const Payroll = require('../models/Payroll');
 const outstanding = require('./outstanding');
+const credits = require('./credits');
+const gstSummary = require('./gstSummary');
 const bankBalances = require('./bankBalances');
 const { occurrences } = require('./recurring');
 const { getSettings } = require('./booksLock');
@@ -165,6 +168,104 @@ async function payingDays() {
 /** Monday 00:00 of the week `d` falls in. */
 const weekStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
 
+/**
+ * Take a party's credit off its open documents, oldest due first, so the
+ * forecast does not expect money that was already paid ahead.
+ * Returns the rows with `outstanding` reduced and `ahead` set on those it touched.
+ */
+function netCredits(rows, credit) {
+  const left = new Map([...credit.entries()].map(([k, v]) => [k, v.available]));
+  return [...rows].sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate)).map((r) => {
+    const k = String(r.party);
+    const avail = left.get(k) || 0;
+    if (avail <= 0.005) return r;
+    const take = Math.min(avail, r.outstanding);
+    left.set(k, r2(avail - take));
+    return { ...r, outstanding: r2(r.outstanding - take), ahead: r2(take) };
+  }).filter((r) => r.outstanding > 0.005);
+}
+
+const monthName = (y, m) => new Date(y, m, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+
+/**
+ * The day of the month salaries are usually paid, from the last six
+ * months of paid slips; the 7th when there is no history.
+ */
+async function salaryDay(now) {
+  const rows = await Payroll.find({ paidAt: { $gte: new Date(now.getTime() - 190 * DAY) } }).select('paidAt').lean();
+  const days = rows.map((r) => new Date(r.paidAt).getDate()).sort((a, b) => a - b);
+  return days.length ? days[Math.floor(days.length / 2)] : 7;
+}
+
+/**
+ * What the law and the payroll will take that no bill shows: salaries,
+ * TDS deposited by the 7th (30 April for March), GST by the 20th.
+ */
+async function statutoryAndPayroll(today, end) {
+  const items = [];
+  const y = today.getFullYear(); const m = today.getMonth();
+  const at = (yy, mm, d) => new Date(yy, mm, Math.min(d, new Date(yy, mm + 1, 0).getDate()));
+  const when = (d) => (d < today ? today : d);
+
+  // Salaries. Slips not yet fully paid, then the latest month's total for
+  // each month still to come whose pay day falls in the window.
+  const payDay = await salaryDay(today);
+  const slips = await Payroll.find({ status: { $ne: 'paid' } }).select('year month netPay amountPaid').lean();
+  const owed = new Map();
+  for (const s of slips) {
+    const due = r2((s.netPay || 0) - (s.amountPaid || 0));
+    if (due <= 0.005) continue;
+    const k = `${s.year}-${s.month}`;
+    owed.set(k, r2((owed.get(k) || 0) + due));
+  }
+  for (const [k, amount] of owed) {
+    const [sy, sm] = k.split('-').map(Number);
+    const payOn = at(sy, sm, payDay); // month sm (1-based) is paid in the month after
+    // A slip whose pay day is long gone was paid by hand and never marked:
+    // not money still to go out.
+    if (payOn < new Date(today.getTime() - 45 * DAY)) continue;
+    const d = when(payOn);
+    if (d <= end) items.push({ direction: 'out', date: d, amount, party: 'Salaries', docNo: `Salaries ${monthName(sy, sm - 1)}`, basis: 'payroll not yet paid' });
+  }
+  const latest = await Payroll.aggregate([
+    { $group: { _id: { year: '$year', month: '$month' }, net: { $sum: '$netPay' }, n: { $sum: 1 } } },
+    { $sort: { '_id.year': -1, '_id.month': -1 } }, { $limit: 1 },
+  ]);
+  if (latest.length) {
+    const { year: ly, month: lm } = latest[0]._id;
+    // Months after the latest payroll, paid on pay day the month after each.
+    for (let i = 1; i <= 4; i++) {
+      const mm0 = lm - 1 + i; // 0-based month being earned
+      const payOn = at(ly, mm0 + 1, payDay);
+      if (payOn > end) break;
+      if (payOn < today) continue;
+      const ey = new Date(ly, mm0, 1);
+      items.push({ direction: 'out', date: payOn, amount: r2(latest[0].net), party: 'Salaries', docNo: `Salaries ${monthName(ey.getFullYear(), ey.getMonth())}`, basis: `estimate: ${monthName(ly, lm - 1)} payroll, ${latest[0].n} people` });
+    }
+  }
+
+  // TDS deducted last month and this month.
+  for (const back of [1, 0]) {
+    const from = new Date(y, m - back, 1);
+    const to = new Date(y, m - back + 1, 0, 23, 59, 59, 999);
+    const due = from.getMonth() === 2 ? at(from.getFullYear(), 3, 30) : at(from.getFullYear(), from.getMonth() + 1, 7);
+    if (due < today || due > end) continue;
+    const [t] = await Payment.aggregate([{ $match: { status: 'posted', kind: 'payment', date: { $gte: from, $lte: to }, 'tds.amount': { $gt: 0 } } }, { $group: { _id: null, amount: { $sum: '$tds.amount' } } }]);
+    if (t?.amount > 0.005) items.push({ direction: 'out', date: due, amount: r2(t.amount), party: 'Income tax (TDS)', docNo: `TDS ${monthName(from.getFullYear(), from.getMonth())}`, basis: back ? 'deducted, to deposit' : 'deducted so far this month' });
+  }
+
+  // GST: last month's return by the 20th, and this month's so far.
+  for (const back of [1, 0]) {
+    const from = new Date(y, m - back, 1);
+    const to = new Date(y, m - back + 1, 0, 23, 59, 59, 999);
+    const due = at(from.getFullYear(), from.getMonth() + 1, 20);
+    if (due < today || due > end) continue;
+    const cash = gstSummary.cashDue(await gstSummary.summary({ from, to }));
+    if (cash > 0.005) items.push({ direction: 'out', date: due, amount: cash, party: 'GST', docNo: `GST ${monthName(from.getFullYear(), from.getMonth())}`, basis: back ? 'net of input credit' : 'net of input credit, so far this month' });
+  }
+  return items;
+}
+
 async function forecast({ weeks = 6, now = new Date() } = {}) {
   const today = new Date(now); today.setHours(0, 0, 0, 0);
   const start = weekStart(today);
@@ -172,10 +273,17 @@ async function forecast({ weeks = 6, now = new Date() } = {}) {
   const accounts = await BankAccount.find({ active: true }).lean();
   const balances = await bankBalances.withBalances(accounts);
   const opening = r2(balances.reduce((s, a) => s + a.balance, 0));
-  const [recv, pay, habits, recurring, customers] = await Promise.all([
+  const [recvAll, payAll, habits, recurring, customers, loose, customerCredits, supplierCredits, statutory] = await Promise.all([
     outstanding.receivables({ asOf: today }), outstanding.payables({ asOf: today }), payingDays(),
     RecurringExpense.find({ active: true }).lean(), Customer.find({}).select('paymentTerms').lean(),
+    // Not in the payables: expenses still waiting for approval, and
+    // approved ones with no supplier (the payee is paid directly).
+    Expense.find({ $or: [{ status: 'pending' }, { status: 'approved', supplier: null }] }).select('expenseNo date dueDate payeeName description totals paidAmount status source').lean(),
+    credits.byParty('customer'), credits.byParty('supplier'),
+    statutoryAndPayroll(today, end),
   ]);
+  const recv = netCredits(recvAll, customerCredits);
+  const pay = netCredits(payAll, supplierCredits);
   const terms = new Map(customers.map((c) => [String(c._id), parseInt(c.paymentTerms, 10) || 30]));
   const items = [];
   for (const r of recv) {
@@ -185,11 +293,21 @@ async function forecast({ weeks = 6, now = new Date() } = {}) {
     // Already later than they usually pay: expect it next week, not today.
     const late = when < today;
     if (late) when = new Date(today.getTime() + 7 * DAY);
-    items.push({ direction: 'in', date: when, amount: r.outstanding, party: r.partyName, docNo: r.docNo, basis: habit ? `pays in ${days} days on average${late ? ', already late' : ''}` : `terms ${days} days${late ? ', already late' : ''}` });
+    const sample = habit ? ` (${habit.n} payment${habit.n === 1 ? '' : 's'})` : '';
+    items.push({ direction: 'in', date: when, amount: r.outstanding, party: r.partyName, docNo: r.docNo, basis: `${habit ? `pays in ${days} days on average${sample}` : `terms ${days} days`}${late ? ', already late' : ''}${r.ahead ? `, less ₹${fmt(r.ahead)} paid ahead` : ''}` });
   }
   for (const p of pay) {
     const when = new Date(p.dueDate) < today ? today : new Date(p.dueDate);
-    items.push({ direction: 'out', date: when, amount: p.outstanding, party: p.partyName, docNo: p.docNo, basis: new Date(p.dueDate) < today ? 'overdue' : 'due' });
+    items.push({ direction: 'out', date: when, amount: p.outstanding, party: p.partyName, docNo: p.docNo, basis: `${new Date(p.dueDate) < today ? 'overdue' : 'due'}${p.ahead ? `, less ₹${fmt(p.ahead)} paid ahead` : ''}` });
+  }
+  for (const e of loose) {
+    const left = r2((e.totals?.grand || 0) - (e.paidAmount || 0));
+    if (left <= 0.005) continue;
+    const pending = e.status === 'pending';
+    const due = e.dueDate ? new Date(e.dueDate) : new Date(e.date);
+    // Waiting for approval: a week out. Approved: when due, or now.
+    const when = pending ? new Date(Math.max(today.getTime() + 7 * DAY, due.getTime())) : due < today ? today : due;
+    items.push({ direction: 'out', date: when, amount: left, party: e.payeeName || e.description, docNo: e.expenseNo, basis: pending ? 'expense waiting for approval' : e.source === 'claim' ? 'claim to repay' : 'expense approved, not paid' });
   }
   for (const t of recurring) {
     for (const d of occurrences(t, end)) {
@@ -197,6 +315,7 @@ async function forecast({ weeks = 6, now = new Date() } = {}) {
       items.push({ direction: 'out', date: d, amount: gross, party: t.payeeName || t.name, docNo: t.name, basis: 'recurring' });
     }
   }
+  items.push(...statutory);
   const buckets = [];
   let running = opening;
   let firstShort = null;
@@ -208,10 +327,8 @@ async function forecast({ weeks = 6, now = new Date() } = {}) {
     const outflow = r2(inWeek.filter((x) => x.direction === 'out').reduce((s, x) => s + x.amount, 0));
     running = r2(running + inflow - outflow);
     if (running < 0 && !firstShort) firstShort = from;
-    buckets.push({
-      from, to, inflow, outflow, closing: running,
-      top: inWeek.sort((a, b) => b.amount - a.amount).slice(0, 5).map((x) => ({ direction: x.direction, party: x.party, docNo: x.docNo, amount: x.amount, basis: x.basis })),
-    });
+    const rows = inWeek.sort((a, b) => b.amount - a.amount).map((x) => ({ direction: x.direction, party: x.party, docNo: x.docNo, amount: x.amount, basis: x.basis, date: x.date }));
+    buckets.push({ from, to, inflow, outflow, closing: running, top: rows.slice(0, 5), items: rows });
   }
   const beyond = items.filter((x) => x.date > end);
   return {
@@ -244,7 +361,10 @@ async function closeChecklist(month) {
       const Model = { Invoice, SupplierBill, Expense, AccountNote, Payment, Contra }[t];
       const dateField = { Invoice: 'invoiceDate', SupplierBill: 'billDate', Expense: 'date', AccountNote: 'date', Payment: 'date', Contra: 'date' }[t];
       const status = { Invoice: 'issued', SupplierBill: { $ne: 'cancelled' }, Expense: { $in: ['approved', 'paid'] }, AccountNote: 'issued', Payment: 'posted', Contra: 'posted' }[t];
-      return Model.countDocuments({ status, [dateField]: range, ...fresh });
+      // An expense with no supplier never goes as a voucher of its own —
+      // its payment carries the head — so it is not waiting to be sent.
+      const own = t === 'Expense' ? { supplier: { $ne: null } } : {};
+      return Model.countDocuments({ status, [dateField]: range, ...own, ...fresh });
     })),
     getSettings(),
     SupplierBill.countDocuments({ status: { $ne: 'cancelled' }, billDate: range }),

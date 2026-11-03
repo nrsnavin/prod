@@ -40,6 +40,30 @@ async function openFor(partyType, party) {
 }
 
 /**
+ * Every party's open credit at once: Map partyId → { available, count }.
+ * What a supplier was paid ahead (an advance, an opening advance, a
+ * debit note not yet set off) comes off what we owe them; what a
+ * customer paid ahead comes off what they owe.
+ */
+async function byParty(partyType) {
+  const [vouchers, notes, advances] = await Promise.all([
+    Payment.aggregate([{ $match: { status: 'posted', partyType, unallocated: { $gt: 0.005 } } }, { $group: { _id: `$${partyType}`, available: { $sum: '$unallocated' }, count: { $sum: 1 } } }]),
+    AccountNote.aggregate([{ $match: { status: 'issued', partyType, unapplied: { $gt: 0.005 } } }, { $group: { _id: `$${partyType}`, available: { $sum: '$unapplied' }, count: { $sum: 1 } } }]),
+    OpeningBalance.aggregate([{ $match: { status: 'posted', kind: 'advance', partyType, unapplied: { $gt: 0.005 } } }, { $group: { _id: `$${partyType}`, available: { $sum: '$unapplied' }, count: { $sum: 1 } } }]),
+  ]);
+  const out = new Map();
+  for (const row of [...vouchers, ...notes, ...advances]) {
+    if (!row._id) continue;
+    const k = String(row._id);
+    const g = out.get(k) || { available: 0, count: 0 };
+    g.available = r2(g.available + row.available);
+    g.count += row.count;
+    out.set(k, g);
+  }
+  return out;
+}
+
+/**
  * Which documents a credit can settle, and the field it moves on each.
  * Returns { partyType, party, targets: { docType: field } }.
  */
@@ -121,4 +145,4 @@ async function apply(body, req) {
   return { applied: total, source: { type: sourceType, id: src._id, docNo: sourceNo(sourceType, src) }, docs: rows.map((r) => ({ docType: r.docType, doc: r.doc, docNo: r.docNo, amount: r.amount })) };
 }
 
-module.exports = { openFor, apply, rulesFor };
+module.exports = { openFor, byParty, apply, rulesFor };
