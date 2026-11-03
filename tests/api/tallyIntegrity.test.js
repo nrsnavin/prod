@@ -189,6 +189,15 @@ describe('the connector', () => {
   });
 });
 
+describe('a reverse-charge bill', () => {
+  it('is not taken for a total that is off its lines', async () => {
+    const s = await scene();
+    await M.Supplier.updateOne({ _id: s.supplier._id }, { gstRegistration: 'unregistered', gstin: '' });
+    await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'LR/1', billDate: '2026-07-05', kind: 'service', reverseCharge: true, lines: [{ description: 'Freight', quantity: 1, rate: 18000, gstPercent: 5 }] });
+    expect((await get('/accounts/health')).body.checks.find((c) => c.key === 'totals').ok).toBe(true);
+  });
+});
+
 describe('the day in India', () => {
   it('keeps a document dated 1 am on the 1st on the 1st, here and in Tally', () => {
     const { readDate } = require('../../services/accountsHelpers');

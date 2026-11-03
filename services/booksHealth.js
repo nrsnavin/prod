@@ -211,9 +211,11 @@ async function datesAcrossMidnight() {
 async function totalsVsLines() {
   const rows = [];
   for (const [docType, Model, no, , dead] of TYPES.filter(([t]) => ['Invoice', 'SupplierBill', 'Expense', 'AccountNote'].includes(t))) {
-    const docs = await Model.find({ status: { $nin: dead } }).select(`${no} lines.amount lines.taxable lines.cgst lines.sgst lines.igst totals`).lean();
+    const docs = await Model.find({ status: { $nin: dead } }).select(`${no} lines.amount lines.taxable lines.cgst lines.sgst lines.igst totals reverseCharge`).lean();
     for (const d of docs) {
-      const lines = r2((d.lines || []).reduce((s, l) => s + (l.amount ?? ((l.taxable || 0) + (l.cgst || 0) + (l.sgst || 0) + (l.igst || 0))), 0));
+      // Under reverse charge the lines carry the tax the supplier did not
+      // charge; the bill's total is their value without it.
+      const lines = r2((d.lines || []).reduce((s, l) => s + (d.reverseCharge ? (l.taxable || 0) : (l.amount ?? ((l.taxable || 0) + (l.cgst || 0) + (l.sgst || 0) + (l.igst || 0)))), 0));
       const grand = r2((d.totals?.grand || 0) - (d.totals?.roundOff || 0));
       if (d.lines?.length && Math.abs(lines - grand) > 1) rows.push({ docType, doc: d._id, docNo: d[no], lines, total: r2(d.totals?.grand || 0) });
     }
