@@ -8,6 +8,10 @@
 //    POST /bank/statements/:id/lines/:index/link     it is this voucher / contra
 //    POST /bank/clear                      tick a book entry cleared (or not)
 //    GET  /bank/reconciliation?account=&asOf=&bankBalance=
+//    GET  /bank/feed                       the statements mailbox: set up?
+//                                          last run, the last mails
+//    POST /bank/feed/run                   read it now
+//    PUT  /bank/feed                       { autoPost } (admin)
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -23,13 +27,13 @@ const Contra = require("../models/Contra");
 
 router.get("/bank/statements", catchAsyncErrors(async (req, res) => {
   const q = isId(req.query.account) ? { account: req.query.account } : {};
-  const rows = await BankStatement.find(q).select("account accountName file from to closingBalance uploadedByName createdAt lines.status").sort({ createdAt: -1 }).limit(30).lean();
+  const rows = await BankStatement.find(q).select("account accountName file source from to closingBalance uploadedByName createdAt lines.status").sort({ createdAt: -1 }).limit(30).lean();
   res.json({
     success: true,
     statements: rows.map((s) => {
       const counts = {};
       for (const l of s.lines) counts[l.status] = (counts[l.status] || 0) + 1;
-      return { _id: s._id, account: s.account, accountName: s.accountName, file: s.file, from: s.from, to: s.to, closingBalance: s.closingBalance, uploadedByName: s.uploadedByName, createdAt: s.createdAt, lines: s.lines.length, counts };
+      return { _id: s._id, account: s.account, accountName: s.accountName, file: s.file, source: s.source || "upload", from: s.from, to: s.to, closingBalance: s.closingBalance, uploadedByName: s.uploadedByName, createdAt: s.createdAt, lines: s.lines.length, counts };
     }),
   });
 }));
@@ -92,6 +96,29 @@ router.get("/bank/reconciliation", catchAsyncErrors(async (req, res, next) => {
   const out = await reconcile.statementAsOf(req.query.account, asOf, req.query.bankBalance);
   if (!out) return next(new ErrorHandler("Account not found", 404));
   res.json({ success: true, ...out });
+}));
+
+// ── The bank's statements, from a mailbox ──────────────────────────
+const bankFeed = require("../services/bankFeed");
+const { isAdmin } = require("../middleware/auth");
+const AccountsSettings = require("../models/AccountsSettings");
+const { getSettings } = require("../services/booksLock");
+
+router.get("/bank/feed", catchAsyncErrors(async (_req, res) => {
+  res.json({ success: true, feed: await bankFeed.status() });
+}));
+
+router.post("/bank/feed/run", catchAsyncErrors(async (_req, res, next) => {
+  if (!bankFeed.configured()) return next(new ErrorHandler("The statements mailbox is not set up on the server", 409));
+  const result = await bankFeed.run({ trigger: "manual" });
+  if (result.busy) return next(new ErrorHandler("The mailbox is being read right now — try again in a minute", 409));
+  res.json({ success: true, result, feed: await bankFeed.status() });
+}));
+
+router.put("/bank/feed", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
+  await getSettings(); // the settings row may not exist yet
+  await AccountsSettings.updateOne({ key: "accounts" }, { $set: { "bankFeed.autoPost": !!req.body?.autoPost } });
+  res.json({ success: true, feed: await bankFeed.status() });
 }));
 
 module.exports = router;

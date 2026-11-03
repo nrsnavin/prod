@@ -69,6 +69,9 @@ function startServer() {
   // business transactions (utils/outbox.js), with retry + backoff.
   require("./utils/outbox").startOutboxDispatcher();
 
+  // The bank's emailed statements (only when BANK_FEED_IMAP_* is set).
+  require("./services/bankFeed").start();
+
   // create server
   //
   // HOST controls the bind address. Left unset it binds all interfaces

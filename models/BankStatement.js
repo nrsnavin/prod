@@ -29,6 +29,11 @@ const LineSchema = new mongoose.Schema(
     voucher:   { type: mongoose.Types.ObjectId, default: null },
     voucherNo: { type: String, default: "" },
     note:      { type: String, default: "" },
+    // What the matcher proposed when it was read — the party and the
+    // documents it settles — so the line can be confirmed and posted from
+    // the stored statement, without uploading it again.
+    suggestion: { type: mongoose.Schema.Types.Mixed, default: null },
+    candidates: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { _id: false }
 );
@@ -45,6 +50,10 @@ const BankStatementSchema = new mongoose.Schema(
     lines:       { type: [LineSchema], default: [] },
     uploadedBy:  { type: mongoose.Types.ObjectId, ref: "User" },
     uploadedByName: { type: String, default: "" },
+    // "upload": a person; "email": the bank's scheduled statement, read
+    // from the statements mailbox (messageId says which mail).
+    source:      { type: String, enum: ["upload", "email"], default: "upload" },
+    messageId:   { type: String, default: "" },
   },
   { timestamps: true }
 );

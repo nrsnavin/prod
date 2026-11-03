@@ -63,6 +63,17 @@ const AccountsSettingsSchema = new mongoose.Schema(
       version:      { type: String, default: "" },
     },
 
+    // The bank's scheduled statements, read from a mailbox (the mailbox
+    // itself is configured in the server's environment, not here).
+    bankFeed: {
+      // Post lines the matcher is sure of without a person: a document
+      // number in the narration and the amount exact. Off by default.
+      autoPost:    { type: Boolean, default: false },
+      lockUntil:   { type: Date, default: null },
+      lastRunAt:   { type: Date, default: null },
+      lastResult:  { type: mongoose.Schema.Types.Mixed, default: null },
+    },
+
     bills: {
       // Percent a billed rate may differ from the PO rate before it needs a note.
       rateVariancePercent: { type: Number, default: 2, min: 0, max: 100 },

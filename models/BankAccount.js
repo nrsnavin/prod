@@ -27,6 +27,9 @@ const BankAccountSchema = new mongoose.Schema(
     isDefault: { type: Boolean, default: false },
     // The ledger this account is in Tally ("Kotak Bank CA", "Cash").
     tallyLedger: { type: String, trim: true, default: "", maxlength: 80 },
+    // The address the bank's scheduled statement comes from, when the
+    // account number is not in the mail (statements mailbox).
+    statementFrom: { type: String, trim: true, lowercase: true, default: "", maxlength: 120 },
   },
   { timestamps: true }
 );

@@ -853,6 +853,20 @@ app.post("/api/v2/notify/cron/run-evening-report", async (req, res) => {
   }
 });
 
+// The statements mailbox, read on demand by a scheduler (the server also
+// reads it on its own timer — services/bankFeed.js).
+//   curl -X POST -H "x-cron-secret: $CRON_SECRET" http://host/api/v2/notify/cron/bank-feed
+app.post("/api/v2/notify/cron/bank-feed", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret) return res.status(503).json({ success: false, message: "CRON_SECRET not configured" });
+  if (!safeEqual(req.get("x-cron-secret"), secret)) return res.status(401).json({ success: false, message: "bad cron secret" });
+  try {
+    return res.json({ success: true, ...(await require("./services/bankFeed").run({ trigger: "cron" })) });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Cron-triggerable month-end checklist — on the 1st, the owner gets what is
 // left before last month's books can close. Same shared-secret pattern.
 //   curl -X POST -H "x-cron-secret: $CRON_SECRET" \

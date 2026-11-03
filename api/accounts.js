@@ -39,7 +39,7 @@ const partyLedger  = require("../services/partyLedger");
 const outstanding  = require("../services/outstanding");
 const { ensureSeed } = require("../services/accountsSeed");
 const { readBill }  = require("../utils/billOcr");
-const bankStatement = require("../services/bankStatement");
+const { importStatement } = require("../services/statementImport");
 const collections   = require("../services/collections");
 const { sendWhatsApp, isConfigured: whatsappConfigured } = require("../utils/whatsapp");
 const aiLedger      = require("../services/aiLedger");
@@ -59,7 +59,6 @@ const PurchaseOrder   = require("../models/PurchaseOrder");
 const MaterialInward  = require("../models/MaterialInward");
 const RawMaterial     = require("../models/RawMaterial");
 const BankStatement   = require("../models/BankStatement");
-const reconcile       = require("../services/reconcile");
 const { ATTACHMENT_TYPES, MAX_ATTACHMENT_BYTES } = require("../models/accountsShared");
 
 const {
@@ -129,7 +128,7 @@ router.get("/bank-accounts", catchAsyncErrors(async (_req, res) => {
   res.json({ success: true, accounts: await bankBalances.withBalances(accounts) });
 }));
 
-const ACCOUNT_FIELDS = ["name", "kind", "bankName", "accountNo", "ifsc", "upiId", "openingBalance", "openingDate", "float", "active", "isDefault", "tallyLedger"];
+const ACCOUNT_FIELDS = ["name", "kind", "bankName", "accountNo", "ifsc", "upiId", "openingBalance", "openingDate", "float", "active", "isDefault", "tallyLedger", "statementFrom"];
 function pickAccount(body) {
   const out = {};
   for (const f of ACCOUNT_FIELDS) if (body[f] !== undefined) out[f] = body[f];
@@ -1302,37 +1301,13 @@ router.post("/bank/statement", keepRequestContext(upload.single("file")), catchA
   if (!isId(req.body?.account)) return next(new ErrorHandler("account is required", 400));
   const account = await BankAccount.findById(req.body.account).lean();
   if (!account) return next(new ErrorHandler("Account not found", 404));
-  let rows;
+  let out;
   try {
-    rows = await bankStatement.parse(req.file.buffer, req.file.mimetype, req.file.originalname);
+    out = await importStatement({ account, buffer: req.file.buffer, mimetype: req.file.mimetype, filename: req.file.originalname, by: req.user?._id, byName: req.user?.name || "", useModel: req.body?.useModel !== "false" });
   } catch (err) {
     return next(new ErrorHandler(err.message, 400));
   }
-  if (!rows.length) return next(new ErrorHandler("No transactions found in the file", 400));
-  const matched = await bankStatement.match(rows, account._id, { useModel: req.body?.useModel !== "false" });
-  // A line set aside in an earlier upload stays set aside.
-  const keys = matched.map((r) => bankStatement.lineKey(r));
-  const earlier = await BankStatement.find({ account: account._id, "lines.key": { $in: keys } }).select("lines.key lines.status lines.note").lean();
-  const ignored = new Map();
-  for (const st of earlier) for (const l of st.lines) if (l.status === "ignored" && keys.includes(l.key)) ignored.set(l.key, l.note);
-  for (const [i, r] of matched.entries()) {
-    if (r.status !== "recorded" && ignored.has(keys[i])) { r.status = "ignored"; r.note = ignored.get(keys[i]); r.suggestion = null; }
-  }
-  const dates = rows.map((r) => r.date.getTime());
-  const statement = await BankStatement.create({
-    account: account._id, accountName: account.name, file: req.file.originalname || "",
-    from: new Date(Math.min(...dates)), to: new Date(Math.max(...dates)), closingBalance: bankStatement.closingOf(rows),
-    uploadedBy: req.user?._id, uploadedByName: req.user?.name || "",
-    lines: matched.map((r, i) => ({
-      index: r.index, date: r.date, narration: r.narration, ref: r.ref, amount: r.amount, direction: r.direction, balance: r.balance ?? null, key: keys[i],
-      status: r.status, voucherType: r.recorded?.voucherType || null, voucher: r.recorded?._id || null, voucherNo: r.recorded?.voucherNo || "", note: r.note || "",
-    })),
-  });
-  // What the bank shows is cleared in the books.
-  for (const r of matched) if (r.status === "recorded" && r.recorded) await reconcile.markCleared(r.recorded.voucherType, r.recorded._id, account._id, r.date);
-  const counts = { recorded: 0, matched: 0, unmatched: 0 };
-  for (const r of matched) counts[r.status] = (counts[r.status] || 0) + 1;
-  res.json({ success: true, statement: statement._id, account: { _id: account._id, name: account.name }, rows: matched, counts, file: req.file.originalname, closingBalance: statement.closingBalance });
+  res.json({ success: true, statement: out.statement._id, account: { _id: account._id, name: account.name }, rows: out.rows, counts: out.counts, file: req.file.originalname, closingBalance: out.closingBalance });
 }));
 
 router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
