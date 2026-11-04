@@ -62,6 +62,16 @@ const supplierSchema = new mongoose.Schema(
     // Days after the bill date its bills fall due (and its expenses).
     paymentTermsDays: { type: Number, default: 30, min: 0, max: 365 },
 
+    // MSME (Udyam) registration. A bill to a micro or small enterprise
+    // must be paid within 15 days, or the days agreed in writing (at most
+    // 45): otherwise the expense is disallowed in the year (s.43B(h)) and
+    // the supplier is owed interest (MSMED Act s.16).
+    msme: {
+      category:   { type: String, enum: ["", "micro", "small", "medium"], default: "" },
+      udyam:      { type: String, trim: true, uppercase: true, default: "", maxlength: 20 },
+      agreedDays: { type: Number, default: 0, min: 0, max: 45 },
+    },
+
     contactPerson: {
       type: String,
     },

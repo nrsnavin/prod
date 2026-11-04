@@ -35,6 +35,7 @@ const BankStatement = require("../models/BankStatement");
 const RecurringExpense = require("../models/RecurringExpense");
 const ExpenseCategory = require("../models/ExpenseCategory");
 const Supplier = require("../models/Supplier");
+const msme = require("../services/msme");
 
 const ACCOUNTS_SURFACES = ["bill-ocr", "bank-statement-match", "collection-reminder"];
 
@@ -46,7 +47,7 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
   const weekEnd = new Date(now.getTime() + 7 * DAY);
   const mine = String(req.user?._id || "");
   const canApprove = ["admin", "accounts"].includes(req.user?.role);
-  const [payables, pendingExpenses, claimsToPay, varianceBills, statements, chase, promisesDue] = await Promise.all([
+  const [payables, pendingExpenses, claimsToPay, varianceBills, statements, chase, promisesDue, msmeDues] = await Promise.all([
     outstanding.payables(),
     Expense.find({ status: "pending" }).select("expenseNo date categoryName description totals.grand submittedBy submittedByName source").sort({ date: 1 }).limit(50).lean(),
     Expense.find({ status: "approved", source: "claim" }).select("expenseNo date description payeeName totals.grand paidAmount").sort({ date: 1 }).limit(20).lean(),
@@ -56,7 +57,9 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
     BankStatement.find({ createdAt: { $gte: new Date(now.getTime() - 90 * DAY) } }).select("account accountName createdAt lines.status lines.key lines.amount").sort({ createdAt: -1 }).lean(),
     collections.overdue(),
     collections.overdue({ includeHeld: true }),
+    msme.dues({ asOf: now }),
   ]);
+  const msmeSoon = msmeDues.rows.filter((r) => r.state !== "ok");
   const dueThisWeek = payables.filter((p) => new Date(p.dueDate) <= weekEnd).sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
   const waitingOnMe = canApprove ? pendingExpenses.filter((e) => String(e.submittedBy || "") !== mine || req.user?.role === "admin") : [];
   // A suggested match ("matched") is not in the books until someone posts it.
@@ -80,6 +83,7 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
     toChase: { count: chase.filter((c) => !c.recentlyContacted).length, amount: r2(chase.filter((c) => !c.recentlyContacted).reduce((s, c) => s + c.overdue, 0)), top: chase.filter((c) => !c.recentlyContacted).slice(0, 5).map((c) => ({ party: c.party, partyName: c.partyName, overdue: c.overdue, oldestDays: c.oldestDays, next: c.next })) },
     promisesDue: { count: promised.length, top: promised.slice(0, 5).map((c) => ({ party: c.party, partyName: c.partyName, promise: c.promise })) },
     variances: { count: varianceBills.length, top: varianceBills },
+    msmeDue: { count: msmeSoon.length, overdue: msmeDues.totals.overdueCount, amount: r2(msmeSoon.reduce((s, r) => s + r.outstanding, 0)), top: msmeSoon.slice(0, 6) },
   });
 }));
 

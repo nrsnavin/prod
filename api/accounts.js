@@ -40,6 +40,7 @@ const outstanding  = require("../services/outstanding");
 const { ensureSeed } = require("../services/accountsSeed");
 const { readBill }  = require("../utils/billOcr");
 const { importStatement } = require("../services/statementImport");
+const msmeService = require("../services/msme");
 const collections   = require("../services/collections");
 const { sendWhatsApp, isConfigured: whatsappConfigured } = require("../utils/whatsapp");
 const aiLedger      = require("../services/aiLedger");
@@ -270,6 +271,11 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     billDate = readDate(b.billDate, "billDate", new Date());
     await assertOpen(billDate, req);
     dueDate = readDate(b.dueDate, "dueDate", new Date(billDate.getTime() + (supplier.paymentTermsDays ?? 30) * DAY));
+    // A micro or small enterprise must be paid within its statutory days (MSMED Act s.15), whatever the terms say.
+    if (msmeService.isMsme(supplier)) {
+      const statutory = new Date(billDate.getTime() + msmeService.statutoryDays(supplier) * DAY);
+      if (dueDate > statutory) dueDate = statutory;
+    }
     lines = readLines(b.lines, { defaultGst: (await getDocumentSettings()).invoice?.defaultGstPercent ?? 5 });
   } catch (err) { return next(err); }
   let po = null;

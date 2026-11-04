@@ -94,6 +94,60 @@ router.post("/contras", catchAsyncErrors(async (req, res, next) => {
   res.status(201).json({ success: true, contra: await Contra.findById(_id).lean() });
 }));
 
+// ── Journal vouchers ───────────────────────────────────────────────
+const Journal = require("../models/Journal");
+const journals = require("../services/journals");
+
+router.get("/journals", catchAsyncErrors(async (req, res) => {
+  const { page, limit, skip, range } = paging(req);
+  const q = {};
+  if (req.query.status && req.query.status !== "all") q.status = String(req.query.status);
+  if (req.query.purpose && req.query.purpose !== "all") q.purpose = String(req.query.purpose);
+  if (isId(req.query.party)) q.$or = [{ "lines.customer": req.query.party }, { "lines.supplier": req.query.party }];
+  if (range) q.date = range;
+  if (req.query.search) { const re = new RegExp(escapeRegex(String(req.query.search)), "i"); q.$and = [{ $or: [{ journalNo: re }, { narration: re }, { reason: re }, { "lines.ledger": re }] }]; }
+  const [total, rows] = await Promise.all([
+    Journal.countDocuments(q),
+    Journal.find(q).select("-fingerprints").sort({ date: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
+  ]);
+  res.json({ success: true, total, page, pages: Math.max(1, Math.ceil(total / limit)), journals: rows });
+}));
+
+router.get("/journals/:id", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Journal not found", 404));
+  const journal = await Journal.findById(req.params.id).lean();
+  if (!journal) return next(new ErrorHandler("Journal not found", 404));
+  res.json({ success: true, journal });
+}));
+
+router.post("/journals", catchAsyncErrors(async (req, res, next) => {
+  const b = req.body || {};
+  let date, read;
+  try {
+    date = readDate(b.date, "date", new Date());
+    await assertOpen(date, req);
+    if (String(b.reason || "").trim().length < 8) throw new ErrorHandler("Say why (a reason of at least 8 characters)", 400);
+    read = await journals.read(b);
+    const limit = (await getSettings()).journals?.approvalAbove || 0;
+    if (limit > 0 && read.total > limit && req.user?.role !== "admin") throw new ErrorHandler(`A journal above ₹${limit.toLocaleString("en-IN")} needs an admin to post it`, 403);
+  } catch (err) { return next(err); }
+  let out;
+  try {
+    out = await journals.post({ date, purpose: ["setoff", "writeoff", "accrual", "salary", "depreciation", "stock", "reclass", "other"].includes(b.purpose) ? b.purpose : "other", narration: b.narration, reason: b.reason, lines: read.lines, total: read.total, requestId: b.requestId }, req);
+  } catch (err) { if (err instanceof ErrorHandler) return next(err); throw err; }
+  res.status(out.replay ? 200 : 201).json({ success: true, journal: out.journal, ...(out.replay ? { replay: true } : {}) });
+}));
+
+router.post("/journals/:id/cancel", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Journal not found", 404));
+  const j = await Journal.findById(req.params.id).lean();
+  if (!j) return next(new ErrorHandler("Journal not found", 404));
+  if (j.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
+  let reason;
+  try { reason = reasonFrom(req); await assertOpen(j.date, req, { cancelling: true }); await journals.cancel(j, reason, req); } catch (err) { if (err instanceof ErrorHandler) return next(err); throw err; }
+  res.json({ success: true, journal: await Journal.findById(j._id).lean() });
+}));
+
 router.post("/contras/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Contra not found", 404));
   const c = await Contra.findById(req.params.id).lean();
@@ -341,6 +395,11 @@ router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
     const p = Number(b.bills.rateVariancePercent);
     if (Number.isFinite(p) && p >= 0 && p <= 100) set["bills.rateVariancePercent"] = p;
   }
+  if (b.gst?.hsnDigits !== undefined && [4, 6, 8].includes(Number(b.gst.hsnDigits))) set["gst.hsnDigits"] = Number(b.gst.hsnDigits);
+  if (b.journals?.approvalAbove !== undefined) {
+    const p = Number(b.journals.approvalAbove);
+    if (Number.isFinite(p) && p >= 0) set["journals.approvalAbove"] = p;
+  }
   await getSettings();
   const settings = await AccountsSettings.findOneAndUpdate({ key: "accounts" }, { $set: set }, { new: true }).lean();
   res.json({ success: true, settings: publicSettings(settings) });
@@ -368,6 +427,7 @@ router.use(require("./accountsTally"));
 router.use(require("./accountsHealth"));
 router.use(require("./accountsDocs"));
 router.use(require("./accountsInsights"));
+router.use(require("./accountsStatutory"));
 
 module.exports = router;
 module.exports.postOpening = postOpening;

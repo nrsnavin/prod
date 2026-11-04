@@ -17,10 +17,10 @@ const PartyLedgerEntry = require('../models/PartyLedgerEntry');
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
-async function post({ partyType, party, date, docType, doc, docNo, debit = 0, credit = 0, narration = '' }, session) {
+async function post({ partyType, party, date, docType, doc, docNo, debit = 0, credit = 0, narration = '', source, line }, session) {
   await PartyLedgerEntry.updateOne(
     { docType, doc },
-    { $set: { partyType, party, date, docNo, debit: r2(debit), credit: r2(credit), narration } },
+    { $set: { partyType, party, date, docNo, debit: r2(debit), credit: r2(credit), narration, ...(source ? { source, line } : {}) } },
     { upsert: true, session }
   );
 }
@@ -130,6 +130,14 @@ async function rebuild() {
     });
     n++;
   }
+  const Journal = require('../models/Journal');
+  for (const j of await Journal.find({ status: 'posted', 'lines.kind': 'party' }).select('date journalNo narration reason lines').lean()) {
+    for (const [i, l] of j.lines.entries()) {
+      if (l.kind !== 'party' || !l.partyType) continue;
+      await post({ partyType: l.partyType, party: l.partyType === 'customer' ? l.customer : l.supplier, date: j.date, docType: 'Journal', doc: journalLineId(j._id, i), docNo: j.journalNo, debit: l.debit || 0, credit: l.credit || 0, narration: j.narration || j.reason, source: j._id, line: i });
+      n++;
+    }
+  }
   for (const p of await Payment.find({ status: 'posted', partyType: { $in: ['customer', 'supplier'] } }).select('kind partyType customer supplier date voucherNo amount tds adjustments narration').lean()) {
     const party = p.partyType === 'customer' ? p.customer : p.supplier;
     const settled = settledBy(p);
@@ -142,4 +150,14 @@ async function rebuild() {
   return n;
 }
 
-module.exports = { post, reverse, statement, balances, balanceOf, rebuild, settledBy, openingEntry };
+/**
+ * A journal can touch the same party on two lines (a set-off against
+ * two of their documents), and the ledger holds one row per (docType,
+ * doc): each line gets an id of its own, derived from the journal's.
+ */
+function journalLineId(journalId, index) {
+  const hex = String(journalId).slice(0, 20) + String(index).padStart(4, '0');
+  return new mongoose.Types.ObjectId(hex);
+}
+
+module.exports = { post, reverse, statement, balances, balanceOf, rebuild, settledBy, openingEntry, journalLineId };

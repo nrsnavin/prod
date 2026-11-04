@@ -50,18 +50,20 @@ function taxLines(t, L, input) {
 const withRound = (lines, t, L) => (Math.abs(t.roundOff || 0) > 0.004 ? [...lines, { ledger: L.roundOff, amount: r2(t.roundOff) }] : lines);
 
 async function load(rows) {
-  const ids = (type) => rows.filter((r) => r.docType === type).map((r) => r.doc);
+  // A journal's ledger rows carry a per-line id; the journal itself is `source`.
+  const ids = (type) => rows.filter((r) => r.docType === type).map((r) => (type === 'Journal' ? r.source : r.doc)).filter(Boolean);
   const pick = (Model, type, fields) => (ids(type).length ? Model.find({ _id: { $in: ids(type) } }).select(fields).lean() : []);
-  const [invoices, bills, expenses, notes, payments, openings] = await Promise.all([
+  const [invoices, bills, expenses, notes, payments, openings, journalsList] = await Promise.all([
     pick(require('../models/Invoice'), 'Invoice', 'invoiceNumber customerPo orderNo totals'),
     pick(require('../models/SupplierBill'), 'SupplierBill', 'billNo supplierBillNo kind category totals reverseCharge poNo'),
     pick(require('../models/Expense'), 'Expense', 'expenseNo refNo category categoryName description totals itc'),
     pick(require('../models/AccountNote'), 'AccountNote', 'kind noteNo partyType against reason totals partyNoteNo'),
     pick(require('../models/Payment'), 'Payment', 'kind voucherNo amount mode account accountName reference tds adjustments allocations unallocated narration'),
     pick(require('../models/OpeningBalance'), 'OpeningBalance', 'docNo refNo kind'),
+    pick(require('../models/Journal'), 'Journal', 'journalNo purpose narration reason lines'),
   ]);
   const byId = new Map();
-  for (const d of [...invoices, ...bills, ...expenses, ...notes, ...payments, ...openings]) byId.set(String(d._id), d);
+  for (const d of [...invoices, ...bills, ...expenses, ...notes, ...payments, ...openings, ...journalsList]) byId.set(String(d._id), d);
   const accountIds = payments.map((p) => p.account).filter(Boolean);
   const catIds = [...bills, ...expenses].map((d) => d.category).filter(Boolean);
   const [accounts, cats] = await Promise.all([
@@ -77,7 +79,7 @@ async function load(rows) {
 
 /** Particulars, voucher type, references and the detailed breakup of one row. */
 function describe(row, partyType, ctx, L) {
-  const d = ctx.byId.get(String(row.doc)) || {};
+  const d = ctx.byId.get(String(row.docType === 'Journal' ? row.source : row.doc)) || {};
   const t = d.totals || {};
   const headOf = (cat, fallback) => ctx.head.get(String(cat)) || fallback || L.sundryExpenses;
   const out = { vchType: '', particulars: '', refs: [], lines: [], partyRef: '' };
@@ -127,6 +129,17 @@ function describe(row, partyType, ctx, L) {
       if ((d.unallocated || 0) > 0.004) out.refs.push({ type: 'On Account', name: d.voucherNo, amount: r2(d.unallocated) });
       // Only one ledger on the other side: nothing to break down.
       if (out.lines.length === 1) out.lines = [];
+      break;
+    }
+    case 'Journal': {
+      out.vchType = 'Journal';
+      const i = Number(row.line) || 0;
+      const mine = (d.lines || [])[i];
+      const others = (d.lines || []).filter((l, k) => k !== i);
+      out.particulars = others.length === 1 ? others[0].ledger : 'As per details';
+      out.partyRef = d.purpose && d.purpose !== 'other' ? d.purpose : '';
+      out.lines = others.map((l) => ({ ledger: `${l.debit > 0 ? 'Dr' : 'Cr'} ${l.ledger}`, amount: r2(l.debit > 0 ? l.debit : l.credit) }));
+      for (const r of mine?.refs || []) out.refs.push({ type: 'Agst Ref', name: r.docNo, amount: r2(r.amount) });
       break;
     }
     case 'OpeningBalance':

@@ -25,12 +25,16 @@ const PartyLedgerEntrySchema = new mongoose.Schema(
     partyType: { type: String, enum: ["customer", "supplier"], required: true },
     party:     { type: mongoose.Types.ObjectId, required: true },
     date:      { type: Date, required: true },
-    docType:   { type: String, enum: ["Invoice", "SupplierBill", "Expense", "AccountNote", "Payment", "OpeningBalance"], required: true },
+    docType:   { type: String, enum: ["Invoice", "SupplierBill", "Expense", "AccountNote", "Payment", "OpeningBalance", "Journal"], required: true },
     doc:       { type: mongoose.Types.ObjectId, required: true },
     docNo:     { type: String, required: true },
     debit:     { type: Number, default: 0 },
     credit:    { type: Number, default: 0 },
     narration: { type: String, default: "" },
+    // A journal posts one row per party line, each under an id of its
+    // own (doc): the journal itself and the line's index are kept here.
+    source:    { type: mongoose.Types.ObjectId },
+    line:      { type: Number },
   },
   { timestamps: true }
 );

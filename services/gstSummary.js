@@ -45,11 +45,17 @@ async function summary({ from, to }) {
   const outputTotal = sum(output.sales); const cnTotal = sum(output.creditNotes); const rcmTotal = sum(output.reverseCharge);
   const inputTotal = sum(input.purchases); const dnTotal = sum(input.debitNotes); const expTotal = sum(input.expenses);
   const netOutput = { cgst: r2(outputTotal.cgst - cnTotal.cgst + rcmTotal.cgst), sgst: r2(outputTotal.sgst - cnTotal.sgst + rcmTotal.sgst), igst: r2(outputTotal.igst - cnTotal.igst + rcmTotal.igst) };
-  const netInput = { cgst: r2(inputTotal.cgst - dnTotal.cgst + expTotal.cgst), sgst: r2(inputTotal.sgst - dnTotal.sgst + expTotal.sgst), igst: r2(inputTotal.igst - dnTotal.igst + expTotal.igst) };
+  // Rule 37: credit reversed on bills unpaid 180 days, and re-claimed once paid.
+  const rule37 = await require('./itcReversal').inPeriod(from, to);
+  const netInput = {
+    cgst: r2(inputTotal.cgst - dnTotal.cgst + expTotal.cgst - rule37.reversed.cgst + rule37.reclaimed.cgst),
+    sgst: r2(inputTotal.sgst - dnTotal.sgst + expTotal.sgst - rule37.reversed.sgst + rule37.reclaimed.sgst),
+    igst: r2(inputTotal.igst - dnTotal.igst + expTotal.igst - rule37.reversed.igst + rule37.reclaimed.igst),
+  };
   return {
     from, to, output, input,
     totals: {
-      output: outputTotal, creditNotes: cnTotal, reverseCharge: rcmTotal, purchases: inputTotal, debitNotes: dnTotal, expenses: expTotal, netOutput, netInput,
+      output: outputTotal, creditNotes: cnTotal, reverseCharge: rcmTotal, purchases: inputTotal, debitNotes: dnTotal, expenses: expTotal, rule37, netOutput, netInput,
       payable: { cgst: r2(netOutput.cgst - netInput.cgst), sgst: r2(netOutput.sgst - netInput.sgst), igst: r2(netOutput.igst - netInput.igst) },
     },
     counts: { invoices: invoices.length, creditNotes: creditNotes.length, bills: bills.length, debitNotes: debitNotes.length, expenses: expenses.length, reverseCharge: rcmBills.length },

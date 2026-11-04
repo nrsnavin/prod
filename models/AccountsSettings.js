@@ -78,6 +78,16 @@ const AccountsSettingsSchema = new mongoose.Schema(
       // Percent a billed rate may differ from the PO rate before it needs a note.
       rateVariancePercent: { type: Number, default: 2, min: 0, max: 100 },
     },
+
+    gst: {
+      // HSN digits GSTR-1 must carry: 4 up to ₹5 crore turnover, 6 above.
+      hsnDigits: { type: Number, enum: [4, 6, 8], default: 4 },
+    },
+
+    journals: {
+      // A journal above this needs an admin to post it (0: anyone in accounts).
+      approvalAbove: { type: Number, default: 0, min: 0 },
+    },
   },
   { timestamps: true }
 );

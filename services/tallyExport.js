@@ -67,7 +67,7 @@ const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct
 const tallyAttrDate = (d) => { const x = new Date(new Date(d).getTime() + IST); return `${x.getUTCDate()}-${MON[x.getUTCMonth()]}-${x.getUTCFullYear()}`; };
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
-const TYPES = ['Invoice', 'SupplierBill', 'Expense', 'AccountNote', 'Payment', 'Contra'];
+const TYPES = ['Invoice', 'SupplierBill', 'Expense', 'AccountNote', 'Payment', 'Contra', 'Journal'];
 
 /**
  * A voucher being built: dr()/cr() add to a ledger (same ledger lines
@@ -113,13 +113,14 @@ function taxLines(v, t, side, L, input, rcm = false) {
 }
 
 const VOUCHER_TYPE = {
-  Invoice: () => 'Sales', SupplierBill: () => 'Purchase', Expense: () => 'Journal', Contra: () => 'Contra',
+  Invoice: () => 'Sales', SupplierBill: () => 'Purchase', Expense: () => 'Journal', Contra: () => 'Contra', Journal: () => 'Journal',
   AccountNote: (d) => (d.kind === 'credit' ? 'Credit Note' : 'Debit Note'),
   Payment: (d) => (d.kind === 'receipt' ? 'Receipt' : 'Payment'),
 };
-const NUMBER = { Invoice: 'invoiceNumber', SupplierBill: 'billNo', Expense: 'expenseNo', AccountNote: 'noteNo', Payment: 'voucherNo', Contra: 'contraNo' };
-const DATE = { Invoice: 'invoiceDate', SupplierBill: 'billDate', Expense: 'date', AccountNote: 'date', Payment: 'date', Contra: 'date' };
-const MODEL = { Invoice, SupplierBill, Expense, AccountNote, Payment, Contra };
+const NUMBER = { Invoice: 'invoiceNumber', SupplierBill: 'billNo', Expense: 'expenseNo', AccountNote: 'noteNo', Payment: 'voucherNo', Contra: 'contraNo', Journal: 'journalNo' };
+const DATE = { Invoice: 'invoiceDate', SupplierBill: 'billDate', Expense: 'date', AccountNote: 'date', Payment: 'date', Contra: 'date', Journal: 'date' };
+const Journal = require('../models/Journal');
+const MODEL = { Invoice, SupplierBill, Expense, AccountNote, Payment, Contra, Journal };
 
 const noBatch = (path) => ({ $or: [{ [path]: { $exists: false } }, { [path]: null }] });
 
@@ -132,7 +133,7 @@ const noBatch = (path) => ({ $or: [{ [path]: { $exists: false } }, { [path]: nul
 async function build({ from, to, fresh = true, L }) {
   const range = { $gte: from, $lte: to };
   const notSent = fresh ? noBatch('tally.batch') : {};
-  const [invoices, bills, expenses, notes, payments, contras, accounts, categories] = await Promise.all([
+  const [invoices, bills, expenses, notes, payments, contras, accounts, categories, journalsList] = await Promise.all([
     Invoice.find({ status: 'issued', invoiceDate: range, ...notSent }).select('invoiceNumber invoiceDate customer buyer customerPo orderNo totals placeOfSupply tally').lean(),
     SupplierBill.find({ status: { $ne: 'cancelled' }, billDate: range, ...notSent }).select('billNo supplierBillNo billDate supplier supplierName supplierGstin kind category totals itc poNo tally reverseCharge rcm').lean(),
     Expense.find({ status: { $in: ['approved', 'paid'] }, date: range, ...notSent }).select('expenseNo date supplier payeeName refNo category categoryName description totals itc tally').lean(),
@@ -141,6 +142,7 @@ async function build({ from, to, fresh = true, L }) {
     Contra.find({ status: 'posted', date: range, ...notSent }).lean(),
     BankAccount.find({}).select('name tallyLedger').lean(),
     ExpenseCategory.find({}).select('name ledger').lean(),
+    Journal.find({ status: 'posted', date: range, ...notSent }).lean(),
   ]);
 
   // Cancelled here after they went: cancelled there, dated as sent.
@@ -174,6 +176,7 @@ async function build({ from, to, fresh = true, L }) {
   notes.forEach((n) => note(n.partyType, n.partyType === 'customer' ? n.customer : n.supplier));
   payments.forEach((p) => { if (p.partyType === 'customer') note('customer', p.customer); if (p.partyType === 'supplier') note('supplier', p.supplier); });
   [...paySources, ...noteSources, ...obSources].forEach((s) => note(s.partyType, s.partyType === 'customer' ? s.customer : s.supplier));
+  journalsList.forEach((j) => j.lines.forEach((l) => { if (l.kind === 'party') note(l.partyType, l[l.partyType]); }));
   const [custs, supps] = await Promise.all([
     Customer.find({ _id: { $in: [...ids.customer] } }).select('name tallyName gstin stateCode address city pincode').lean(),
     Supplier.find({ _id: { $in: [...ids.supplier] } }).select('name tallyName gstin gstRegistration address').lean(),
@@ -199,6 +202,7 @@ async function build({ from, to, fresh = true, L }) {
   for (const p of [...payments, ...paySources]) for (const a of p.allocations || []) wantRef(a.docType, a.doc);
   for (const n of [...notes, ...noteSources]) { if (n.against) wantRef(n.against.docType, n.against.doc); for (const a of n.applications || []) wantRef(a.docType, a.doc); }
   for (const o of obSources) for (const a of o.applications || []) wantRef(a.docType, a.doc);
+  for (const j of journalsList) for (const l of j.lines) for (const r of l.refs || []) wantRef(r.docType, r.doc);
   const [refBills, refExpenses, refObs] = await Promise.all([
     SupplierBill.find({ _id: { $in: [...want.SupplierBill] } }).select('billNo supplierBillNo').lean(),
     Expense.find({ _id: { $in: [...want.Expense] } }).select('expenseNo refNo supplier category categoryName totals itc').lean(),
@@ -350,6 +354,26 @@ async function build({ from, to, fresh = true, L }) {
     const v = voucher('Contra', { docType: 'Contra', doc: c._id, number: c.contraNo, date: c.date, party: '', reference: c.reference || '', narration: c.narration || `${c.fromName} to ${c.toName}` });
     v.dr(acct.get(String(c.to)) || c.toName, c.amount);
     v.cr(acct.get(String(c.from)) || c.fromName, c.amount);
+    finish(v);
+  }
+
+  for (const j of journalsList) {
+    const v = voucher('Journal', { docType: 'Journal', doc: j._id, number: j.journalNo, date: j.date, party: '', reference: '', narration: j.narration || j.reason });
+    for (const l of j.lines) {
+      const amount = l.debit > 0 ? l.debit : l.credit;
+      let ledger = l.ledger;
+      let bills = null;
+      if (l.kind === 'party') {
+        ledger = party(l.partyType, l[l.partyType], l.ledger);
+        // Lowering what the party owes sets against their documents; raising it is a new reference.
+        const lowers = l.partyType === 'customer' ? l.credit > 0 : l.debit > 0;
+        const refs = (l.refs || []).map((r) => ({ name: refOf(r.docType, r.doc, r.docNo), type: 'Agst Ref', amount: r.amount }));
+        const rest = r2(amount - refs.reduce((s, r) => s + r.amount, 0));
+        bills = lowers ? [...refs, ...(rest > 0.005 ? [{ name: j.journalNo, type: 'On Account', amount: rest }] : [])] : [{ name: j.journalNo, type: 'New Ref', amount }];
+      } else if (l.kind === 'bank') ledger = acct.get(String(l.account)) || l.ledger;
+      else if (l.kind === 'head') ledger = headOf(l.category, l.ledger);
+      if (l.debit > 0) v.dr(ledger, amount, bills); else v.cr(ledger, amount, bills);
+    }
     finish(v);
   }
 

@@ -24,6 +24,7 @@ const Customer = require('../models/Customer');
 const Invoice = require('../models/Invoice');
 const Payment = require('../models/Payment');
 const Contra = require('../models/Contra');
+const Journal = require('../models/Journal');
 const BankAccount = require('../models/BankAccount');
 const BankStatement = require('../models/BankStatement');
 const RecurringExpense = require('../models/RecurringExpense');
@@ -357,10 +358,10 @@ async function closeChecklist(month) {
     SupplierBill.countDocuments({ status: { $ne: 'cancelled' }, billDate: range, 'attachments.0': { $exists: false } }),
     Expense.find({ status: 'pending', date: { $lte: new Date(Date.now() - 7 * DAY) } }).select('totals.grand').lean(),
     Payment.aggregate([{ $match: { status: 'posted', kind: 'payment', date: range, 'tds.amount': { $gt: 0 } } }, { $group: { _id: '$tds.section', amount: { $sum: '$tds.amount' } } }]),
-    Promise.all(['Invoice', 'SupplierBill', 'Expense', 'AccountNote', 'Payment', 'Contra'].map(async (t) => {
-      const Model = { Invoice, SupplierBill, Expense, AccountNote, Payment, Contra }[t];
-      const dateField = { Invoice: 'invoiceDate', SupplierBill: 'billDate', Expense: 'date', AccountNote: 'date', Payment: 'date', Contra: 'date' }[t];
-      const status = { Invoice: 'issued', SupplierBill: { $ne: 'cancelled' }, Expense: { $in: ['approved', 'paid'] }, AccountNote: 'issued', Payment: 'posted', Contra: 'posted' }[t];
+    Promise.all(['Invoice', 'SupplierBill', 'Expense', 'AccountNote', 'Payment', 'Contra', 'Journal'].map(async (t) => {
+      const Model = { Invoice, SupplierBill, Expense, AccountNote, Payment, Contra, Journal }[t];
+      const dateField = { Invoice: 'invoiceDate', SupplierBill: 'billDate', Expense: 'date', AccountNote: 'date', Payment: 'date', Contra: 'date', Journal: 'date' }[t];
+      const status = { Invoice: 'issued', SupplierBill: { $ne: 'cancelled' }, Expense: { $in: ['approved', 'paid'] }, AccountNote: 'issued', Payment: 'posted', Contra: 'posted', Journal: 'posted' }[t];
       // An expense with no supplier never goes as a voucher of its own —
       // its payment carries the head — so it is not waiting to be sent.
       const own = t === 'Expense' ? { supplier: { $ne: null } } : {};
@@ -370,6 +371,13 @@ async function closeChecklist(month) {
     SupplierBill.countDocuments({ status: { $ne: 'cancelled' }, billDate: range }),
     AccountNote.countDocuments({ status: 'issued', unapplied: { $gt: 0.005 } }),
   ]);
+  const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+  const [msmeDues, twoB, rule37] = await Promise.all([
+    require('./msme').dues({ asOf: to }),
+    require('./gstr2b').summary(monthKey),
+    require('./itcReversal').due(monthKey),
+  ]);
+  const msmeOver = msmeDues.rows.filter((r) => r.dueDate <= to && r.state === 'overdue');
   const seen = new Map();
   for (const st of statements) for (const l of st.lines) {
     if (l.date < from || l.date > to) continue;
@@ -389,6 +397,9 @@ async function closeChecklist(month) {
     { key: 'approvals', label: 'Expenses decided', ok: pending.length === 0, count: pending.length, amount: r2(pending.reduce((s, e) => s + (e.totals?.grand || 0), 0)), detail: pending.length ? `${pending.length} waiting for approval more than a week` : 'Nothing waiting more than a week', link: '/accounts/expenses' },
     { key: 'tds', label: `TDS to deposit by ${dmy(tdsDue)}`, ok: tdsTotal === 0, count: tds.length, amount: tdsTotal, detail: tdsTotal ? `₹${fmt(tdsTotal)} deducted (${tds.map((x) => `${x._id || '—'} ₹${fmt(x.amount)}`).join(', ')}) — deposit by the 7th` : 'No TDS deducted this month', link: '/accounts/reports' },
     { key: 'gst', label: `GST return by ${dmy(gstDue)}`, ok: true, count: rcmAndBills, detail: 'Check the GST report against the purchase register before filing', link: '/accounts/reports' },
+    { key: 'msme', label: 'MSME suppliers paid in time', ok: msmeOver.length === 0, count: msmeOver.length, amount: r2(msmeOver.reduce((s, r) => s + r.outstanding, 0)), detail: msmeOver.length ? `${msmeOver.length} bill${msmeOver.length === 1 ? '' : 's'} to micro / small suppliers past the 45-day limit — disallowed at year end if still unpaid (s.43B(h))` : msmeDues.suppliers ? 'Every MSME bill is within its limit' : 'No supplier is marked micro or small', link: '/accounts/statutory' },
+    { key: 'gstr2b', label: 'GSTR-2B matched', ok: twoB.uploaded && twoB.counts.missing === 0 && twoB.counts.mismatch === 0, count: twoB.uploaded ? twoB.counts.missing + twoB.counts.mismatch : 0, amount: twoB.uploaded ? r2(twoB.itc.missing + twoB.itc.mismatch) : 0, detail: !twoB.uploaded ? 'Upload the month\'s GSTR-2B from the portal before claiming input credit' : twoB.counts.missing + twoB.counts.mismatch ? `${twoB.counts.missing} bill${twoB.counts.missing === 1 ? '' : 's'} not in 2B (₹${fmt(twoB.itc.missing)} ITC on hold), ${twoB.counts.mismatch} with a different tax` : 'Every bill with credit is in GSTR-2B', link: '/accounts/statutory' },
+    { key: 'rule37', label: 'Credit reversed on bills unpaid 180 days', ok: rule37.toReverse.filter((b) => b.inMonth).length === 0, count: rule37.toReverse.length, amount: rule37.totals.reverse, detail: rule37.toReverse.length ? `${rule37.toReverse.length} bill${rule37.toReverse.length === 1 ? '' : 's'} unpaid past 180 days: reverse ₹${fmt(rule37.totals.reverse)} of credit in GSTR-3B (Rule 37)` : 'Nothing to reverse', link: '/accounts/statutory' },
     { key: 'credits', label: 'Unapplied credit notes', ok: credits === 0, count: credits, detail: credits ? `${credits} note${credits === 1 ? '' : 's'} with credit not yet set against an invoice` : 'Every credit is applied', link: '/accounts/notes' },
     { key: 'tally', label: 'Sent to Tally', ok: unsentTotal === 0, count: unsentTotal, detail: unsentTotal ? `${unsentTotal} document${unsentTotal === 1 ? '' : 's'} not yet sent` : 'Everything has gone', link: '/accounts/tally' },
     { key: 'lock', label: 'Books locked', ok: !!locked, count: 0, detail: locked ? `Locked up to ${dmy(settings.lockDate)}` : 'Lock the month once it has gone to Tally', link: '/accounts/settings' },

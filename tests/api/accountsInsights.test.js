@@ -179,7 +179,7 @@ describe('month end, recurring expenses, the inbox, Excel', () => {
     const s = await supplier();
     await post('/accounts/bills', { supplier: s._id, supplierBillNo: 'Z1', billDate: iso(new Date(prev.getFullYear(), prev.getMonth(), 10)), lines: [{ description: 'Yarn', quantity: 1, rate: 1000 }] });
     const c = (await get(`/accounts/close?month=${month}`)).body;
-    expect(c.items.map((i) => i.key)).toEqual(['bank', 'cleared', 'photos', 'approvals', 'tds', 'gst', 'credits', 'tally', 'lock']);
+    expect(c.items.map((i) => i.key)).toEqual(['bank', 'cleared', 'photos', 'approvals', 'tds', 'gst', 'msme', 'gstr2b', 'rule37', 'credits', 'tally', 'lock']);
     expect(c.items.find((i) => i.key === 'photos')).toMatchObject({ ok: false, count: 1 });
     expect(c.items.find((i) => i.key === 'tally')).toMatchObject({ ok: false, count: 1 });
     expect(c.items.find((i) => i.key === 'lock').ok).toBe(false);

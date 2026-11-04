@@ -26,6 +26,7 @@ const Expense = require('../models/Expense');
 const AccountNote = require('../models/AccountNote');
 const Payment = require('../models/Payment');
 const Contra = require('../models/Contra');
+const Journal = require('../models/Journal');
 const OpeningBalance = require('../models/OpeningBalance');
 const Customer = require('../models/Customer');
 const Supplier = require('../models/Supplier');
@@ -182,6 +183,7 @@ const TYPES = [
   ['AccountNote', AccountNote, 'noteNo', 'date', ['cancelled']],
   ['Payment', Payment, 'voucherNo', 'date', ['cancelled']],
   ['Contra', Contra, 'contraNo', 'date', ['cancelled']],
+  ['Journal', Journal, 'journalNo', 'date', ['cancelled']],
 ];
 
 /** Sent to Tally, then cancelled here: the next export cancels them there. */

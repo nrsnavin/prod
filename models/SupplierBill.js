@@ -51,6 +51,25 @@ const SupplierBillSchema = new mongoose.Schema(
       eligible: { type: Boolean, default: true },
       amount:   { type: Number, default: 0 },
     },
+    // What the supplier reported in GSTR-2B for this bill (services/gstr2b.js).
+    gstr2b: {
+      status:  { type: String, enum: ["", "matched", "mismatch", "missing"], default: "" },
+      period:  { type: String, default: "" },   // the 2B month it was found (or looked for) in
+      entry:   { type: mongoose.Types.ObjectId, ref: "Gstr2bEntry" },
+      diff:    { type: Number, default: 0 },    // tax in books − tax in 2B
+      note:    { type: String, default: "" },
+      at:      { type: Date },
+    },
+    // Input credit reversed because the supplier was not paid within 180
+    // days (CGST Rule 37), and re-claimed when paid.
+    itcReversal: {
+      amount:        { type: Number, default: 0 },
+      period:        { type: String, default: "" },
+      at:            { type: Date },
+      reclaimAmount: { type: Number, default: 0 },
+      reclaimPeriod: { type: String, default: "" },
+      reclaimAt:     { type: Date },
+    },
     // TDS to deduct when paying this bill.
     tds: {
       applicable: { type: Boolean, default: false },
