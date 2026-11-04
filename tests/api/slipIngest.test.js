@@ -103,11 +103,14 @@ describe('working out the shift', () => {
   });
 
   it('a printed sheet with no readable plan number: from its codes', async () => {
-    const { sp, details } = await plan({ dateKey: '2026-10-05', shift: 'NIGHT' });
-    await plan({ dateKey: '2026-10-06', shift: 'DAY', prefix: 'N-0' }); // another, more recent plan
+    // Codes are matched only against the last 30 days of plans, so these
+    // are dated from today, not fixed (fixed dates aged out of the window).
+    const ago = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+    const { sp, details } = await plan({ dateKey: ago(2), shift: 'NIGHT' });
+    await plan({ dateKey: ago(1), shift: 'DAY', prefix: 'N-0' }); // another, more recent plan
     const slip = await uploadAndRead({ format: 'sheet', rows: [row({ code: shortCode(details[1]._id) })] });
     expect(String(slip.shiftPlan)).toBe(String(sp._id));
-    expect(slip).toMatchObject({ dateKey: '2026-10-05', shift: 'NIGHT', dateFrom: 'codes' });
+    expect(slip).toMatchObject({ dateKey: ago(2), shift: 'NIGHT', dateFrom: 'codes' });
   });
 
   it("the factory's own slip: the caption wins over what is written on it", async () => {
