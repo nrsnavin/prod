@@ -66,7 +66,10 @@ router.get(
     // neither collection was listed here, so the record existed and was
     // invisible. An audit trail that omits a whole document type is worse
     // than none — it reads as complete.
-    const [orders, jobs, pos, dcs, invoices, bills, expenses, notes, vouchers, quotes, counts, groups] = await Promise.all([
+    // One name per query below, in the same order. A query added here without a
+    // name shifts every later one and drops the last off the trail — which is
+    // exactly the "silently omitted document type" this route exists to avoid.
+    const [orders, jobs, pos, dcs, invoices, bills, expenses, notes, vouchers, contras, journals, openings, quotes, counts, groups] = await Promise.all([
       recentFrom(Order,           "Order",           "orderNo",    limit),
       recentFrom(JobOrder,        "JobOrder",        "jobOrderNo", limit),
       recentFrom(PurchaseOrder,   "PurchaseOrder",   "poNo",       limit),
@@ -101,7 +104,7 @@ router.get(
       reason: null,
     }));
 
-    const entries = [...orders, ...jobs, ...pos, ...dcs, ...invoices, ...bills, ...expenses, ...notes, ...vouchers, ...quotes, ...counts, ...groups, ...access]
+    const entries = [...orders, ...jobs, ...pos, ...dcs, ...invoices, ...bills, ...expenses, ...notes, ...vouchers, ...contras, ...journals, ...openings, ...quotes, ...counts, ...groups, ...access]
       .filter((e) => e.at)
       .sort((a, b) => new Date(b.at) - new Date(a.at))
       .slice(0, limit);
