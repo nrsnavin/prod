@@ -61,6 +61,8 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
     msme.dues({ asOf: now }),
   ]);
   const serviceBills = await MachineServiceBill.find({ supplierBill: null, amount: { $gt: 0 } }).select("machine serviceLog kind vendor billNo billDate amount filename createdAt").sort({ createdAt: -1 }).limit(20).lean();
+  // Cheques in the drawer whose date has come (or comes this week): to be deposited.
+  const cheques = await Payment.find({ status: "posted", "cheque.status": "held", "cheque.date": { $lte: weekEnd } }).select("kind voucherNo partyName amount cheque.number cheque.bank cheque.date").sort({ "cheque.date": 1 }).limit(20).lean();
   const msmeSoon = msmeDues.rows.filter((r) => r.state !== "ok");
   const dueThisWeek = payables.filter((p) => new Date(p.dueDate) <= weekEnd).sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
   const waitingOnMe = canApprove ? pendingExpenses.filter((e) => String(e.submittedBy || "") !== mine || req.user?.role === "admin") : [];
@@ -86,6 +88,7 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
     promisesDue: { count: promised.length, top: promised.slice(0, 5).map((c) => ({ party: c.party, partyName: c.partyName, promise: c.promise })) },
     variances: { count: varianceBills.length, top: varianceBills },
     serviceBills: { count: serviceBills.length, amount: r2(serviceBills.reduce((s, b) => s + (b.amount || 0), 0)), top: serviceBills.slice(0, 6) },
+    chequesDue: { count: cheques.length, amount: r2(cheques.reduce((s, c) => s + c.amount, 0)), overdue: cheques.filter((c) => new Date(c.cheque.date) < today).length, top: cheques.slice(0, 6) },
     msmeDue: { count: msmeSoon.length, overdue: msmeDues.totals.overdueCount, amount: r2(msmeSoon.reduce((s, r) => s + r.outstanding, 0)), top: msmeSoon.slice(0, 6) },
   });
 }));

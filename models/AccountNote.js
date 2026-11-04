@@ -53,6 +53,21 @@ const AccountNoteSchema = new mongoose.Schema(
     // The party's own number for the same note (a supplier's credit note).
     partyNoteNo: { type: String, default: "", trim: true, maxlength: 40 },
 
+    // A debit note charging interest on overdue invoices: per invoice, the
+    // days it covered, so the next one runs from there (services/overdueInterest.js).
+    interest: {
+      type: [new mongoose.Schema({
+        invoice: { type: mongoose.Types.ObjectId, ref: "Invoice", required: true },
+        docNo:   { type: String, default: "" },
+        from:    { type: Date, required: true },
+        to:      { type: Date, required: true },
+        days:    { type: Number, default: 0 },
+        rate:    { type: Number, default: 0 },
+        amount:  { type: Number, default: 0 },
+      }, { _id: false })],
+      default: [],
+    },
+
     reason: { type: String, required: true, trim: true, maxlength: 200 },
     supplyType: { type: String, enum: ["intra", "inter"], required: true },
     lines:  { type: [TaxLineSchema], default: [] },

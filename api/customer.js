@@ -21,7 +21,7 @@ router.use(isAuthenticated, isAdmin('admin', 'accounts'));
 const CUSTOMER_FIELDS = [
   "name", "tallyName", "email", "gstin", "status", "contactName", "phoneNumber",
   "address", "city", "pincode", "stateCode",
-  "purchase", "accountant", "merchandiser", "paymentTerms",
+  "purchase", "accountant", "merchandiser", "paymentTerms", "interestRate", "interestGraceDays", "country", "sez", "currency",
   "creditLimit", "maxOverdueDays", "tan", "pan",
 ];
 function pickCustomer(body) {

@@ -13,6 +13,15 @@
 //    PUT  /budgets                        save the year's budgets
 //    GET  /cost-centres?from=&to=         spend by order, machine, department
 //    GET  /cost-centres/order/:id         what was bought for one order
+//    GET  /confirmations?asOf=            parties with a balance and where each stands
+//    POST /confirmations                  rows for the parties asked (or all)
+//    GET  /confirmations/:id/letter       the letter and the statement behind it
+//    POST /confirmations/:id/send         email / WhatsApp / printed
+//    POST /confirmations/:id/reply        confirmed, or disputed with their figure
+//    GET  /pdc?status=                    cheques held, deposited, cleared, bounced
+//    POST /payments/:id/cheque            deposited / cleared / bounced
+//    GET  /interest?asOf=&customer=       interest due on overdue invoices
+//    GET  /interest/draft?customer=&asOf= the debit note that charges it
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -28,6 +37,12 @@ const closingStock = require("../services/closingStock");
 const budgets = require("../services/budgets");
 const costCentres = require("../services/costCentres");
 const FixedAsset = require("../models/FixedAsset");
+const Payment = require("../models/Payment");
+const confirmations = require("../services/confirmations");
+const overdueInterest = require("../services/overdueInterest");
+const { cancelVoucher } = require("../services/voucherCancel");
+const { fp } = require("../services/accountsHelpers");
+const { ACTION_CODES } = require("../utils/fingerprint");
 
 const FY = /^\d{4}-\d{2}$/;
 const fyOf = (q) => (FY.test(String(q || "")) ? q : fixedAssets.fyOf(new Date()));
@@ -148,6 +163,105 @@ router.get("/cost-centres", catchAsyncErrors(async (req, res, next) => {
 router.get("/cost-centres/order/:id", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Order not found", 404));
   res.json({ success: true, ...(await costCentres.forOrder(req.params.id)) });
+}));
+
+// ── Balance confirmations ──────────────────────────────────────────
+router.get("/confirmations", catchAsyncErrors(async (req, res, next) => {
+  let asOf;
+  try { asOf = readDate(req.query.asOf, "asOf", new Date()); } catch (err) { return next(err); }
+  res.json({ success: true, ...(await confirmations.list(asOf)) });
+}));
+
+router.post("/confirmations", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {
+  const b = req.body || {};
+  let asOf;
+  try { asOf = readDate(b.asOf, "asOf", null); } catch (err) { return next(err); }
+  if (!asOf) return next(new ErrorHandler("asOf is required (YYYY-MM-DD)", 400));
+  try {
+    const out = await confirmations.create({ asOf, partyType: b.partyType, parties: b.parties, all: !!b.all }, req);
+    res.status(201).json({ success: true, ...out, ...(await confirmations.list(asOf)) });
+  } catch (err) { return fail(err, next); }
+}));
+
+router.get("/confirmations/:id/letter", catchAsyncErrors(async (req, res, next) => {
+  try { res.json({ success: true, ...(await confirmations.letter(req.params.id)) }); }
+  catch (err) { return fail(err, next); }
+}));
+
+router.post("/confirmations/:id/send", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {
+  try { res.json({ success: true, confirmation: await confirmations.send(req.params.id, req.body || {}, req) }); }
+  catch (err) { return fail(err, next); }
+}));
+
+router.post("/confirmations/:id/reply", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {
+  try { res.json({ success: true, confirmation: await confirmations.reply(req.params.id, req.body || {}, req) }); }
+  catch (err) { return fail(err, next); }
+}));
+
+// ── Post-dated cheques ─────────────────────────────────────────────
+router.get("/pdc", catchAsyncErrors(async (req, res) => {
+  const status = ["held", "deposited", "cleared", "bounced", "all"].includes(req.query.status) ? req.query.status : "held";
+  const q = { mode: "cheque", "cheque.status": status === "all" ? { $in: ["held", "deposited", "cleared", "bounced"] } : status };
+  if (status !== "bounced") q.status = "posted";
+  const rows = await Payment.find(q).select("kind voucherNo date partyType customer supplier partyName amount account accountName reference cheque allocations.docNo status cancel").sort({ "cheque.date": 1, date: 1 }).limit(500).lean();
+  const today = new Date(); today.setUTCHours(23, 59, 59, 999);
+  const inWeek = new Date(today.getTime() + 7 * DAY);
+  const held = await Payment.find({ status: "posted", "cheque.status": "held" }).select("kind amount cheque.date").lean();
+  const sum = (xs) => Math.round(xs.reduce((s, x) => s + x.amount, 0) * 100) / 100;
+  res.json({
+    success: true, status, rows,
+    totals: {
+      held: { count: held.length, received: sum(held.filter((x) => x.kind === "receipt")), issued: sum(held.filter((x) => x.kind === "payment")) },
+      dueToday: { count: held.filter((x) => new Date(x.cheque.date) <= today).length, amount: sum(held.filter((x) => new Date(x.cheque.date) <= today)) },
+      dueThisWeek: { count: held.filter((x) => new Date(x.cheque.date) <= inWeek).length, amount: sum(held.filter((x) => new Date(x.cheque.date) <= inWeek)) },
+    },
+  });
+}));
+
+router.post("/payments/:id/cheque", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Voucher not found", 404));
+  const v = await Payment.findById(req.params.id).lean();
+  if (!v) return next(new ErrorHandler("Voucher not found", 404));
+  if (v.mode !== "cheque" || !v.cheque?.status) return next(new ErrorHandler("That voucher is not a cheque", 400));
+  const b = req.body || {};
+  const action = ["deposited", "cleared", "bounced"].includes(b.action) ? b.action : null;
+  if (!action) return next(new ErrorHandler("action must be deposited, cleared or bounced", 400));
+  let on;
+  try { on = readDate(b.on, "on", new Date()); } catch (err) { return next(err); }
+  const from = v.cheque.status;
+  const allowed = { deposited: ["held"], cleared: ["held", "deposited"], bounced: ["held", "deposited"] };
+  if (!allowed[action].includes(from)) return next(new ErrorHandler(`A ${from} cheque cannot be marked ${action}`, 409));
+  if (v.status !== "posted") return next(new ErrorHandler("That voucher is cancelled", 409));
+  const meta = { voucherNo: v.voucherNo, cheque: v.cheque.number, from, to: action, on };
+  if (action === "bounced") {
+    const reason = String(b.reason || "").trim().slice(0, 200);
+    if (reason.length < 3) return next(new ErrorHandler("Say why the cheque was returned", 400));
+    const charges = Math.max(0, Math.round((Number(b.charges) || 0) * 100) / 100);
+    try {
+      const payment = await cancelVoucher(v, `Cheque ${v.cheque.number || ""} returned: ${reason}`.trim(), req, {
+        extra: { "cheque.status": "bounced", "cheque.bouncedOn": on, "cheque.bounceReason": reason, "cheque.charges": charges },
+        code: ACTION_CODES.PDC_UPDATED, meta: { ...meta, reason, charges },
+      });
+      return res.json({ success: true, payment, bounced: true });
+    } catch (err) { return fail(err, next); }
+  }
+  const set = action === "deposited" ? { "cheque.status": "deposited", "cheque.depositedOn": on } : { "cheque.status": "cleared", clearedOn: on, ...(from === "held" ? { "cheque.depositedOn": on } : {}) };
+  await Payment.updateOne({ _id: v._id }, { $set: set, $push: { fingerprints: fp(ACTION_CODES.PDC_UPDATED, v, req, meta) } });
+  res.json({ success: true, payment: await Payment.findById(v._id).select("-attachments.data").lean() });
+}));
+
+// ── Interest on overdue receivables ────────────────────────────────
+router.get("/interest", catchAsyncErrors(async (req, res, next) => {
+  let asOf;
+  try { asOf = readDate(req.query.asOf, "asOf", new Date()); } catch (err) { return next(err); }
+  res.json({ success: true, ...(await overdueInterest.compute({ asOf, customer: isId(req.query.customer) ? req.query.customer : undefined })) });
+}));
+
+router.get("/interest/draft", catchAsyncErrors(async (req, res, next) => {
+  let asOf;
+  try { asOf = readDate(req.query.asOf, "asOf", new Date()); } catch (err) { return next(err); }
+  try { res.json({ success: true, ...(await overdueInterest.draft({ customer: req.query.customer, asOf })) }); }
+  catch (err) { return fail(err, next); }
 }));
 
 module.exports = router;

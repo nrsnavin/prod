@@ -113,6 +113,15 @@ const CustomerSchema = new mongoose.Schema(
         pan:            { type: String, trim: true, uppercase: true, default: "", maxlength: 10 },
         creditLimit:    { type: Number, default: 0, min: 0 },
         maxOverdueDays: { type: Number, default: 0, min: 0 },
+        // Interest on overdue invoices, % a year, and days past due before it
+        // runs; null takes the rate in accounts settings (services/overdueInterest.js).
+        interestRate:      { type: Number, default: null, min: 0, max: 100 },
+        interestGraceDays: { type: Number, default: null, min: 0, max: 365 },
+        // Export: the country, and whether the customer is in an SEZ. An
+        // invoice to them is zero-rated under LUT or charged IGST (services/exportSupply.js).
+        country:   { type: String, trim: true, default: "", maxlength: 60 },
+        sez:       { type: Boolean, default: false },
+        currency:  { type: String, trim: true, uppercase: true, default: "", maxlength: 3 },
         
     },
     { timestamps: true }

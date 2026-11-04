@@ -46,6 +46,8 @@ const tdsService = require("../services/tds");
 const MachineServiceBill = require("../models/MachineServiceBill");
 const collections   = require("../services/collections");
 const costCentres   = require("../services/costCentres");
+const overdueInterest = require("../services/overdueInterest");
+const { cancelVoucher } = require("../services/voucherCancel");
 const { sendWhatsApp, isConfigured: whatsappConfigured } = require("../utils/whatsapp");
 const aiLedger      = require("../services/aiLedger");
 const { promptVersion } = require("../utils/aiPrompts");
@@ -718,12 +720,14 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
   if (!target) return next(new ErrorHandler(`${docType === "Invoice" ? "Invoice" : "Bill"} not found`, 404));
   if (docType === "Invoice" && target.status !== "issued") return next(new ErrorHandler("That invoice is cancelled", 409));
   if (docType === "SupplierBill" && target.status === "cancelled") return next(new ErrorHandler("That bill is cancelled", 409));
-  let date, lines;
+  let date, lines, interest = [];
   // s.34(2): a GST credit note for an invoice of one year is allowed until
   // 30 November of the next. After that it is a financial credit note, no tax.
   let financial = false;
   try {
     date = readDate(b.date, "date", new Date());
+    // A debit note charging interest says which invoices and days it covered.
+    if (kind === "debit" && partyType === "customer") interest = overdueInterest.readMarkers(b.interest);
     await assertOpen(date, req);
     lines = readLines(b.lines, { defaultGst: target.lines?.[0]?.gstPercent ?? 5 });
     if (kind === "credit" && docType === "Invoice") {
@@ -766,7 +770,7 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
     partyType, customer: partyType === "customer" ? party : undefined, supplier: partyType === "supplier" ? party : undefined,
     partyName, partyGstin: partyGstin || "", partyNoteNo: String(b.partyNoteNo || "").trim().slice(0, 40),
     against: { docType, doc: target._id, docNo },
-    reason: reason.slice(0, 200), supplyType: p.supplyType, lines: p.lines, totals: p.totals, financial,
+    reason: reason.slice(0, 200), supplyType: p.supplyType, lines: p.lines, totals: p.totals, financial, interest,
     applied, unapplied, notes: String(b.notes || "").trim().slice(0, 500), createdBy: req.user?._id,
   };
   data.fingerprints = [fp(ACTION_CODES.NOTE_ISSUED, { _id }, req, { noteNo: number, against: docNo, grand: p.totals.grand, unapplied, reason })];
@@ -906,6 +910,15 @@ async function createVoucher(b, req) {
   if (!account || !account.active) throw new ErrorHandler("Account not found", 404);
   const date = readDate(b.date, "date", new Date());
   await assertOpen(date, req);
+  // A cheque: its number, bank and date. Dated after today, it is held
+  // (post-dated); otherwise it is taken as deposited on the voucher date.
+  let cheque;
+  if (b.mode === "cheque") {
+    const c = b.cheque || {};
+    const chequeDate = c.date ? readDate(c.date, "cheque.date") : date;
+    const held = chequeDate > businessDay(new Date());
+    cheque = { number: String(c.number || b.reference || "").trim().slice(0, 20), bank: String(c.bank || "").trim().slice(0, 80), date: chequeDate, status: held ? "held" : "deposited", ...(held ? {} : { depositedOn: date }) };
+  }
 
   // The party.
   const partyType = b.partyType;
@@ -991,7 +1004,8 @@ async function createVoucher(b, req) {
   const data = {
     _id, kind, voucherNo: number, financialYear, sequence, requestId: b.requestId ? String(b.requestId) : undefined, date,
     partyType, customer: partyType === "customer" ? party._id : undefined, supplier: partyType === "supplier" ? party._id : undefined, partyName,
-    amount, mode: b.mode, account: account._id, accountName: account.name, reference: String(b.reference || "").trim().slice(0, 60),
+    amount, mode: b.mode, account: account._id, accountName: account.name, reference: String(b.reference || cheque?.number || "").trim().slice(0, 60),
+    ...(cheque ? { cheque } : {}),
     tds: { section: tdsAmount > 0 ? tdsSection || "" : "", rate: tdsAmount > 0 ? tdsRate : 0, amount: tdsAmount, base: tdsBase },
     adjustments, allocations, unallocated, narration: String(b.narration || "").trim().slice(0, 300),
     source: b.source === "statement" ? "statement" : "manual", statementLine: String(b.statementLine || "").slice(0, 200),
@@ -1045,29 +1059,13 @@ router.post("/payments/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   if (!v) return next(new ErrorHandler("Voucher not found", 404));
   if (v.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
   let reason;
-  try { reason = reasonFrom(req); await assertOpen(v.date, req, { cancelling: true }); } catch (err) { return next(err); }
-  const cancel = { reason, at: new Date(), by: req.user?._id };
-  const mark = fp(ACTION_CODES.PAYMENT_CANCELLED, v, req, { voucherNo: v.voucherNo, reason });
-  try {
-    await withTxn(async (session) => {
-      await Payment.updateOne({ _id: v._id }, { $set: { status: "cancelled", cancel }, $push: { fingerprints: mark } }, { session });
-      for (const a of v.allocations) {
-        if (a.docType === "SupplierBill") {
-          await settle.apply("SupplierBill", a.doc, { paidAmount: -r2(a.amount - (a.tds || 0)), tdsAmount: -(a.tds || 0) }, session);
-        } else if (a.docType === "Expense") {
-          await settle.apply("Expense", a.doc, { paidAmount: -a.amount }, session);
-          await Expense.updateOne({ _id: a.doc, status: "approved" }, { $unset: { paidFrom: 1, paidAt: 1 } }, { session });
-        } else {
-          await settle.apply(a.docType, a.doc, { [VOUCHER_FIELD[a.docType]]: -a.amount }, session);
-        }
-      }
-      await partyLedger.reverse("Payment", v._id, session);
-    });
-  } catch (err) {
+  try { reason = reasonFrom(req); } catch (err) { return next(err); }
+  let payment;
+  try { payment = await cancelVoucher(v, reason, req); } catch (err) {
     if (err instanceof ErrorHandler) return next(err);
     throw err;
   }
-  res.json({ success: true, payment: await Payment.findById(v._id).select("-attachments.data").lean() });
+  res.json({ success: true, payment });
 }));
 
 // ══════════════════════════════════════════════════════════════════
