@@ -136,9 +136,9 @@ describe('the Tally export', () => {
   it('sends a posted journal voucher and stamps it, so it is not sent twice', async () => {
     const s = await scene();
     // A customer line too: the party ledger keys journal rows by line, and the journal is their source.
-    const j = await post('/accounts/journals', { date: '2026-07-09', purpose: 'reclass', reason: 'Freight recovered from the customer', lines: [
-      { kind: 'party', partyType: 'customer', party: s.customer._id, debit: 1500 },
-      { kind: 'ledger', ledger: 'Freight Outward', credit: 1500 },
+    const j = await post('/accounts/journals', { date: '2026-07-09', purpose: 'writeoff', reason: 'Freight waived on the first invoice', lines: [
+      { kind: 'ledger', ledger: 'Freight Outward', debit: 1500 },
+      { kind: 'party', partyType: 'customer', party: s.customer._id, credit: 1500, refs: [{ docType: 'Invoice', doc: s.inv._id, amount: 1500 }] },
     ] });
     expect(j.status).toBe(201);
     const ex = await post('/accounts/tally/export', { from: '2026-07-01', to: '2026-07-31' });
@@ -148,7 +148,8 @@ describe('the Tally export', () => {
     expect((await Journal.findById(j.body.journal._id).lean()).tally.batch).toEqual(expect.any(mongoose.Types.ObjectId));
     const xml = (await request(app).get(`/api/v2/accounts/tally/batches/${ex.body.batch._id}/xml`).set('Cookie', cookie())).text;
     const jv = vouchersIn(xml).find((v) => v.type === 'Journal');
-    expect(jv.lines).toEqual(expect.arrayContaining([{ ledger: s.customer.name, dr: true, amount: -1500 }, { ledger: 'Freight Outward', dr: false, amount: 1500 }]));
+    expect(jv.lines).toEqual(expect.arrayContaining([{ ledger: 'Freight Outward', dr: true, amount: -1500 }, { ledger: s.customer.name, dr: false, amount: 1500 }]));
+    expect(xml).toMatch(new RegExp(`<NAME>${s.inv.invoiceNumber.replace(/\//g, '\\/')}</NAME><BILLTYPE>Agst Ref</BILLTYPE><AMOUNT>1500.00</AMOUNT>`));
     expect((await get('/accounts/tally/preview?from=2026-07-01&to=2026-07-31')).body).toMatchObject({ vouchers: 0, alreadySent: 2 });
   });
 

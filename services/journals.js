@@ -13,8 +13,12 @@
 //  same conditional update a receipt uses (services/settle.js): a
 //  customer credited settles their invoices (creditedAmount, as a
 //  credit note does); a supplier debited settles their bills
-//  (debitedAmount). The other direction (a customer debited, a supplier
-//  credited) raises what they owe: no refs.
+//  (debitedAmount). That is the only direction a party line may take,
+//  and it must name the documents for the whole amount: a journal that
+//  raised a party, or left part of it on account, would move the ledger
+//  with nothing the receipts, the outstanding or the credits could see.
+//  Raising a customer is a debit note; raising a supplier is their bill
+//  or an expense.
 // ══════════════════════════════════════════════════════════════════
 
 const mongoose = require('mongoose');
@@ -33,6 +37,8 @@ const { ACTION_CODES } = require('../utils/fingerprint');
 /** The settlement field a journal line moves on each kind of document. */
 function fieldFor(partyType, debit, docType) {
   if (docType === 'OpeningBalance') return 'settledAmount';
+  // An expense has no debited figure: settled by a journal, it is paid.
+  if (docType === 'Expense') return 'paidAmount';
   if (partyType === 'customer') return debit ? 'debitedAmount' : 'creditedAmount';
   return 'debitedAmount';
 }
@@ -42,6 +48,7 @@ async function read(body) {
   if (raw.length < 2) throw new ErrorHandler('A journal needs at least two lines', 400);
   if (raw.length > 40) throw new ErrorHandler('At most 40 lines', 400);
   const lines = [];
+  let incomplete = null;
   for (const [i, l] of raw.entries()) {
     const n = i + 1;
     const debit = r2(l.debit); const credit = r2(l.credit);
@@ -54,10 +61,18 @@ async function read(body) {
       const p = await Model.findById(l.party).select('name tallyName').lean();
       if (!p) throw new ErrorHandler(`Line ${n}: party not found`, 404);
       out.partyType = l.partyType; out[l.partyType] = p._id; out.ledger = (p.tallyName || p.name).trim(); out.partyName = p.name;
-      // Bill-wise: only on the side that lowers what the party owes.
+      // A party line only ever LOWERS what the party owes, and names the
+      // documents it settles in full. Raising a party here would put a
+      // balance on the ledger that no receipt could collect and no
+      // outstanding list could show; an amount left "on account" would be
+      // a credit nothing could apply. Both belong to documents of their own.
       const lowers = l.partyType === 'customer' ? credit > 0 : debit > 0;
+      if (!lowers) {
+        throw new ErrorHandler(l.partyType === 'customer'
+          ? `Line ${n}: a journal cannot raise what ${p.name} owes — issue a debit note to the customer, so it can be collected against`
+          : `Line ${n}: a journal cannot raise what is owed to ${p.name} — enter their bill or an expense, so it can be paid against`, 400);
+      }
       const refs = Array.isArray(l.refs) ? l.refs : [];
-      if (refs.length && !lowers) throw new ErrorHandler(`Line ${n}: a ${l.partyType} ${debit > 0 ? 'debited' : 'credited'} owes more; nothing to set it against`, 400);
       const allowed = l.partyType === 'customer' ? ['Invoice', 'OpeningBalance'] : ['SupplierBill', 'Expense', 'OpeningBalance'];
       const seen = new Set();
       for (const r of refs) {
@@ -78,6 +93,8 @@ async function read(body) {
       }
       const refTotal = r2(out.refs.reduce((t, r) => t + r.amount, 0));
       if (refTotal > (debit || credit) + 0.005) throw new ErrorHandler(`Line ${n}: the references add to ${refTotal.toFixed(2)}, more than the line`, 400);
+      // Said after the balance check below: a journal that does not balance is the first thing to fix.
+      if (refTotal < (debit || credit) - 0.005) incomplete = incomplete || new ErrorHandler(`Line ${n}: set the whole ${(debit || credit).toFixed(2)} against ${p.name}'s open documents (the references add to ${refTotal.toFixed(2)}) — what comes off a party here must say which documents it settles`, 400);
     } else if (l.kind === 'bank') {
       if (!isId(l.account)) throw new ErrorHandler(`Line ${n}: pick the account`, 400);
       const a = await BankAccount.findById(l.account).select('name tallyLedger active').lean();
@@ -99,6 +116,7 @@ async function read(body) {
   const cr = r2(lines.reduce((t, l) => t + l.credit, 0));
   if (Math.abs(dr - cr) > 0.005) throw new ErrorHandler(`Debits ${dr.toFixed(2)} and credits ${cr.toFixed(2)} must be equal`, 400);
   if (!(dr > 0)) throw new ErrorHandler('The journal is for nothing', 400);
+  if (incomplete) throw incomplete;
   return { lines, total: dr };
 }
 

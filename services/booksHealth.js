@@ -55,10 +55,11 @@ function initialApplied(n) {
  */
 async function expectedFigures() {
   const exp = { Invoice: new Map(), SupplierBill: new Map(), Expense: new Map(), OpeningBalance: new Map(), Payment: new Map(), AccountNote: new Map() };
-  const [payments, notes, advances] = await Promise.all([
+  const [payments, notes, advances, journals] = await Promise.all([
     Payment.find({ status: 'posted' }).select('kind amount tds adjustments allocations unallocated').lean(),
     AccountNote.find({ status: 'issued' }).select('kind partyType against applied unapplied applications totals.grand').lean(),
     OpeningBalance.find({ status: 'posted', kind: 'advance' }).select('amount applications partyType').lean(),
+    require('../models/Journal').find({ status: 'posted', 'lines.refs.0': { $exists: true } }).select('lines').lean(),
   ]);
   for (const p of payments) {
     const settled = r2((p.amount || 0) + (p.tds?.amount || 0) + (p.adjustments || []).reduce((s, a) => s + (a.amount || 0), 0));
@@ -79,6 +80,14 @@ async function expectedFigures() {
     for (const a of n.applications || []) { later += a.amount || 0; add(exp[a.docType], a.doc, field(a.docType), a.amount); }
     // A debit note to a customer raises what they owe; it is never a credit to apply.
     if (!(n.kind === 'debit' && n.partyType === 'customer')) exp.AccountNote.set(String(n._id), { unapplied: r2((n.totals?.grand || 0) - first - later) });
+  }
+  // A journal's party line settles the documents it names (services/journals.js).
+  const { fieldFor } = require('./journals');
+  for (const j of journals) {
+    for (const l of j.lines || []) {
+      if (l.kind !== 'party') continue;
+      for (const r of l.refs || []) add(exp[r.docType], r.doc, fieldFor(l.partyType, l.debit > 0, r.docType), r.amount);
+    }
   }
   for (const o of advances) {
     let later = 0;

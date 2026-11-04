@@ -262,7 +262,7 @@ describe('journal vouchers', () => {
     expect(unbalanced.body.message).toMatch(/Debits 500.00 and credits 400.00 must be equal/);
     const wrongSide = await post('/accounts/journals', { date: '2026-10-15', reason: 'Written off, customer closed down', lines: [{ kind: 'bank', account: acct._id, credit: 500 }, { kind: 'party', partyType: 'customer', party: customer._id, debit: 500, refs: [{ docType: 'Invoice', doc: inv._id, amount: 500 }] }] });
     expect(wrongSide.status).toBe(400);
-    expect(wrongSide.body.message).toMatch(/owes more; nothing to set it against/);
+    expect(wrongSide.body.message).toMatch(/cannot raise what .* owes — issue a debit note/);
     await put('/accounts/settings', { journals: { approvalAbove: 1000 } });
     const big = { date: '2026-10-15', purpose: 'writeoff', reason: 'Written off, customer closed down', lines: [{ kind: 'ledger', ledger: 'Bad Debts Written Off', debit: 10500 }, { kind: 'party', partyType: 'customer', party: customer._id, credit: 10500, refs: [{ docType: 'Invoice', doc: inv._id, amount: 10500 }] }] };
     const byClerk = await post('/accounts/journals', big, clerk);
