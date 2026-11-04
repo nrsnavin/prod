@@ -27,9 +27,10 @@ const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 /** The centre from a request body, resolved: { order, orderNo } | { machine, machineName } | { department }. */
 async function read(raw) {
   if (!raw || typeof raw !== 'object') return undefined;
-  if (isId(raw.order)) {
-    const o = await Order.findById(raw.order).select('orderNo').lean();
-    if (!o) throw new ErrorHandler('Cost centre: order not found', 404);
+  // An order by its id, or by the number the office knows it by.
+  if (isId(raw.order) || Number.isInteger(Number(raw.orderNo)) && Number(raw.orderNo) > 0) {
+    const o = isId(raw.order) ? await Order.findById(raw.order).select('orderNo').lean() : await Order.findOne({ orderNo: Number(raw.orderNo) }).select('orderNo').lean();
+    if (!o) throw new ErrorHandler(isId(raw.order) ? 'Cost centre: order not found' : `Cost centre: no order #${raw.orderNo}`, 404);
     return { kind: 'order', order: o._id, orderNo: o.orderNo ?? null, name: `Order #${o.orderNo ?? ''}`.trim() };
   }
   if (isId(raw.machine)) {

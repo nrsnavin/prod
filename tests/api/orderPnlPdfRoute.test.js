@@ -412,7 +412,7 @@ describe('the qualifications are the service\'s own warnings', () => {
 describe('the sheet agrees with the JSON the screen reads', () => {
   let pnl;
   const LABELS = {
-    material: 'Yarn issued', labour: 'Wages', jobWork: 'Outsourced job-work',
+    material: 'Yarn issued', booked: 'Bought for this order', labour: 'Wages', jobWork: 'Outsourced job-work',
     finishing: 'Finishing', checking: 'Checking', packing: 'Packing',
     overhead: 'Overhead',
   };

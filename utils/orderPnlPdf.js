@@ -86,11 +86,12 @@ function _bufferFromDoc(doc) {
   });
 }
 
-// The seven cost elements, with the one-line basis each is computed on.
+// The eight cost elements, with the one-line basis each is computed on.
 // Printing the basis beside the figure is what stops the sheet becoming
 // an argument about where a number came from.
 const COST_ELEMENTS = [
   { key: 'material',  label: 'Yarn issued',         basis: 'Issued quantity x price captured at issue' },
+  { key: 'booked',    label: 'Bought for this order', basis: 'Bills and expenses booked to the order, net of GST claimed' },
   { key: 'labour',    label: 'Wages',               basis: 'Scheduled shift hours x operator hourly rate' },
   { key: 'jobWork',   label: 'Outsourced job-work', basis: 'Vendor rate x meters returned' },
   { key: 'finishing', label: 'Finishing',           basis: 'Rate card per meter, or the job\'s own figure' },
@@ -414,7 +415,8 @@ async function buildOrderPnlPdf(data) {
       jobWork: _money(costs.jobWork),
       conversion: _money((costs.finishing || 0) + (costs.checking || 0) + (costs.packing || 0)),
       overhead: _money(costs.overhead),
-      total: _money((costs.total || 0) - (costs.material || 0)),
+      // Yarn and what was bought for the order are order-level, not a job's.
+      total: _money((costs.total || 0) - (costs.material || 0) - (costs.booked || 0)),
     },
     emptyText: 'No jobs have been raised against this order.',
     note: 'Yarn is drawn against the ORDER at approval, not against a job, so it is not split here — '
