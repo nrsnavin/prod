@@ -9,6 +9,10 @@
 //    POST /notes/:id/irn               an IRN pasted from the portal
 //    GET  /payments/:id/pdf            receipt / payment advice
 //    GET  /statement/pdf               a party's statement of account
+//    GET  /statement/xlsx              the same ledger account, as Excel
+//    GET  /ledger/summary              Sundry Debtors / Creditors: every
+//                                      party's opening, debits, credits,
+//                                      closing (?format=xlsx for Excel)
 //    POST /share/draft                 the WhatsApp message that goes with
 //                                      one of these, to edit and send
 //                                      through /collections/send
@@ -25,7 +29,7 @@ const { getDocumentSettings, getPdfBranding } = require("../services/documentSet
 const { buildEinvoiceJson, readiness } = require("../services/einvoice");
 const { getProvider } = require("../services/einvoiceProvider");
 const { asInvoice } = require("../services/noteDocument");
-const partyLedger = require("../services/partyLedger");
+const partyStatement = require("../services/partyStatement");
 const outstanding = require("../services/outstanding");
 const { e164 } = require("../services/collections");
 const { isId, readDate, DAY } = require("../services/accountsHelpers");
@@ -158,7 +162,7 @@ async function statementFor(q) {
   if (to) to = new Date(new Date(to).setHours(0, 0, 0, 0) + DAY - 1);
   const party = await partyOf(partyType, q.party);
   if (!party) throw new ErrorHandler("Party not found", 404);
-  const statement = await partyLedger.statement(partyType, q.party, { from, to });
+  const statement = await partyStatement.ledgerAccount(partyType, q.party, { from, to });
   const open = outstanding.totals(partyType === "customer" ? await outstanding.receivables({ customer: q.party }) : await outstanding.payables({ supplier: q.party }));
   return { partyType, party, statement, from, to, open };
 }
@@ -167,7 +171,76 @@ router.get("/statement/pdf", catchAsyncErrors(async (req, res, next) => {
   let s;
   try { s = await statementFor(req.query); } catch (err) { return next(err); }
   const branding = await getPdfBranding();
-  pdf(res, `Statement ${s.party.name}`, await renderPdf("partyStatement", { ...s, branding, company: branding.company }));
+  pdf(res, `Statement ${s.party.name}`, await renderPdf("partyStatement", { ...s, detailed: req.query.detailed === "1", branding, company: branding.company }));
+}));
+
+// ── Excel ──────────────────────────────────────────────────────────
+const ExcelJS = require("exceljs");
+const dd = (d) => { if (!d) return ""; const t = new Date(d); const p = (n) => String(n).padStart(2, "0"); return `${p(t.getDate())}-${p(t.getMonth() + 1)}-${t.getFullYear()}`; };
+async function sendXlsx(res, name, wb) {
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${fileName(name)}.xlsx"`);
+  await wb.xlsx.write(res);
+  res.end();
+}
+const dateRange = (q) => {
+  const from = readDate(q.from, "from");
+  let to = readDate(q.to, "to");
+  if (to) to = new Date(new Date(to).setHours(0, 0, 0, 0) + DAY - 1);
+  return { from, to };
+};
+
+/** The ledger account in Tally's columns, with the bill-wise lines under each voucher. */
+router.get("/statement/xlsx", catchAsyncErrors(async (req, res, next) => {
+  let s;
+  try { s = await statementFor(req.query); } catch (err) { return next(err); }
+  const st = s.statement;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Ledger");
+  ws.addRow([s.party.name]).font = { bold: true, size: 13 };
+  ws.addRow([`Ledger Account${s.party.gstin ? ` · GSTIN ${s.party.gstin}` : ""}`]);
+  ws.addRow([`${s.from ? dd(s.from) : "From the start"} to ${dd(s.to || new Date())}`]);
+  ws.addRow([]);
+  const head = ws.addRow(["Date", "Particulars", "Vch Type", "Vch No.", "Reference", "Detail", "Debit", "Credit", "Balance", ""]);
+  head.font = { bold: true };
+  const side = (amount, which) => (which === "Dr" ? [amount, null] : which === "Cr" ? [null, amount] : [null, null]);
+  // A customer's Dr balance and a supplier's Dr balance both sit in the Debit column.
+  const open = side(Math.abs(st.opening), st.openingSide);
+  ws.addRow(["", "Opening Balance", "", "", "", null, open[0], open[1], Math.abs(st.opening), st.openingSide]).font = { bold: true };
+  for (const r of st.rows) {
+    ws.addRow([dd(r.date), `${r.toBy} ${r.particulars}`, r.vchType, r.docNo, r.partyRef || "", null, r.debit || null, r.credit || null, Math.abs(r.balance), r.balanceSide]);
+    for (const l of r.lines || []) ws.addRow(["", `    ${l.ledger}`, "", "", "", l.amount, null, null, null, ""]);
+    for (const b of r.refs || []) ws.addRow(["", `    ${b.type} ${b.name}`, "", "", "", b.amount, null, null, null, ""]);
+  }
+  ws.addRow(["", "Current Total", "", "", "", null, st.totals.debit, st.totals.credit, null, ""]).font = { bold: true };
+  const close = side(Math.abs(st.closing), st.closingSide);
+  ws.addRow(["", "Closing Balance", "", "", "", null, close[0], close[1], Math.abs(st.closing), st.closingSide]).font = { bold: true };
+  ws.columns = [{ width: 12 }, { width: 42 }, { width: 13 }, { width: 20 }, { width: 24 }, { width: 14 }, { width: 15 }, { width: 15 }, { width: 15 }, { width: 5 }];
+  for (const c of [6, 7, 8, 9]) ws.getColumn(c).numFmt = "#,##0.00";
+  ws.views = [{ state: "frozen", ySplit: 5 }];
+  await sendXlsx(res, `Ledger ${s.party.name}`, wb);
+}));
+
+/** Sundry Debtors or Sundry Creditors for a period, party by party. */
+router.get("/ledger/summary", catchAsyncErrors(async (req, res, next) => {
+  const partyType = req.query.partyType;
+  if (!["customer", "supplier"].includes(partyType)) return next(new ErrorHandler("partyType must be customer or supplier", 400));
+  let range;
+  try { range = dateRange(req.query); } catch (err) { return next(err); }
+  const g = await partyStatement.groupSummary(partyType, range);
+  if (req.query.format !== "xlsx") return res.json({ success: true, ...g, from: range.from, to: range.to });
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet(g.group);
+  ws.addRow([`${g.group} — group summary`]).font = { bold: true, size: 13 };
+  ws.addRow([`${range.from ? dd(range.from) : "From the start"} to ${dd(range.to || new Date())}`]);
+  ws.addRow([]);
+  ws.addRow(["Particulars", "GSTIN", "Opening", "", "Debit", "Credit", "Closing", ""]).font = { bold: true };
+  for (const r of g.rows) ws.addRow([r.partyName, r.gstin, Math.abs(r.opening), r.openingSide, r.debit, r.credit, Math.abs(r.closing), r.closingSide]);
+  ws.addRow(["Grand Total", "", Math.abs(g.totals.opening), g.totals.openingSide, g.totals.debit, g.totals.credit, Math.abs(g.totals.closing), g.totals.closingSide]).font = { bold: true };
+  ws.columns = [{ width: 36 }, { width: 18 }, { width: 15 }, { width: 5 }, { width: 15 }, { width: 15 }, { width: 15 }, { width: 5 }];
+  for (const c of [3, 5, 6, 7]) ws.getColumn(c).numFmt = "#,##0.00";
+  ws.views = [{ state: "frozen", ySplit: 4 }];
+  await sendXlsx(res, g.group, wb);
 }));
 
 // ── WhatsApp drafts ────────────────────────────────────────────────

@@ -6,8 +6,9 @@
 //                     which invoices it settled) or a PAYMENT ADVICE for
 //                     a supplier (what we paid, the TDS deducted and on
 //                     what, and which bills it settled)
-//  buildStatementPdf  a party's statement of account for a period:
-//                     opening balance, every document, running balance
+//  buildStatementPdf  a party's ledger account for a period, as Tally
+//                     prints it: To/By particulars, voucher type and
+//                     number, Dr/Cr, totals, closing balance
 //
 //  Plain data in, a Buffer out, like every renderer the PDF workers run.
 // ══════════════════════════════════════════════════════════════════
@@ -75,8 +76,9 @@ function table(ctx, y, cols, rows) {
   y += 18;
   for (const r of rows) {
     if (y > doc.page.height - 80) { doc.addPage(); y = 40; }
-    cols.forEach((c, i) => text(r[i], xs[i] + 4, y, { size: 8.5, width: c.w * W - 8, align: c.align, bold: r.bold }));
-    y += 14;
+    if (r.rule) { doc.moveTo(L, y - 2).lineTo(L + W, y - 2).lineWidth(0.5).strokeColor(RULE).stroke(); }
+    cols.forEach((c, i) => text(r[i], xs[i] + 4, y, { size: r.small ? 7.5 : 8.5, width: c.w * W - 8, align: c.align, bold: r.bold, color: r.muted ? MUTED : INK }));
+    y += r.small ? 11 : 14;
   }
   return y;
 }
@@ -150,13 +152,15 @@ async function buildVoucherPdf({ voucher, party = {}, branding = {}, company } =
 }
 
 /**
- * @param statement  partyLedger.statement(): { opening, rows, closing }
+ * The ledger account as Tally prints it.
+ * @param statement  partyStatement.ledgerAccount(): { opening, openingSide, rows, totals, closing, closingSide }
  * @param party      { name, gstin, address }
  * @param partyType  customer | supplier
+ * @param detailed   each voucher's other ledgers and bill-wise references under it
  */
-async function buildStatementPdf({ statement, party = {}, partyType = 'customer', from, to, open, branding = {}, company } = {}) {
-  const s = statement || { opening: 0, rows: [], closing: 0 };
-  const ctx = start({ title: 'STATEMENT OF ACCOUNT', branding, company });
+async function buildStatementPdf({ statement, party = {}, partyType = 'customer', from, to, open, detailed = false, branding = {}, company } = {}) {
+  const s = statement || { opening: 0, rows: [], closing: 0, totals: { debit: 0, credit: 0 } };
+  const ctx = start({ title: 'LEDGER ACCOUNT', branding, company });
   const { text, L, W, RS } = ctx;
   let y = ctx.y + 10;
   text(party.name || '', L, y, { bold: true, size: 11, width: W * 0.6 });
@@ -165,23 +169,37 @@ async function buildStatementPdf({ statement, party = {}, partyType = 'customer'
   if (party.gstin) { text(`GSTIN ${party.gstin}`, L, y, { size: 8.5 }); y += 12; }
   if (party.address) { text(party.address, L, y, { size: 8.5, color: MUTED, width: W * 0.6, lineBreak: true }); y += 12; }
   y += 10;
-  const cols = [{ h: 'Date', w: 0.12 }, { h: 'Document', w: 0.2 }, { h: 'Particulars', w: 0.32 }, { h: 'Debit', w: 0.12, align: 'right' }, { h: 'Credit', w: 0.12, align: 'right' }, { h: 'Balance', w: 0.12, align: 'right' }];
-  const sideOf = (b) => (partyType === 'customer' ? (b >= 0 ? 'Dr' : 'Cr') : (b >= 0 ? 'Cr' : 'Dr'));
-  const bal = (b) => `${money(Math.abs(b))} ${sideOf(b)}`;
-  const rows = [
-    Object.assign(['', '', 'Opening balance', '', '', bal(s.opening)], { bold: true }),
-    ...s.rows.map((r) => [dmy(r.date), r.docNo, String(r.narration || '').slice(0, 48), r.debit ? money(r.debit) : '', r.credit ? money(r.credit) : '', bal(r.balance)]),
-    Object.assign(['', '', 'Closing balance', '', '', bal(s.closing)], { bold: true }),
+  const cols = [
+    { h: 'Date', w: 0.1 }, { h: 'Particulars', w: 0.34 }, { h: 'Vch Type', w: 0.1 }, { h: 'Vch No.', w: 0.14 },
+    { h: 'Debit', w: 0.11, align: 'right' }, { h: 'Credit', w: 0.11, align: 'right' }, { h: 'Balance', w: 0.1, align: 'right' },
   ];
+  const fallbackSide = (b) => (Math.abs(b) < 0.005 ? '' : partyType === 'customer' ? (b > 0 ? 'Dr' : 'Cr') : (b > 0 ? 'Cr' : 'Dr'));
+  const bal = (b, side) => `${money(Math.abs(b))} ${side ?? fallbackSide(b)}`.trim();
+  const inCol = (amount, side) => (side === 'Dr' ? [money(Math.abs(amount)), ''] : side === 'Cr' ? ['', money(Math.abs(amount))] : ['', '']);
+  const openSide = s.openingSide ?? fallbackSide(s.opening);
+  const closeSide = s.closingSide ?? fallbackSide(s.closing);
+  const rows = [Object.assign(['', 'Opening Balance', '', '', ...inCol(s.opening, openSide), bal(s.opening, openSide)], { bold: true })];
+  for (const r of s.rows) {
+    const particulars = r.particulars ? `${r.toBy || (r.debit ? 'To' : 'By')} ${r.particulars}` : String(r.narration || '');
+    rows.push([dmy(r.date), particulars.slice(0, 56), r.vchType || '', r.docNo, r.debit ? money(r.debit) : '', r.credit ? money(r.credit) : '', bal(r.balance, r.balanceSide)]);
+    if (r.partyRef) rows.push(Object.assign(['', `   ${r.partyRef}`.slice(0, 60), '', '', '', '', ''], { small: true, muted: true }));
+    if (detailed) {
+      for (const l of r.lines || []) rows.push(Object.assign(['', `   ${l.ledger}  ${money(l.amount)}`.slice(0, 60), '', '', '', '', ''], { small: true, muted: true }));
+      for (const b of r.refs || []) rows.push(Object.assign(['', `   ${b.type} ${b.name}  ${money(b.amount)}`.slice(0, 60), '', '', '', '', ''], { small: true, muted: true }));
+    }
+  }
+  const totals = s.totals || { debit: s.rows.reduce((t, r) => t + (r.debit || 0), 0), credit: s.rows.reduce((t, r) => t + (r.credit || 0), 0) };
+  rows.push(Object.assign(['', 'Current Total', '', '', money(totals.debit), money(totals.credit), ''], { bold: true, rule: true }));
+  rows.push(Object.assign(['', 'Closing Balance', '', '', ...inCol(s.closing, closeSide), bal(s.closing, closeSide)], { bold: true }));
   y = table(ctx, y, cols, rows) + 10;
-  const owes = partyType === 'customer' ? s.closing > 0 : s.closing > 0;
+  const owes = s.closing > 0;
   const who = partyType === 'customer' ? (owes ? 'Due from you' : 'Held for you') : (owes ? 'Due to you' : 'Paid ahead to you');
   text(`${who}: ${RS} ${money(Math.abs(s.closing))}`, L, y, { bold: true, size: 11 });
   y += 16;
   if (open && open.overdue > 0) { text(`Of which past due: ${RS} ${money(open.overdue)}`, L, y, { size: 9 }); y += 13; }
   y += 8;
   text('Please let us know within 15 days if anything here does not agree with your books.', L, y, { size: 8, color: MUTED, width: W, lineBreak: true });
-  return finish(ctx, `${party.name || 'Statement'} · ${dmy(to || new Date())}`);
+  return finish(ctx, `${party.name || 'Ledger'} · ${dmy(to || new Date())}`);
 }
 
 module.exports = { buildVoucherPdf, buildStatementPdf };

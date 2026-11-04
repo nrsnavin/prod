@@ -185,8 +185,11 @@ describe('documents the other side receives', () => {
     expect(rt).toContain(inv.invoiceNumber);
     const sp = await request(app).get(`/api/v2/accounts/statement/pdf?partyType=customer&party=${customer._id}`).set('Cookie', cookie()).buffer(true).parse(binary);
     const st = await pdfText(sp.body);
-    expect(st).toMatch(/STATEMENT OF ACCOUNT/);
-    expect(st).toMatch(/Closing balance/);
+    expect(st).toMatch(/LEDGER ACCOUNT/);
+    expect(st).toMatch(/To Sales/);
+    expect(st).toMatch(/\bBy \S/);
+    expect(st).toMatch(/Receipt/);
+    expect(st).toMatch(/Closing Balance/);
     const draft = await post('/accounts/share/draft', { kind: 'payment', id: r._id });
     expect(draft.body).toMatchObject({ to: '+919677707535' });
     expect(draft.body.message).toMatch(/we have received ₹10,500.00/);

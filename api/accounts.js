@@ -1058,7 +1058,8 @@ router.get("/statement", catchAsyncErrors(async (req, res, next) => {
   const Model = partyType === "customer" ? Customer : Supplier;
   const party = await Model.findById(req.query.party).select("name gstin").lean();
   if (!party) return next(new ErrorHandler("Party not found", 404));
-  const s = await partyLedger.statement(partyType, party._id, { from, to });
+  // The ledger account as Tally prints it: particulars, voucher type, references, totals, Dr/Cr.
+  const s = await require("../services/partyStatement").ledgerAccount(partyType, party._id, { from, to });
   const open = partyType === "customer" ? await outstanding.receivables({ customer: party._id }) : await outstanding.payables({ supplier: party._id });
   res.json({ success: true, party: { _id: party._id, name: party.name, gstin: party.gstin || "" }, partyType, ...s, open: outstanding.totals(open) });
 }));
