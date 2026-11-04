@@ -43,6 +43,16 @@ const SupplierBillSchema = new mongoose.Schema(
     machine:     { type: mongoose.Types.ObjectId, ref: "Machine" },
     serviceBill: { type: mongoose.Types.ObjectId, ref: "MachineServiceBill" },
     category: { type: mongoose.Types.ObjectId, ref: "ExpenseCategory" },
+    // Booked to a cost centre: the order it was bought for, a machine, or a
+    // department (services/costCentres.js). At most one.
+    costCentre: {
+      kind:        { type: String, enum: ["order", "machine", "department"] },
+      order:       { type: mongoose.Types.ObjectId, ref: "Order" },
+      orderNo:     { type: Number },
+      machine:     { type: mongoose.Types.ObjectId, ref: "Machine" },
+      department:  { type: String, default: "", trim: true, maxlength: 60 },
+      name:        { type: String, default: "", trim: true },
+    },
 
     supplyType: { type: String, enum: ["intra", "inter"], required: true },
     lines:  { type: [TaxLineSchema], default: [] },
@@ -127,6 +137,7 @@ SupplierBillSchema.index({ financialYear: 1, sequence: 1 });
 SupplierBillSchema.index({ supplier: 1, billDate: -1 });
 SupplierBillSchema.index({ status: 1, dueDate: 1 });
 SupplierBillSchema.index({ purchaseOrder: 1 });
+SupplierBillSchema.index({ "costCentre.order": 1 });
 // The same supplier invoice entered twice is the commonest double payment.
 // ($in, not $ne: a partial index cannot say "not cancelled" directly.)
 SupplierBillSchema.index({ supplier: 1, supplierBillNo: 1 }, { unique: true, partialFilterExpression: { status: { $in: ["open", "part_paid", "paid"] } } });

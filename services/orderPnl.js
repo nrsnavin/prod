@@ -59,6 +59,7 @@ const MaterialOutward  = require('../models/MaterialOut.cjs');
 const DeliveryChallan  = require('../models/DeliveryChallan');
 const CostSettings     = require('../models/CostSettings');
 const { shiftHours }   = require('../utils/shiftHours');
+const costCentres      = require('./costCentres');
 
 // `Math.round((Number(n) || 0) * 100) / 100` laundered a broken number
 // into a plausible one: `NaN || 0` is 0, so an overflowed order reported
@@ -338,8 +339,16 @@ async function orderPnl(orderId) {
     );
   }
 
+  // ── Bought for this order ────────────────────────────────────
+  // Supplier bills and expenses booked to the order as their cost
+  // centre: dyeing, job work, the transport on its consignments. Net
+  // of GST claimed. Yarn from stock is the material line above, not
+  // this one, so nothing is counted twice.
+  const booked = await costCentres.forOrder(order._id);
+
   const costs = {
     material:  materialCost,
+    booked:    booked.total,
     labour:    r2(labourCost),
     jobWork:   r2(jobWorkCost),
     finishing: r2(finishingCost),
@@ -348,7 +357,7 @@ async function orderPnl(orderId) {
     overhead:  r2(overheadCost),
   };
   costs.total = r2(
-    costs.material + costs.labour + costs.jobWork +
+    costs.material + costs.booked + costs.labour + costs.jobWork +
     costs.finishing + costs.checking + costs.packing + costs.overhead
   );
 
@@ -391,6 +400,7 @@ async function orderPnl(orderId) {
       configured:            settings.configured,
     },
     materialLines,
+    bookedLines: booked.rows,
     warnings,
   };
 }

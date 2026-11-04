@@ -45,6 +45,7 @@ const creditNoteLimit = require("../services/creditNoteLimit");
 const tdsService = require("../services/tds");
 const MachineServiceBill = require("../models/MachineServiceBill");
 const collections   = require("../services/collections");
+const costCentres   = require("../services/costCentres");
 const { sendWhatsApp, isConfigured: whatsappConfigured } = require("../utils/whatsapp");
 const aiLedger      = require("../services/aiLedger");
 const { promptVersion } = require("../utils/aiPrompts");
@@ -326,6 +327,9 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     if (serviceBill.supplierBill) return next(new ErrorHandler("That service bill is already entered in the books", 409));
   }
 
+  let costCentre;
+  try { costCentre = await costCentres.read(b.costCentre); } catch (err) { return next(err); }
+
   const { financialYear, sequence, number } = await allocate(SupplierBill, "PB", { at: billDate });
   const _id = new mongoose.Types.ObjectId();
   const data = {
@@ -335,6 +339,7 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     purchaseOrder: po?._id, poNo: po?.poNo, inwards: inwardIds,
     kind: b.kind === "service" ? "service" : "goods", category: isId(b.category) ? b.category : undefined,
     ...(serviceBill ? { machine: serviceBill.machine, serviceBill: serviceBill._id } : {}),
+    ...(costCentre ? { costCentre } : {}),
     supplyType: p.supplyType, lines: p.lines, totals: gst.totals,
     reverseCharge, ...(gst.rcm ? { rcm: gst.rcm } : {}),
     itc: { eligible: itcEligible, amount: gst.itcAmount },
@@ -518,6 +523,9 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
   const itcEligible = b.itcEligible === undefined ? !!category.itcEligible && p.totals.tax > 0 : !!b.itcEligible;
   const needsApproval = category.approvalAbove === 0 || p.totals.grand > category.approvalAbove;
 
+  let costCentre;
+  try { costCentre = await costCentres.read(b.costCentre); } catch (err) { return next(err); }
+
   const { financialYear, sequence, number } = await allocate(Expense, "EXP", { at: date });
   const _id = new mongoose.Types.ObjectId();
   const data = {
@@ -525,6 +533,7 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
     date, dueDate, category: category._id, categoryName: category.name, description: description.slice(0, 200),
     supplier: supplier?._id, payeeName: String(b.payeeName || supplier?.name || "").trim().slice(0, 120), payeeGstin,
     refNo: String(b.refNo || "").trim().slice(0, 40),
+    ...(costCentre ? { costCentre } : {}),
     supplyType: p.supplyType, lines: p.lines, totals: p.totals,
     itc: { eligible: itcEligible, amount: itcEligible ? p.totals.tax : 0 },
     status: needsApproval ? "pending" : "approved",

@@ -38,6 +38,16 @@ const ExpenseSchema = new mongoose.Schema(
     payeeGstin: { type: String, default: "", trim: true },
     // The payee's bill / receipt number, when there is one.
     refNo:      { type: String, default: "", trim: true, maxlength: 40 },
+    // Booked to a cost centre: the order it was bought for, a machine, or a
+    // department (services/costCentres.js). At most one.
+    costCentre: {
+      kind:        { type: String, enum: ["order", "machine", "department"] },
+      order:       { type: mongoose.Types.ObjectId, ref: "Order" },
+      orderNo:     { type: Number },
+      machine:     { type: mongoose.Types.ObjectId, ref: "Machine" },
+      department:  { type: String, default: "", trim: true, maxlength: 60 },
+      name:        { type: String, default: "", trim: true },
+    },
 
     supplyType: { type: String, enum: ["intra", "inter"], default: "intra" },
     lines:  { type: [TaxLineSchema], default: [] },
@@ -83,6 +93,7 @@ ExpenseSchema.index({ financialYear: 1, sequence: 1 });
 ExpenseSchema.index({ status: 1, date: -1 });
 ExpenseSchema.index({ category: 1, date: -1 });
 ExpenseSchema.index({ supplier: 1, date: -1 });
+ExpenseSchema.index({ "costCentre.order": 1 });
 
 ExpenseSchema.methods.outstanding = function outstanding() {
   return Math.round(((this.totals?.grand || 0) - this.paidAmount) * 100) / 100;

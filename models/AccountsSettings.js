@@ -55,6 +55,17 @@ const AccountsSettingsSchema = new mongoose.Schema(
       pfPayable:        ledger("PF Payable"),
       esiPayable:       ledger("ESI Payable"),
       staffAdvances:    ledger("Staff Advances"),
+      // Year end (services/fixedAssets.js, services/closingStock.js).
+      depreciation:     ledger("Depreciation"),
+      accumulatedDepreciation: ledger("Accumulated Depreciation"),
+      stockInHand:      ledger("Stock-in-Hand"),
+      closingStock:     ledger("Closing Stock"),
+      // Export and SEZ sales, zero-rated or with IGST (services/exportSupply.js).
+      exportSales:      ledger("Export Sales"),
+      // Interest charged on overdue receivables (services/overdueInterest.js).
+      interestReceived: ledger("Interest Received"),
+      // Charges the bank took on a dishonoured cheque.
+      chequeCharges:    ledger("Cheque Return Charges"),
     },
 
     // The program on the Tally computer: its key (only the hash), and
@@ -103,6 +114,24 @@ const AccountsSettingsSchema = new mongoose.Schema(
     journals: {
       // A journal above this needs an admin to post it (0: anyone in accounts).
       approvalAbove: { type: Number, default: 0, min: 0 },
+    },
+
+    costCentres: {
+      // Send the cost centre on each bill and expense to Tally as a cost-centre allocation.
+      tally: { type: Boolean, default: false },
+    },
+
+    receivables: {
+      // Interest charged on overdue invoices, % a year; 0 = none. Days past due before it runs.
+      interestRate: { type: Number, default: 0, min: 0, max: 100 },
+      graceDays:    { type: Number, default: 0, min: 0, max: 365 },
+    },
+
+    // Export under a Letter of Undertaking (no IGST): its number and the year it covers.
+    lut: {
+      number:    { type: String, default: "", trim: true, maxlength: 40 },
+      validFrom: { type: Date, default: null },
+      validTo:   { type: Date, default: null },
     },
   },
   { timestamps: true }

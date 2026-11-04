@@ -25,6 +25,7 @@ const AccountNote     = require("../models/AccountNote");
 const Payment         = require("../models/Payment");
 const Contra = require("../models/Contra");
 const Journal = require("../models/Journal");
+const FixedAsset = require("../models/FixedAsset");
 const OpeningBalance = require("../models/OpeningBalance");
 const MaterialGroup   = require("../models/MaterialGroup");
 const AccessEvent     = require("../models/AccessEvent");
@@ -69,7 +70,7 @@ router.get(
     // One name per query below, in the same order. A query added here without a
     // name shifts every later one and drops the last off the trail — which is
     // exactly the "silently omitted document type" this route exists to avoid.
-    const [orders, jobs, pos, dcs, invoices, bills, expenses, notes, vouchers, contras, journals, openings, quotes, counts, groups] = await Promise.all([
+    const [orders, jobs, pos, dcs, invoices, bills, expenses, notes, vouchers, contras, journals, openings, assets, quotes, counts, groups] = await Promise.all([
       recentFrom(Order,           "Order",           "orderNo",    limit),
       recentFrom(JobOrder,        "JobOrder",        "jobOrderNo", limit),
       recentFrom(PurchaseOrder,   "PurchaseOrder",   "poNo",       limit),
@@ -82,6 +83,7 @@ router.get(
       recentFrom(Contra,          "Contra",          "contraNo",   limit),
       recentFrom(Journal,         "Journal",         "journalNo",  limit),
       recentFrom(OpeningBalance,  "OpeningBalance",  "docNo",      limit),
+      recentFrom(FixedAsset,      "FixedAsset",      "assetNo",    limit),
       recentFrom(Quote,           "Quote",           "quoteNo",    limit),
       recentFrom(StockCount,      "StockCount",      "countNo",    limit),
       // Groups have no document number — `code` is their stable handle,
@@ -104,7 +106,7 @@ router.get(
       reason: null,
     }));
 
-    const entries = [...orders, ...jobs, ...pos, ...dcs, ...invoices, ...bills, ...expenses, ...notes, ...vouchers, ...contras, ...journals, ...openings, ...quotes, ...counts, ...groups, ...access]
+    const entries = [...orders, ...jobs, ...pos, ...dcs, ...invoices, ...bills, ...expenses, ...notes, ...vouchers, ...contras, ...journals, ...openings, ...assets, ...quotes, ...counts, ...groups, ...access]
       .filter((e) => e.at)
       .sort((a, b) => new Date(b.at) - new Date(a.at))
       .slice(0, limit);

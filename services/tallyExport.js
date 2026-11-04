@@ -75,18 +75,20 @@ const TYPES = ['Invoice', 'SupplierBill', 'Expense', 'AccountNote', 'Payment', '
  */
 function voucher(type, { docType, doc, number, date, narration, reference, party, partyType, gstin = '', placeOfSupply = '', kind = 'voucher', key, extra = {} }) {
   const lines = [];
-  const add = (ledger, amount, bills) => {
+  // `costCentre`: the centre this ledger line is allocated to in Tally
+  // (an order, a machine, a department), when the setting is on.
+  const add = (ledger, amount, bills, costCentre) => {
     const a = r2(amount);
     if (!ledger || !a) return;
-    const hit = !bills && lines.find((l) => l.ledger === ledger && !l.bills);
+    const hit = !bills && lines.find((l) => l.ledger === ledger && !l.bills && (l.costCentre || '') === (costCentre || ''));
     if (hit) hit.amount = r2(hit.amount + a);
-    else lines.push({ ledger, amount: a, bills: bills || null });
+    else lines.push({ ledger, amount: a, bills: bills || null, ...(costCentre ? { costCentre } : {}) });
   };
   return {
     type, docType, doc, number, date, narration: narration || '', reference: reference || '', party: party || '', partyType: partyType || null,
     gstin, placeOfSupply, kind, key: key || `${kind}:${docType}:${doc}`, ...extra, lines,
-    dr(ledger, amount, bills) { add(ledger, amount, bills); },        // debit: positive
-    cr(ledger, amount, bills) { add(ledger, -amount, bills); },       // credit: negative
+    dr(ledger, amount, bills, cc) { add(ledger, amount, bills, cc); },        // debit: positive
+    cr(ledger, amount, bills, cc) { add(ledger, -amount, bills, cc); },       // credit: negative
   };
 }
 
@@ -130,13 +132,16 @@ const noBatch = (path) => ({ $or: [{ [path]: { $exists: false } }, { [path]: nul
  * @param fresh     only what has not gone to Tally yet
  * @param L         the ledger names (AccountsSettings.tally)
  */
-async function build({ from, to, fresh = true, L }) {
+async function build({ from, to, fresh = true, L, costCentres }) {
   const range = { $gte: from, $lte: to };
+  // Cost centres go to Tally only when the office has set them up there.
+  if (costCentres === undefined) costCentres = !!(await require('./booksLock').getSettings()).costCentres?.tally;
+  const ccOf = (d) => (costCentres && d.costCentre?.kind ? (d.costCentre.name || (d.costCentre.kind === 'order' ? `Order #${d.costCentre.orderNo ?? ''}` : d.costCentre.department || '')) : '');
   const notSent = fresh ? noBatch('tally.batch') : {};
   const [invoices, bills, expenses, notes, payments, contras, accounts, categories, journalsList] = await Promise.all([
     Invoice.find({ status: 'issued', invoiceDate: range, ...notSent }).select('invoiceNumber invoiceDate customer buyer customerPo orderNo totals placeOfSupply tally').lean(),
-    SupplierBill.find({ status: { $ne: 'cancelled' }, billDate: range, ...notSent }).select('billNo supplierBillNo billDate supplier supplierName supplierGstin kind category totals itc poNo tally reverseCharge rcm').lean(),
-    Expense.find({ status: { $in: ['approved', 'paid'] }, date: range, ...notSent }).select('expenseNo date supplier payeeName refNo category categoryName description totals itc tally').lean(),
+    SupplierBill.find({ status: { $ne: 'cancelled' }, billDate: range, ...notSent }).select('billNo supplierBillNo billDate supplier supplierName supplierGstin kind category totals itc poNo tally reverseCharge rcm costCentre').lean(),
+    Expense.find({ status: { $in: ['approved', 'paid'] }, date: range, ...notSent }).select('expenseNo date supplier payeeName refNo category categoryName description totals itc tally costCentre').lean(),
     AccountNote.find({ status: 'issued', date: range, ...notSent }).select('kind noteNo date partyType customer supplier partyName partyGstin against reason totals partyNoteNo applied unapplied applications tally financial').lean(),
     Payment.find({ status: 'posted', date: range, ...notSent }).lean(),
     Contra.find({ status: 'posted', date: range, ...notSent }).lean(),
@@ -239,7 +244,7 @@ async function build({ from, to, fresh = true, L }) {
     const v = voucher('Purchase', { docType: 'SupplierBill', doc: b._id, number: b.billNo, date: b.billDate, party: p, partyType: 'supplier', gstin: b.supplierGstin || partyInfo.get(p)?.gstin || '', reference: b.supplierBillNo, narration: `Bill ${b.supplierBillNo}${b.poNo ? ` · PO #${b.poNo}` : ''}` });
     v.cr(p, t.grand, [{ name: b.supplierBillNo || b.billNo, type: 'New Ref', amount: t.grand }]);
     const itc = b.itc?.eligible !== false;
-    v.dr(ledger, itc ? t.taxable : r2((t.taxable || 0) + (t.tax || 0)));
+    v.dr(ledger, itc ? t.taxable : r2((t.taxable || 0) + (t.tax || 0)), null, ccOf(b));
     if (itc) taxLines(v, t, 'dr', L, true);
     // Reverse charge: we owe the tax (output) and claim it (input).
     if (b.reverseCharge && b.rcm?.tax) {
@@ -260,7 +265,7 @@ async function build({ from, to, fresh = true, L }) {
     const v = voucher('Journal', { docType: 'Expense', doc: e._id, number: e.expenseNo, date: e.date, party: p, partyType: 'supplier', reference: e.refNo || '', narration: `${e.categoryName}: ${e.description}` });
     v.cr(p, t.grand, [{ name: e.refNo || e.expenseNo, type: 'New Ref', amount: t.grand }]);
     const itc = !!e.itc?.eligible;
-    v.dr(headOf(e.category, L.sundryExpenses), itc ? t.taxable : r2((t.taxable || 0) + (t.tax || 0)));
+    v.dr(headOf(e.category, L.sundryExpenses), itc ? t.taxable : r2((t.taxable || 0) + (t.tax || 0)), null, ccOf(e));
     if (itc) taxLines(v, t, 'dr', L, true);
     v.dr(L.roundOff, t.roundOff || 0);
     finish(v);
@@ -436,7 +441,11 @@ function ledgerLine(l) {
   const bills = (l.bills || []).map((b) => (
     `<BILLALLOCATIONS.LIST><NAME>${esc(b.name)}</NAME><BILLTYPE>${esc(b.type)}</BILLTYPE><AMOUNT>${((debit ? -1 : 1) * Math.abs(b.amount)).toFixed(2)}</AMOUNT></BILLALLOCATIONS.LIST>`
   )).join('');
-  return `<ALLLEDGERENTRIES.LIST><LEDGERNAME>${esc(l.ledger)}</LEDGERNAME><ISDEEMEDPOSITIVE>${debit ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE><ISPARTYLEDGER>${l.bills ? 'Yes' : 'No'}</ISPARTYLEDGER><AMOUNT>${amt.toFixed(2)}</AMOUNT>${bills}</ALLLEDGERENTRIES.LIST>`;
+  // A cost centre on the line: Tally's allocation under its primary category.
+  const cc = l.costCentre
+    ? `<CATEGORYALLOCATIONS.LIST><CATEGORY>Primary Cost Category</CATEGORY><ISDEEMEDPOSITIVE>${debit ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE><COSTCENTREALLOCATIONS.LIST><NAME>${esc(l.costCentre)}</NAME><AMOUNT>${amt.toFixed(2)}</AMOUNT></COSTCENTREALLOCATIONS.LIST></CATEGORYALLOCATIONS.LIST>`
+    : '';
+  return `<ALLLEDGERENTRIES.LIST><LEDGERNAME>${esc(l.ledger)}</LEDGERNAME><ISDEEMEDPOSITIVE>${debit ? 'Yes' : 'No'}</ISDEEMEDPOSITIVE><ISPARTYLEDGER>${l.bills ? 'Yes' : 'No'}</ISPARTYLEDGER><AMOUNT>${amt.toFixed(2)}</AMOUNT>${bills}${cc}</ALLLEDGERENTRIES.LIST>`;
 }
 
 /** One voucher as a <TALLYMESSAGE>. */

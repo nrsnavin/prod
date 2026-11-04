@@ -406,6 +406,21 @@ router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
     const p = Number(b.journals.approvalAbove);
     if (Number.isFinite(p) && p >= 0) set["journals.approvalAbove"] = p;
   }
+  if (b.costCentres?.tally !== undefined) set["costCentres.tally"] = !!b.costCentres.tally;
+  if (b.receivables) {
+    const r = b.receivables;
+    if (r.interestRate !== undefined && Number.isFinite(Number(r.interestRate)) && Number(r.interestRate) >= 0 && Number(r.interestRate) <= 100) set["receivables.interestRate"] = Number(r.interestRate);
+    if (r.graceDays !== undefined && Number.isInteger(Number(r.graceDays)) && Number(r.graceDays) >= 0 && Number(r.graceDays) <= 365) set["receivables.graceDays"] = Number(r.graceDays);
+  }
+  if (b.lut) {
+    if (b.lut.number !== undefined) set["lut.number"] = String(b.lut.number || "").trim().toUpperCase().slice(0, 40);
+    for (const k of ["validFrom", "validTo"]) {
+      if (b.lut[k] === undefined) continue;
+      if (!b.lut[k]) { set[`lut.${k}`] = null; continue; }
+      const d = new Date(b.lut[k]);
+      if (!Number.isNaN(d.getTime())) set[`lut.${k}`] = d;
+    }
+  }
   await getSettings();
   const settings = await AccountsSettings.findOneAndUpdate({ key: "accounts" }, { $set: set }, { new: true }).lean();
   res.json({ success: true, settings: publicSettings(settings) });
@@ -434,6 +449,7 @@ router.use(require("./accountsHealth"));
 router.use(require("./accountsDocs"));
 router.use(require("./accountsInsights"));
 router.use(require("./accountsStatutory"));
+router.use(require("./accountsRegisters"));
 
 module.exports = router;
 module.exports.postOpening = postOpening;
