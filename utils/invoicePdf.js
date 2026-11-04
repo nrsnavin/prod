@@ -61,7 +61,11 @@ const when = (d) => {
 async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   const inv = invoice || {};
   const lines = Array.isArray(inv.lines) ? inv.lines : [];
-  const inter = inv.supplyType === 'inter';
+  // IGST (or nothing, zero-rated) on anything that is not an in-state sale.
+  const inter = inv.supplyType !== 'intra';
+  const exp = inv.export?.kind ? inv.export : null;
+  const exportSupply = require('../services/exportSupply');
+  const zero = exportSupply.isZeroRated(exp);
   const cancelled = inv.status === 'cancelled';
   const registered = inv.einvoice?.status === 'registered' && inv.einvoice?.irn;
   const invSettings = settings.invoice || {};
@@ -155,11 +159,18 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
     ['P.O.#', inv.customerPo || (inv.orderNo != null ? `Order #${inv.orderNo}` : '—')],
     ['Delivery Challan', (inv.dcs || []).map((d) => d.dcNumber).join(', ') || '—'],
   ];
+  const taxLabel = zero ? `Zero-rated under LUT${exp.lut?.number ? ` ${exp.lut.number}` : ''} — no IGST`
+    : inv.supplyType === 'export' ? 'IGST (export, with payment)' : inv.supplyType === 'sez' ? 'IGST (SEZ, with payment)'
+    : inter ? `IGST (inter-state)${exp?.kind === 'DEXP' ? ', deemed export' : ''}` : `CGST + SGST (intra-state)${exp?.kind === 'DEXP' ? ', deemed export' : ''}`;
   const rightRows = inv.detailRows?.right || [
-    ['Place Of Supply', inv.placeOfSupply ? `${stateName(inv.placeOfSupply)} (${inv.placeOfSupply})` : '—'],
+    ['Place Of Supply', inv.supplyType === 'export' ? `Other Country (96)${exp?.countryCode ? ` — ${exp.countryCode}` : ''}` : inv.placeOfSupply ? `${stateName(inv.placeOfSupply)} (${inv.placeOfSupply})` : '—'],
     ['Total Boxes', Number(inv.totalBoxes) > 0 ? String(inv.totalBoxes) : '—'],
-    ['Tax', inter ? 'IGST (inter-state)' : 'CGST + SGST (intra-state)'],
+    ['Tax', taxLabel],
     ['Order', inv.orderNo != null ? `#${inv.orderNo}` : '—'],
+    ...(inv.supplyType === 'export' ? [
+      ['Currency', exp?.currency && exp.currency !== 'INR' ? `${exp.currency} @ ₹${exp.exchangeRate} · ${exp.currency} ${(exportSupply.fxValue(exp, inv.totals?.grand) ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'INR'],
+      ['Port / Ship. bill', [exp?.portCode, exp?.shippingBill?.number ? `${exp.shippingBill.number}${exp.shippingBill.date ? ` dt ${ddmmyyyy(exp.shippingBill.date)}` : ''}` : ''].filter(Boolean).join(' · ') || '—'],
+    ] : []),
   ];
   const gridH = rowH * Math.max(leftRows.length, rightRows.length) + 6;
   hline(y, L, R, 0.8);
@@ -338,7 +349,7 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   ly2 += 11;
   doc.font(FB).fontSize(9.5).fillColor(INK).text(inv.amountInWords || '—', lx, ly2, { width: leftW });
   ly2 += doc.heightOfString(inv.amountInWords || '—', { width: leftW }) + 8;
-  const notes = [inv.notes, invSettings.declaration].filter(Boolean);
+  const notes = [exportSupply.declaration(exp), inv.notes, invSettings.declaration].filter(Boolean);
   if (notes.length) {
     text('Notes', lx, ly2, { size: 9, color: MUTED, width: leftW });
     ly2 += 11;

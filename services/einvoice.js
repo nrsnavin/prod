@@ -13,6 +13,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const { isGstin, round2 } = require('./gst');
+const exportSupply = require('./exportSupply');
 
 // GST unit quantity codes for the units the challans use.
 const UQC = { m: 'MTR', mtr: 'MTR', meter: 'MTR', metre: 'MTR', pcs: 'PCS', pc: 'PCS', kg: 'KGS', kgs: 'KGS', nos: 'NOS', set: 'SET', roll: 'ROL' };
@@ -31,9 +32,12 @@ function buildEinvoiceJson(inv) {
   const b = inv.buyer || {};
   const t = inv.totals || {};
   const docNo = String(inv.invoiceNumber || '');
+  const exp = inv.export?.kind ? inv.export : null;
+  const abroad = inv.supplyType === 'export';
+  const pos = abroad ? exportSupply.OTHER_COUNTRY : inv.placeOfSupply || b.stateCode || '';
   return {
     Version: '1.1',
-    TranDtls: { TaxSch: 'GST', SupTyp: 'B2B', RegRev: 'N', IgstOnIntra: 'N' },
+    TranDtls: { TaxSch: 'GST', SupTyp: exp ? exp.kind : 'B2B', RegRev: 'N', IgstOnIntra: 'N' },
     // INV for an invoice; CRN / DBN for a credit or debit note to the buyer.
     DocDtls: { Typ: inv.einvoiceType || 'INV', No: docNo, Dt: ddmmyyyy(inv.invoiceDate) },
     SellerDtls: {
@@ -41,8 +45,12 @@ function buildEinvoiceJson(inv) {
       Pin: Number(s.pincode) || 0, Stcd: s.stateCode || '',
       ...(s.phone ? { Ph: s.phone } : {}), ...(s.email ? { Em: s.email } : {}),
     },
-    BuyerDtls: {
-      Gstin: b.gstin || '', LglNm: b.name || '', Pos: inv.placeOfSupply || b.stateCode || '',
+    // A buyer abroad has no GSTIN (URP), PIN 999999 and state 96, as the schema wants.
+    BuyerDtls: abroad ? {
+      Gstin: 'URP', LglNm: b.name || '', Pos: pos, Addr1: b.address || '', Loc: b.city || '', Pin: 999999, Stcd: exportSupply.OTHER_COUNTRY,
+      ...(b.phone ? { Ph: b.phone } : {}), ...(b.email ? { Em: b.email } : {}),
+    } : {
+      Gstin: b.gstin || '', LglNm: b.name || '', Pos: pos,
       Addr1: b.address || '', Loc: b.city || '', Pin: Number(b.pincode) || 0, Stcd: b.stateCode || '',
       ...(b.phone ? { Ph: b.phone } : {}), ...(b.email ? { Em: b.email } : {}),
     },
@@ -66,7 +74,16 @@ function buildEinvoiceJson(inv) {
     ValDtls: {
       AssVal: num(t.taxable), CgstVal: num(t.cgst), SgstVal: num(t.sgst), IgstVal: num(t.igst),
       RndOffAmt: num(t.roundOff), TotInvVal: num(t.grand),
+      ...(abroad && exp.currency && exp.currency !== 'INR' ? { TotInvValFc: exportSupply.fxValue(exp, t.grand) } : {}),
     },
+    ...(abroad ? {
+      ExpDtls: {
+        ...(exp.shippingBill?.number ? { ShipBNo: exp.shippingBill.number, ShipBDt: ddmmyyyy(exp.shippingBill.date || inv.invoiceDate) } : {}),
+        ...(exp.portCode ? { Port: exp.portCode } : {}),
+        RefClm: exportSupply.isZeroRated(exp) ? 'N' : 'Y',
+        ForCur: exp.currency || 'INR', CntCode: exp.countryCode || '',
+      },
+    } : {}),
     ...(inv.customerPo || inv.orderNo != null || inv.precedingDoc ? {
       RefDtls: {
         ...(inv.customerPo ? { DocPerdDtls: undefined, ContrDtls: [{ PoRefr: String(inv.customerPo).slice(0, 16) }] } : {}),
@@ -83,14 +100,22 @@ function readiness(inv) {
   const s = inv.seller || {};
   const b = inv.buyer || {};
   const problems = [];
+  const abroad = inv.supplyType === 'export';
   if (!isGstin(s.gstin)) problems.push('Your GSTIN is missing or not valid (Settings → Documents).');
   if (!s.pincode || !/^\d{6}$/.test(String(s.pincode))) problems.push('Your PIN code is missing (Settings → Invoice).');
   if (!s.city) problems.push('Your city is missing (Settings → Invoice).');
   if (!s.address) problems.push('Your address is missing (Settings → Documents).');
-  if (!isGstin(b.gstin)) problems.push(`${b.name || 'The customer'} has no valid GSTIN on the customer record.`);
-  if (!b.pincode || !/^\d{6}$/.test(String(b.pincode))) problems.push(`${b.name || 'The customer'} has no PIN code on the customer record.`);
-  if (!b.address) problems.push(`${b.name || 'The customer'} has no billing address on the customer record.`);
-  if (!b.city) problems.push(`${b.name || 'The customer'} has no city on the customer record.`);
+  if (abroad) {
+    // A buyer abroad: no GSTIN or PIN, but the portal wants the country and the currency.
+    if (!b.address) problems.push(`${b.name || 'The customer'} has no address on the customer record.`);
+    if (!inv.export?.countryCode) problems.push('The destination country code is missing on the invoice.');
+    if (!inv.export?.currency) problems.push('The invoice currency is missing.');
+  } else {
+    if (!isGstin(b.gstin)) problems.push(`${b.name || 'The customer'} has no valid GSTIN on the customer record.`);
+    if (!b.pincode || !/^\d{6}$/.test(String(b.pincode))) problems.push(`${b.name || 'The customer'} has no PIN code on the customer record.`);
+    if (!b.address) problems.push(`${b.name || 'The customer'} has no billing address on the customer record.`);
+    if (!b.city) problems.push(`${b.name || 'The customer'} has no city on the customer record.`);
+  }
   if (!(inv.lines || []).length) problems.push('The invoice has no lines.');
   (inv.lines || []).forEach((l, i) => {
     if (!l.hsn) problems.push(`Line ${i + 1} (${l.name}) has no HSN code.`);

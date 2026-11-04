@@ -139,7 +139,7 @@ async function build({ from, to, fresh = true, L, costCentres }) {
   const ccOf = (d) => (costCentres && d.costCentre?.kind ? (d.costCentre.name || (d.costCentre.kind === 'order' ? `Order #${d.costCentre.orderNo ?? ''}` : d.costCentre.department || '')) : '');
   const notSent = fresh ? noBatch('tally.batch') : {};
   const [invoices, bills, expenses, notes, payments, contras, accounts, categories, journalsList] = await Promise.all([
-    Invoice.find({ status: 'issued', invoiceDate: range, ...notSent }).select('invoiceNumber invoiceDate customer buyer customerPo orderNo totals placeOfSupply tally').lean(),
+    Invoice.find({ status: 'issued', invoiceDate: range, ...notSent }).select('invoiceNumber invoiceDate customer buyer customerPo orderNo totals placeOfSupply supplyType export tally').lean(),
     SupplierBill.find({ status: { $ne: 'cancelled' }, billDate: range, ...notSent }).select('billNo supplierBillNo billDate supplier supplierName supplierGstin kind category totals itc poNo tally reverseCharge rcm costCentre').lean(),
     Expense.find({ status: { $in: ['approved', 'paid'] }, date: range, ...notSent }).select('expenseNo date supplier payeeName refNo category categoryName description totals itc tally costCentre').lean(),
     AccountNote.find({ status: 'issued', date: range, ...notSent }).select('kind noteNo date partyType customer supplier partyName partyGstin against reason totals partyNoteNo applied unapplied applications tally financial').lean(),
@@ -228,10 +228,11 @@ async function build({ from, to, fresh = true, L, costCentres }) {
   for (const inv of invoices) {
     const t = inv.totals || {};
     const p = party('customer', inv.customer, inv.buyer?.name);
-    const pos = /^\d{2}$/.test(String(inv.placeOfSupply || '')) ? stateName(inv.placeOfSupply) : (inv.placeOfSupply || stateName(String(inv.buyer?.gstin || '').slice(0, 2)));
+    const pos = inv.supplyType === 'export' ? 'Other Country' : /^\d{2}$/.test(String(inv.placeOfSupply || '')) ? stateName(inv.placeOfSupply) : (inv.placeOfSupply || stateName(String(inv.buyer?.gstin || '').slice(0, 2)));
     const v = voucher('Sales', { docType: 'Invoice', doc: inv._id, number: inv.invoiceNumber, date: inv.invoiceDate, party: p, partyType: 'customer', gstin: inv.buyer?.gstin || '', placeOfSupply: pos, reference: inv.customerPo || '', narration: `Order #${inv.orderNo ?? ''}`.trim() });
     v.dr(p, t.grand, [{ name: inv.invoiceNumber, type: 'New Ref', amount: t.grand }]);
-    v.cr(L.sales, t.taxable);
+    // An export or SEZ sale to its own ledger, so the zero-rated turnover reads apart.
+    v.cr(inv.supplyType === 'export' || inv.supplyType === 'sez' ? (L.exportSales || L.sales) : L.sales, t.taxable);
     taxLines(v, t, 'cr', L, false);
     v.cr(L.roundOff, t.roundOff || 0);
     finish(v);

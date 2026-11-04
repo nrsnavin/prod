@@ -49,15 +49,18 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
  *        state is treated as the seller's (intra-state) — the readiness
  *        check for the e-invoice says so out loud.
  */
-function computeInvoice(lines, { sellerStateCode, buyerStateCode } = {}) {
+function computeInvoice(lines, { sellerStateCode, buyerStateCode, supply, zeroRated } = {}) {
   const seller = String(sellerStateCode || '');
   const buyer = String(buyerStateCode || '') || seller;
-  const interState = !!seller && !!buyer && seller !== buyer;
+  // An export or a supply to an SEZ is always IGST (zero-rated under LUT:
+  // no tax at all), whatever the states say.
+  const abroad = supply === 'export' || supply === 'sez';
+  const interState = abroad || (!!seller && !!buyer && seller !== buyer);
 
   const priced = lines.map((l) => {
     const quantity = Number(l.quantity) || 0;
     const rate = Number(l.rate) || 0;
-    const gstPercent = Number(l.gstPercent) || 0;
+    const gstPercent = zeroRated ? 0 : Number(l.gstPercent) || 0;
     const taxable = round2(quantity * rate);
     const tax = round2((taxable * gstPercent) / 100);
     const half = round2(tax / 2);
@@ -79,8 +82,9 @@ function computeInvoice(lines, { sellerStateCode, buyerStateCode } = {}) {
   const roundOff = round2(grand - beforeRound);
 
   return {
-    supplyType: interState ? 'inter' : 'intra',
-    placeOfSupply: buyer,
+    supplyType: abroad ? supply : interState ? 'inter' : 'intra',
+    // 96: "other country", the place of supply of an export.
+    placeOfSupply: supply === 'export' ? '96' : buyer,
     lines: priced,
     totals: { taxable, cgst, sgst, igst, tax, roundOff, grand },
   };

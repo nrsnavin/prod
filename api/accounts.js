@@ -112,8 +112,8 @@ function readLines(raw, { defaultGst = 5 } = {}) {
   });
 }
 
-function priced(lines, sellerState, partyState) {
-  const p = computeInvoice(lines, { sellerStateCode: sellerState, buyerStateCode: partyState });
+function priced(lines, sellerState, partyState, extra = {}) {
+  const p = computeInvoice(lines, { sellerStateCode: sellerState, buyerStateCode: partyState, ...extra });
   return {
     supplyType: p.supplyType,
     lines: p.lines.map((l) => ({
@@ -741,7 +741,8 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
     }
   } catch (err) { return next(err); }
   const partyState = docType === "Invoice" ? target.buyer?.stateCode : target.supplierStateCode;
-  const p = priced(lines, await sellerStateCode(), partyState);
+  // A note against an export or SEZ invoice is priced as that invoice was: IGST, or nothing.
+  const p = priced(lines, await sellerStateCode(), partyState, docType === "Invoice" ? require("../services/exportSupply").pricing(target.export) : {});
   const party = docType === "Invoice" ? target.customer : target.supplier;
   const partyName = docType === "Invoice" ? target.buyer?.name : target.supplierName;
   const partyGstin = docType === "Invoice" ? target.buyer?.gstin : target.supplierGstin;

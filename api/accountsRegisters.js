@@ -22,6 +22,8 @@
 //    POST /payments/:id/cheque            deposited / cleared / bounced
 //    GET  /interest?asOf=&customer=       interest due on overdue invoices
 //    GET  /interest/draft?customer=&asOf= the debit note that charges it
+//    GET  /registers/sales?from=&to=      the sales register (?format=xlsx)
+//    GET  /registers/purchase?from=&to=   the purchase register (?format=xlsx)
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -41,6 +43,7 @@ const Payment = require("../models/Payment");
 const confirmations = require("../services/confirmations");
 const overdueInterest = require("../services/overdueInterest");
 const { cancelVoucher } = require("../services/voucherCancel");
+const registers = require("../services/registers");
 const { fp } = require("../services/accountsHelpers");
 const { ACTION_CODES } = require("../utils/fingerprint");
 
@@ -262,6 +265,55 @@ router.get("/interest/draft", catchAsyncErrors(async (req, res, next) => {
   try { asOf = readDate(req.query.asOf, "asOf", new Date()); } catch (err) { return next(err); }
   try { res.json({ success: true, ...(await overdueInterest.draft({ customer: req.query.customer, asOf })) }); }
   catch (err) { return fail(err, next); }
+}));
+
+// ── Sales and purchase registers ───────────────────────────────────
+function period(req) {
+  const now = new Date();
+  const from = readDate(req.query.from, "from", new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
+  const to = readDate(req.query.to, "to", now);
+  return { from, to: new Date(to.getTime() + DAY - 1) };
+}
+const rateCols = (rows) => [...new Set(rows.flatMap((r) => Object.keys(r.byRate || {})))].sort((a, b) => Number(a) - Number(b));
+
+router.get("/registers/sales", catchAsyncErrors(async (req, res, next) => {
+  let p;
+  try { p = period(req); } catch (err) { return next(err); }
+  const r = await registers.sales(p);
+  if (req.query.format !== "xlsx") return res.json({ success: true, ...r });
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Sales register");
+  const rates = rateCols(r.rows);
+  ws.addRow([`Sales register ${dd(r.from)} to ${dd(r.to)}`]).font = { bold: true };
+  ws.addRow([]);
+  ws.addRow(["Date", "Document", "Kind", "Customer", "GSTIN", "Place of supply", "Supply", "Against / order", ...rates.map((x) => `Taxable @ ${x}%`), "Taxable", "CGST", "SGST", "IGST", "Round off", "Total", "IRN", "E-way bill", "Outstanding", "Status"]).font = { bold: true };
+  for (const x of r.rows) ws.addRow([dd(x.date), x.docNo, x.kind, x.partyName, x.gstin, x.state, x.exportKind || x.supplyType, x.against || (x.orderNo != null ? `Order #${x.orderNo}` : ""), ...rates.map((k) => (x.byRate?.[k] || 0) * (x.sign || 1)), x.taxable * (x.sign || 1), x.cgst * (x.sign || 1), x.sgst * (x.sign || 1), x.igst * (x.sign || 1), x.roundOff * (x.sign || 1), x.grand * (x.sign || 1), x.irn, x.ewaybill, x.outstanding, x.cancelled ? "CANCELLED" : x.financial ? "financial CN" : x.interest ? "interest" : ""]);
+  const t = r.totals;
+  ws.addRow(["Total", "", "", "", "", "", "", "", ...rates.map((k) => t.byRate[k] || 0), t.taxable, t.cgst, t.sgst, t.igst, "", t.grand]).font = { bold: true };
+  ws.columns.forEach((c, i) => { c.width = i === 3 ? 30 : 14; });
+  money(ws, Array.from({ length: rates.length + 6 }, (_, i) => 9 + i).concat([rates.length + 17]));
+  ws.views = [{ state: "frozen", ySplit: 3 }];
+  await sendXlsx(res, `Sales register ${dd(r.from)} ${dd(r.to)}`, wb);
+}));
+
+router.get("/registers/purchase", catchAsyncErrors(async (req, res, next) => {
+  let p;
+  try { p = period(req); } catch (err) { return next(err); }
+  const r = await registers.purchase(p);
+  if (req.query.format !== "xlsx") return res.json({ success: true, ...r });
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Purchase register");
+  const rates = rateCols(r.rows);
+  ws.addRow([`Purchase register ${dd(r.from)} to ${dd(r.to)}`]).font = { bold: true };
+  ws.addRow([]);
+  ws.addRow(["Date", "Our no.", "Supplier's no.", "Kind", "Supplier / payee", "GSTIN", "State", "Head / PO", "Cost centre", ...rates.map((x) => `Taxable @ ${x}%`), "Taxable", "CGST", "SGST", "IGST", "Round off", "Total", "ITC claimed", "Reverse charge", "TDS", "GSTR-2B", "ITC reversed", "Outstanding", "Status"]).font = { bold: true };
+  for (const x of r.rows) ws.addRow([dd(x.date), x.docNo, x.refNo || "", x.kind, x.partyName, x.gstin, x.state, x.head || x.against || (x.poNo != null ? `PO #${x.poNo}` : ""), x.costCentre || "", ...rates.map((k) => (x.byRate?.[k] || 0) * (x.sign || 1)), x.taxable * (x.sign || 1), x.cgst * (x.sign || 1), x.sgst * (x.sign || 1), x.igst * (x.sign || 1), x.roundOff * (x.sign || 1), x.grand * (x.sign || 1), x.itc ? "yes" : "no", x.reverseCharge ? x.rcmTax : "", x.tds, x.gstr2b, x.itcReversed || "", x.outstanding, x.cancelled ? "CANCELLED" : ""]);
+  const t = r.totals;
+  ws.addRow(["Total", "", "", "", "", "", "", "", "", ...rates.map((k) => t.byRate[k] || 0), t.taxable, t.cgst, t.sgst, t.igst, "", t.grand, t.itc, t.reverseCharge]).font = { bold: true };
+  ws.columns.forEach((c, i) => { c.width = i === 4 ? 30 : 14; });
+  money(ws, Array.from({ length: rates.length + 6 }, (_, i) => 10 + i));
+  ws.views = [{ state: "frozen", ySplit: 3 }];
+  await sendXlsx(res, `Purchase register ${dd(r.from)} ${dd(r.to)}`, wb);
 }));
 
 module.exports = router;

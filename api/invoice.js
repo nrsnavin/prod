@@ -43,6 +43,8 @@ const { getProvider } = require("../services/einvoiceProvider");
 const partyLedger = require("../services/partyLedger");
 const { assertOpen } = require("../services/booksLock");
 const creditControl = require("../services/creditControl");
+const exportSupply = require("../services/exportSupply");
+const { getSettings: getBooksSettings } = require("../services/booksLock");
 
 const Invoice         = require("../models/Invoice");
 const Order           = require("../models/Order");
@@ -179,7 +181,7 @@ function readOverrides(raw) {
 }
 
 const populateOrder = (q) => q
-  .populate("customer", "name email gstin contactName phoneNumber address city pincode stateCode")
+  .populate("customer", "name email gstin contactName phoneNumber address city pincode stateCode country sez currency")
   .populate("elasticOrdered.elastic", "name hsn gstPercent");
 
 function nextInvoiceSeq(fy) {
@@ -212,7 +214,14 @@ router.get(
     const buyer = buyerFrom(order.customer);
     const priced = computeInvoice(lines, { sellerStateCode: seller.stateCode, buyerStateCode: buyer.stateCode });
     const preview = { seller, buyer, lines: priced.lines, status: "issued" };
+    const books = await getBooksSettings();
     res.json({
+      // Export / SEZ: what the customer's file suggests, the kinds, and the LUT on file.
+      export: {
+        suggested: exportSupply.suggestFor(order.customer), kinds: exportSupply.options(),
+        lut: { number: books.lut?.number || "", validFrom: books.lut?.validFrom || null, validTo: books.lut?.validTo || null },
+        currency: order.customer?.currency || "", country: order.customer?.country || "", sez: !!order.customer?.sez,
+      },
       success: true,
       order: { _id: order._id, orderNo: order.orderNo, po: order.po, status: order.status, customer: order.customer?._id },
       seller, buyer,
@@ -283,7 +292,10 @@ router.post(
       return next(new ErrorHandler(
         `No rate for ${unpriced.map((l) => l.name).join(", ")} — price the order line, or enter a rate on the invoice.`, 409));
     }
-    const priced = computeInvoice(lines, { sellerStateCode: seller.stateCode, buyerStateCode: buyer.stateCode });
+    // An export, SEZ or deemed-export supply: zero-rated under LUT, or IGST.
+    let exp;
+    try { exp = exportSupply.read(req.body.export, { lut: (await getBooksSettings()).lut, invoiceDate: when, customer: order.customer }); } catch (err) { return next(err); }
+    const priced = computeInvoice(lines, { sellerStateCode: seller.stateCode, buyerStateCode: buyer.stateCode, ...exportSupply.pricing(exp) });
 
     const fy = financialYearLong(when);
     const sequence = await nextInvoiceSeq(fy);
@@ -300,6 +312,7 @@ router.post(
       seller, buyer,
       shipTo: String(req.body.shipTo ?? "").trim().slice(0, 300) || shipToFor(chosen, buyer),
       supplyType: priced.supplyType, placeOfSupply: priced.placeOfSupply,
+      ...(exp ? { export: exp } : {}),
       dcs: chosen.map((d) => ({ dc: d._id, dcNumber: d.dcNumber, dispatchDate: d.dispatchDate })),
       lines: priced.lines.map((l) => ({
         elastic: l.elastic, name: l.name, hsn: l.hsn, unit: l.unit, quantity: l.quantity, boxes: l.boxes || 0, rate: l.rate,
@@ -313,7 +326,7 @@ router.post(
     });
     doc.fingerprints.push(buildFingerprint(ACTION_CODES.INVOICE_CREATED, {
       entityId: doc._id, actor,
-      meta: { invoiceNumber: number, orderNo: order.orderNo, dcs: doc.dcs.map((d) => d.dcNumber), grand: priced.totals.grand },
+      meta: { invoiceNumber: number, orderNo: order.orderNo, dcs: doc.dcs.map((d) => d.dcNumber), grand: priced.totals.grand, ...(exp ? { export: exp.kind } : {}) },
     }));
     try {
       await doc.save();
@@ -450,6 +463,28 @@ router.post(
       return next(e);
     }
     stampRegistration(inv, reg, provider.name, req);
+    await inv.save();
+    res.json({ success: true, invoice: publicInvoice(inv) });
+  })
+);
+
+// ── Export details that come later: the shipping bill, the port ──
+// Customs issue the shipping bill after the invoice; it changes no
+// value, so it is the one thing an issued invoice takes afterwards.
+router.post(
+  "/:id/export",
+  catchAsyncErrors(async (req, res, next) => {
+    const inv = await loadInvoice(req.params.id, next);
+    if (!inv) return;
+    if (inv.supplyType !== "export") return next(new ErrorHandler("Only an export invoice carries a shipping bill", 409));
+    const b = req.body || {};
+    const number = String(b.shippingBill?.number ?? b.shippingBillNo ?? "").trim().slice(0, 20);
+    if (!number) return next(new ErrorHandler("shippingBill.number is required", 400));
+    let date;
+    try { date = readDate(b.shippingBill?.date ?? b.shippingBillDate, "shippingBill.date", inv.invoiceDate); } catch (err) { return next(err); }
+    inv.export.shippingBill = { number, date };
+    if (b.portCode !== undefined) inv.export.portCode = String(b.portCode || "").trim().toUpperCase().slice(0, 10);
+    inv.fingerprints.push(buildFingerprint(ACTION_CODES.INVOICE_EXPORT, { entityId: inv._id, actor: actorFromRequest(req), meta: { invoiceNumber: inv.invoiceNumber, shippingBill: number, portCode: inv.export.portCode } }));
     await inv.save();
     res.json({ success: true, invoice: publicInvoice(inv) });
   })

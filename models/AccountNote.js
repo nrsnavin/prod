@@ -69,7 +69,7 @@ const AccountNoteSchema = new mongoose.Schema(
     },
 
     reason: { type: String, required: true, trim: true, maxlength: 200 },
-    supplyType: { type: String, enum: ["intra", "inter"], required: true },
+    supplyType: { type: String, enum: ["intra", "inter", "export", "sez"], required: true },
     lines:  { type: [TaxLineSchema], default: [] },
     totals: { type: TotalsSchema, default: () => ({}) },
 

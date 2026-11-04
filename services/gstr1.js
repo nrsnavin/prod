@@ -24,6 +24,7 @@ const Invoice = require('../models/Invoice');
 const AccountNote = require('../models/AccountNote');
 const Customer = require('../models/Customer');
 const { getSettings } = require('./booksLock');
+const exportSupply = require('./exportSupply');
 const { getDocumentSettings } = require('./documentSettings');
 const { uqc } = require('./einvoice');
 
@@ -53,7 +54,7 @@ async function build(month) {
   const { from, to, fp } = monthRange(month);
   const range = { $gte: from, $lte: to };
   const [invoices, cancelled, notes, cancelledNotes, settings, docSettings] = await Promise.all([
-    Invoice.find({ status: 'issued', invoiceDate: range }).select('invoiceNumber invoiceDate customer buyer supplyType placeOfSupply lines totals einvoice.irn').sort({ invoiceDate: 1, sequence: 1 }).lean(),
+    Invoice.find({ status: 'issued', invoiceDate: range }).select('invoiceNumber invoiceDate customer buyer supplyType placeOfSupply lines totals einvoice.irn export').sort({ invoiceDate: 1, sequence: 1 }).lean(),
     Invoice.find({ status: 'cancelled', invoiceDate: range }).select('invoiceNumber').lean(),
     AccountNote.find({ status: 'issued', partyType: 'customer', date: range, financial: { $ne: true } }).select('kind noteNo date customer partyName partyGstin against supplyType lines totals').sort({ date: 1 }).lean(),
     AccountNote.find({ status: 'cancelled', partyType: 'customer', date: range }).select('noteNo kind').lean(),
@@ -70,17 +71,30 @@ async function build(month) {
 
   const checks = [];
   const b2b = new Map(); const b2cl = new Map(); const b2cs = new Map();
+  // Table 6A: exports, with or without payment of tax.
+  const exp = new Map();
   for (const inv of invoices) {
     const gstin = String(inv.buyer?.gstin || '').toUpperCase();
     const pos = posOf(inv) || ourState;
-    const row = { inum: inv.invoiceNumber, idt: dmy(inv.invoiceDate), val: r2(inv.totals?.grand || 0), pos, rchrg: 'N', inv_typ: 'R', itms: items(inv.lines), customer: inv.buyer?.name || '', irn: inv.einvoice?.irn || '' };
-    const onFile = customers.get(String(inv.customer));
-    if (!gstin && onFile?.gstin) checks.push({ level: 'error', doc: inv.invoiceNumber, text: `${onFile.name} has GSTIN ${onFile.gstin} on file but the invoice carries none: it would go as B2C` });
+    const expKind = inv.export?.kind ? exportSupply.gstr1Type(inv.export) : '';
+    const invTyp = expKind === 'SEWP' || expKind === 'SEWOP' || expKind === 'DE' ? expKind : 'R';
+    const row = { inum: inv.invoiceNumber, idt: dmy(inv.invoiceDate), val: r2(inv.totals?.grand || 0), pos, rchrg: 'N', inv_typ: invTyp, itms: items(inv.lines), customer: inv.buyer?.name || '', irn: inv.einvoice?.irn || '' };
     for (const l of inv.lines || []) {
       const h = String(l.hsn || '').replace(/\D/g, '');
       if (!h) checks.push({ level: 'error', doc: inv.invoiceNumber, text: `"${l.name}" has no HSN` });
       else if (h.length < hsnDigits) checks.push({ level: 'warn', doc: inv.invoiceNumber, text: `"${l.name}" HSN ${h} has ${h.length} digits; ${hsnDigits} are required` });
     }
+    if (inv.supplyType === 'export') {
+      const sb = inv.export?.shippingBill || {};
+      if (!sb.number) checks.push({ level: 'warn', doc: inv.invoiceNumber, text: 'Export without a shipping bill number yet — the refund (or the LUT record) needs it' });
+      const g = exp.get(expKind) || { exp_typ: expKind, inv: [] };
+      g.inv.push({ inum: row.inum, idt: row.idt, val: row.val, sbpcode: inv.export?.portCode || '', sbnum: sb.number || '', sbdt: sb.number ? dmy(sb.date || inv.invoiceDate) : '', itms: row.itms.map((it) => ({ txval: it.itm_det.txval, rt: it.itm_det.rt, iamt: it.itm_det.iamt, csamt: 0 })), customer: row.customer, irn: row.irn });
+      exp.set(expKind, g);
+      continue;
+    }
+    const onFile = customers.get(String(inv.customer));
+    if (!gstin && onFile?.gstin) checks.push({ level: 'error', doc: inv.invoiceNumber, text: `${onFile.name} has GSTIN ${onFile.gstin} on file but the invoice carries none: it would go as B2C` });
+    if (inv.supplyType === 'sez' && !gstin) checks.push({ level: 'error', doc: inv.invoiceNumber, text: 'A supply to an SEZ unit needs the unit\'s GSTIN' });
     if (gstin) {
       const g = b2b.get(gstin) || { ctin: gstin, name: inv.buyer?.name || '', inv: [] };
       g.inv.push(row); b2b.set(gstin, g);
@@ -105,7 +119,7 @@ async function build(month) {
     if (!n.against?.docNo) checks.push({ level: 'error', doc: n.noteNo, text: 'The note names no original invoice' });
     else if (!invByNo.has(n.against.docNo) && !(await Invoice.exists({ invoiceNumber: n.against.docNo }))) checks.push({ level: 'warn', doc: n.noteNo, text: `Original invoice ${n.against.docNo} is not in the books` });
     if (gstin) { const g = cdnr.get(gstin) || { ctin: gstin, name: n.partyName, nt: [] }; g.nt.push(row); cdnr.set(gstin, g); }
-    else cdnur.push({ ...row, typ: n.supplyType === 'inter' && row.val > B2CL_LIMIT ? 'B2CL' : 'B2CS' });
+    else cdnur.push({ ...row, typ: n.supplyType === 'export' ? 'EXPWOP' : n.supplyType === 'inter' && row.val > B2CL_LIMIT ? 'B2CL' : 'B2CS' });
   }
 
   // HSN summary: by HSN and rate, over invoices, less credit notes, plus debit notes.
@@ -143,9 +157,11 @@ async function build(month) {
   return {
     month, from, to, fp, gstin: ourGstin, hsnDigits,
     b2b: [...b2b.values()], b2cl: [...b2cl.values()], b2cs: [...b2cs.values()].sort((a, b) => a.pos.localeCompare(b.pos) || a.rt - b.rt),
+    exp: [...exp.values()],
     cdnr: [...cdnr.values()], cdnur, hsn: hsnRows, docs,
     summary: {
       b2b: sumRows(flatInv([...b2b.values()]), (x) => x),
+      exp: sumRows([...exp.values()].flatMap((g) => g.inv.map((i) => ({ val: i.val, ...i.itms.reduce((t, it) => ({ txval: r2(t.txval + it.txval), iamt: r2(t.iamt + it.iamt), camt: 0, samt: 0 }), { txval: 0, iamt: 0, camt: 0, samt: 0 }) }))), (x) => x),
       b2cl: sumRows(flatInv([...b2cl.values()]), (x) => x),
       b2cs: sumRows([...b2cs.values()], (x) => ({ val: r2(x.txval + x.iamt + x.camt + x.samt), txval: x.txval, iamt: x.iamt, camt: x.camt, samt: x.samt })),
       cdnr: sumRows(flatNt([...cdnr.values()].flatMap((g) => g.nt)), (x) => x),
@@ -164,6 +180,7 @@ function toJson(r) {
     b2b: r.b2b.map((g) => ({ ctin: g.ctin, inv: g.inv.map(strip) })),
     b2cl: r.b2cl.map((g) => ({ pos: g.pos, inv: g.inv.map((i) => { const { pos, ...rest } = strip(i); return rest; }) })),
     b2cs: r.b2cs.map(({ count, ...g }) => g),
+    exp: r.exp.map((g) => ({ exp_typ: g.exp_typ, inv: g.inv.map(({ customer, irn, ...i }) => i) })),
     cdnr: r.cdnr.map((g) => ({ ctin: g.ctin, nt: g.nt.map(strip) })),
     cdnur: r.cdnur.map((n) => ({ typ: n.typ, ...strip(n) })),
     hsn: { data: r.hsn },

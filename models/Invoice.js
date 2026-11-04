@@ -105,8 +105,21 @@ const InvoiceSchema = new mongoose.Schema(
     totalBoxes: { type: Number, default: 0 },
 
     // "intra": CGST + SGST; "inter": IGST. From the two state codes.
-    supplyType:    { type: String, enum: ["intra", "inter"], required: true },
+    // "export" / "sez": zero-rated, IGST or none (services/exportSupply.js).
+    supplyType:    { type: String, enum: ["intra", "inter", "export", "sez"], required: true },
     placeOfSupply: { type: String, default: "" },
+
+    // An export, SEZ or deemed-export supply: the kind, the LUT it went
+    // under, the currency and rate, the port and the shipping bill.
+    export: {
+      kind:         { type: String, enum: ["", "EXPWP", "EXPWOP", "SEZWP", "SEZWOP", "DEXP"], default: "" },
+      currency:     { type: String, default: "", trim: true },
+      exchangeRate: { type: Number, default: 0 },
+      countryCode:  { type: String, default: "", trim: true },
+      portCode:     { type: String, default: "", trim: true },
+      shippingBill: { number: { type: String, default: "", trim: true }, date: { type: Date } },
+      lut:          { number: { type: String, default: "", trim: true }, validFrom: { type: Date }, validTo: { type: Date } },
+    },
 
     dcs: {
       type: [new mongoose.Schema({
