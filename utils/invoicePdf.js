@@ -159,7 +159,8 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
     ['P.O.#', inv.customerPo || (inv.orderNo != null ? `Order #${inv.orderNo}` : '—')],
     ['Delivery Challan', (inv.dcs || []).map((d) => d.dcNumber).join(', ') || '—'],
   ];
-  const taxLabel = zero ? `Zero-rated under LUT${exp.lut?.number ? ` ${exp.lut.number}` : ''} — no IGST`
+  // Short enough for the grid's cell; the LUT number gets a row of its own.
+  const taxLabel = zero ? 'Zero-rated under LUT, no IGST'
     : inv.supplyType === 'export' ? 'IGST (export, with payment)' : inv.supplyType === 'sez' ? 'IGST (SEZ, with payment)'
     : inter ? `IGST (inter-state)${exp?.kind === 'DEXP' ? ', deemed export' : ''}` : `CGST + SGST (intra-state)${exp?.kind === 'DEXP' ? ', deemed export' : ''}`;
   const rightRows = inv.detailRows?.right || [
@@ -167,6 +168,7 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
     ['Total Boxes', Number(inv.totalBoxes) > 0 ? String(inv.totalBoxes) : '—'],
     ['Tax', taxLabel],
     ['Order', inv.orderNo != null ? `#${inv.orderNo}` : '—'],
+    ...(zero && exp?.lut?.number ? [['LUT No.', exp.lut.number]] : []),
     ...(inv.supplyType === 'export' ? [
       ['Currency', exp?.currency && exp.currency !== 'INR' ? `${exp.currency} @ ₹${exp.exchangeRate} · ${exp.currency} ${(exportSupply.fxValue(exp, inv.totals?.grand) ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'INR'],
       ['Port / Ship. bill', [exp?.portCode, exp?.shippingBill?.number ? `${exp.shippingBill.number}${exp.shippingBill.date ? ` dt ${ddmmyyyy(exp.shippingBill.date)}` : ''}` : ''].filter(Boolean).join(' · ') || '—'],
@@ -308,7 +310,8 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
     ['Total Taxable Amount', money(t.taxable)],
   ];
   for (const r of rates) {
-    if (inter) totalRows.push([`IGST${r} (${r}%)`, money(sumBy(r, 'igst'))]);
+    if (zero) totalRows.push(['IGST (zero-rated)', money(0)]);
+    else if (inter) totalRows.push([`IGST${r} (${r}%)`, money(sumBy(r, 'igst'))]);
     else {
       totalRows.push([`CGST${r / 2} (${r / 2}%)`, money(sumBy(r, 'cgst'))]);
       totalRows.push([`SGST${r / 2} (${r / 2}%)`, money(sumBy(r, 'sgst'))]);

@@ -25,6 +25,7 @@ const MODELS = {
   AccountNote: () => require('../models/AccountNote'),
   Payment: () => require('../models/Payment'),
   Contra: () => require('../models/Contra'),
+  Journal: () => require('../models/Journal'),
   OpeningBalance: () => require('../models/OpeningBalance'),
 };
 

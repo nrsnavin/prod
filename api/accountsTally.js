@@ -211,10 +211,12 @@ const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 /** A party's ledger balance from the documents already sent (and the opening, which came from Tally). */
 async function sentBalances(partyType) {
   const PartyLedgerEntry = require("../models/PartyLedgerEntry");
-  const rows = await PartyLedgerEntry.find({ partyType }).select("party docType doc debit credit").lean();
+  const rows = await PartyLedgerEntry.find({ partyType }).select("party docType doc source debit credit").lean();
   const sent = new Set();
   const byType = {};
-  for (const r of rows) if (MODELS[r.docType] && r.docType !== "OpeningBalance") (byType[r.docType] = byType[r.docType] || new Set()).add(String(r.doc));
+  // A journal's party rows are one per line, keyed by a derived id; the journal itself is `source`.
+  const docOf = (r) => String(r.docType === "Journal" && r.source ? r.source : r.doc);
+  for (const r of rows) if (MODELS[r.docType] && r.docType !== "OpeningBalance") (byType[r.docType] = byType[r.docType] || new Set()).add(docOf(r));
   for (const [t, ids] of Object.entries(byType)) {
     for (const d of await MODELS[t]().find({ _id: { $in: [...ids] }, "tally.batch": { $ne: null } }).select("_id").lean()) sent.add(String(d._id));
   }
@@ -223,7 +225,7 @@ async function sentBalances(partyType) {
     const k = String(r.party);
     const v = partyType === "customer" ? (r.debit || 0) - (r.credit || 0) : (r.credit || 0) - (r.debit || 0);
     all.set(k, r2((all.get(k) || 0) + v));
-    if (r.docType === "OpeningBalance" || sent.has(String(r.doc))) sentOnly.set(k, r2((sentOnly.get(k) || 0) + v));
+    if (r.docType === "OpeningBalance" || sent.has(docOf(r))) sentOnly.set(k, r2((sentOnly.get(k) || 0) + v));
     else unsent.set(k, (unsent.get(k) || 0) + 1);
   }
   return { all, sentOnly, unsent };
