@@ -46,6 +46,10 @@ const AccountNoteSchema = new mongoose.Schema(
       docNo:   { type: String, required: true },
     },
 
+    // A credit note past the GST time limit (s.34(2)) carries no tax and
+    // is not reported in GSTR-1: a financial (commercial) credit note.
+    financial: { type: Boolean, default: false },
+
     // The party's own number for the same note (a supplier's credit note).
     partyNoteNo: { type: String, default: "", trim: true, maxlength: 40 },
 

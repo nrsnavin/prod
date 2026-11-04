@@ -15,6 +15,20 @@
 //    GET  /gstr1?month=2026-10          the return's tables and checks
 //    GET  /gstr1/json?month=            the offline tool's JSON
 //    GET  /gstr1/xlsx?month=            the tables as Excel
+//    GET  /tds/register?month=          deducted, due, deposited, balance
+//    POST /tds/challans                 a challan deposited
+//    GET  /tds/26q?fy=&q=Q3             the quarter's return rows (?format=xlsx)
+//    GET  /tds/certificates?fy=         Form 16A issued and received
+//    POST /tds/certificates             record one
+//    GET  /tds/receivable?fy=           what customers deducted, vs 26AS
+//    POST /tds/26as                     upload Form 26AS (CSV / Excel)
+//    GET  /tds/194q?fy=                 purchases against the ₹50 lakh limit
+//    GET  /payroll-books?month=         the month's payroll and its journals
+//    POST /payroll-books/salary         post (or re-post) the salary journal
+//    POST /payroll-books/paid           post the cash paid out
+//    POST /payroll-books/deposits       PF / ESI / PT deposited
+//    GET  /service-bills/:id/draft      a machine's service bill, as a bill draft
+//    GET  /credit-note-limit?invoice=   s.34(2): the last day for a GST credit note
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -31,6 +45,16 @@ const msme = require("../services/msme");
 const gstr2b = require("../services/gstr2b");
 const itcReversal = require("../services/itcReversal");
 const gstr1 = require("../services/gstr1");
+const tds = require("../services/tds");
+const payrollBooks = require("../services/payrollBooks");
+const creditNoteLimit = require("../services/creditNoteLimit");
+const TdsCertificate = require("../models/TdsCertificate");
+const MachineServiceBill = require("../models/MachineServiceBill");
+const Supplier = require("../models/Supplier");
+const Customer = require("../models/Customer");
+const Invoice = require("../models/Invoice");
+const { isAdmin } = require("../middleware/auth");
+const serviceErr = (err, next) => (err.status ? next(new ErrorHandler(err.message, err.status)) : Promise.reject(err));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 1 } });
 const MONTH = /^\d{4}-\d{2}$/;
@@ -162,6 +186,129 @@ router.get("/gstr1/xlsx", catchAsyncErrors(async (req, res) => {
   for (const c of r.checks) checks.addRow([c.level, c.doc, c.text]);
   for (const ws of wb.worksheets) { ws.views = [{ state: "frozen", ySplit: 1 }]; ws.columns.forEach((c) => { c.width = 16; }); }
   await sendXlsx(res, `GSTR-1 ${r.month}`, wb);
+}));
+
+// ── TDS ────────────────────────────────────────────────────────────
+router.get("/tds/register", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, ...(await tds.register(monthOf(req.query.month))) });
+}));
+
+router.post("/tds/challans", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {
+  const b = req.body || {};
+  let depositedOn;
+  try { depositedOn = readDate(b.depositedOn, "depositedOn", null); } catch (err) { return next(err); }
+  try {
+    const c = await tds.addChallan({ ...b, depositedOn, account: isId(b.account) ? b.account : undefined, by: req.user?._id });
+    res.status(201).json({ success: true, challan: c, register: await tds.register(c.month) });
+  } catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
+}));
+
+router.get("/tds/26q", catchAsyncErrors(async (req, res, next) => {
+  const q = ["Q1", "Q2", "Q3", "Q4"].includes(req.query.q) ? req.query.q : tds.quarterOf(new Date(Date.now() - 45 * 86_400_000));
+  const r = await tds.form26q(fyOf(req.query.fy), q);
+  if (req.query.format !== "xlsx") return res.json({ success: true, ...r });
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("26Q");
+  ws.addRow([`Form 26Q · ${r.fy} ${r.quarter} · ${dd(r.from)} to ${dd(r.to)}`]).font = { bold: true };
+  ws.addRow([]);
+  ws.addRow(["Deductee", "PAN", "Section", "Date of payment", "Amount paid", "Rate %", "TDS", "Voucher", "Against", "Challan (BSR/No/Date)"]).font = { bold: true };
+  for (const x of r.rows) ws.addRow([x.deductee, x.pan, x.section, dd(x.date), x.amountPaid, x.rate, x.tds, x.voucherNo, x.docs.join(", "), x.challan]);
+  ws.addRow(["Total", "", "", "", r.totals.amountPaid, "", r.totals.tds]).font = { bold: true };
+  ws.columns = [{ width: 30 }, { width: 13 }, { width: 9 }, { width: 14 }, { width: 15 }, { width: 8 }, { width: 13 }, { width: 18 }, { width: 24 }, { width: 28 }];
+  money(ws, [5, 7]);
+  const c = wb.addWorksheet("Checks");
+  c.addRow(["Level", "Voucher", "Check"]).font = { bold: true };
+  for (const k of r.checks) c.addRow([k.level, k.doc, k.text]);
+  await sendXlsx(res, `26Q ${r.fy} ${r.quarter}`, wb);
+}));
+
+router.get("/tds/certificates", catchAsyncErrors(async (req, res) => {
+  const fy = fyOf(req.query.fy);
+  res.json({ success: true, fy, rows: await TdsCertificate.find({ fy }).sort({ quarter: 1, partyName: 1 }).lean() });
+}));
+
+router.post("/tds/certificates", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {
+  const b = req.body || {};
+  if (!["issued", "received"].includes(b.kind)) return next(new ErrorHandler("kind must be issued or received", 400));
+  const partyType = b.kind === "issued" ? "supplier" : "customer";
+  if (!isId(b.party)) return next(new ErrorHandler(`Pick the ${partyType}`, 400));
+  const party = await (partyType === "supplier" ? Supplier : Customer).findById(b.party).select("name").lean();
+  if (!party) return next(new ErrorHandler(`${partyType} not found`, 404));
+  if (!["Q1", "Q2", "Q3", "Q4"].includes(b.quarter)) return next(new ErrorHandler("quarter must be Q1–Q4", 400));
+  const amount = Number(b.amount);
+  if (!(amount >= 0)) return next(new ErrorHandler("amount must be 0 or more", 400));
+  let on;
+  try { on = readDate(b.on, "on", new Date()); } catch (err) { return next(err); }
+  const row = await TdsCertificate.create({ kind: b.kind, partyType, party: party._id, partyName: party.name, fy: fyOf(b.fy), quarter: b.quarter, certNo: String(b.certNo || "").trim().slice(0, 20), section: String(b.section || "").trim().toUpperCase(), amount: Math.round(amount * 100) / 100, on, note: String(b.note || "").trim().slice(0, 200), createdBy: req.user?._id });
+  res.status(201).json({ success: true, certificate: row });
+}));
+
+router.get("/tds/receivable", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, ...(await tds.receivable(fyOf(req.query.fy))) });
+}));
+
+router.post("/tds/26as", keepRequestContext(upload.single("file")), catchAsyncErrors(async (req, res, next) => {
+  if (!req.file) return next(new ErrorHandler("Attach Form 26AS as CSV or Excel", 400));
+  try {
+    const r = await tds.upload26as({ fy: fyOf(req.body?.fy), buffer: req.file.buffer, filename: req.file.originalname, by: req.user?._id });
+    res.json({ success: true, ...r, receivable: await tds.receivable(r.fy) });
+  } catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
+}));
+
+router.get("/tds/194q", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, ...(await tds.purchases194q(fyOf(req.query.fy))) });
+}));
+
+// ── Payroll into the books ─────────────────────────────────────────
+router.get("/payroll-books", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, ...(await payrollBooks.summary(monthOf(req.query.month))) });
+}));
+
+const payrollPost = (fn) => catchAsyncErrors(async (req, res, next) => {
+  const month = String(req.body?.month || "");
+  if (!MONTH.test(month)) return next(new ErrorHandler("month must be YYYY-MM", 400));
+  try {
+    const out = await fn(month, req);
+    res.status(201).json({ success: true, journal: out.journal, summary: out.summary });
+  } catch (err) { if (err instanceof ErrorHandler) return next(err); if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
+});
+router.post("/payroll-books/salary", isAdmin("admin", "accounts"), payrollPost(payrollBooks.postSalary));
+router.post("/payroll-books/paid", isAdmin("admin", "accounts"), payrollPost(payrollBooks.postPaid));
+
+router.post("/payroll-books/deposits", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {
+  const b = req.body || {};
+  let depositedOn;
+  try { depositedOn = readDate(b.depositedOn, "depositedOn", null); } catch (err) { return next(err); }
+  try {
+    const d = await payrollBooks.addDeposit({ ...b, depositedOn, account: isId(b.account) ? b.account : undefined, by: req.user?._id });
+    res.status(201).json({ success: true, deposit: d, summary: await payrollBooks.summary(d.month) });
+  } catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
+}));
+
+// ── A machine's service bill, as a supplier bill to enter ──────────
+router.get("/service-bills/:id/draft", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Service bill not found", 404));
+  const sb = await MachineServiceBill.findById(req.params.id).select("-data").lean();
+  if (!sb) return next(new ErrorHandler("Service bill not found", 404));
+  if (sb.supplierBill) return res.json({ success: true, entered: sb.supplierBill, draft: null });
+  // A supplier whose name matches the vendor typed on the log, if there is one.
+  const supplier = sb.vendor ? await Supplier.findOne({ name: new RegExp(`^${sb.vendor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") }).select("name gstin").lean() : null;
+  res.json({
+    success: true, entered: null,
+    draft: {
+      serviceBill: sb._id, machine: sb.machine, kind: "service", supplier: supplier?._id || null, supplierName: supplier?.name || sb.vendor || "", vendor: sb.vendor || "",
+      supplierBillNo: sb.billNo || "", billDate: sb.billDate || sb.createdAt, amount: sb.amount || 0, filename: sb.filename,
+      lines: [{ description: sb.kind === "spare_bill" ? `Spare: ${sb.partName || "part"}` : `Machine service${sb.notes ? `: ${sb.notes.slice(0, 80)}` : ""}`, quantity: 1, rate: sb.amount || 0 }],
+    },
+  });
+}));
+
+// ── Credit note time limit ─────────────────────────────────────────
+router.get("/credit-note-limit", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.query.invoice)) return next(new ErrorHandler("invoice is required", 400));
+  const inv = await Invoice.findById(req.query.invoice).select("invoiceNumber invoiceDate").lean();
+  if (!inv) return next(new ErrorHandler("Invoice not found", 404));
+  res.json({ success: true, invoiceNumber: inv.invoiceNumber, ...creditNoteLimit.check(inv.invoiceDate) });
 }));
 
 module.exports = router;

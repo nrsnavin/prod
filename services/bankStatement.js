@@ -345,4 +345,4 @@ async function match(rows, accountId, { useModel = true } = {}) {
   return out;
 }
 
-module.exports = { parse, parseDetailed, parseCsv, parseDate, columnsOf, match, nameScore, subsetFor, fifo, lineKey, closingOf };
+module.exports = { parse, parseDetailed, parseCsv, parseDate, columnsOf, sheetRows, match, nameScore, subsetFor, fifo, lineKey, closingOf };

@@ -455,6 +455,57 @@ router.post(
   })
 );
 
+// ── E-way bill (CGST Rule 138) ─────────────────────────────────
+const ewaybill = require("../services/ewaybill");
+
+// Generate from the IRN through the connected provider.
+router.post(
+  "/:id/ewaybill",
+  catchAsyncErrors(async (req, res, next) => {
+    const inv = await loadInvoice(req.params.id, next);
+    if (!inv) return;
+    if (inv.status === "cancelled") return next(new ErrorHandler("A cancelled invoice moves no goods", 409));
+    let d;
+    try { d = await ewaybill.generate(inv, req.body || {}); } catch (err) {
+      if (err instanceof ErrorHandler) return next(err);
+      const e = new ErrorHandler(`The e-way bill provider could not be reached: ${err.message}`, 502);
+      e.code = "EWB_UNREACHABLE";
+      return next(e);
+    }
+    inv.fingerprints.push(buildFingerprint(ACTION_CODES.INVOICE_EWB, { entityId: inv._id, actor: actorFromRequest(req), meta: { invoiceNumber: inv.invoiceNumber, ewb: inv.ewaybill.number, vehicleNo: d.vehicleNo, provider: inv.ewaybill.provider } }));
+    await inv.save();
+    res.json({ success: true, invoice: publicInvoice(inv) });
+  })
+);
+
+// The number from the portal, pasted in.
+router.post(
+  "/:id/ewaybill/paste",
+  catchAsyncErrors(async (req, res, next) => {
+    const inv = await loadInvoice(req.params.id, next);
+    if (!inv) return;
+    if (inv.status === "cancelled") return next(new ErrorHandler("A cancelled invoice moves no goods", 409));
+    let d;
+    try { d = ewaybill.paste(inv, req.body || {}); } catch (err) { return next(err); }
+    inv.fingerprints.push(buildFingerprint(ACTION_CODES.INVOICE_EWB, { entityId: inv._id, actor: actorFromRequest(req), meta: { invoiceNumber: inv.invoiceNumber, ewb: inv.ewaybill.number, vehicleNo: d.vehicleNo, provider: "manual" } }));
+    await inv.save();
+    res.json({ success: true, invoice: publicInvoice(inv) });
+  })
+);
+
+// What the portal needs, to key in or for a provider's bulk upload.
+router.get(
+  "/:id/ewaybill.json",
+  catchAsyncErrors(async (req, res, next) => {
+    const inv = await loadInvoice(req.params.id, next);
+    if (!inv) return;
+    const d = { vehicleNo: req.query.vehicleNo || inv.ewaybill?.vehicleNo || "", transporterId: req.query.transporterId || inv.ewaybill?.transporterId || "", transporterName: inv.ewaybill?.transporterName || "", distanceKm: Number(req.query.distanceKm) || inv.ewaybill?.distanceKm || 0, mode: inv.ewaybill?.mode || "road", transDocNo: inv.ewaybill?.transDocNo || "" };
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("Content-Disposition", `attachment; filename="EWB_${inv.invoiceNumber.replace(/[\/\\]/g, "-")}.json"`);
+    res.send(JSON.stringify({ byIrn: ewaybill.payload(inv.toObject(), d), needed: ewaybill.needed(inv.toObject()), value: ewaybill.valueOf(inv.toObject()), limit: ewaybill.LIMIT }, null, 2));
+  })
+);
+
 // ── POST /:id/irn  (pasted from the portal) ────────────────────
 router.post(
   "/:id/irn",

@@ -108,6 +108,9 @@ const CustomerSchema = new mongoose.Schema(
             default: "30"
         },
         // Credit control (services/creditControl.js): 0 = no limit.
+        // The customer's TAN, to match what they deducted against Form 26AS.
+        tan:            { type: String, trim: true, uppercase: true, default: "", maxlength: 10 },
+        pan:            { type: String, trim: true, uppercase: true, default: "", maxlength: 10 },
         creditLimit:    { type: Number, default: 0, min: 0 },
         maxOverdueDays: { type: Number, default: 0, min: 0 },
         

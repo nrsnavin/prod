@@ -69,6 +69,8 @@ const MachineServiceBillSchema = new mongoose.Schema(
     partName: { type: String, trim: true, default: "" },
     notes: { type: String, trim: true, default: "" },
 
+    /** The supplier bill in the books this file was entered as. */
+    supplierBill: { type: mongoose.Types.ObjectId, ref: "SupplierBill", default: null },
     uploadedBy: {
       type: mongoose.Types.ObjectId,
       ref: "User",

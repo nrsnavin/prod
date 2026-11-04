@@ -22,7 +22,7 @@ const CUSTOMER_FIELDS = [
   "name", "tallyName", "email", "gstin", "status", "contactName", "phoneNumber",
   "address", "city", "pincode", "stateCode",
   "purchase", "accountant", "merchandiser", "paymentTerms",
-  "creditLimit", "maxOverdueDays",
+  "creditLimit", "maxOverdueDays", "tan", "pan",
 ];
 function pickCustomer(body) {
   const out = {};

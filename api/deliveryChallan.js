@@ -1533,4 +1533,24 @@ router.post(
   })
 );
 
+// ── E-way bill on a challan (job work, machine parts: no IRN) ─────
+// The number from the portal, pasted in; and what the portal needs.
+const ewaybillService = require("../services/ewaybill");
+router.post(
+  "/:id/ewaybill/paste",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.isValidObjectId(req.params.id)) return next(new ErrorHandler("Challan not found", 404));
+    const dc = await DeliveryChallan.findById(req.params.id);
+    if (!dc) return next(new ErrorHandler("Challan not found", 404));
+    if (dc.status === "cancelled") return next(new ErrorHandler("A cancelled challan moves no goods", 409));
+    let d;
+    try { d = ewaybillService.paste(dc, req.body || {}); } catch (err) { return next(err); }
+    if (d.vehicleNo && !dc.vehicleNo) dc.vehicleNo = d.vehicleNo;
+    dc.fingerprints = dc.fingerprints || [];
+    dc.fingerprints.push(buildFingerprint(ACTION_CODES.DC_EWB, { entityId: dc._id, actor: actorFromRequest(req), meta: { dcNumber: dc.dcNumber, ewb: dc.ewaybill.number, vehicleNo: d.vehicleNo } }));
+    await dc.save();
+    res.json({ success: true, dc: dc.toObject() });
+  })
+);
+
 module.exports = router;

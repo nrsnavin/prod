@@ -39,6 +39,9 @@ const SupplierBillSchema = new mongoose.Schema(
     inwards:       { type: [{ type: mongoose.Types.ObjectId, ref: "MaterialInward" }], default: [] },
 
     kind: { type: String, enum: ["goods", "service"], default: "goods" },
+    // A service or spare-part bill entered from a machine's service log.
+    machine:     { type: mongoose.Types.ObjectId, ref: "Machine" },
+    serviceBill: { type: mongoose.Types.ObjectId, ref: "MachineServiceBill" },
     category: { type: mongoose.Types.ObjectId, ref: "ExpenseCategory" },
 
     supplyType: { type: String, enum: ["intra", "inter"], required: true },

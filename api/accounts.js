@@ -41,6 +41,9 @@ const { ensureSeed } = require("../services/accountsSeed");
 const { readBill }  = require("../utils/billOcr");
 const { importStatement } = require("../services/statementImport");
 const msmeService = require("../services/msme");
+const creditNoteLimit = require("../services/creditNoteLimit");
+const tdsService = require("../services/tds");
+const MachineServiceBill = require("../models/MachineServiceBill");
 const collections   = require("../services/collections");
 const { sendWhatsApp, isConfigured: whatsappConfigured } = require("../utils/whatsapp");
 const aiLedger      = require("../services/aiLedger");
@@ -309,6 +312,19 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
   const tdsRate = Number(b.tds?.rate) || 0;
   const tds = { applicable: !!b.tds?.applicable && tdsRate > 0, section: String(b.tds?.section || "").trim().slice(0, 8), rate: tdsRate };
   if (tds.applicable && (tdsRate < 0 || tdsRate > 100)) return next(new ErrorHandler("TDS rate must be between 0 and 100", 400));
+  // s.194Q: once this year's goods purchases from the supplier pass the limit, TDS on the rest.
+  let q194 = null;
+  if (!tds.applicable && b.kind !== "service") {
+    q194 = await tdsService.apply194q(supplier._id, billDate, gst.totals.taxable);
+    if (q194) { tds.applicable = true; tds.section = "194Q"; tds.rate = q194.rate; }
+  }
+  // Entered from a machine's service log: the file comes along, and both sides link.
+  let serviceBill = null;
+  if (isId(b.serviceBill)) {
+    serviceBill = await MachineServiceBill.findById(b.serviceBill).lean();
+    if (!serviceBill) return next(new ErrorHandler("Service bill not found", 404));
+    if (serviceBill.supplierBill) return next(new ErrorHandler("That service bill is already entered in the books", 409));
+  }
 
   const { financialYear, sequence, number } = await allocate(SupplierBill, "PB", { at: billDate });
   const _id = new mongoose.Types.ObjectId();
@@ -318,20 +334,27 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     supplierBillNo: supplierBillNo.slice(0, 40), billDate, dueDate,
     purchaseOrder: po?._id, poNo: po?.poNo, inwards: inwardIds,
     kind: b.kind === "service" ? "service" : "goods", category: isId(b.category) ? b.category : undefined,
+    ...(serviceBill ? { machine: serviceBill.machine, serviceBill: serviceBill._id } : {}),
     supplyType: p.supplyType, lines: p.lines, totals: gst.totals,
     reverseCharge, ...(gst.rcm ? { rcm: gst.rcm } : {}),
     itc: { eligible: itcEligible, amount: gst.itcAmount },
     ...(variance.lines.length ? { variance: { ...variance, note: varianceNote.slice(0, 300) } } : {}),
     tds, notes: String(b.notes || "").trim().slice(0, 500), source: b.source === "scan" ? "scan" : "manual",
     aiSuggestion: isId(b.aiSuggestion) ? b.aiSuggestion : undefined, createdBy: req.user?._id,
-    fingerprints: [fp(ACTION_CODES.BILL_CREATED, { _id }, req, { billNo: number, supplierBillNo, supplier: supplier.name, grand: gst.totals.grand, ...(variance.lines.length ? { variance: variance.total, note: varianceNote } : {}), ...(reverseCharge ? { reverseCharge: true } : {}) })],
+    fingerprints: [fp(ACTION_CODES.BILL_CREATED, { _id }, req, { billNo: number, supplierBillNo, supplier: supplier.name, grand: gst.totals.grand, ...(variance.lines.length ? { variance: variance.total, note: varianceNote } : {}), ...(reverseCharge ? { reverseCharge: true } : {}), ...(q194 ? { tds194q: q194 } : {}), ...(serviceBill ? { serviceBill: serviceBill._id } : {}) })],
   };
   let doc;
   try {
     await withTxn(async (session) => {
       [doc] = await SupplierBill.create([data], { session });
       await partyLedger.post({ partyType: "supplier", party: supplier._id, date: billDate, docType: "SupplierBill", doc: _id, docNo: number, credit: gst.totals.grand, narration: `Bill ${supplierBillNo}${po ? ` · PO #${po.poNo}` : ""}${reverseCharge ? " · reverse charge" : ""}` }, session);
+      if (serviceBill) await MachineServiceBill.updateOne({ _id: serviceBill._id, supplierBill: null }, { $set: { supplierBill: _id } }, { session });
     });
+    if (serviceBill?.data) {
+      // The photo or PDF from the service log becomes the bill's attachment.
+      const base64 = String(serviceBill.data).split(",")[1] || "";
+      await attachments.attach(SupplierBill, "bills", _id, { buffer: Buffer.from(base64, "base64"), mimetype: serviceBill.contentType, originalname: serviceBill.filename || "service-bill", size: serviceBill.size }).catch(() => {});
+    }
   } catch (err) {
     if (err?.code === 11000) {
       if (b.requestId) {
@@ -687,10 +710,22 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
   if (docType === "Invoice" && target.status !== "issued") return next(new ErrorHandler("That invoice is cancelled", 409));
   if (docType === "SupplierBill" && target.status === "cancelled") return next(new ErrorHandler("That bill is cancelled", 409));
   let date, lines;
+  // s.34(2): a GST credit note for an invoice of one year is allowed until
+  // 30 November of the next. After that it is a financial credit note, no tax.
+  let financial = false;
   try {
     date = readDate(b.date, "date", new Date());
     await assertOpen(date, req);
     lines = readLines(b.lines, { defaultGst: target.lines?.[0]?.gstPercent ?? 5 });
+    if (kind === "credit" && docType === "Invoice") {
+      const lim = creditNoteLimit.check(target.invoiceDate, date);
+      if (lim.past && !b.financial) {
+        const err = new ErrorHandler(`A GST credit note against ${target.invoiceNumber} could be declared only until ${lim.limit.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })} (s.34(2)). Issue it as a financial credit note instead: the customer's account comes down, no GST moves.`, 400);
+        err.code = "CN_TIME_LIMIT"; err.details = { limit: lim.limit };
+        throw err;
+      }
+      if (b.financial) { financial = true; lines = lines.map((l) => ({ ...l, gstPercent: 0 })); }
+    }
   } catch (err) { return next(err); }
   const partyState = docType === "Invoice" ? target.buyer?.stateCode : target.supplierStateCode;
   const p = priced(lines, await sellerStateCode(), partyState);
@@ -722,7 +757,7 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
     partyType, customer: partyType === "customer" ? party : undefined, supplier: partyType === "supplier" ? party : undefined,
     partyName, partyGstin: partyGstin || "", partyNoteNo: String(b.partyNoteNo || "").trim().slice(0, 40),
     against: { docType, doc: target._id, docNo },
-    reason: reason.slice(0, 200), supplyType: p.supplyType, lines: p.lines, totals: p.totals,
+    reason: reason.slice(0, 200), supplyType: p.supplyType, lines: p.lines, totals: p.totals, financial,
     applied, unapplied, notes: String(b.notes || "").trim().slice(0, 500), createdBy: req.user?._id,
   };
   data.fingerprints = [fp(ACTION_CODES.NOTE_ISSUED, { _id }, req, { noteNo: number, against: docNo, grand: p.totals.grand, unapplied, reason })];

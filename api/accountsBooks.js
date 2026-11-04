@@ -396,6 +396,12 @@ router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
     if (Number.isFinite(p) && p >= 0 && p <= 100) set["bills.rateVariancePercent"] = p;
   }
   if (b.gst?.hsnDigits !== undefined && [4, 6, 8].includes(Number(b.gst.hsnDigits))) set["gst.hsnDigits"] = Number(b.gst.hsnDigits);
+  if (b.tds?.purchase194q !== undefined) {
+    const q = b.tds.purchase194q || {};
+    if (q.enabled !== undefined) set["tds.purchase194q.enabled"] = !!q.enabled;
+    if (Number.isFinite(Number(q.limit)) && Number(q.limit) >= 0) set["tds.purchase194q.limit"] = Number(q.limit);
+    if (Number.isFinite(Number(q.rate)) && Number(q.rate) >= 0 && Number(q.rate) <= 100) set["tds.purchase194q.rate"] = Number(q.rate);
+  }
   if (b.journals?.approvalAbove !== undefined) {
     const p = Number(b.journals.approvalAbove);
     if (Number.isFinite(p) && p >= 0) set["journals.approvalAbove"] = p;

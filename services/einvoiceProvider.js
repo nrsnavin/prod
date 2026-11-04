@@ -96,6 +96,25 @@ const PROVIDERS = {
       }
       return readRegistration(body);
     },
+    /** Generate the e-way bill from a registered IRN (the portal's "EWB by IRN"). */
+    async ewaybill(payload) {
+      const res = await fetch(cfg.baseUrl.replace(/\/$/, '') + '/ewaybill', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'client-id': cfg.clientId || '', 'client-secret': cfg.clientSecret || '',
+          username: cfg.username || '', password: cfg.password || '', gstin: cfg.gstin || '',
+        },
+        body: JSON.stringify(payload),
+      });
+      let body;
+      try { body = await res.json(); } catch { body = {}; }
+      if (!res.ok) throw failure(`The e-way bill provider answered ${res.status}${body?.message ? `: ${body.message}` : ''}.`, 'EWB_REJECTED', 502);
+      const data = pick(body, 'Data', 'data', 'result') && typeof pick(body, 'Data', 'data', 'result') === 'object' ? pick(body, 'Data', 'data', 'result') : body;
+      const number = pick(data, 'EwbNo', 'ewbNo', 'ewayBillNo');
+      if (!number) throw failure('The provider did not return an e-way bill number.', 'EWB_REJECTED', 502);
+      return { number: String(number), generatedAt: readAckDate(pick(data, 'EwbDt', 'ewbDt')), validUpto: pick(data, 'EwbValidTill', 'ewbValidTill', 'validUpto') ? readAckDate(pick(data, 'EwbValidTill', 'ewbValidTill', 'validUpto')) : undefined, raw: data };
+    },
     async cancel(irn, { reason }) {
       const res = await fetch(cfg.baseUrl.replace(/\/$/, '') + '/cancel', {
         method: 'POST',

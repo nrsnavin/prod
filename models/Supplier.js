@@ -62,6 +62,9 @@ const supplierSchema = new mongoose.Schema(
     // Days after the bill date its bills fall due (and its expenses).
     paymentTermsDays: { type: Number, default: 30, min: 0, max: 365 },
 
+    // For TDS returns (26Q): without a PAN, tax is deducted at 20% (s.206AA).
+    pan: { type: String, trim: true, uppercase: true, default: "", maxlength: 10 },
+
     // MSME (Udyam) registration. A bill to a micro or small enterprise
     // must be paid within 15 days, or the days agreed in writing (at most
     // 45): otherwise the expense is disallowed in the year (s.43B(h)) and

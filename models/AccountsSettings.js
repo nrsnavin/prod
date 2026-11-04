@@ -49,6 +49,12 @@ const AccountsSettingsSchema = new mongoose.Schema(
       sundryExpenses:   ledger("Sundry Expenses"),
       debtorsGroup:     ledger("Sundry Debtors"),
       creditorsGroup:   ledger("Sundry Creditors"),
+      // Payroll into the books (services/payrollBooks.js).
+      salaries:         ledger("Salaries & Wages"),
+      salaryPayable:    ledger("Salary Payable"),
+      pfPayable:        ledger("PF Payable"),
+      esiPayable:       ledger("ESI Payable"),
+      staffAdvances:    ledger("Staff Advances"),
     },
 
     // The program on the Tally computer: its key (only the hash), and
@@ -82,6 +88,16 @@ const AccountsSettingsSchema = new mongoose.Schema(
     gst: {
       // HSN digits GSTR-1 must carry: 4 up to ₹5 crore turnover, 6 above.
       hsnDigits: { type: Number, enum: [4, 6, 8], default: 4 },
+    },
+
+    tds: {
+      // s.194Q: TDS at 0.1% on purchases of goods from one seller beyond
+      // ₹50 lakh in a year, once last year's turnover crossed ₹10 crore.
+      purchase194q: {
+        enabled: { type: Boolean, default: false },
+        limit:   { type: Number, default: 5000000, min: 0 },
+        rate:    { type: Number, default: 0.1, min: 0, max: 100 },
+      },
     },
 
     journals: {

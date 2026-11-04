@@ -55,7 +55,7 @@ async function build(month) {
   const [invoices, cancelled, notes, cancelledNotes, settings, docSettings] = await Promise.all([
     Invoice.find({ status: 'issued', invoiceDate: range }).select('invoiceNumber invoiceDate customer buyer supplyType placeOfSupply lines totals einvoice.irn').sort({ invoiceDate: 1, sequence: 1 }).lean(),
     Invoice.find({ status: 'cancelled', invoiceDate: range }).select('invoiceNumber').lean(),
-    AccountNote.find({ status: 'issued', partyType: 'customer', date: range }).select('kind noteNo date customer partyName partyGstin against supplyType lines totals').sort({ date: 1 }).lean(),
+    AccountNote.find({ status: 'issued', partyType: 'customer', date: range, financial: { $ne: true } }).select('kind noteNo date customer partyName partyGstin against supplyType lines totals').sort({ date: 1 }).lean(),
     AccountNote.find({ status: 'cancelled', partyType: 'customer', date: range }).select('noteNo kind').lean(),
     getSettings(),
     getDocumentSettings(),

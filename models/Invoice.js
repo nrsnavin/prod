@@ -153,6 +153,23 @@ const InvoiceSchema = new mongoose.Schema(
       cancelledAt:   { type: Date },
     },
 
+
+    // The e-way bill for the goods' movement (CGST Rule 138).
+    ewaybill: {
+      status:        { type: String, enum: ["", "generated", "cancelled"], default: "" },
+      number:        { type: String, default: "" },
+      generatedAt:   { type: Date },
+      validUpto:     { type: Date },
+      vehicleNo:     { type: String, default: "" },
+      transporterId: { type: String, default: "" },
+      transporterName: { type: String, default: "" },
+      transDocNo:    { type: String, default: "" },
+      distanceKm:    { type: Number, default: 0 },
+      mode:          { type: String, enum: ["road", "rail", "air", "ship"], default: "road" },
+      provider:      { type: String, default: "" },
+      cancelledAt:   { type: Date },
+    },
+
     createdBy:    { type: mongoose.Types.ObjectId, ref: "User" },
     fingerprints: { type: [FingerprintSchema], default: [] },
   },

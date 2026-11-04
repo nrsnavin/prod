@@ -975,8 +975,8 @@ const SUPPLIER_FIELDS = [
   "leadTimeDays", "minOrderQty", "packSize",
   // Accounts: what GST it may charge, and when its bills fall due.
   "gstRegistration", "paymentTermsDays",
-  // MSME (Udyam) status, for the 45-day rule.
-  "msme",
+  // MSME (Udyam) status, for the 45-day rule; PAN for the TDS return.
+  "msme", "pan",
 ];
 router.put(
   "/edit-supplier",

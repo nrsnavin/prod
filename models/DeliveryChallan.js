@@ -116,6 +116,23 @@ const DeliveryChallanSchema = new mongoose.Schema(
     totalQuantity: { type: Number, default: 0 },
     totalAmount:   { type: Number, default: 0 },
 
+    // The e-way bill for the goods' movement (CGST Rule 138).
+    ewaybill: {
+      status:        { type: String, enum: ["", "generated", "cancelled"], default: "" },
+      number:        { type: String, default: "" },
+      generatedAt:   { type: Date },
+      validUpto:     { type: Date },
+      vehicleNo:     { type: String, default: "" },
+      transporterId: { type: String, default: "" },
+      transporterName: { type: String, default: "" },
+      transDocNo:    { type: String, default: "" },
+      distanceKm:    { type: Number, default: 0 },
+      mode:          { type: String, enum: ["road", "rail", "air", "ship"], default: "road" },
+      provider:      { type: String, default: "" },
+      cancelledAt:   { type: Date },
+    },
+
+
     // ── Status ───────────────────────────────────────────────
     status: {
       type: String,

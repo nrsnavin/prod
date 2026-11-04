@@ -137,7 +137,7 @@ async function build({ from, to, fresh = true, L }) {
     Invoice.find({ status: 'issued', invoiceDate: range, ...notSent }).select('invoiceNumber invoiceDate customer buyer customerPo orderNo totals placeOfSupply tally').lean(),
     SupplierBill.find({ status: { $ne: 'cancelled' }, billDate: range, ...notSent }).select('billNo supplierBillNo billDate supplier supplierName supplierGstin kind category totals itc poNo tally reverseCharge rcm').lean(),
     Expense.find({ status: { $in: ['approved', 'paid'] }, date: range, ...notSent }).select('expenseNo date supplier payeeName refNo category categoryName description totals itc tally').lean(),
-    AccountNote.find({ status: 'issued', date: range, ...notSent }).select('kind noteNo date partyType customer supplier partyName partyGstin against reason totals partyNoteNo applied unapplied applications tally').lean(),
+    AccountNote.find({ status: 'issued', date: range, ...notSent }).select('kind noteNo date partyType customer supplier partyName partyGstin against reason totals partyNoteNo applied unapplied applications tally financial').lean(),
     Payment.find({ status: 'posted', date: range, ...notSent }).lean(),
     Contra.find({ status: 'posted', date: range, ...notSent }).lean(),
     BankAccount.find({}).select('name tallyLedger').lean(),
@@ -281,7 +281,11 @@ async function build({ from, to, fresh = true, L }) {
       ...(first > 0.005 ? [{ name: ref, type: 'Agst Ref', amount: first }] : []),
       ...(onAccount > 0.005 ? [{ name: n.noteNo, type: 'On Account', amount: onAccount }] : []),
     ];
-    if (n.kind === 'credit') {
+    if (n.kind === 'credit' && n.financial) {
+      // Past the GST time limit: a commercial credit note, no tax moves.
+      v.cr(p, t.grand, bills);
+      v.dr(L.discountAllowed, t.grand);
+    } else if (n.kind === 'credit') {
       // To a customer: their account down, sales and output tax back.
       v.cr(p, t.grand, bills);
       v.dr(L.sales, t.taxable);
