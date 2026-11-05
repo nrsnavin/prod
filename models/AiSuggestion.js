@@ -66,6 +66,11 @@ const AI_SURFACES = Object.freeze([
   'bank-statement-match',
   // A payment reminder drafted for a customer; sent as edited, or not.
   'collection-reminder',
+  // A floor entry's remark put in a downtime class (services/floorRemark.js).
+  'floor-remark',
+  // A customer's remittance advice read into a receipt; the receipt
+  // entered from it settles it (utils/adviceOcr.js).
+  'payment-advice',
   // The beam weights written by hand on a printed covering programme,
   // read from a photo; each row is checked on screen before it is saved.
   'covering-beam-ocr',

@@ -1124,6 +1124,13 @@ router.post("/payments", catchAsyncErrors(async (req, res, next) => {
   let out;
   try { out = await createVoucher(req.body || {}, req); } catch (err) { if (err instanceof ErrorHandler) return next(err); throw err; }
   const v = out.voucher.toObject ? out.voucher.toObject() : out.voucher;
+  // Entered from a payment advice: what was kept of the reading scores it.
+  if (!out.replay && isId(req.body?.adviceSuggestion)) {
+    aiLedger.settle(req.body.adviceSuggestion, {
+      accepted: { amount: v.amount, date: new Date(v.date).toISOString().slice(0, 10), reference: v.reference || "", invoices: (v.allocations || []).filter((a) => a.docType === "Invoice").map((a) => a.docNo), tds: (v.adjustments || []).filter((a) => a.kind === "tds_by_customer").reduce((s, a) => s + a.amount, 0) },
+      decidedBy: req.user?._id, expectSurface: "payment-advice", ignoreMissing: true,
+    }).catch(() => {});
+  }
   res.status(out.replay ? 200 : 201).json({ success: true, payment: v, ...(out.replay ? { replay: true } : {}) });
 }));
 
@@ -1385,6 +1392,42 @@ router.post("/scan", keepRequestContext(scanUpload.array("files", 4)), catchAsyn
   // Who it is on file, whether it is entered already, and what is still to bill (services/billMatch.js).
   const match = await require("../services/billMatch").matchRead(read);
   res.json({ success: true, read, supplier: match.supplier, alreadyEntered: match.alreadyEntered, purchaseOrders: match.purchaseOrders, aiSuggestion: suggestionId });
+}));
+
+// ══════════════════════════════════════════════════════════════════
+//  AI: A CUSTOMER'S PAYMENT ADVICE INTO A RECEIPT
+// ══════════════════════════════════════════════════════════════════
+//  POST /advice/read  multipart "files" (PDF / photos) or { text }, and
+//  optionally { customer } → what it says, placed on the books: the
+//  customer, each invoice settled gross, TDS and discount as the
+//  receipt's adjustments, what did not match, and the bank line it came
+//  in on. Nothing is saved: the receipt form opens filled in.
+router.post("/advice/read", keepRequestContext(scanUpload.array("files", 4)), catchAsyncErrors(async (req, res, next) => {
+  const files = Array.isArray(req.files) ? req.files : [];
+  const text = String(req.body?.text || "");
+  let read;
+  const startedAt = Date.now();
+  try {
+    read = await require("../utils/adviceOcr").readAdvice({ pages: files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype })), text });
+  } catch (err) {
+    if (err.code === "ANTHROPIC_KEY_MISSING") return next(new ErrorHandler("Reading advices is not configured on this server (no AI key).", 503));
+    if (err.code) return next(new ErrorHandler(err.message, 400));
+    await aiLedger.record({ surface: "payment-advice", model: "?", promptVersion: promptVersion("payment-advice"), latencyMs: Date.now() - startedAt, error: err.message });
+    return next(new ErrorHandler(`The advice could not be read: ${err.message}`, 502));
+  }
+  const placed = read.problem ? null : await require("../services/adviceMatch").placeAdvice(read, { customer: isId(req.body?.customer) ? req.body.customer : null });
+  // Scored on what can be compared with the receipt entered: the invoices
+  // as they are on file, not as the advice wrote them short.
+  const suggestionId = await aiLedger.record({
+    surface: "payment-advice", model: read.model, promptVersion: promptVersion("payment-advice"),
+    proposed: {
+      amount: read.amount, date: read.date, reference: read.reference,
+      invoices: placed ? placed.allocations.filter((a) => a.docType === "Invoice").map((a) => a.docNo) : read.lines.map((l) => l.invoiceNo),
+      tds: placed ? (placed.adjustments.find((a) => a.kind === "tds_by_customer")?.amount || 0) : (read.tdsTotal || 0),
+    },
+    latencyMs: read.latencyMs, usage: read.usage,
+  });
+  res.json({ success: true, read, placed, aiSuggestion: suggestionId });
 }));
 
 // ══════════════════════════════════════════════════════════════════
