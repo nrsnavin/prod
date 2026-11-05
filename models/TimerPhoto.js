@@ -51,6 +51,13 @@ const TimerPhotoSchema = new mongoose.Schema(
     used: { type: Boolean, default: false },
     runTimeUsed: { type: String, default: null },
     usedAt: { type: Date, default: null },
+    /**
+     * When the display was a total-hours meter, the readings the run time
+     * was worked out from (end − start). The end is where the meter stood
+     * when this shift finished: the next shift on the loom starts from it.
+     */
+    meterStart: { type: Number, default: null },
+    meterEnd: { type: Number, default: null },
 
     expiresAt: { type: Date, default: null },
   },

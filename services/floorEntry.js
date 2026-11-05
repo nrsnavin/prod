@@ -32,6 +32,7 @@ const ShiftDetail = require('../models/ShiftDetail');
 const TimerPhoto = require('../models/TimerPhoto');
 const Machine = require('../models/Machine');
 const Employee = require('../models/Employee');
+const Attendance = require('../models/Attendence');
 const { assertCanWork, employedFrom } = require('../utils/employeeStatus');
 require('../models/JobOrder');
 require('../models/Elastic');
@@ -40,6 +41,7 @@ const { createShiftPlan, addMachineToPlan } = require('./shiftPlanCreate');
 const { submitProduction } = require('./shiftSubmit');
 const { isProductionLocked } = require('../utils/productionLock');
 const { currentShift } = require('./machineLoading');
+const pm = require('./productionModel');
 
 const TOKEN_HOURS = 14;
 const SURFACE = 'floor-entry';
@@ -193,7 +195,77 @@ const fromFloor = (plan) => plan?.source === 'floor';
 /** On a plan the office made, the operator it put on a loom is its say, not the floor's. */
 const operatorLocked = (plan, detail) => !!(plan && !fromFloor(plan) && detail?.employee);
 
-function machineState(m, detail, plan) {
+/**
+ * What a head of this loom weaves an hour, learned from its own verified
+ * shifts at the pick of the elastics on its heads (services/productionModel.js).
+ * Null when the model is not trained, or the elastics have no pick.
+ */
+function rateOf(model, m) {
+  if (!model) return null;
+  const elastics = (m.elastics || []).filter((h) => h && h.elastic && typeof h.elastic === 'object').map((h) => ({ pick: h.elastic.pick }));
+  const { pick } = pm.pickOfRunning(elastics);
+  if (!pick) return null;
+  const s = pm.machineSummary(model, m._id, { pick });
+  if (!s?.metresPerHeadHour) return null;
+  return { metresPerHeadHour: s.metresPerHeadHour, basis: s.basis, shifts: s.shifts, pick: s.pick };
+}
+
+// ── Who to put on a loom ──────────────────────────────────────────
+
+const SUGGEST_LOOKBACK_DAYS = 14;
+const AWAY = new Set(['absent', 'on_leave']);
+
+/**
+ * For each loom, who ran it on the latest same shift (day or night) of
+ * the last two weeks — operators keep to their looms and their shift —
+ * passing over anyone who has left, or whose attendance for this shift
+ * says absent or on leave, for whoever ran it before them. Advisory: the
+ * supervisor still chooses; nothing is put on the shift by this.
+ * Map of machine id → { id, name, why }.
+ */
+async function operatorSuggestions({ dateKey, shift }, machineIds) {
+  const out = new Map();
+  if (!machineIds.length) return out;
+  const centre = moment.utc(dateKey, 'YYYY-MM-DD');
+  const plans = await ShiftPlan.find({
+    shift,
+    date: { $gte: centre.clone().subtract(SUGGEST_LOOKBACK_DAYS, 'days').subtract(12, 'hours').toDate(), $lt: centre.clone().subtract(12, 'hours').toDate() },
+  }).select('_id date').lean();
+  if (!plans.length) return out;
+  const dateOf = new Map(plans.map((p) => [String(p._id), p.date]));
+  const rows = await ShiftDetail.find({ shiftPlan: { $in: plans.map((p) => p._id) }, machine: { $in: machineIds }, employee: { $ne: null } })
+    .select('machine employee shiftPlan').lean();
+  if (!rows.length) return out;
+  rows.sort((a, b) => new Date(dateOf.get(String(b.shiftPlan))) - new Date(dateOf.get(String(a.shiftPlan))));
+
+  const ids = [...new Set(rows.map((r) => String(r.employee)))];
+  const [here, marks] = await Promise.all([
+    Employee.find({ _id: { $in: ids }, ...employedFrom(dateKey) }).select('name').lean(),
+    // Attendance is kept by calendar day; match the day the way plans are.
+    Attendance.find({ employee: { $in: ids }, shift, date: { $gte: centre.clone().subtract(36, 'hours').toDate(), $lte: centre.clone().add(36, 'hours').toDate() } })
+      .select('employee date status').lean(),
+  ]);
+  const nameOf = new Map(here.map((e) => [String(e._id), e.name]));
+  const markOf = new Map();
+  for (const a of marks) {
+    if (moment(a.date).format('YYYY-MM-DD') === dateKey || new Date(a.date).toISOString().slice(0, 10) === dateKey) markOf.set(String(a.employee), a.status);
+  }
+  for (const r of rows) {
+    const machine = String(r.machine);
+    const emp = String(r.employee);
+    if (out.has(machine) || !nameOf.has(emp) || AWAY.has(markOf.get(emp))) continue;
+    const when = moment(dateOf.get(String(r.shiftPlan))).format('D MMM');
+    const mark = markOf.get(emp);
+    out.set(machine, {
+      id: emp,
+      name: nameOf.get(emp),
+      why: `Ran this loom on the ${shiftLabel(shift).toLowerCase()} shift of ${when}${mark ? ` · marked ${mark.replace('_', ' ')} today` : ''}`,
+    });
+  }
+  return out;
+}
+
+function machineState(m, detail, plan, model = null, suggested = null) {
   const job = m.orderRunning && typeof m.orderRunning === 'object' ? m.orderRunning : null;
   const headMap = headMapOf(m);
   const headsRunning = headMap.filter((h) => h.elastic).length;
@@ -244,6 +316,9 @@ function machineState(m, detail, plan) {
     } : null,
     entry,
     why,
+    rate: rateOf(model, m),
+    // Only where an operator is still to be chosen.
+    suggestedOperator: suggested && !detail?.employee && ['unplanned', 'ready', 'loading'].includes(entry) ? suggested : null,
   };
 }
 
@@ -270,7 +345,7 @@ async function shiftState({ dateKey, shift }) {
   const [machines, details, operators] = [
     await Machine.find().select(MACHINE_FIELDS)
       .populate({ path: 'orderRunning', select: 'jobOrderNo status' })
-      .populate({ path: 'elastics.elastic', select: 'name' })
+      .populate({ path: 'elastics.elastic', select: 'name pick' })
       .lean(),
     plan ? await ShiftDetail.find({ _id: { $in: plan.plan || [] } })
       .select('machine employee status submittedProductionMeters submittedTimer submittedFeedback submittedAt submittedByName productionMeters timer feedback verifiedAt')
@@ -280,7 +355,10 @@ async function shiftState({ dateKey, shift }) {
   ];
   machines.sort((a, b) => String(a.ID).localeCompare(String(b.ID), undefined, { numeric: true, sensitivity: 'base' }));
   const detailByMachine = new Map(details.map((d) => [String(d.machine), d]));
-  const rows = machines.map((m) => machineState(m, detailByMachine.get(String(m._id)) || null, plan));
+  const { model } = await pm.getModel();
+  const open = machines.filter((m) => !detailByMachine.get(String(m._id))?.employee && m.status === 'running').map((m) => m._id);
+  const suggested = await operatorSuggestions({ dateKey, shift }, open).catch(() => new Map());
+  const rows = machines.map((m) => machineState(m, detailByMachine.get(String(m._id)) || null, plan, model, suggested.get(String(m._id)) || null));
   const counts = rows.reduce((c, r) => { c[r.entry] = (c[r.entry] || 0) + 1; return c; }, {});
   const now = currentShift();
   return {
@@ -339,14 +417,16 @@ async function machineForShift({ dateKey, shift }, code) {
   const plan = await findPlan(dateKey, shift);
   const m = await Machine.findById(machineId).select(MACHINE_FIELDS)
     .populate({ path: 'orderRunning', select: 'jobOrderNo status' })
-    .populate({ path: 'elastics.elastic', select: 'name' })
+    .populate({ path: 'elastics.elastic', select: 'name pick' })
     .lean();
   const detail = plan
     ? await ShiftDetail.findOne({ shiftPlan: plan._id, machine: m._id })
       .select('machine employee status submittedProductionMeters submittedTimer submittedFeedback submittedAt submittedByName productionMeters timer feedback verifiedAt')
       .populate({ path: 'employee', select: 'name department' }).lean()
     : null;
-  return { plan: plan ? planView(plan) : null, machine: machineState(m, detail, plan) };
+  const { model } = await pm.getModel();
+  const suggested = detail?.employee ? new Map() : await operatorSuggestions({ dateKey, shift }, [m._id]).catch(() => new Map());
+  return { plan: plan ? planView(plan) : null, machine: machineState(m, detail, plan, model, suggested.get(String(m._id)) || null) };
 }
 
 // ── The plan, made from the floor ─────────────────────────────────
@@ -464,6 +544,21 @@ function shiftBefore({ dateKey, shift }) {
 }
 
 /**
+ * Where a total-hours meter stood when a shift ended, from its photo:
+ * the end reading the run time was worked out from, else the reading
+ * itself when the display was read as an hour meter. Null for a run-time
+ * display (it starts from zero each shift) or nothing readable.
+ */
+function meterHoursOf(photo) {
+  if (Number.isFinite(photo?.meterEnd)) return photo.meterEnd;
+  if (photo?.readKind !== 'hour_meter') return null;
+  const t = String(photo.readText || '').trim().replace(',', '.');
+  if (!/^\d+(\.\d+)?$/.test(t)) return null;
+  const v = Number(t);
+  return Number.isFinite(v) ? v : null;
+}
+
+/**
  * The timer photo taken on this loom the shift before (the one the run
  * time was filled from, else the latest), shown beside the camera so
  * the supervisor can see what the display read when the last shift
@@ -486,11 +581,12 @@ async function previousTimerPhoto(session, machine) {
   out.entryId = String(detail._id);
   const photo = await TimerPhoto.findOne({ shift: detail._id })
     .sort({ used: -1, createdAt: -1 })
-    .select('createdAt uploadedByName readText runTimeUsed used').lean();
+    .select('createdAt uploadedByName readText readKind runTimeUsed used meterEnd').lean();
   if (photo) {
     out.photo = {
       id: String(photo._id), takenAt: photo.createdAt, byName: photo.uploadedByName || '',
-      readText: photo.readText || null, runTimeUsed: photo.runTimeUsed || null, used: !!photo.used,
+      readText: photo.readText || null, readKind: photo.readKind || null, runTimeUsed: photo.runTimeUsed || null, used: !!photo.used,
+      meterHours: meterHoursOf(photo),
     };
   }
   return out;
@@ -558,7 +654,9 @@ async function enterProduction(session, { detailId, production, timer, feedback,
   );
   if (out.skipped.length) throw new ErrorHandler(out.skipped[0].reason, 409);
   await ShiftDetail.updateOne({ _id: detail._id }, { $set: { submittedByName: session.name } });
-  return { detailId: String(detail._id), machineId: String(detail.machine) };
+  // When the photo and the loom's own rate already agree, nobody need check it.
+  const auto = await require('./autoVerify').tryAutoVerify(detail._id);
+  return { detailId: String(detail._id), machineId: String(detail.machine), autoVerified: auto.verified, ...(auto.verified ? {} : { waitsBecause: auto.reasons }) };
 }
 
 module.exports = {
@@ -566,6 +664,6 @@ module.exports = {
   openFloor, sessionFromToken, issueToken,
   shiftState, machineForShift, resolveMachine, findPlan,
   setOperator, enterProduction, completeFloorPlan,
-  shiftBefore, previousTimerPhoto, previousReadingFor, photoOnFloor,
+  shiftBefore, previousTimerPhoto, previousReadingFor, photoOnFloor, meterHoursOf, operatorSuggestions,
   SURFACE, TOKEN_HOURS,
 };

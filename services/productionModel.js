@@ -578,6 +578,7 @@ module.exports = {
   describe,
   predict,
   machineSummary,
+  pickOfRunning,
   runMinutes,
   effectivePick,
   SHIFT_MINUTES,

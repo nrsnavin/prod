@@ -100,13 +100,29 @@ async function keepAndReadTimerPhoto({ file, shiftId = null, uploadedBy = null, 
   return { reading, suggestionId, photoId };
 }
 
+/**
+ * The total-hours meter readings a run time came from, when they make
+ * sense together (end above start, at most a long shift apart), else null.
+ */
+function meterReadings(meter) {
+  if (!meter || typeof meter !== 'object') return null;
+  const start = Number(meter.start), end = Number(meter.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end > 1e7) return null;
+  if (end <= start || end - start > 25) return null;
+  return { start, end };
+}
+
 /** The photo the run time came from; settles its reading too. */
-async function markPhotoUsed(photoId, runTime, { decidedBy = null } = {}) {
+async function markPhotoUsed(photoId, runTime, { decidedBy = null, meter = null } = {}) {
   const photo = await TimerPhoto.findById(photoId).select('shift suggestion').lean();
   if (!photo) return null;
+  const m = meterReadings(meter);
   // One photo per shift is the one the run time came from: the latest used.
   await TimerPhoto.updateMany({ shift: photo.shift, _id: { $ne: photo._id }, used: true }, { used: false });
-  await TimerPhoto.updateOne({ _id: photo._id }, { used: true, runTimeUsed: runTime, usedAt: new Date() });
+  await TimerPhoto.updateOne({ _id: photo._id }, {
+    used: true, runTimeUsed: runTime, usedAt: new Date(),
+    meterStart: m ? m.start : null, meterEnd: m ? m.end : null,
+  });
   if (photo.suggestion) {
     await ledger.settle(String(photo.suggestion), {
       accepted: { runTime }, decidedBy, expectSurface: SURFACE, ignoreMissing: true,
@@ -115,4 +131,4 @@ async function markPhotoUsed(photoId, runTime, { decidedBy = null } = {}) {
   return photo;
 }
 
-module.exports = { keepAndReadTimerPhoto, markPhotoUsed, asRunTime, SURFACE };
+module.exports = { keepAndReadTimerPhoto, markPhotoUsed, meterReadings, asRunTime, SURFACE };

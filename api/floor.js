@@ -13,7 +13,7 @@
 //                                        become the plan, free looms written on it; refused
 //                                        with looms still to enter unless forced
 //    POST /api/v2/floor/timer-photo      multipart photo + detailId → reading
-//    POST /api/v2/floor/timer-photo/:photoId/use { runTime }
+//    POST /api/v2/floor/timer-photo/:photoId/use { runTime, meter? {start, end} }
 //    GET  /api/v2/floor/previous-timer-photo?machine=<id>
 //                                        the loom's timer photo from the shift before
 //    GET  /api/v2/floor/timer-photo/:photoId/file  the photo (this shift's or the one before);
@@ -131,14 +131,14 @@ router.post(
 
 router.post(
   '/timer-photo/:photoId/use',
-  validate({ body: z.object({ runTime: z.string().max(12) }) }),
+  validate({ body: z.object({ runTime: z.string().max(12), meter: z.object({ start: z.number(), end: z.number() }).nullish() }) }),
   catchAsyncErrors(async (req, res, next) => {
     const runTime = asRunTime(req.body.runTime);
     if (!runTime) return next(new ErrorHandler('runTime must look like 7:45:00', 400));
     if (!mongoose.isValidObjectId(req.params.photoId)) return next(new ErrorHandler('Photo not found', 404));
     const photo = await TimerPhoto.findById(req.params.photoId).select('shift').lean();
     if (!photo || !(await detailOnShift(req.floor, photo.shift))) return next(new ErrorHandler('Photo not found', 404));
-    await markPhotoUsed(photo._id, runTime, { decidedBy: null });
+    await markPhotoUsed(photo._id, runTime, { decidedBy: null, meter: req.body.meter });
     res.json({ success: true });
   })
 );

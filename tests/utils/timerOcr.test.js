@@ -21,7 +21,9 @@ describe('the prompt', () => {
     expect(PROMPT).toMatch(/ALWAYS write the text with both colons, as H:MM:SS/);
     expect(PROMPT).toMatch(/1 and 7/);
     expect(PROMPT).toMatch(/"0:44:17"/);
-    expect(PROMPTS['timer-ocr'].version).toBe('v1.1');
+    // The loom's QR label may share the photo; it is never a reading.
+    expect(PROMPT).toMatch(/sticker with a QR code/);
+    expect(PROMPTS['timer-ocr'].version).toBe('v1.2');
   });
 });
 

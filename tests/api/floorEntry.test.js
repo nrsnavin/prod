@@ -429,6 +429,47 @@ describe('the plan, when nobody made one', () => {
   });
 });
 
+describe('who to put on a loom', () => {
+  const Attendance = () => require('../../models/Attendence.js');
+  async function ran(s, date, shift, operator, machine = s.running) {
+    const { createShiftPlan } = require('../../services/shiftPlanCreate');
+    await createShiftPlan({ date, shiftType: shift, machines: [{ machine: machine._id, operator: operator._id }] });
+  }
+
+  it('offers who ran the loom on its latest same shift, passing over anyone away today or gone', async () => {
+    const s = await seed();
+    await ran(s, '2026-10-17', 'DAY', s.ravi);
+    await ran(s, '2026-10-19', 'DAY', s.sita);
+    await ran(s, '2026-10-20', 'NIGHT', s.clerk); // the other shift: not who runs it by day
+    const f = floor((await open({ date: DATE, shift: 'DAY' })).body.token);
+
+    let row = (await f.get('/shift')).body.state.machines.find((m) => m.id === String(s.running._id));
+    expect(row.suggestedOperator).toEqual({ id: String(s.sita._id), name: 'Sita', why: 'Ran this loom on the day shift of 19 Oct' });
+    expect((await f.get(`/machine?code=${s.running.ID}`)).body.machine.suggestedOperator).toMatchObject({ name: 'Sita' });
+
+    // Sita is on leave today: Ravi, who ran it before her, is offered — and said to be present.
+    await Attendance().create({ employee: s.sita._id, date: new Date('2026-10-21T00:00:00Z'), shift: 'DAY', status: 'on_leave' });
+    await Attendance().create({ employee: s.ravi._id, date: new Date('2026-10-21T00:00:00Z'), shift: 'DAY', status: 'present' });
+    row = (await f.get('/shift')).body.state.machines.find((m) => m.id === String(s.running._id));
+    expect(row.suggestedOperator).toMatchObject({ name: 'Ravi', why: 'Ran this loom on the day shift of 17 Oct · marked present today' });
+
+    // Ravi has left too: nobody to offer.
+    await M.Employee.updateOne({ _id: s.ravi._id }, { status: 'offboarded', offboarding: { lastWorkingDay: new Date('2026-10-20T00:00:00Z') } });
+    row = (await f.get('/shift')).body.state.machines.find((m) => m.id === String(s.running._id));
+    expect(row.suggestedOperator).toBeNull();
+  });
+
+  it('offers nobody once the loom has its operator', async () => {
+    const s = await seed();
+    await ran(s, '2026-10-20', 'DAY', s.sita);
+    await planned(s);
+    const f = floor((await open({ date: DATE, shift: 'DAY' })).body.token);
+    const row = (await f.get('/shift')).body.state.machines.find((m) => m.id === String(s.running._id));
+    expect(row.detail.operator.name).toBe('Ravi');
+    expect(row.suggestedOperator).toBeNull();
+  });
+});
+
 describe('putting an operator on a loom', () => {
   it('adds a loom the office plan left out, with the operator chosen on the floor', async () => {
     const s = await seed();
@@ -717,6 +758,31 @@ describe('the timer photo from the shift before', () => {
     expect((await f.get(`/previous-timer-photo?machine=${s.running._id}`)).body.previous).toMatchObject({ operator: 'Ravi', runTime: '7:45:00', photo: null });
     expect((await f.get(`/previous-timer-photo?machine=${s.free._id}`)).body.previous).toMatchObject({ operator: null, photo: null });
     expect((await f.get('/previous-timer-photo?machine=nope')).status).toBe(400);
+  });
+
+  it('on a total-hours meter, gives where the meter stood when the shift before ended, for this shift to start from', async () => {
+    const s = await seed();
+    // The night before read its meter as 1226.85 → 1234.6 h: that end is kept with the photo.
+    const { photo: night } = await before(s, '2026-10-20', 'NIGHT');
+    await M.TimerPhoto.updateOne({ _id: night._id }, { readText: '1234.6', readKind: 'hour_meter' });
+    const nightToken = (await open({ date: '2026-10-20', shift: 'NIGHT' })).body.token;
+    const use = await request(app).post(`/api/v2/floor/timer-photo/${night._id}/use`).set('X-Floor-Token', nightToken)
+      .send({ runTime: '7:45:00', meter: { start: 1226.85, end: 1234.6 } });
+    expect(use.status).toBe(200);
+    expect(await M.TimerPhoto.findById(night._id).lean()).toMatchObject({ meterStart: 1226.85, meterEnd: 1234.6, runTimeUsed: '7:45:00' });
+
+    const day = floor((await open({ date: DATE, shift: 'DAY' })).body.token);
+    expect((await day.get(`/previous-timer-photo?machine=${s.running._id}`)).body.previous.photo).toMatchObject({ readKind: 'hour_meter', meterHours: 1234.6 });
+
+    // Readings that cannot be one shift are not kept; the meter's own reading still serves.
+    await request(app).post(`/api/v2/floor/timer-photo/${night._id}/use`).set('X-Floor-Token', nightToken)
+      .send({ runTime: '7:45:00', meter: { start: 1240, end: 1234.6 } });
+    expect(await M.TimerPhoto.findById(night._id).lean()).toMatchObject({ meterStart: null, meterEnd: null });
+    expect((await day.get(`/previous-timer-photo?machine=${s.running._id}`)).body.previous.photo.meterHours).toBe(1234.6);
+
+    // A run-time display starts from zero each shift: nothing to start from.
+    await M.TimerPhoto.updateOne({ _id: night._id }, { readText: '07:45:12', readKind: 'run_time' });
+    expect((await day.get(`/previous-timer-photo?machine=${s.running._id}`)).body.previous.photo.meterHours).toBeNull();
   });
 
   it('is shown to the office beside the entry awaiting verification, verified or not', async () => {

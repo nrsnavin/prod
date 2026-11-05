@@ -106,6 +106,17 @@ const ShiftDetailSchema = new mongoose.Schema(
 
     // ── Admin verification audit ─────────────────────────────
     verifiedAt: { type: Date },
+    // Verified without a person (services/autoVerify.js): what it was
+    // checked against, so the office can see why and spot-check it.
+    autoVerified: {
+      at:           { type: Date },
+      expected:     { type: Number },
+      low:          { type: Number },
+      high:         { type: Number },
+      tolerancePct: { type: Number },
+      shifts:       { type: Number },
+      photo:        { type: mongoose.Schema.Types.ObjectId, ref: "TimerPhoto" },
+    },
     verifiedBy: {
       type: mongoose.Types.ObjectId,
       ref: "User",

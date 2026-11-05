@@ -454,7 +454,9 @@ router.post(
     });
     if (!updated) return next(new ErrorHandler("Shift is already closed", 400));
 
-    res.json({ success: true, shift: updated });
+    // When the photo and the loom's own rate already agree, nobody need check it.
+    const auto = await require("../services/autoVerify").tryAutoVerify(shift._id);
+    res.json({ success: true, shift: auto.verified ? await ShiftDetail.findById(shift._id).lean() : updated, autoVerified: auto.verified });
   })
 );
 
@@ -552,6 +554,174 @@ router.get(
 //  applyProductionCascade so JobOrder/Order/ShiftPlan all reflect
 //  the admin-blessed numbers.
 // ────────────────────────────────────────────────────────────────
+/**
+ * Verify one shift entry: the figures become canonical, the shift closes,
+ * production cascades to the job, order and plan, and attendance is filled
+ * in. One function for the office's button and for auto-verification
+ * (services/autoVerify.js), so both keep the same rules.
+ *
+ * @param req   the actor (a person's request, or the auto-verifier's stand-in)
+ * @param auto  when the rule verified it: what it was checked against
+ */
+async function verifyShiftProduction({ shiftId, productionMeters, timer, feedback, note }, req, { auto = null } = {}) {
+  const prodValue = Number(productionMeters);
+  const session = await mongoose.startSession();
+  try {
+    let resp;
+    await session.withTransaction(async () => {
+      const shift = await ShiftDetail.findById(shiftId)
+        .populate({ path: "machine", populate: { path: "orderRunning" } })
+        .session(session);
+
+      if (!shift) throw new ErrorHandler("Shift detail not found", 404);
+      if (shift.status === "closed") {
+        throw new ErrorHandler("Shift is already closed", 400);
+      }
+      if (shift.status === "loading") throw new ErrorHandler(LOADING_SHIFT, 409);
+      // The rule verifies only what was submitted and is waiting.
+      if (auto && shift.status !== "pending_verification") throw new ErrorHandler("Not waiting for verification", 409);
+      await assertPlanNotFinalized(shift, session);
+      await assertShiftProductionOpen(shift, { JobOrder, Machine }, "verify production");
+
+      const machine = await Machine.findById(shift.machine).session(session);
+
+      // Canonical (admin-blessed) values overwrite whatever the
+      // worker had typed.
+      const finalTimer    = timer    != null ? timer    : (shift.submittedTimer    || "00:00:00");
+      const finalFeedback = feedback != null ? feedback : (shift.submittedFeedback || "");
+
+      // Per head × the heads that ran — the job's head plan, which may
+      // use fewer heads than the loom has (utils/machineHeads.js). The
+      // snapshot is brought up to that plan too, so a later correction
+      // (_rederiveShiftProduction) divides by the same heads.
+      const runningHeads = (machine?.elastics || []).filter((h) => h && h.elastic);
+      if (runningHeads.length) {
+        shift.elastics = runningHeads.map((h) => ({ head: h.head, elastic: h.elastic }));
+      }
+      shift.headsRun         = headsInUse(machine);
+      shift.productionMeters = prodValue * shift.headsRun;
+      shift.timer            = finalTimer;
+      shift.feedback         = finalFeedback;
+      shift.status           = "closed";
+      shift.verifiedAt       = new Date();
+      shift.verifiedBy       = auto ? undefined : req.user?._id;
+      if (auto) shift.autoVerified = { at: new Date(), ...auto };
+      if (note) shift.description = note;
+      await shift.save({ session });
+
+      const { fingerprint } = await applyProductionCascade(session, {
+        shift,
+        machine,
+        productionMeters: prodValue,
+        timer:            finalTimer,
+        feedback:         finalFeedback,
+        req,
+      });
+
+      // Auto-mark attendance for this operator on this date if
+      // there isn't already a row. Manual marks win — we only
+      // fill the gap. Skipped when production is zero (treat that
+      // as "verify-but-no-work-done", admin should mark manually).
+      let attendanceAutoMarked = false;
+      if (prodValue > 0 && shift.employee) {
+        const dayStart = new Date(shift.date);
+        dayStart.setHours(0, 0, 0, 0);
+        const dayEnd = new Date(dayStart.getTime() + 86_400_000);
+        const existing = await Attendance.findOne({
+          employee: shift.employee,
+          date:     { $gte: dayStart, $lt: dayEnd },
+          shift:    shift.shift,
+        }).session(session);
+
+        if (!existing) {
+          // new + save (not insertOne) so the pre('save') hook
+          // computes shiftHours / hoursWorked correctly.
+          const att = new Attendance({
+            employee: shift.employee,
+            date:     dayStart,
+            shift:    shift.shift,
+            status:   'present',
+            markedBy: 'auto_shift_verify',
+          });
+          await att.save({ session });
+          attendanceAutoMarked = true;
+        }
+      }
+
+      resp = { shift, fingerprint, attendanceAutoMarked };
+    });
+    return resp;
+  } finally {
+    session.endSession();
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  PRODUCTION SETTINGS — auto-verification and the shift-end nudge
+//    GET /production-settings         (admin, production)
+//    PUT /production-settings         (admin)
+//  ENTRIES VERIFIED BY THE RULE
+//    GET /auto-verified?days=2        what the rule verified, with what
+//                                     it was checked against, newest first
+// ────────────────────────────────────────────────────────────────
+const ProductionSettings = require("../models/ProductionSettings");
+const autoVerify = require("../services/autoVerify");
+
+router.get("/production-settings", isAdmin("admin", "production"), catchAsyncErrors(async (_req, res) => {
+  res.json({ success: true, settings: await autoVerify.settings() });
+}));
+
+router.put("/production-settings", isAdmin("admin"), catchAsyncErrors(async (req, res, next) => {
+  const b = req.body || {};
+  const set = { updatedBy: req.user?._id };
+  if (b.autoVerify) {
+    const a = b.autoVerify;
+    if (a.enabled !== undefined) set["autoVerify.enabled"] = !!a.enabled;
+    if (a.tolerancePct !== undefined) {
+      const t = Number(a.tolerancePct);
+      if (!(t >= 1 && t <= 50)) return next(new ErrorHandler("tolerancePct must be between 1 and 50", 400));
+      set["autoVerify.tolerancePct"] = t;
+    }
+    if (a.minShifts !== undefined) {
+      const m = Number(a.minShifts);
+      if (!(Number.isInteger(m) && m >= 1 && m <= 200)) return next(new ErrorHandler("minShifts must be a whole number from 1 to 200", 400));
+      set["autoVerify.minShifts"] = m;
+    }
+  }
+  if (b.shiftEndNudge) {
+    const n = b.shiftEndNudge;
+    if (n.enabled !== undefined) set["shiftEndNudge.enabled"] = !!n.enabled;
+    if (n.minutesBefore !== undefined) {
+      const m = Number(n.minutesBefore);
+      if (!(Number.isInteger(m) && m >= 5 && m <= 240)) return next(new ErrorHandler("minutesBefore must be a whole number from 5 to 240", 400));
+      set["shiftEndNudge.minutesBefore"] = m;
+    }
+    if (n.phones !== undefined) {
+      const { e164 } = require("../services/collections");
+      set["shiftEndNudge.phones"] = (Array.isArray(n.phones) ? n.phones : String(n.phones).split(/[,\s]+/)).map(e164).filter(Boolean).slice(0, 20);
+    }
+  }
+  await autoVerify.settings();
+  const settings = await ProductionSettings.findOneAndUpdate({ key: "production" }, { $set: set }, { new: true }).lean();
+  res.json({ success: true, settings });
+}));
+
+router.get("/auto-verified", isAdmin("admin", "production"), catchAsyncErrors(async (req, res) => {
+  const days = Math.min(31, Math.max(1, parseInt(req.query.days, 10) || 2));
+  const since = new Date(Date.now() - days * 86_400_000);
+  const rows = await ShiftDetail.find({ "autoVerified.at": { $gte: since } })
+    .select("date shift machine employee productionMeters headsRun timer autoVerified shiftPlan")
+    .populate({ path: "machine", select: "ID" }).populate({ path: "employee", select: "name" })
+    .sort({ "autoVerified.at": -1 }).limit(300).lean();
+  res.json({
+    success: true, days,
+    rows: rows.map((r) => ({
+      _id: r._id, date: r.date, shift: r.shift, machine: r.machine?.ID || "", operator: r.employee?.name || "",
+      perHead: r.headsRun ? Math.round((r.productionMeters / r.headsRun) * 10) / 10 : r.productionMeters, timer: r.timer, ...r.autoVerified,
+    })),
+  });
+}));
+
 router.post(
   "/verify-production",
   isAdmin('admin', 'production'),
@@ -565,94 +735,11 @@ router.post(
     if (isNaN(prodValue) || prodValue < 0) {
       return next(new ErrorHandler("productionMeters must be a non-negative number", 400));
     }
-
-    const session = await mongoose.startSession();
     try {
-      let resp;
-      await session.withTransaction(async () => {
-        const shift = await ShiftDetail.findById(shiftId)
-          .populate({ path: "machine", populate: { path: "orderRunning" } })
-          .session(session);
-
-        if (!shift) throw new ErrorHandler("Shift detail not found", 404);
-        if (shift.status === "closed") {
-          throw new ErrorHandler("Shift is already closed", 400);
-        }
-        if (shift.status === "loading") throw new ErrorHandler(LOADING_SHIFT, 409);
-        await assertPlanNotFinalized(shift, session);
-        await assertShiftProductionOpen(shift, { JobOrder, Machine }, "verify production");
-
-        const machine = await Machine.findById(shift.machine).session(session);
-
-        // Canonical (admin-blessed) values overwrite whatever the
-        // worker had typed.
-        const finalTimer    = timer    != null ? timer    : (shift.submittedTimer    || "00:00:00");
-        const finalFeedback = feedback != null ? feedback : (shift.submittedFeedback || "");
-
-        // Per head × the heads that ran — the job's head plan, which may
-        // use fewer heads than the loom has (utils/machineHeads.js). The
-        // snapshot is brought up to that plan too, so a later correction
-        // (_rederiveShiftProduction) divides by the same heads.
-        const runningHeads = (machine?.elastics || []).filter((h) => h && h.elastic);
-        if (runningHeads.length) {
-          shift.elastics = runningHeads.map((h) => ({ head: h.head, elastic: h.elastic }));
-        }
-        shift.headsRun         = headsInUse(machine);
-        shift.productionMeters = prodValue * shift.headsRun;
-        shift.timer            = finalTimer;
-        shift.feedback         = finalFeedback;
-        shift.status           = "closed";
-        shift.verifiedAt       = new Date();
-        shift.verifiedBy       = req.user?._id;
-        if (note) shift.description = note;
-        await shift.save({ session });
-
-        const { fingerprint } = await applyProductionCascade(session, {
-          shift,
-          machine,
-          productionMeters: prodValue,
-          timer:            finalTimer,
-          feedback:         finalFeedback,
-          req,
-        });
-
-        // Auto-mark attendance for this operator on this date if
-        // there isn't already a row. Manual marks win — we only
-        // fill the gap. Skipped when production is zero (treat that
-        // as "verify-but-no-work-done", admin should mark manually).
-        let attendanceAutoMarked = false;
-        if (prodValue > 0 && shift.employee) {
-          const dayStart = new Date(shift.date);
-          dayStart.setHours(0, 0, 0, 0);
-          const dayEnd = new Date(dayStart.getTime() + 86_400_000);
-          const existing = await Attendance.findOne({
-            employee: shift.employee,
-            date:     { $gte: dayStart, $lt: dayEnd },
-            shift:    shift.shift,
-          }).session(session);
-
-          if (!existing) {
-            // new + save (not insertOne) so the pre('save') hook
-            // computes shiftHours / hoursWorked correctly.
-            const att = new Attendance({
-              employee: shift.employee,
-              date:     dayStart,
-              shift:    shift.shift,
-              status:   'present',
-              markedBy: 'auto_shift_verify',
-            });
-            await att.save({ session });
-            attendanceAutoMarked = true;
-          }
-        }
-
-        resp = { shift, fingerprint, attendanceAutoMarked };
-      });
+      const resp = await verifyShiftProduction({ shiftId, productionMeters: prodValue, timer, feedback, note }, req);
       res.json({ success: true, ...resp });
     } catch (err) {
       return next(err);
-    } finally {
-      session.endSession();
     }
   })
 );
@@ -1625,3 +1712,4 @@ router.delete(
 );
 
 module.exports = router;
+module.exports.verifyShiftProduction = verifyShiftProduction;
