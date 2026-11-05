@@ -581,12 +581,14 @@ async function previousTimerPhoto(session, machine) {
   out.entryId = String(detail._id);
   const photo = await TimerPhoto.findOne({ shift: detail._id })
     .sort({ used: -1, createdAt: -1 })
-    .select('createdAt uploadedByName readText readKind runTimeUsed used meterEnd').lean();
+    .select('createdAt uploadedByName readText readKind runTimeUsed used meterEnd counterEnd').lean();
   if (photo) {
     out.photo = {
       id: String(photo._id), takenAt: photo.createdAt, byName: photo.uploadedByName || '',
       readText: photo.readText || null, readKind: photo.readKind || null, runTimeUsed: photo.runTimeUsed || null, used: !!photo.used,
       meterHours: meterHoursOf(photo),
+      // A metre counter on the panel, where it stood when that shift ended.
+      counterMetres: Number.isFinite(photo.counterEnd) ? photo.counterEnd : null,
     };
   }
   return out;

@@ -780,6 +780,13 @@ describe('the timer photo from the shift before', () => {
     expect(await M.TimerPhoto.findById(night._id).lean()).toMatchObject({ meterStart: null, meterEnd: null });
     expect((await day.get(`/previous-timer-photo?machine=${s.running._id}`)).body.previous.photo.meterHours).toBe(1234.6);
 
+    // A metre counter on the same panel: where it stood is kept for the next shift too.
+    await request(app).post(`/api/v2/floor/timer-photo/${night._id}/use`).set('X-Floor-Token', nightToken)
+      .send({ runTime: '7:45:00', counter: 58213.5 });
+    expect((await day.get(`/previous-timer-photo?machine=${s.running._id}`)).body.previous.photo.counterMetres).toBe(58213.5);
+    expect((await request(app).post(`/api/v2/floor/timer-photo/${night._id}/use`).set('X-Floor-Token', nightToken)
+      .send({ runTime: '7:45:00', counter: 'lots' })).status).toBe(400);
+
     // A run-time display starts from zero each shift: nothing to start from.
     await M.TimerPhoto.updateOne({ _id: night._id }, { readText: '07:45:12', readKind: 'run_time' });
     expect((await day.get(`/previous-timer-photo?machine=${s.running._id}`)).body.previous.photo.meterHours).toBeNull();

@@ -66,6 +66,7 @@ const PROMPT = [
   '  (total hours ever run, a large decimal), "clock" (time of day), "counter" (picks, metres,',
   '  pieces) or "other".',
   '- label: any printed word naming the reading (e.g. "RUN", "HRS", "TIME", "PICK"), or "".',
+  '  For a counter, the unit printed beside it ("MTR", "M", "PICK", "PCS") is its label.',
   '  The maker and model name ("SELEC", "LTC9A") is not a label: use "".',
   '- confidence: 0 to 1, how sure you are of every digit.',
   '- alternatives: other full readings of the same display if a digit is unclear, in the',

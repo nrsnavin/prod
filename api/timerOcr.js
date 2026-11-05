@@ -7,7 +7,7 @@
 //      → { available, reading: { displays, primary, problem }, suggestionId, photoId }
 //    POST /api/v2/ocr/timer/:id/settle    { runTime: "H:MM:SS" }
 //      → records what the person actually used, against what was read
-//    POST /api/v2/ocr/timer/photo/:photoId/use   { runTime, meter? {start, end} }
+//    POST /api/v2/ocr/timer/photo/:photoId/use   { runTime, meter? {start, end}, counter? }
 //      → marks the photo the run time was filled from, and settles its reading
 //    GET  /api/v2/ocr/timer/shift/:shiftId/photos
 //      → the timer photos kept for a shift, newest first (no bytes)
@@ -74,6 +74,7 @@ const photoMeta = (p) => ({
   runTimeUsed: p.runTimeUsed,
   meterStart: p.meterStart ?? null,
   meterEnd: p.meterEnd ?? null,
+  counterEnd: p.counterEnd ?? null,
 });
 
 router.post(
@@ -125,7 +126,7 @@ router.post(
 
 router.post(
   '/timer/photo/:photoId/use',
-  validate({ body: z.object({ runTime: z.string().max(12), meter: z.object({ start: z.number(), end: z.number() }).nullish() }) }),
+  validate({ body: z.object({ runTime: z.string().max(12), meter: z.object({ start: z.number(), end: z.number() }).nullish(), counter: z.number().nullish() }) }),
   catchAsyncErrors(async (req, res, next) => {
     const runTime = asRunTime(req.body.runTime);
     if (!runTime) return next(new ErrorHandler('runTime must look like 7:45:00', 400));
@@ -133,7 +134,7 @@ router.post(
     const photo = await TimerPhoto.findById(req.params.photoId).select('shift suggestion').lean();
     if (!photo || !(await reachableShift(req, photo.shift))) return next(new ErrorHandler('Photo not found', 404));
 
-    await markPhotoUsed(photo._id, runTime, { decidedBy: req.user?._id, meter: req.body.meter });
+    await markPhotoUsed(photo._id, runTime, { decidedBy: req.user?._id, meter: req.body.meter, counter: req.body.counter });
     res.json({ success: true });
   })
 );

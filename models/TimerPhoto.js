@@ -58,6 +58,8 @@ const TimerPhotoSchema = new mongoose.Schema(
      */
     meterStart: { type: Number, default: null },
     meterEnd: { type: Number, default: null },
+    /** A metre counter on the same panel, as it read in this photo: the next shift's start. */
+    counterEnd: { type: Number, default: null },
 
     expiresAt: { type: Date, default: null },
   },

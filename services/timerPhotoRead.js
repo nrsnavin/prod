@@ -113,7 +113,7 @@ function meterReadings(meter) {
 }
 
 /** The photo the run time came from; settles its reading too. */
-async function markPhotoUsed(photoId, runTime, { decidedBy = null, meter = null } = {}) {
+async function markPhotoUsed(photoId, runTime, { decidedBy = null, meter = null, counter = null } = {}) {
   const photo = await TimerPhoto.findById(photoId).select('shift suggestion').lean();
   if (!photo) return null;
   const m = meterReadings(meter);
@@ -122,6 +122,7 @@ async function markPhotoUsed(photoId, runTime, { decidedBy = null, meter = null 
   await TimerPhoto.updateOne({ _id: photo._id }, {
     used: true, runTimeUsed: runTime, usedAt: new Date(),
     meterStart: m ? m.start : null, meterEnd: m ? m.end : null,
+    counterEnd: Number.isFinite(counter) && counter >= 0 && counter <= 1e9 ? counter : null,
   });
   if (photo.suggestion) {
     await ledger.settle(String(photo.suggestion), {
