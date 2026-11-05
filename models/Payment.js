@@ -123,6 +123,13 @@ const PaymentSchema = new mongoose.Schema(
     cancel: { reason: { type: String, default: "" }, at: { type: Date }, by: { type: mongoose.Types.ObjectId, ref: "User" } },
 
     narration:   { type: String, default: "", trim: true, maxlength: 300 },
+    // A payment the checks stopped (services/paymentChecks.js), released
+    // by someone who said how they confirmed it.
+    risk: {
+      flags: { type: [String], default: undefined },
+      note:  { type: String, default: "" },
+      byName: { type: String, default: "" },
+    },
     attachments: { type: [AttachmentSchema], default: [] },
     // "manual", or "statement" when posted from a bank statement line.
     source: { type: String, default: "manual" },

@@ -64,6 +64,17 @@ const supplierSchema = new mongoose.Schema(
 
     // For TDS returns (26Q): without a PAN, tax is deducted at 20% (s.206AA).
     pan: { type: String, trim: true, uppercase: true, default: "", maxlength: 10 },
+    // Where they are paid. A change is the classic payment fraud (a mail
+    // "our bank has changed"), so when, by whom and from what is kept, and
+    // a payment soon after it must be confirmed (services/paymentChecks.js).
+    bank: {
+      accountNo:         { type: String, trim: true, default: "", maxlength: 20 },
+      ifsc:              { type: String, trim: true, uppercase: true, default: "", maxlength: 11 },
+      holder:            { type: String, trim: true, default: "", maxlength: 120 },
+      changedAt:         { type: Date, default: null },
+      changedByName:     { type: String, default: "" },
+      previousAccountNo: { type: String, default: "" },
+    },
 
     // MSME (Udyam) registration. A bill to a micro or small enterprise
     // must be paid within 15 days, or the days agreed in writing (at most

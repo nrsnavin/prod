@@ -1074,6 +1074,24 @@ async function createVoucher(b, req) {
   }
   const incomeLedger = partyType === "other" && kind === "receipt" && b.incomeLedger === "interest" ? "interest" : undefined;
 
+  // Before money goes out: a bank account changed lately, or shared with
+  // another supplier, stops it until someone says how they confirmed it.
+  // A payment recorded from the bank statement has already left: nothing to stop.
+  let risk = null;
+  if (kind === "payment" && b.source !== "statement") {
+    const danger = (await require("../services/paymentChecks").paymentFlags({ ...b, kind, partyType, supplier: partyType === "supplier" ? party?._id : undefined, partyName, amount, allocations }, req.user)).filter((f) => f.severity === "danger");
+    if (danger.length) {
+      const note = String(b.riskNote || "").trim();
+      if (!b.confirmRisk || note.length < 8) {
+        const err = new ErrorHandler(`${danger.map((f) => f.message).join(" · ")} — say how you confirmed it to pay`, 409);
+        err.code = "PAYMENT_RISK";
+        err.details = { flags: danger };
+        throw err;
+      }
+      risk = { flags: danger.map((f) => f.code), note: note.slice(0, 300), byName: req.user?.name || "" };
+    }
+  }
+
   const { financialYear, sequence, number } = await allocate(Payment, kind === "receipt" ? "RCT" : "PAY", { extra: { kind }, at: date });
   const _id = new mongoose.Types.ObjectId();
   const data = {
@@ -1087,8 +1105,9 @@ async function createVoucher(b, req) {
     source: b.source === "statement" ? "statement" : "manual", statementLine: String(b.statementLine || "").slice(0, 200),
     clearedOn: b.clearedOn ? readDate(b.clearedOn, "clearedOn") : undefined,
     createdBy: req.user?._id,
+    ...(risk ? { risk } : {}),
   };
-  data.fingerprints = [fp(ACTION_CODES.PAYMENT_POSTED, { _id }, req, { voucherNo: number, amount, tds: tdsAmount, adjustments: adjTotal, docs: allocations.map((a) => a.docNo) })];
+  data.fingerprints = [fp(ACTION_CODES.PAYMENT_POSTED, { _id }, req, { voucherNo: number, amount, tds: tdsAmount, adjustments: adjTotal, docs: allocations.map((a) => a.docNo), ...(risk ? { risk: risk.flags, riskNote: risk.note } : {}) })];
 
   let voucher;
   try {

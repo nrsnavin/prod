@@ -113,6 +113,9 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
 router.post("/bills/check", catchAsyncErrors(async (req, res) => {
   res.json({ success: true, flags: await insights.anomalies("bill", req.body || {}, req.user) });
 }));
+router.post("/payments/check", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, flags: await require("../services/paymentChecks").paymentFlags(req.body || {}, req.user) });
+}));
 router.post("/expenses/check", catchAsyncErrors(async (req, res) => {
   res.json({ success: true, flags: await insights.anomalies("expense", req.body || {}, req.user) });
 }));

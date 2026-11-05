@@ -126,6 +126,7 @@ router.post(
         packSize:     Math.max(0, Number(packSize)     || 0),
         ...(["regular", "composition", "unregistered"].includes(gstRegistration) ? { gstRegistration } : {}),
         ...(paymentTermsDays !== undefined && paymentTermsDays !== "" ? { paymentTermsDays: Math.min(365, Math.max(0, Number(paymentTermsDays) || 0)) } : {}),
+        ...(req.body?.bank ? { bank: readBank(req.body.bank) } : {}),
       });
       if (mongoose.Types.ObjectId.isValid(String(req.body?.aiSuggestion || ""))) {
         require("../services/aiLedger").settle(req.body.aiSuggestion, {
@@ -978,6 +979,15 @@ const SUPPLIER_FIELDS = [
   // MSME (Udyam) status, for the 45-day rule; PAN for the TDS return.
   "msme", "pan",
 ];
+/** Bank details as given, checked: account digits only, IFSC as the RBI writes it. */
+function readBank(b) {
+  const accountNo = String(b?.accountNo || "").replace(/[\s-]/g, "");
+  const ifsc = String(b?.ifsc || "").trim().toUpperCase();
+  if (accountNo && !/^\d{6,18}$/.test(accountNo)) throw new Error("The bank account number is 6 to 18 digits");
+  if (ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) throw new Error("The IFSC is 11 characters, like HDFC0001234");
+  return { accountNo, ifsc, holder: String(b?.holder || "").trim().slice(0, 120) };
+}
+
 router.put(
   "/edit-supplier",
   catchAsyncErrors(async (req, res, next) => {
@@ -985,6 +995,22 @@ router.put(
       const update = {};
       for (const f of SUPPLIER_FIELDS) {
         if (req.body[f] !== undefined) update[f] = req.body[f];
+      }
+      // Bank details: checked, and a change remembered — who, when, from what.
+      if (req.body.bank !== undefined) {
+        let bank;
+        try { bank = readBank(req.body.bank); } catch (err) { return next(new ErrorHandler(err.message, 400)); }
+        const was = mongoose.Types.ObjectId.isValid(String(req.body._id || "")) ? await Supplier.findById(req.body._id).select("bank").lean() : null;
+        const before = was?.bank || {};
+        const changed = (before.accountNo || "") !== bank.accountNo || (before.ifsc || "") !== bank.ifsc;
+        update["bank.accountNo"] = bank.accountNo;
+        update["bank.ifsc"] = bank.ifsc;
+        update["bank.holder"] = bank.holder;
+        if (changed && before.accountNo) {
+          update["bank.changedAt"] = new Date();
+          update["bank.changedByName"] = req.user?.name || "";
+          update["bank.previousAccountNo"] = before.accountNo;
+        }
       }
       const supplier = await Supplier.findByIdAndUpdate(
         req.body._id, update, { new: true, runValidators: true }
