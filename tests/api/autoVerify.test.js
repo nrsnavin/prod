@@ -130,9 +130,34 @@ describe('auto-verification', () => {
     const detailId = (await f.post('/operator', { machine: String(s.loom._id), operator: String(s.ravi._id) })).body.detailId;
     const out = (await f.post('/entry', { detailId, production: 455, timer: '7:30' })).body;
     expect(out.autoVerified).toBe(false);
-    expect(out.waitsBecause).toEqual(expect.arrayContaining(['run time not read from a photo of the timer']));
+    expect(out.waitsBecause).toEqual(expect.arrayContaining(['run time not read from a photo of the timer, and no loom sensor to check it']));
     expect(out.waitsBecause.some((r) => /model not trained yet|not learned yet|no expected output/.test(r))).toBe(true);
     expect((await f.get(`/machine?code=${s.loom.ID}`)).body.machine.rate).toBeNull();
+  });
+
+  it('with no photo, takes the loom sensor\'s run time as the evidence — when they agree', async () => {
+    const s = await scene();
+    await turnOn();
+    const LoomDevice = require('../../models/LoomDevice');
+    const LoomReading = require('../../models/LoomReading');
+    const d = await LoomDevice.create({ machine: s.loom._id, keyId: `ld_av${n}`, keyHash: 'x', lastSeenAt: new Date() });
+    // The board saw 7 h 31 min of running on the day shift of DATE.
+    const at = (hhmm) => new Date(`${DATE}T${hhmm}:00+05:30`);
+    await LoomReading.insertMany([
+      { device: d._id, machine: s.loom._id, at: at('07:59'), runSecondsTotal: 1000 },
+      { device: d._id, machine: s.loom._id, at: at('12:00'), runSecondsTotal: 1000 + 4 * 3600 },
+      { device: d._id, machine: s.loom._id, at: at('16:00'), runSecondsTotal: 1000 + 7 * 3600 + 31 * 60 },
+    ]);
+    const f = await openFloor();
+    const m = (await f.get(`/machine?code=${s.loom.ID}`)).body.machine;
+    expect(m.sensor).toMatchObject({ runTime: expect.stringMatching(/^7:3\d:\d\d$/), live: true, complete: false });
+
+    const detailId = (await f.post('/operator', { machine: String(s.loom._id), operator: String(s.ravi._id) })).body.detailId;
+    // A run time the sensor does not bear out waits.
+    expect((await f.post('/entry', { detailId, production: 380, timer: '6:15' })).body.waitsBecause[0]).toMatch(/differs from the loom sensor's 7:3\d/);
+    const saved = await f.post('/entry', { detailId, production: 455, timer: '7:30' });
+    expect(saved.body.autoVerified).toBe(true);
+    expect((await M.ShiftDetail.findById(detailId).lean()).autoVerified.sensorRunTime).toMatch(/^7:3\d/);
   });
 
   it('only an admin changes the settings, within limits', async () => {

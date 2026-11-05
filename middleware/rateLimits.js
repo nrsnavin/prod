@@ -75,6 +75,7 @@ function buildLimiters({
   webhookLimit = 30,
   photoOcrPerHour = 40,
   floorPinPerAddress = 8,
+  sensorPerKey = 30,
   storeFor = (prefix) => new MongoRateLimitStore({ prefix }),
 } = {}) {
   const apiLimiter = rateLimit({
@@ -157,7 +158,19 @@ function buildLimiters({
     message: { success: false, message: 'Too many PIN attempts — ask the admin for the PIN and try again in a few minutes.' },
   });
 
-  return { apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter };
+  // A loom's board posts about once a minute, and every board in the
+  // factory shares one address — so counted per device key, not per
+  // address. A board stuck in a loop is held to this; the rest go on.
+  const sensorLimiter = rateLimit({
+    ...common,
+    windowMs: 60 * 1000,
+    limit: sensorPerKey,
+    keyGenerator: (req) => `key:${String(req.get('X-Device-Key') || req.get('Authorization') || '').replace(/^Device\s+/i, '').split('.')[0].slice(0, 40) || 'none'}`,
+    store: storeFor('rl:sensor:'),
+    message: { success: false, message: 'Too many posts from this device — once a minute is plenty.' },
+  });
+
+  return { apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter, sensorLimiter };
 }
 
 module.exports = { buildLimiters, userOrIpKey, accountKey, ipKey };

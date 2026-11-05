@@ -127,6 +127,8 @@ const ShiftDetailSchema = new mongoose.Schema(
       tolerancePct: { type: Number },
       shifts:       { type: Number },
       photo:        { type: mongoose.Schema.Types.ObjectId, ref: "TimerPhoto" },
+      // Or, with no photo, the loom sensor's run time it agreed with.
+      sensorRunTime: { type: String },
     },
     verifiedBy: {
       type: mongoose.Types.ObjectId,

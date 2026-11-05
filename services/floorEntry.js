@@ -265,7 +265,25 @@ async function operatorSuggestions({ dateKey, shift }, machineIds) {
   return out;
 }
 
-function machineState(m, detail, plan, model = null, suggested = null) {
+/**
+ * What each loom's sensor says it ran on this shift so far, for the looms
+ * that have one: Map of machine id → { runTime, seconds, lastAt, live }.
+ */
+async function sensorRuns(session, machineIds) {
+  const out = new Map();
+  if (!machineIds.length) return out;
+  const LoomDevice = require('../models/LoomDevice');
+  const devices = await LoomDevice.find({ machine: { $in: machineIds }, active: true }).select('machine lastSeenAt').lean();
+  if (!devices.length) return out;
+  const { shiftRun } = require('./loomSensor');
+  for (const d of devices) {
+    const run = await shiftRun(d.machine, session).catch(() => null);
+    if (run) out.set(String(d.machine), { runTime: run.runTime, seconds: run.seconds, lastAt: run.lastAt, complete: run.complete, live: !!(d.lastSeenAt && Date.now() - new Date(d.lastSeenAt).getTime() < 10 * 60_000) });
+  }
+  return out;
+}
+
+function machineState(m, detail, plan, model = null, suggested = null, sensor = null) {
   const job = m.orderRunning && typeof m.orderRunning === 'object' ? m.orderRunning : null;
   const headMap = headMapOf(m);
   const headsRunning = headMap.filter((h) => h.elastic).length;
@@ -319,6 +337,8 @@ function machineState(m, detail, plan, model = null, suggested = null) {
     rate: rateOf(model, m),
     // Only where an operator is still to be chosen.
     suggestedOperator: suggested && !detail?.employee && ['unplanned', 'ready', 'loading'].includes(entry) ? suggested : null,
+    // The loom's own sensor: what it ran on this shift so far.
+    sensor: sensor || null,
   };
 }
 
@@ -357,8 +377,11 @@ async function shiftState({ dateKey, shift }) {
   const detailByMachine = new Map(details.map((d) => [String(d.machine), d]));
   const { model } = await pm.getModel();
   const open = machines.filter((m) => !detailByMachine.get(String(m._id))?.employee && m.status === 'running').map((m) => m._id);
-  const suggested = await operatorSuggestions({ dateKey, shift }, open).catch(() => new Map());
-  const rows = machines.map((m) => machineState(m, detailByMachine.get(String(m._id)) || null, plan, model, suggested.get(String(m._id)) || null));
+  const [suggested, sensed] = await Promise.all([
+    operatorSuggestions({ dateKey, shift }, open).catch(() => new Map()),
+    sensorRuns({ dateKey, shift }, machines.filter((m) => m.status === 'running').map((m) => m._id)).catch(() => new Map()),
+  ]);
+  const rows = machines.map((m) => machineState(m, detailByMachine.get(String(m._id)) || null, plan, model, suggested.get(String(m._id)) || null, sensed.get(String(m._id)) || null));
   const counts = rows.reduce((c, r) => { c[r.entry] = (c[r.entry] || 0) + 1; return c; }, {});
   const now = currentShift();
   return {
@@ -426,7 +449,8 @@ async function machineForShift({ dateKey, shift }, code) {
     : null;
   const { model } = await pm.getModel();
   const suggested = detail?.employee ? new Map() : await operatorSuggestions({ dateKey, shift }, [m._id]).catch(() => new Map());
-  return { plan: plan ? planView(plan) : null, machine: machineState(m, detail, plan, model, suggested.get(String(m._id)) || null) };
+  const sensed = await sensorRuns({ dateKey, shift }, [m._id]).catch(() => new Map());
+  return { plan: plan ? planView(plan) : null, machine: machineState(m, detail, plan, model, suggested.get(String(m._id)) || null, sensed.get(String(m._id)) || null) };
 }
 
 // ── The plan, made from the floor ─────────────────────────────────

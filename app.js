@@ -52,7 +52,7 @@ function safeEqual(a, b) {
 // per signed-in user rather than per office IP, failed logins only, and
 // counters in MongoDB so they hold across every worker process.
 const {
-  apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter,
+  apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter, sensorLimiter,
 } = require("./middleware/rateLimits.js").buildLimiters();
 
 const user     = require("./api/user.js");
@@ -581,6 +581,12 @@ app.use("/api/v2/floor",
   (req, res, next) => (req.method === 'POST' && req.path === '/open' ? floorPinLimiter(req, res, next) : next()),
   (req, res, next) => (req.method === 'POST' && req.path === '/timer-photo' ? photoOcrLimiter(req, res, next) : next()),
   require("./api/floor.js"));
+// Loom sensors: the board posts with its own key, no login (limited per
+// key — every board shares the factory's address); the admin adds the
+// boards and their keys behind the admin gate.
+const loomSensor = require("./api/loomSensor.js");
+app.use("/api/v2/loom-sensor/reading", sensorLimiter, loomSensor.device);
+app.use("/api/v2/loom-sensor",  ADMIN_GATE, loomSensor.admin);
 // Analytics and the Order/Elastic-group forms all read the customer list
 // without ever writing one.
 app.use("/api/v2/customer",    gate('accounts'),

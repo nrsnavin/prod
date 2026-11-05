@@ -36,6 +36,20 @@ async function settings() {
   return ProductionSettings.findOneAndUpdate({ key: 'production' }, { $setOnInsert: { key: 'production' } }, { upsert: true, new: true }).lean();
 }
 
+/** What the loom's sensor says it ran on the entry's shift, or null. */
+async function sensorRunFor(d) {
+  const plan = d.shiftPlan && typeof d.shiftPlan === 'object' ? d.shiftPlan : null;
+  const date = plan?.date || d.date;
+  const shift = plan?.shift || d.shift;
+  if (!date || !shift) return null;
+  return require('./loomSensor').shiftRun(d.machine, { dateKey: factoryClockKey(date), shift }).catch(() => null);
+}
+
+/** A plan's date (UTC midnight, or older ones local midnight) as its factory-day key. */
+function factoryClockKey(date) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: process.env.FACTORY_TZ || 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(date));
+}
+
 /** The run time as minutes, whatever way it was written. */
 const minutesOf = (t) => pm.runMinutes(t);
 
@@ -46,7 +60,7 @@ async function check(detailId, s = null) {
   const cfg = (s || (await settings())).autoVerify || {};
   const reasons = [];
   if (!cfg.enabled) return { ok: false, reasons: ['auto-verification is off'] };
-  const d = await ShiftDetail.findById(detailId).select('status submittedProductionMeters submittedTimer submittedFeedback machine').lean();
+  const d = await ShiftDetail.findById(detailId).select('status submittedProductionMeters submittedTimer submittedFeedback machine shiftPlan date shift').populate({ path: 'shiftPlan', select: 'date shift' }).lean();
   if (!d) return { ok: false, reasons: ['entry not found'] };
   if (d.status !== 'pending_verification') return { ok: false, reasons: ['not waiting for verification'] };
   if (String(d.submittedFeedback || '').trim()) reasons.push('a remark was left with it');
@@ -54,9 +68,16 @@ async function check(detailId, s = null) {
   if (!minutes) reasons.push('no run time');
   else if (minutes > 12 * 60) reasons.push('run time longer than a shift');
 
+  // The run time's evidence: a photo of the timer it was read from, or
+  // else the loom's own sensor agreeing with it (within 5 min or 3%).
   const photo = await TimerPhoto.findOne({ shift: d._id, used: true }).sort({ createdAt: -1 }).select('runTimeUsed').lean();
-  if (!photo) reasons.push('run time not read from a photo of the timer');
-  else if (!minutes || Math.abs((minutesOf(photo.runTimeUsed) || -1) - minutes) > 0.5) reasons.push('run time differs from the one read off the photo');
+  let sensorRunTime = null;
+  if (!photo) {
+    const sensor = await sensorRunFor(d);
+    if (!sensor) reasons.push('run time not read from a photo of the timer, and no loom sensor to check it');
+    else if (!minutes || Math.abs(sensor.seconds / 60 - minutes) > Math.max(5, minutes * 0.03)) reasons.push(`run time differs from the loom sensor's ${sensor.runTime}`);
+    else sensorRunTime = sensor.runTime;
+  } else if (!minutes || Math.abs((minutesOf(photo.runTimeUsed) || -1) - minutes) > 0.5) reasons.push('run time differs from the one read off the photo');
 
   let auto = null;
   if (minutes) {
@@ -72,7 +93,7 @@ async function check(detailId, s = null) {
       const high = r1(p.perHead * (1 + tol));
       const entered = Number(d.submittedProductionMeters);
       if (!(entered >= low && entered <= high)) reasons.push(`${entered} m a head is outside ${low}–${high} m expected`);
-      auto = { expected: p.perHead, low, high, tolerancePct: cfg.tolerancePct || 10, shifts: p.shifts, photo: photo?._id };
+      auto = { expected: p.perHead, low, high, tolerancePct: cfg.tolerancePct || 10, shifts: p.shifts, photo: photo?._id, ...(sensorRunTime ? { sensorRunTime } : {}) };
     }
   }
   return reasons.length ? { ok: false, reasons, ...(auto ? { expected: auto } : {}) } : { ok: true, reasons: [], auto };
