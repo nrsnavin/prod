@@ -321,6 +321,11 @@ const fmt = {
     return p?.body || null;
   },
 
+  // services/shiftEndNudge.js builds the text: the looms still to enter.
+  shiftEndNudge(p) {
+    return p?.body || null;
+  },
+
   test(p) {
     return p?.body || "✅ Test message from your factory notifications. If you can read this, WhatsApp alerts are working.";
   },
@@ -363,6 +368,7 @@ const EVENT_FLAG = {
   wastageAnomalyDay:          "wastageAnomalyDay",
   mlPosteriorStale:           "mlPosteriorStale",
   eveningReport:              "eveningReport",
+  shiftEndNudge:              "shiftEndNudge",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

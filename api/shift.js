@@ -660,6 +660,7 @@ async function verifyShiftProduction({ shiftId, productionMeters, timer, feedbac
 //  PRODUCTION SETTINGS — auto-verification and the shift-end nudge
 //    GET /production-settings         (admin, production)
 //    PUT /production-settings         (admin)
+//    POST /shift-end-nudge/send       (admin) the reminder now, for the running shift
 //  ENTRIES VERIFIED BY THE RULE
 //    GET /auto-verified?days=2        what the rule verified, with what
 //                                     it was checked against, newest first
@@ -698,12 +699,19 @@ router.put("/production-settings", isAdmin("admin"), catchAsyncErrors(async (req
     }
     if (n.phones !== undefined) {
       const { e164 } = require("../services/collections");
-      set["shiftEndNudge.phones"] = (Array.isArray(n.phones) ? n.phones : String(n.phones).split(/[,\s]+/)).map(e164).filter(Boolean).slice(0, 20);
+      set["shiftEndNudge.phones"] = (Array.isArray(n.phones) ? n.phones : String(n.phones).split(/[,;\n]+/)).map(e164).filter(Boolean).slice(0, 20);
     }
   }
   await autoVerify.settings();
   const settings = await ProductionSettings.findOneAndUpdate({ key: "production" }, { $set: set }, { new: true }).lean();
   res.json({ success: true, settings });
+}));
+
+// The shift-end reminder, now, for the running shift: to try it, or to
+// send it again. Claims nothing, so the timed one still goes.
+router.post("/shift-end-nudge/send", isAdmin("admin"), catchAsyncErrors(async (_req, res) => {
+  const out = await require("../services/shiftEndNudge").run({ force: true });
+  res.json({ success: true, ...out });
 }));
 
 router.get("/auto-verified", isAdmin("admin", "production"), catchAsyncErrors(async (req, res) => {

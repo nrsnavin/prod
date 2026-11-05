@@ -72,6 +72,9 @@ function startServer() {
   // The bank's emailed statements (only when BANK_FEED_IMAP_* is set).
   require("./services/bankFeed").start();
 
+  // Before each shift ends, the looms still to enter (off until an admin turns it on).
+  require("./services/shiftEndNudge").start();
+
   // create server
   //
   // HOST controls the bind address. Left unset it binds all interfaces

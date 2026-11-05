@@ -47,6 +47,8 @@ const EVENT_DEFAULTS = {
   posteriorDriftDetected:    { tier: "hourly" },
   wastageAnomalyDay:         { tier: "daily"  },
   mlPosteriorStale:          { tier: "daily"  },
+  // Before a shift ends, the looms still to enter (services/shiftEndNudge.js).
+  shiftEndNudge:             { tier: "realtime" },
 };
 
 function normalizeEventConfig(value, eventName) {
@@ -99,6 +101,7 @@ const NotificationSettingsSchema = new mongoose.Schema(
       orderPredictedLate:     { type: mongoose.Schema.Types.Mixed, default: true },
       morningDigest:          { type: mongoose.Schema.Types.Mixed, default: true },
       eveningReport:          { type: mongoose.Schema.Types.Mixed, default: true },
+      shiftEndNudge:          { type: mongoose.Schema.Types.Mixed, default: true },
       machineBreakdown:       { type: mongoose.Schema.Types.Mixed, default: true },
       shiftBelowThreshold:    { type: mongoose.Schema.Types.Mixed, default: true },
       wastageHighEvent:       { type: mongoose.Schema.Types.Mixed, default: true },
