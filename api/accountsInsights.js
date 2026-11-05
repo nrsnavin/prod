@@ -64,6 +64,18 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
   // Cheques in the drawer whose date has come (or comes this week): to be deposited.
   const cheques = await Payment.find({ status: "posted", "cheque.status": "held", "cheque.date": { $lte: weekEnd } }).select("kind voucherNo partyName amount cheque.number cheque.bank cheque.date").sort({ "cheque.date": 1 }).limit(20).lean();
   const msmeSoon = msmeDues.rows.filter((r) => r.state !== "ok");
+  // A bank account in use whose last statement is more than a week old
+  // (or which has none): this week's download is due.
+  const BankAccount = require("../models/BankAccount");
+  const bankAccounts = await BankAccount.find({ active: { $ne: false }, kind: { $ne: "cash" } }).select("name").lean();
+  const statementsDue = [];
+  for (const a of bankAccounts) {
+    const last = await BankStatement.findOne({ account: a._id }).sort({ to: -1 }).select("to").lean();
+    if (last?.to && now - new Date(last.to) <= 7 * DAY) continue;
+    // An account nothing moves through is not asked for.
+    if (!last && !(await Payment.exists({ account: a._id, status: "posted", date: { $gte: new Date(now.getTime() - 60 * DAY) } }))) continue;
+    statementsDue.push({ account: a._id, accountName: a.name, lastTo: last?.to || null });
+  }
   const dueThisWeek = payables.filter((p) => new Date(p.dueDate) <= weekEnd).sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate));
   const waitingOnMe = canApprove ? pendingExpenses.filter((e) => String(e.submittedBy || "") !== mine || req.user?.role === "admin") : [];
   // A suggested match ("matched") is not in the books until someone posts it.
@@ -88,6 +100,7 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
     promisesDue: { count: promised.length, top: promised.slice(0, 5).map((c) => ({ party: c.party, partyName: c.partyName, promise: c.promise })) },
     variances: { count: varianceBills.length, top: varianceBills },
     serviceBills: { count: serviceBills.length, amount: r2(serviceBills.reduce((s, b) => s + (b.amount || 0), 0)), top: serviceBills.slice(0, 6) },
+    statementsDue: { count: statementsDue.length, top: statementsDue.slice(0, 6) },
     chequesDue: { count: cheques.length, amount: r2(cheques.reduce((s, c) => s + c.amount, 0)), overdue: cheques.filter((c) => new Date(c.cheque.date) < today).length, top: cheques.slice(0, 6) },
     msmeDue: { count: msmeSoon.length, overdue: msmeDues.totals.overdueCount, amount: r2(msmeSoon.reduce((s, r) => s + r.outstanding, 0)), top: msmeSoon.slice(0, 6) },
   });

@@ -7,8 +7,9 @@
 //           { date, narration, ref, amount, direction }
 //  match()  each line to what the books expect: a voucher already
 //           recorded for it, an open invoice or bill it settles (by a
-//           document number in the narration, an exact amount, or the
-//           party's name), and the odd ones left for a person — with
+//           document number in the narration, a payer remembered from
+//           an earlier statement, the party's name, or an exact amount),
+//           and the odd ones left for a person — with
 //           one model call, when configured, to put a name to a
 //           narration the rules could not.
 //
@@ -21,6 +22,7 @@ const Customer = require('../models/Customer');
 const Supplier = require('../models/Supplier');
 const Payment = require('../models/Payment');
 const Contra = require('../models/Contra');
+const BankAlias = require('../models/BankAlias');
 const outstanding = require('./outstanding');
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 const { promptVersion } = require('../utils/aiPrompts');
@@ -115,8 +117,53 @@ async function parse(buffer, mimetype, filename = '') {
  * account number the bank wrote in it.
  * @returns { rows, format: 'mt940'|'sheet'|'csv', accountNo }
  */
+/**
+ * What the file really is, from its first bytes — a bank's ".xls" is as
+ * often an HTML table or tab-separated text as a spreadsheet.
+ *   xlsx   a zip (Excel 2007 onwards)
+ *   xls    an old binary Excel workbook (OLE2) — not readable here
+ *   html   a web page holding the statement as a table
+ *   text   anything else: CSV, tab-separated, MT940
+ */
+function sniff(buffer) {
+  const b = buffer || Buffer.alloc(0);
+  if (b[0] === 0x50 && b[1] === 0x4b) return 'xlsx';
+  if (b[0] === 0xd0 && b[1] === 0xcf && b[2] === 0x11 && b[3] === 0xe0) return 'xls';
+  const head = b.slice(0, 2048).toString('utf8').replace(/^\uFEFF/, '').trimStart().toLowerCase();
+  if (head.startsWith('<') && /<(table|html|tr)\b/.test(head)) return 'html';
+  return 'text';
+}
+
+/** Rows of the first table that holds a date column, from an HTML page. */
+function htmlRows(text) {
+  const decode = (s) => s.replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, '').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&#39;|&apos;/gi, "'").replace(/&quot;/gi, '"').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n))).replace(/\s+/g, ' ').trim();
+  const rows = [];
+  for (const tr of text.match(/<tr\b[\s\S]*?<\/tr>/gi) || []) {
+    rows.push((tr.match(/<t[dh]\b[\s\S]*?<\/t[dh]>/gi) || []).map(decode));
+  }
+  return rows;
+}
+
+/** A plain-text table: tab-separated when the lines carry tabs, else CSV. */
+function textRows(text) {
+  const lines = text.split(/\r?\n/).slice(0, 40);
+  const tabs = lines.filter((l) => l.includes('\t')).length;
+  if (tabs >= 2) return text.split(/\r?\n/).map((l) => l.split('\t').map((c) => c.replace(/^"(.*)"$/, '$1').trim()));
+  return parseCsv(text);
+}
+
 async function parseDetailed(buffer, mimetype, filename = '') {
-  const isSheet = /spreadsheetml|excel/.test(mimetype || '') || /\.xlsx?$/i.test(filename);
+  const kind = sniff(buffer);
+  if (kind === 'xls') {
+    const e = new Error('This is an old-style Excel file (.xls), which cannot be read. Download the statement as CSV from net banking, or open this file in Excel and save it as .xlsx, then upload that.');
+    e.code = 'STATEMENT_XLS'; e.status = 400;
+    throw e;
+  }
+  if (kind === 'html') {
+    const rows = await parseTable(null, false, htmlRows(buffer.toString('utf8')));
+    return { rows, format: 'html', accountNo: '' };
+  }
+  const isSheet = kind === 'xlsx';
   if (!isSheet) {
     const text = buffer.toString('utf8');
     if (mt940.isMt940(text)) {
@@ -135,8 +182,8 @@ async function parseDetailed(buffer, mimetype, filename = '') {
   return { rows, format: isSheet ? 'sheet' : 'csv', accountNo: '' };
 }
 
-async function parseTable(buffer, isSheet) {
-  const table = isSheet ? await sheetRows(buffer) : parseCsv(buffer.toString('utf8').replace(/^﻿/, ''));
+async function parseTable(buffer, isSheet, given = null) {
+  const table = given || (isSheet ? await sheetRows(buffer) : textRows(buffer.toString('utf8').replace(/^﻿/, '')));
   // The header is the first row with a date column and a narration column.
   let headerAt = -1;
   let cols = null;
@@ -183,6 +230,19 @@ function lineKey(row) {
   const d = new Date(row.date);
   const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   return [day, row.direction, r2(row.amount).toFixed(2), String(row.narration || '').toUpperCase().replace(/\s+/g, ' ').trim(), String(row.ref || '').toUpperCase().trim()].join('|');
+}
+
+/**
+ * The bank's balance before the chronologically first line, when the
+ * file has a balance column: that line's balance, less what it brought
+ * in or plus what it took out.
+ */
+function openingOf(rows) {
+  if (!rows.length) return null;
+  const ascending = new Date(rows[0].date) <= new Date(rows[rows.length - 1].date);
+  const first = ascending ? rows[0] : rows[rows.length - 1];
+  if (first.balance === null || first.balance === undefined) return null;
+  return r2(first.direction === 'in' ? first.balance - first.amount : first.balance + first.amount);
 }
 
 /** The bank's balance after the chronologically last line, when the file has one. */
@@ -236,10 +296,12 @@ const alloc = (pairs) => pairs.map(({ doc, amount }) => ({ docType: doc.docType,
  * @param accountId  the bank account the statement is for (recorded vouchers are looked up on it)
  */
 async function match(rows, accountId, { useModel = true } = {}) {
-  const [recv, pay, customers, suppliers] = await Promise.all([
+  const [recv, pay, customers, suppliers, aliases] = await Promise.all([
     outstanding.receivables(), outstanding.payables(),
     Customer.find({ archived: { $ne: true } }).select('name').lean(), Supplier.find({}).select('name').lean(),
+    BankAlias.find({}).lean(),
   ]);
+  const rememberedUsed = new Set();
   const recvByParty = outstanding.byParty(recv);
   const payByParty = outstanding.byParty(pay);
   const dates = rows.map((r) => r.date.getTime());
@@ -281,7 +343,21 @@ async function match(rows, accountId, { useModel = true } = {}) {
       const pairs = subsetFor(group?.docs || [byDoc], row.amount) || fifo(group?.docs || [byDoc], row.amount);
       return { ...row, status: 'matched', suggestion: { partyType, party: byDoc.party, partyName: byDoc.partyName, allocations: alloc(pairs.map((p) => (p.doc ? p : { doc: p }))), confidence: 0.95, reason: `${byDoc.docNo} named in the narration` } };
     }
-    // 2. The party's name in the narration.
+    // 2. A payer or payee remembered from an earlier statement: the
+    //    narration carries text a person once said is this party.
+    const known = aliases.filter((a) => a.direction === row.direction && text.includes(a.text)).sort((a, b) => b.text.length - a.text.length)[0];
+    if (known) {
+      rememberedUsed.add(String(known._id));
+      if (known.partyType === 'other') {
+        return { ...row, status: 'matched', suggestion: { partyType: 'other', party: null, partyName: known.partyName, allocations: [], confidence: 0.8, reason: `remembered: lines with "${known.text}" are ${known.partyName}`, remembered: String(known._id) } };
+      }
+      const group = groups.find((g) => String(g.party) === String(known.party));
+      const docs = group?.docs || [];
+      const exact = subsetFor(docs, row.amount);
+      const pairs = exact ? exact.map((doc) => ({ doc })) : fifo(docs, row.amount);
+      return { ...row, status: 'matched', suggestion: { partyType: known.partyType, party: known.party, partyName: known.partyName, allocations: alloc(pairs), confidence: exact ? 0.9 : docs.length ? 0.65 : 0.5, reason: `remembered: lines with "${known.text}" are ${known.partyName}${exact ? `; amount matches ${exact.map((d) => d.docNo).join(' + ')}` : docs.length ? '; allocated oldest first' : '; nothing open, stays on account'}`, remembered: String(known._id) } };
+    }
+    // 3. The party's name in the narration.
     const parties = partyType === 'customer' ? customers : suppliers;
     const scored = parties.map((p) => ({ p, s: nameScore(row.narration, p.name) })).filter((x) => x.s >= 0.5).sort((a, b) => b.s - a.s);
     if (scored.length && (scored.length === 1 || scored[0].s > scored[1].s)) {
@@ -292,7 +368,7 @@ async function match(rows, accountId, { useModel = true } = {}) {
       const pairs = exact ? exact.map((doc) => ({ doc })) : fifo(docs, row.amount);
       return { ...row, status: 'matched', suggestion: { partyType, party: party._id, partyName: party.name, allocations: alloc(pairs), confidence: exact ? 0.9 : docs.length ? 0.65 : 0.5, reason: exact ? `${party.name} in the narration, amount matches ${exact.map((d) => d.docNo).join(' + ')}` : docs.length ? `${party.name} in the narration; allocated oldest first` : `${party.name} in the narration; nothing open, stays on account` } };
     }
-    // 3. One open document anywhere for exactly this amount.
+    // 4. One open document anywhere for exactly this amount.
     const exactAny = openDocs.filter((d) => Math.abs(d.outstanding - row.amount) < 1);
     if (exactAny.length === 1) {
       const d = exactAny[0];
@@ -301,7 +377,7 @@ async function match(rows, accountId, { useModel = true } = {}) {
     return { ...row, status: 'unmatched', suggestion: null, candidates: exactAny.slice(0, 5).map((d) => ({ partyType, party: d.party, partyName: d.partyName, docNo: d.docNo, docType: d.docType, doc: d.id })) };
   });
 
-  // 4. The model, for narrations the rules could not place — asked only
+  // 5. The model, for narrations the rules could not place — asked only
   //    to name the party from the list; the allocation is still ours.
   const open = out.filter((r) => r.status === 'unmatched');
   if (useModel && open.length) {
@@ -342,7 +418,8 @@ async function match(rows, accountId, { useModel = true } = {}) {
       }
     }
   }
+  if (rememberedUsed.size) await BankAlias.updateMany({ _id: { $in: [...rememberedUsed] } }, { $set: { lastMatchedAt: new Date() } });
   return out;
 }
 
-module.exports = { parse, parseDetailed, parseCsv, parseDate, columnsOf, sheetRows, match, nameScore, subsetFor, fifo, lineKey, closingOf };
+module.exports = { sniff, htmlRows, openingOf, parse, parseDetailed, parseCsv, parseDate, columnsOf, sheetRows, match, nameScore, subsetFor, fifo, lineKey, closingOf };

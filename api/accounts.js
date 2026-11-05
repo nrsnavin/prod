@@ -66,6 +66,7 @@ const PurchaseOrder   = require("../models/PurchaseOrder");
 const MaterialInward  = require("../models/MaterialInward");
 const RawMaterial     = require("../models/RawMaterial");
 const BankStatement   = require("../models/BankStatement");
+const BankAlias       = require("../models/BankAlias");
 const { ATTACHMENT_TYPES, MAX_ATTACHMENT_BYTES } = require("../models/accountsShared");
 
 const {
@@ -1403,8 +1404,35 @@ router.post("/bank/statement", keepRequestContext(upload.single("file")), catchA
   } catch (err) {
     return next(new ErrorHandler(err.message, 400));
   }
-  res.json({ success: true, statement: out.statement._id, account: { _id: account._id, name: account.name }, rows: out.rows, counts: out.counts, file: req.file.originalname, closingBalance: out.closingBalance });
+  res.json({ success: true, statement: out.statement._id, account: { _id: account._id, name: account.name }, rows: out.rows, counts: out.counts, file: req.file.originalname, closingBalance: out.closingBalance, continuity: out.continuity });
 }));
+
+/**
+ * Keep a payer or payee for the next statement: the text must be in the
+ * line's own narration (so nothing else can be planted), and a later
+ * correction of the same text replaces the party. Never throws: the
+ * voucher is posted either way.
+ */
+async function rememberPayer(r, partyType, voucher, req) {
+  try {
+    const text = String(r.remember?.text ?? r.remember ?? "").toUpperCase().replace(/\s+/g, " ").trim();
+    const narration = String(r.narration || "").toUpperCase().replace(/\s+/g, " ");
+    if (text.length < 4 || text.length > 80 || !narration.includes(text)) return false;
+    const direction = r.direction === "in" ? "in" : "out";
+    const party = partyType === "other" ? null : (partyType === "customer" ? voucher.customer : voucher.supplier) || null;
+    if (partyType !== "other" && !party) return false;
+    const partyName = String(voucher.partyName || r.partyName || "").trim().slice(0, 120);
+    if (!partyName) return false;
+    await BankAlias.updateOne(
+      { text, direction },
+      { $set: { partyType, party, partyName, createdBy: req.user?._id, createdByName: req.user?.name || "" }, $setOnInsert: { text, direction } },
+      { upsert: true }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.body?.account)) return next(new ErrorHandler("account is required", 400));
@@ -1437,7 +1465,9 @@ router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
       if (statementId && Number.isInteger(r.index)) {
         await BankStatement.updateOne({ _id: statementId, "lines.index": r.index }, { $set: { "lines.$.status": "posted", "lines.$.voucherType": "Payment", "lines.$.voucher": voucher._id, "lines.$.voucherNo": voucher.voucherNo } });
       }
-      results.push({ index: i, ok: true, voucherNo: voucher.voucherNo, _id: voucher._id, replay: !!replay });
+      // "Remember": the next statement's lines carrying this text are this party.
+      const remembered = r.remember ? await rememberPayer(r, partyType, voucher, req) : false;
+      results.push({ index: i, ok: true, voucherNo: voucher.voucherNo, _id: voucher._id, replay: !!replay, ...(r.remember ? { remembered } : {}) });
     } catch (err) {
       results.push({ index: i, ok: false, error: err.message });
     }

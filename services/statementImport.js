@@ -64,9 +64,19 @@ async function importStatement({ account, buffer, mimetype, filename = '', rows:
     if (r.status !== 'recorded' && ignored.has(keys[i])) { r.status = 'ignored'; r.note = ignored.get(keys[i]); r.suggestion = null; }
   }
   const dates = rows.map((r) => r.date.getTime());
+  const from = new Date(Math.min(...dates));
+  const to = new Date(Math.max(...dates));
+  const openingBalance = bankStatement.openingOf(parsed);
+  // How this statement sits against the last one for the account: days
+  // nobody downloaded, lines already brought in, a balance that does not
+  // carry over (lines missing between the two).
+  const previous = await BankStatement.findOne({ account: account._id }).sort({ to: -1, createdAt: -1 }).select('file from to closingBalance').lean();
+  const seenBefore = new Set();
+  for (const st of earlier) for (const l of st.lines) seenBefore.add(l.key);
+  const continuity = continuityOf({ previous, from, to, openingBalance, overlapLines: keys.filter((k) => seenBefore.has(k)).length });
   const statement = await BankStatement.create({
     account: account._id, accountName: account.name, file: filename || '',
-    from: new Date(Math.min(...dates)), to: new Date(Math.max(...dates)), closingBalance: bankStatement.closingOf(parsed),
+    from, to, openingBalance, closingBalance: bankStatement.closingOf(parsed),
     uploadedBy: by, uploadedByName: byName, source, messageId,
     lines: matched.map((r, i) => ({
       index: r.index, date: r.date, narration: r.narration, ref: r.ref, amount: r.amount, direction: r.direction, balance: r.balance ?? null, key: keys[i],
@@ -78,7 +88,35 @@ async function importStatement({ account, buffer, mimetype, filename = '', rows:
   for (const r of matched) if (r.status === 'recorded' && r.recorded) await reconcile.markCleared(r.recorded.voucherType, r.recorded._id, account._id, r.date);
   const counts = { recorded: 0, matched: 0, unmatched: 0 };
   for (const r of matched) counts[r.status] = (counts[r.status] || 0) + 1;
-  return { statement, rows: matched, counts, closingBalance: statement.closingBalance, newLines: matched.length, total: parsed.length };
+  return { statement, rows: matched, counts, closingBalance: statement.closingBalance, newLines: matched.length, total: parsed.length, continuity };
 }
 
-module.exports = { importStatement, sameAccount };
+const DAY = 86_400_000;
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const dayOf = (d) => { const x = new Date(d); return Date.UTC(x.getFullYear(), x.getMonth(), x.getDate()); };
+
+/**
+ * @returns { previous: { file, from, to, closingBalance } | null, from, to,
+ *   openingBalance, gapDays, overlapLines, balanceDiff }
+ * gapDays: whole days between the last statement's end and this one's
+ * start that neither covers. balanceDiff: this file's opening balance
+ * less the last one's closing, when this one starts after it ends and
+ * both carry balances — not zero means lines are missing between them
+ * (a gap with no difference is days without a transaction).
+ */
+function continuityOf({ previous, from, to, openingBalance, overlapLines }) {
+  const prev = previous ? { file: previous.file || '', from: previous.from, to: previous.to, closingBalance: previous.closingBalance ?? null } : null;
+  let gapDays = 0;
+  let balanceDiff = null;
+  if (prev?.to) {
+    const days = Math.round((dayOf(from) - dayOf(prev.to)) / DAY);
+    gapDays = Math.max(0, days - 1);
+    if (days >= 1 && prev.closingBalance !== null && openingBalance !== null && openingBalance !== undefined) {
+      const diff = r2(openingBalance - prev.closingBalance);
+      balanceDiff = Math.abs(diff) > 0.005 ? diff : 0;
+    }
+  }
+  return { previous: prev, from, to, openingBalance: openingBalance ?? null, gapDays, overlapLines, balanceDiff };
+}
+
+module.exports = { importStatement, sameAccount, continuityOf };

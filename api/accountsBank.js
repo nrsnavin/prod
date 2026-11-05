@@ -12,6 +12,8 @@
 //                                          last run, the last mails
 //    POST /bank/feed/run                   read it now
 //    PUT  /bank/feed                       { autoPost } (admin)
+//    GET  /bank/aliases                    payers remembered from statements
+//    DELETE /bank/aliases/:id              forget one
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -27,13 +29,13 @@ const Contra = require("../models/Contra");
 
 router.get("/bank/statements", catchAsyncErrors(async (req, res) => {
   const q = isId(req.query.account) ? { account: req.query.account } : {};
-  const rows = await BankStatement.find(q).select("account accountName file source from to closingBalance uploadedByName createdAt lines.status").sort({ createdAt: -1 }).limit(30).lean();
+  const rows = await BankStatement.find(q).select("account accountName file source from to openingBalance closingBalance uploadedByName createdAt lines.status").sort({ createdAt: -1 }).limit(30).lean();
   res.json({
     success: true,
     statements: rows.map((s) => {
       const counts = {};
       for (const l of s.lines) counts[l.status] = (counts[l.status] || 0) + 1;
-      return { _id: s._id, account: s.account, accountName: s.accountName, file: s.file, source: s.source || "upload", from: s.from, to: s.to, closingBalance: s.closingBalance, uploadedByName: s.uploadedByName, createdAt: s.createdAt, lines: s.lines.length, counts };
+      return { _id: s._id, account: s.account, accountName: s.accountName, file: s.file, source: s.source || "upload", from: s.from, to: s.to, openingBalance: s.openingBalance ?? null, closingBalance: s.closingBalance, uploadedByName: s.uploadedByName, createdAt: s.createdAt, lines: s.lines.length, counts };
     }),
   });
 }));
@@ -100,6 +102,22 @@ router.get("/bank/reconciliation", catchAsyncErrors(async (req, res, next) => {
   const out = await reconcile.statementAsOf(req.query.account, asOf, req.query.bankBalance);
   if (!out) return next(new ErrorHandler("Account not found", 404));
   res.json({ success: true, ...out });
+}));
+
+// ── Remembered payers and payees ───────────────────────────────────
+//    GET    /bank/aliases       what the matcher remembers, newest first
+//    DELETE /bank/aliases/:id   forget one (a wrong remember is undone here)
+const BankAlias = require("../models/BankAlias");
+
+router.get("/bank/aliases", catchAsyncErrors(async (_req, res) => {
+  res.json({ success: true, aliases: await BankAlias.find({}).sort({ updatedAt: -1 }).limit(500).lean() });
+}));
+
+router.delete("/bank/aliases/:id", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));
+  const r = await BankAlias.deleteOne({ _id: req.params.id });
+  if (!r.deletedCount) return next(new ErrorHandler("Not found", 404));
+  res.json({ success: true });
 }));
 
 // ── The bank's statements, from a mailbox ──────────────────────────

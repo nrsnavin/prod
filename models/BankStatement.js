@@ -45,7 +45,10 @@ const BankStatementSchema = new mongoose.Schema(
     file:        { type: String, default: "" },
     from:        { type: Date },
     to:          { type: Date },
-    // The bank's balance after the last line, when the statement has a balance column.
+    // The bank's balance before the first line and after the last, when
+    // the statement has a balance column: the next statement's opening
+    // should be this one's closing.
+    openingBalance: { type: Number, default: null },
     closingBalance: { type: Number, default: null },
     lines:       { type: [LineSchema], default: [] },
     uploadedBy:  { type: mongoose.Types.ObjectId, ref: "User" },
