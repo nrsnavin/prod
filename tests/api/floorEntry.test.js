@@ -429,47 +429,6 @@ describe('the plan, when nobody made one', () => {
   });
 });
 
-describe('who to put on a loom', () => {
-  const Attendance = () => require('../../models/Attendence.js');
-  async function ran(s, date, shift, operator, machine = s.running) {
-    const { createShiftPlan } = require('../../services/shiftPlanCreate');
-    await createShiftPlan({ date, shiftType: shift, machines: [{ machine: machine._id, operator: operator._id }] });
-  }
-
-  it('offers who ran the loom on its latest same shift, passing over anyone away today or gone', async () => {
-    const s = await seed();
-    await ran(s, '2026-10-17', 'DAY', s.ravi);
-    await ran(s, '2026-10-19', 'DAY', s.sita);
-    await ran(s, '2026-10-20', 'NIGHT', s.clerk); // the other shift: not who runs it by day
-    const f = floor((await open({ date: DATE, shift: 'DAY' })).body.token);
-
-    let row = (await f.get('/shift')).body.state.machines.find((m) => m.id === String(s.running._id));
-    expect(row.suggestedOperator).toEqual({ id: String(s.sita._id), name: 'Sita', why: 'Ran this loom on the day shift of 19 Oct' });
-    expect((await f.get(`/machine?code=${s.running.ID}`)).body.machine.suggestedOperator).toMatchObject({ name: 'Sita' });
-
-    // Sita is on leave today: Ravi, who ran it before her, is offered — and said to be present.
-    await Attendance().create({ employee: s.sita._id, date: new Date('2026-10-21T00:00:00Z'), shift: 'DAY', status: 'on_leave' });
-    await Attendance().create({ employee: s.ravi._id, date: new Date('2026-10-21T00:00:00Z'), shift: 'DAY', status: 'present' });
-    row = (await f.get('/shift')).body.state.machines.find((m) => m.id === String(s.running._id));
-    expect(row.suggestedOperator).toMatchObject({ name: 'Ravi', why: 'Ran this loom on the day shift of 17 Oct · marked present today' });
-
-    // Ravi has left too: nobody to offer.
-    await M.Employee.updateOne({ _id: s.ravi._id }, { status: 'offboarded', offboarding: { lastWorkingDay: new Date('2026-10-20T00:00:00Z') } });
-    row = (await f.get('/shift')).body.state.machines.find((m) => m.id === String(s.running._id));
-    expect(row.suggestedOperator).toBeNull();
-  });
-
-  it('offers nobody once the loom has its operator', async () => {
-    const s = await seed();
-    await ran(s, '2026-10-20', 'DAY', s.sita);
-    await planned(s);
-    const f = floor((await open({ date: DATE, shift: 'DAY' })).body.token);
-    const row = (await f.get('/shift')).body.state.machines.find((m) => m.id === String(s.running._id));
-    expect(row.detail.operator.name).toBe('Ravi');
-    expect(row.suggestedOperator).toBeNull();
-  });
-});
-
 describe('putting an operator on a loom', () => {
   it('adds a loom the office plan left out, with the operator chosen on the floor', async () => {
     const s = await seed();
