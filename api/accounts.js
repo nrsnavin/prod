@@ -1047,11 +1047,21 @@ async function createVoucher(b, req) {
     throw new ErrorHandler(`Adjustments settle documents — ₹${unallocated.toFixed(2)} would be left on account. Tick the documents the ${explains.map((a) => a.label.toLowerCase()).join(", ")} settles, or take it off`, 400);
   }
 
+  // Someone not on file: a payment's expense head, a receipt's income.
+  let head = null;
+  if (partyType === "other" && kind === "payment" && b.head) {
+    if (!isId(b.head)) throw new ErrorHandler("head is not an id", 400);
+    head = await ExpenseCategory.findById(b.head).select("name").lean();
+    if (!head) throw new ErrorHandler("Expense head not found", 404);
+  }
+  const incomeLedger = partyType === "other" && kind === "receipt" && b.incomeLedger === "interest" ? "interest" : undefined;
+
   const { financialYear, sequence, number } = await allocate(Payment, kind === "receipt" ? "RCT" : "PAY", { extra: { kind }, at: date });
   const _id = new mongoose.Types.ObjectId();
   const data = {
     _id, kind, voucherNo: number, financialYear, sequence, requestId: b.requestId ? String(b.requestId) : undefined, date,
     partyType, customer: partyType === "customer" ? party._id : undefined, supplier: partyType === "supplier" ? party._id : undefined, partyName,
+    ...(head ? { head: head._id, headName: head.name } : {}), ...(incomeLedger ? { incomeLedger } : {}),
     amount, mode: b.mode, account: account._id, accountName: account.name, reference: String(b.reference || cheque?.number || "").trim().slice(0, 60),
     ...(cheque ? { cheque } : {}),
     tds: { section: tdsAmount > 0 ? tdsSection || sectionFromDoc || "" : "", rate: tdsAmount > 0 ? (tdsRate || allocations.find((a) => a.tds > 0)?.rate || 0) : 0, amount: tdsAmount, base: tdsBase },
@@ -1408,6 +1418,50 @@ router.post("/bank/statement", keepRequestContext(upload.single("file")), catchA
 }));
 
 /**
+ * A statement line that is money between this account and another of
+ * ours, posted as a contra: out of this account to the other, or into
+ * it from the other, on the line's day, and cleared here that day.
+ * A replayed requestId returns the contra it made before.
+ */
+async function contraFromLine(r, accountId, req) {
+  if (r.requestId) {
+    const dup = await Contra.findOne({ requestId: String(r.requestId) }).lean();
+    if (dup) return { contra: dup, replay: true };
+  }
+  const otherId = r.contra?.account ?? r.contra;
+  if (!isId(otherId)) throw new ErrorHandler("contra.account is required", 400);
+  if (String(otherId) === String(accountId)) throw new ErrorHandler("A transfer needs another account", 400);
+  const [here, other] = await Promise.all([BankAccount.findById(accountId).lean(), BankAccount.findById(otherId).lean()]);
+  if (!here || here.active === false || !other || other.active === false) throw new ErrorHandler("Account not found", 404);
+  const amount = r2(r.amount);
+  if (!(amount > 0)) throw new ErrorHandler("amount must be more than 0", 400);
+  const date = readDate(r.date, "date", new Date());
+  await assertOpen(date, req);
+  const out = r.direction !== "in";
+  const [from, to] = out ? [here, other] : [other, here];
+  const { financialYear, sequence, number } = await allocate(Contra, "CTR", { at: date });
+  const _id = new mongoose.Types.ObjectId();
+  try {
+    await Contra.create({
+      _id, contraNo: number, financialYear, sequence, requestId: r.requestId ? String(r.requestId) : undefined, date,
+      from: from._id, fromName: from.name, to: to._id, toName: to.name, amount,
+      mode: from.kind === "cash" || to.kind === "cash" ? "cash" : "bank",
+      reference: String(r.ref || "").trim().slice(0, 60), narration: String(r.narration || "").trim().slice(0, 300),
+      ...(out ? { fromClearedOn: date } : { toClearedOn: date }),
+      createdBy: req.user?._id,
+      fingerprints: [fp(ACTION_CODES.CONTRA_POSTED, { _id }, req, { contraNo: number, from: from.name, to: to.name, amount, source: "statement" })],
+    });
+  } catch (err) {
+    if (err?.code === 11000 && r.requestId) {
+      const dup = await Contra.findOne({ requestId: String(r.requestId) }).lean();
+      if (dup) return { contra: dup, replay: true };
+    }
+    throw err;
+  }
+  return { contra: await Contra.findById(_id).lean(), replay: false };
+}
+
+/**
  * Keep a payer or payee for the next statement: the text must be in the
  * line's own narration (so nothing else can be planted), and a later
  * correction of the same text replaces the party. Never throws: the
@@ -1425,7 +1479,7 @@ async function rememberPayer(r, partyType, voucher, req) {
     if (!partyName) return false;
     await BankAlias.updateOne(
       { text, direction },
-      { $set: { partyType, party, partyName, createdBy: req.user?._id, createdByName: req.user?.name || "" }, $setOnInsert: { text, direction } },
+      { $set: { partyType, party, partyName, head: voucher.head || null, headName: voucher.headName || "", incomeLedger: voucher.incomeLedger || "", createdBy: req.user?._id, createdByName: req.user?.name || "" }, $setOnInsert: { text, direction } },
       { upsert: true }
     );
     return true;
@@ -1451,9 +1505,19 @@ router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
   const results = [];
   for (const [i, r] of rows.entries()) {
     try {
+      // Money between our own accounts: a contra, not a receipt or payment.
+      if (r.contra) {
+        const c = await contraFromLine(r, req.body.account, req);
+        if (statementId && Number.isInteger(r.index)) {
+          await BankStatement.updateOne({ _id: statementId, "lines.index": r.index }, { $set: { "lines.$.status": "posted", "lines.$.voucherType": "Contra", "lines.$.voucher": c.contra._id, "lines.$.voucherNo": c.contra.contraNo } });
+        }
+        results.push({ index: i, ok: true, voucherNo: c.contra.contraNo, _id: c.contra._id, contra: true, replay: c.replay });
+        continue;
+      }
       const kind = r.direction === "in" ? "receipt" : "payment";
       const partyType = r.partyType === "customer" || r.partyType === "supplier" ? r.partyType : "other";
       const { voucher, replay } = await createVoucher({
+        ...(partyType === "other" ? { head: r.head || undefined, incomeLedger: r.incomeLedger || undefined } : {}),
         kind, date: r.date, partyType,
         ...(partyType === "customer" ? { customer: r.party } : partyType === "supplier" ? { supplier: r.party } : { partyName: r.partyName || r.narration || "Bank" }),
         amount: r.amount, mode: r.mode || "bank", account: req.body.account, reference: r.ref || "",

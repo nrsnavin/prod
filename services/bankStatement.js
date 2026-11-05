@@ -23,10 +23,11 @@ const Supplier = require('../models/Supplier');
 const Payment = require('../models/Payment');
 const Contra = require('../models/Contra');
 const BankAlias = require('../models/BankAlias');
+const BankAccount = require('../models/BankAccount');
+const BankStatement = require('../models/BankStatement');
+const ExpenseCategory = require('../models/ExpenseCategory');
+const statementAi = require('./statementAi');
 const outstanding = require('./outstanding');
-const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
-const { promptVersion } = require('../utils/aiPrompts');
-const ledger = require('./aiLedger');
 const mt940 = require('./mt940');
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -291,17 +292,59 @@ function fifo(docs, amount) {
 
 const alloc = (pairs) => pairs.map(({ doc, amount }) => ({ docType: doc.docType, doc: doc.id, docNo: doc.docNo, amount: r2(amount ?? doc.outstanding) }));
 
+const CASH_OUT = /\b(CASH\s*WDL|CASH\s*WITHDRAWAL|ATM\s*WDL|ATW|NWD|SELF\s*(CHQ|CHEQUE|WDL)|CASH\s*PAID)\b/;
+const CASH_IN = /\b(CASH\s*DEP(OSIT)?|BY\s*CASH|CASH\s*RECEIVED|CDM)\b/;
+
+/**
+ * A transfer between two of our own accounts, from the narration: the
+ * other account's number (its last six digits or more), or cash drawn
+ * or paid in at the counter (the cash box on the other side).
+ */
+function transferOf(row, otherAccounts, cashAccount) {
+  const text = String(row.narration || '').toUpperCase();
+  // Digit runs as the narration writes them (an account number is one run, or ends one).
+  const runs = (`${text} ${String(row.ref || '').toUpperCase()}`).match(/\d{6,}/g) || [];
+  for (const a of otherAccounts) {
+    const no = String(a.accountNo || '').replace(/\D/g, '');
+    if (no.length >= 6 && runs.some((r) => r.endsWith(no.slice(-6)) && (no.endsWith(r) || r.endsWith(no) || r.length <= 8))) {
+      return { kind: 'contra', partyType: 'other', party: null, partyName: a.name, account: a._id, accountName: a.name, allocations: [], confidence: 0.85, reason: `account ending ${no.slice(-4)} (${a.name}) in the narration` };
+    }
+  }
+  if (cashAccount && ((row.direction === 'out' && CASH_OUT.test(text)) || (row.direction === 'in' && CASH_IN.test(text)))) {
+    return { kind: 'contra', partyType: 'other', party: null, partyName: cashAccount.name, account: cashAccount._id, accountName: cashAccount.name, allocations: [], confidence: 0.8, reason: row.direction === 'out' ? `cash drawn: into ${cashAccount.name}` : `cash paid in: from ${cashAccount.name}` };
+  }
+  return null;
+}
+
+/** How people placed this account's lines before, and what is remembered: the model's best guide. */
+async function placedBefore(accountId, aliases) {
+  const out = aliases.slice(0, 20).map((a) => `${a.text} → ${a.partyName}${a.headName ? ` (${a.headName})` : a.incomeLedger === 'interest' ? ' (interest)' : ''}`);
+  const statements = await BankStatement.find({ account: accountId, 'lines.status': 'posted' }).sort({ createdAt: -1 }).limit(4).select('lines.narration lines.status lines.voucher lines.voucherType').lean();
+  const lines = statements.flatMap((s) => s.lines.filter((l) => l.status === 'posted' && l.voucher)).slice(0, 40);
+  const vouchers = new Map((await Payment.find({ _id: { $in: lines.filter((l) => l.voucherType !== 'Contra').map((l) => l.voucher) } }).select('partyName partyType headName incomeLedger').lean()).map((v) => [String(v._id), v]));
+  for (const l of lines) {
+    const v = vouchers.get(String(l.voucher));
+    if (!v) continue;
+    out.push(`${l.narration.slice(0, 80)} → ${v.partyName}${v.partyType === 'other' ? (v.headName ? ` (${v.headName})` : v.incomeLedger === 'interest' ? ' (interest)' : ' (not on file)') : ` (${v.partyType})`}`);
+  }
+  return out.slice(0, 40);
+}
+
 /**
  * @param rows   from parse()
  * @param accountId  the bank account the statement is for (recorded vouchers are looked up on it)
  */
 async function match(rows, accountId, { useModel = true } = {}) {
-  const [recv, pay, customers, suppliers, aliases] = await Promise.all([
+  const [recv, pay, customers, suppliers, aliases, ownAccounts] = await Promise.all([
     outstanding.receivables(), outstanding.payables(),
     Customer.find({ archived: { $ne: true } }).select('name').lean(), Supplier.find({}).select('name').lean(),
     BankAlias.find({}).lean(),
+    BankAccount.find({ active: { $ne: false } }).select('name kind accountNo').lean(),
   ]);
   const rememberedUsed = new Set();
+  const thisAccount = ownAccounts.find((a) => String(a._id) === String(accountId));
+  const otherAccounts = ownAccounts.filter((a) => String(a._id) !== String(accountId));
+  const cashAccount = otherAccounts.find((a) => a.kind === 'cash') || null;
   const recvByParty = outstanding.byParty(recv);
   const payByParty = outstanding.byParty(pay);
   const dates = rows.map((r) => r.date.getTime());
@@ -349,7 +392,7 @@ async function match(rows, accountId, { useModel = true } = {}) {
     if (known) {
       rememberedUsed.add(String(known._id));
       if (known.partyType === 'other') {
-        return { ...row, status: 'matched', suggestion: { partyType: 'other', party: null, partyName: known.partyName, allocations: [], confidence: 0.8, reason: `remembered: lines with "${known.text}" are ${known.partyName}`, remembered: String(known._id) } };
+        return { ...row, status: 'matched', suggestion: { partyType: 'other', party: null, partyName: known.partyName, ...(known.head ? { head: known.head, headName: known.headName } : {}), ...(known.incomeLedger ? { incomeLedger: known.incomeLedger } : {}), allocations: [], confidence: 0.8, reason: `remembered: lines with "${known.text}" are ${known.partyName}${known.headName ? ` (${known.headName})` : known.incomeLedger === 'interest' ? ' (interest received)' : ''}`, remembered: String(known._id) } };
       }
       const group = groups.find((g) => String(g.party) === String(known.party));
       const docs = group?.docs || [];
@@ -357,7 +400,11 @@ async function match(rows, accountId, { useModel = true } = {}) {
       const pairs = exact ? exact.map((doc) => ({ doc })) : fifo(docs, row.amount);
       return { ...row, status: 'matched', suggestion: { partyType: known.partyType, party: known.party, partyName: known.partyName, allocations: alloc(pairs), confidence: exact ? 0.9 : docs.length ? 0.65 : 0.5, reason: `remembered: lines with "${known.text}" are ${known.partyName}${exact ? `; amount matches ${exact.map((d) => d.docNo).join(' + ')}` : docs.length ? '; allocated oldest first' : '; nothing open, stays on account'}`, remembered: String(known._id) } };
     }
-    // 3. The party's name in the narration.
+    // 3. Money between our own accounts: another account's number in the
+    //    narration, or cash drawn or paid in over the counter.
+    const transfer = transferOf(row, otherAccounts, cashAccount);
+    if (transfer) return { ...row, status: 'matched', suggestion: transfer };
+    // 4. The party's name in the narration.
     const parties = partyType === 'customer' ? customers : suppliers;
     const scored = parties.map((p) => ({ p, s: nameScore(row.narration, p.name) })).filter((x) => x.s >= 0.5).sort((a, b) => b.s - a.s);
     if (scored.length && (scored.length === 1 || scored[0].s > scored[1].s)) {
@@ -368,7 +415,7 @@ async function match(rows, accountId, { useModel = true } = {}) {
       const pairs = exact ? exact.map((doc) => ({ doc })) : fifo(docs, row.amount);
       return { ...row, status: 'matched', suggestion: { partyType, party: party._id, partyName: party.name, allocations: alloc(pairs), confidence: exact ? 0.9 : docs.length ? 0.65 : 0.5, reason: exact ? `${party.name} in the narration, amount matches ${exact.map((d) => d.docNo).join(' + ')}` : docs.length ? `${party.name} in the narration; allocated oldest first` : `${party.name} in the narration; nothing open, stays on account` } };
     }
-    // 4. One open document anywhere for exactly this amount.
+    // 5. One open document anywhere for exactly this amount.
     const exactAny = openDocs.filter((d) => Math.abs(d.outstanding - row.amount) < 1);
     if (exactAny.length === 1) {
       const d = exactAny[0];
@@ -377,49 +424,28 @@ async function match(rows, accountId, { useModel = true } = {}) {
     return { ...row, status: 'unmatched', suggestion: null, candidates: exactAny.slice(0, 5).map((d) => ({ partyType, party: d.party, partyName: d.partyName, docNo: d.docNo, docType: d.docType, doc: d.id })) };
   });
 
-  // 5. The model, for narrations the rules could not place — asked only
-  //    to name the party from the list; the allocation is still ours.
+  // 6. The model, for lines the rules could not place: who it is and the
+  //    documents it names, a transfer, an expense head, or income — each
+  //    answer checked against what is on file (services/statementAi.js).
   const open = out.filter((r) => r.status === 'unmatched');
   if (useModel && open.length) {
-    const claude = anthropic();
-    if (claude) {
-      const names = { customer: customers.map((c) => c.name).slice(0, 300), supplier: suppliers.map((s) => s.name).slice(0, 300) };
-      const startedAt = Date.now();
-      try {
-        const prompt = [
-          'Bank statement narrations from an elastic weaving factory\'s account. For each, say which party on',
-          'file the money came from (a customer, for money in) or went to (a supplier, for money out), if',
-          'the narration names one — a short form, an initial, a bank\'s truncation of the name all count.',
-          'Return ONLY JSON: {"rows":[{"index":0,"party":"exact name from the list or null","confidence":0.8}]}.',
-          'Never invent a name that is not in the list. Null when unsure.',
-          '', `Customers: ${JSON.stringify(names.customer)}`, `Suppliers: ${JSON.stringify(names.supplier)}`, '',
-          `Rows: ${JSON.stringify(open.map((r) => ({ index: r.index, direction: r.direction, narration: r.narration, amount: r.amount })))}`,
-        ].join('\n');
-        const resp = await claude.messages.create({ model: TEXT_MODEL, max_tokens: 2048, messages: [{ role: 'user', content: prompt }] });
-        const text = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-        const s = text.indexOf('{'); const e = text.lastIndexOf('}');
-        const parsed = s >= 0 && e >= 0 ? JSON.parse(text.slice(s, e + 1)) : { rows: [] };
-        for (const hit of parsed.rows || []) {
-          const row = out[hit.index];
-          if (!row || row.status !== 'unmatched' || !hit.party) continue;
-          const partyType = row.direction === 'in' ? 'customer' : 'supplier';
-          const party = (partyType === 'customer' ? customers : suppliers).find((p) => p.name === hit.party);
-          if (!party) continue;
-          const group = (row.direction === 'in' ? recvByParty : payByParty).find((g) => String(g.party) === String(party._id));
-          const docs = group?.docs || [];
-          const exact = subsetFor(docs, row.amount);
-          const pairs = exact ? exact.map((doc) => ({ doc })) : fifo(docs, row.amount);
-          row.status = 'matched';
-          row.suggestion = { partyType, party: party._id, partyName: party.name, allocations: alloc(pairs), confidence: Math.min(0.6, Number(hit.confidence) || 0.5), reason: `${party.name} read from the narration (model); check it`, byModel: true };
-        }
-        await ledger.record({ surface: 'bank-statement-match', model: TEXT_MODEL, promptVersion: promptVersion('bank-statement-match'), proposed: { rows: (parsed.rows || []).length }, latencyMs: Date.now() - startedAt, usage: resp.usage });
-      } catch (err) {
-        await ledger.record({ surface: 'bank-statement-match', model: TEXT_MODEL, promptVersion: promptVersion('bank-statement-match'), latencyMs: Date.now() - startedAt, error: err.message });
-      }
+    const [heads, examples] = await Promise.all([
+      ExpenseCategory.find({ active: { $ne: false } }).select('name').lean(),
+      placedBefore(accountId, aliases),
+    ]);
+    const placed = await statementAi.place(open, {
+      recv, pay, recvByParty, payByParty, customers, suppliers, heads, examples,
+      accounts: otherAccounts, thisAccount: thisAccount?.name || 'this account', subsetFor, fifo, alloc,
+    });
+    for (const [index, suggestion] of placed) {
+      const row = out.find((r) => r.index === index);
+      if (!row || row.status !== 'unmatched') continue;
+      row.status = 'matched';
+      row.suggestion = suggestion;
     }
   }
   if (rememberedUsed.size) await BankAlias.updateMany({ _id: { $in: [...rememberedUsed] } }, { $set: { lastMatchedAt: new Date() } });
   return out;
 }
 
-module.exports = { sniff, htmlRows, openingOf, parse, parseDetailed, parseCsv, parseDate, columnsOf, sheetRows, match, nameScore, subsetFor, fifo, lineKey, closingOf };
+module.exports = { transferOf, sniff, htmlRows, openingOf, parse, parseDetailed, parseCsv, parseDate, columnsOf, sheetRows, match, nameScore, subsetFor, fifo, lineKey, closingOf };

@@ -53,6 +53,13 @@ const PaymentSchema = new mongoose.Schema(
     customer:  { type: mongoose.Types.ObjectId, ref: "Customer" },
     supplier:  { type: mongoose.Types.ObjectId, ref: "Supplier" },
     partyName: { type: String, required: true, trim: true },
+    // A payment to someone not on file: the expense head it debits
+    // (else Sundry Expenses). A receipt from someone not on file: the
+    // income it is ("interest": the Interest Received ledger; else the
+    // party's name, as before).
+    head:      { type: mongoose.Types.ObjectId, ref: "ExpenseCategory", default: undefined },
+    headName:  { type: String, default: undefined, trim: true },
+    incomeLedger: { type: String, enum: ["", "interest"], default: undefined },
 
     // The money itself.
     amount:    { type: Number, required: true, min: 0.01 },

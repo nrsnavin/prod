@@ -21,6 +21,11 @@ const BankAliasSchema = new mongoose.Schema(
     partyType: { type: String, enum: ["customer", "supplier", "other"], required: true },
     party:     { type: mongoose.Types.ObjectId, default: null },
     partyName: { type: String, required: true, trim: true, maxlength: 120 },
+    // Someone not on file: the expense head a payment to them debits, or
+    // the income a receipt from them is.
+    head:      { type: mongoose.Types.ObjectId, ref: "ExpenseCategory", default: null },
+    headName:  { type: String, default: "" },
+    incomeLedger: { type: String, enum: ["", "interest"], default: "" },
     createdBy: { type: mongoose.Types.ObjectId, ref: "User" },
     createdByName: { type: String, default: "" },
     lastMatchedAt: { type: Date, default: null },

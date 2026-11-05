@@ -125,8 +125,8 @@ const PROMPTS = Object.freeze({
     system: null,
   },
   'bank-statement-match': {
-    version: 'v1.0',
-    notes: 'Names the party behind a statement narration from a list of names. Lives in services/bankStatement.js.',
+    version: 'v2.0',
+    notes: 'Places statement lines the rules could not: a customer or supplier and the invoices or bills named, a transfer between our own accounts, an expense head, or interest received — each answer checked against what is on file. Lives in services/statementAi.js.',
     system: null,
   },
   'collection-reminder': {

@@ -12,6 +12,7 @@
 //                                          last run, the last mails
 //    POST /bank/feed/run                   read it now
 //    PUT  /bank/feed                       { autoPost } (admin)
+//    POST /bank/statements/:id/rematch     match the lines still to place again
 //    GET  /bank/aliases                    payers remembered from statements
 //    DELETE /bank/aliases/:id              forget one
 // ══════════════════════════════════════════════════════════════════
@@ -102,6 +103,37 @@ router.get("/bank/reconciliation", catchAsyncErrors(async (req, res, next) => {
   const out = await reconcile.statementAsOf(req.query.account, asOf, req.query.bankBalance);
   if (!out) return next(new ErrorHandler("Account not found", 404));
   res.json({ success: true, ...out });
+}));
+
+// ── Match a stored statement again ─────────────────────────────────
+// After parties, invoices or remembered payers were added, or to have
+// the model look at lines it was not asked about: every line still to
+// place is matched afresh. A line posted, recorded or set aside
+// meanwhile is left as it is (each write is conditional on the line
+// still being unplaced).
+const bankStatement = require("../services/bankStatement");
+const UNPLACED = ["matched", "unmatched"];
+
+router.post("/bank/statements/:id/rematch", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Statement not found", 404));
+  const st = await BankStatement.findById(req.params.id).lean();
+  if (!st) return next(new ErrorHandler("Statement not found", 404));
+  const rows = st.lines.filter((l) => UNPLACED.includes(l.status))
+    .map((l) => ({ index: l.index, date: new Date(l.date), narration: l.narration, ref: l.ref, amount: l.amount, direction: l.direction, balance: l.balance }));
+  let changed = 0;
+  if (rows.length) {
+    const out = await bankStatement.match(rows, st.account, { useModel: req.body?.useModel !== false });
+    for (const r of out) {
+      const set = {
+        "lines.$.status": r.status, "lines.$.voucherType": r.recorded?.voucherType || null, "lines.$.voucher": r.recorded?._id || null, "lines.$.voucherNo": r.recorded?.voucherNo || "",
+        "lines.$.suggestion": r.status === "matched" ? r.suggestion || null : null, "lines.$.candidates": r.candidates?.length ? r.candidates : null,
+      };
+      const w = await BankStatement.updateOne({ _id: st._id, lines: { $elemMatch: { index: r.index, status: { $in: UNPLACED } } } }, { $set: set });
+      if (w.modifiedCount) changed += 1;
+      if (r.status === "recorded" && r.recorded) await reconcile.markCleared(r.recorded.voucherType, r.recorded._id, st.account, r.date);
+    }
+  }
+  res.json({ success: true, changed, statement: await BankStatement.findById(st._id).lean() });
 }));
 
 // ── Remembered payers and payees ───────────────────────────────────

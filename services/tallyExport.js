@@ -331,7 +331,8 @@ async function build({ from, to, fresh = true, L, costCentres }) {
     if (pay.kind === 'receipt') {
       v.dr(bank, pay.amount);
       for (const a of adjustments) v.dr(ADJ_RECEIPT[a.kind] || L.roundOff, a.amount);
-      if (pay.partyType === 'other') v.cr(p, settled);
+      // Someone not on file: the income it was, else a ledger by their name.
+      if (pay.partyType === 'other') v.cr(pay.incomeLedger === 'interest' ? L.interestReceived : p, settled);
       else v.cr(p, settled, bills(onAccount));
     } else {
       v.cr(bank, pay.amount);
@@ -354,7 +355,8 @@ async function build({ from, to, fresh = true, L, costCentres }) {
           if (itc) taxLines(v, tax, 'dr', L, true);
           left = r2(left - a.amount);
         }
-        v.dr(L.sundryExpenses, left);
+        // What no expense explains debits the head the line was put under.
+        v.dr(pay.head ? headOf(pay.head, L.sundryExpenses) : L.sundryExpenses, left);
       }
     }
     finish(v);
