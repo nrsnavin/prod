@@ -326,6 +326,11 @@ const fmt = {
     return p?.body || null;
   },
 
+  // services/collectionReply.js: what a customer said back about money owed.
+  collectionReply(p) {
+    return p?.body || null;
+  },
+
   test(p) {
     return p?.body || "✅ Test message from your factory notifications. If you can read this, WhatsApp alerts are working.";
   },
@@ -369,6 +374,7 @@ const EVENT_FLAG = {
   mlPosteriorStale:           "mlPosteriorStale",
   eveningReport:              "eveningReport",
   shiftEndNudge:              "shiftEndNudge",
+  collectionReply:            "collectionReply",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

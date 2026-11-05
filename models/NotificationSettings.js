@@ -49,6 +49,8 @@ const EVENT_DEFAULTS = {
   mlPosteriorStale:          { tier: "daily"  },
   // Before a shift ends, the looms still to enter (services/shiftEndNudge.js).
   shiftEndNudge:             { tier: "realtime" },
+  // A customer replied on WhatsApp about money they owe (services/collectionReply.js).
+  collectionReply:           { tier: "realtime" },
 };
 
 function normalizeEventConfig(value, eventName) {
@@ -102,6 +104,7 @@ const NotificationSettingsSchema = new mongoose.Schema(
       morningDigest:          { type: mongoose.Schema.Types.Mixed, default: true },
       eveningReport:          { type: mongoose.Schema.Types.Mixed, default: true },
       shiftEndNudge:          { type: mongoose.Schema.Types.Mixed, default: true },
+      collectionReply:        { type: mongoose.Schema.Types.Mixed, default: true },
       machineBreakdown:       { type: mongoose.Schema.Types.Mixed, default: true },
       shiftBelowThreshold:    { type: mongoose.Schema.Types.Mixed, default: true },
       wastageHighEvent:       { type: mongoose.Schema.Types.Mixed, default: true },

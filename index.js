@@ -78,6 +78,9 @@ function startServer() {
   // Supplier bills mailed to the bills mailbox, read into drafts (only when BILLS_IMAP_* is set).
   require("./services/billMailbox").start();
 
+  // Payment reminders on WhatsApp at the set hour (off until an admin turns it on).
+  require("./services/collectionReminders").start();
+
   // create server
   //
   // HOST controls the bind address. Left unset it binds all interfaces

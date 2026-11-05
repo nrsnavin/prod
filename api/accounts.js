@@ -1672,6 +1672,18 @@ router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
 // ══════════════════════════════════════════════════════════════════
 //  AI: COLLECTION FOLLOW-UPS
 // ══════════════════════════════════════════════════════════════════
+// Scheduled reminders: who today's run would remind and who it leaves, and
+// the admin's "send today's now" (still once a day).
+router.get("/collections/auto-remind", catchAsyncErrors(async (_req, res) => {
+  const s = await require("../services/booksLock").getSettings();
+  const cfg = s.collections?.autoRemind || {};
+  const d = await require("../services/collectionReminders").due(cfg);
+  res.json({ success: true, settings: { ...cfg, acknowledgeReplies: !!s.collections?.acknowledgeReplies }, send: d.send.map((r) => ({ party: r.party, partyName: r.partyName, overdue: r.overdue, oldestDays: r.oldestDays, tone: r.next.tone, phone: r.contact.phone || r.contact.accountantPhone })), skip: d.skip, more: d.more, whatsapp: whatsappConfigured() });
+}));
+router.post("/collections/auto-remind/run", isAdmin("admin"), catchAsyncErrors(async (_req, res) => {
+  res.json({ success: true, ...(await require("../services/collectionReminders").run({ force: true })) });
+}));
+
 router.get("/collections", catchAsyncErrors(async (req, res) => {
   const rows = await collections.overdue({ includeHeld: req.query.held === "true" });
   res.json({ success: true, rows, total: r2(rows.reduce((s, r) => s + r.overdue, 0)), whatsapp: whatsappConfigured() });

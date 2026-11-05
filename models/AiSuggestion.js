@@ -74,6 +74,9 @@ const AI_SURFACES = Object.freeze([
   // A supplier's statement of our account read for reconciliation
   // (utils/partyStatementOcr.js); the entries are matched by code.
   'supplier-statement',
+  // A customer's WhatsApp reply about money owed, read into promise /
+  // paid / dispute (services/collectionReply.js).
+  'collection-reply',
   // The beam weights written by hand on a printed covering programme,
   // read from a photo; each row is checked on screen before it is saved.
   'covering-beam-ocr',

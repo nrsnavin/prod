@@ -121,6 +121,21 @@ const AccountsSettingsSchema = new mongoose.Schema(
       tally: { type: Boolean, default: false },
     },
 
+    collections: {
+      // Send a short acknowledgement to a customer who replies on WhatsApp.
+      acknowledgeReplies: { type: Boolean, default: false },
+      // Payment reminders sent on WhatsApp each day at `hour` (factory time)
+      // to customers past due — not one with a live promise, nor one
+      // reminded in the last `everyDays` (services/collectionReminders.js).
+      autoRemind: {
+        enabled:        { type: Boolean, default: false },
+        hour:           { type: Number, default: 11, min: 0, max: 23 },
+        everyDays:      { type: Number, default: 7, min: 1, max: 60 },
+        minOverdueDays: { type: Number, default: 3, min: 0, max: 365 },
+        lastRunDate:    { type: String, default: "" },
+      },
+    },
+
     receivables: {
       // Interest charged on overdue invoices, % a year; 0 = none. Days past due before it runs.
       interestRate: { type: Number, default: 0, min: 0, max: 100 },

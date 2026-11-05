@@ -13,7 +13,7 @@ const mongoose = require("mongoose");
 const CollectionNoteSchema = new mongoose.Schema(
   {
     customer: { type: mongoose.Types.ObjectId, ref: "Customer", required: true },
-    kind:     { type: String, enum: ["reminder", "call", "promise", "note"], required: true },
+    kind:     { type: String, enum: ["reminder", "call", "promise", "note", "reply"], required: true },   // reply: the customer's own message (services/collectionReply.js)
     channel:  { type: String, default: "" },        // whatsapp / phone / email / visit
     tone:     { type: String, default: "" },        // gentle / firm
     to:       { type: String, default: "" },

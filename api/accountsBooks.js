@@ -412,6 +412,15 @@ router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
     if (r.interestRate !== undefined && Number.isFinite(Number(r.interestRate)) && Number(r.interestRate) >= 0 && Number(r.interestRate) <= 100) set["receivables.interestRate"] = Number(r.interestRate);
     if (r.graceDays !== undefined && Number.isInteger(Number(r.graceDays)) && Number(r.graceDays) >= 0 && Number(r.graceDays) <= 365) set["receivables.graceDays"] = Number(r.graceDays);
   }
+  if (b.collections) {
+    const c = b.collections;
+    if (c.acknowledgeReplies !== undefined) set["collections.acknowledgeReplies"] = !!c.acknowledgeReplies;
+    const a = c.autoRemind || {};
+    if (a.enabled !== undefined) set["collections.autoRemind.enabled"] = !!a.enabled;
+    for (const [k, lo, hi] of [["hour", 0, 23], ["everyDays", 1, 60], ["minOverdueDays", 0, 365]]) {
+      if (a[k] !== undefined && Number.isInteger(Number(a[k])) && Number(a[k]) >= lo && Number(a[k]) <= hi) set[`collections.autoRemind.${k}`] = Number(a[k]);
+    }
+  }
   if (b.lut) {
     if (b.lut.number !== undefined) set["lut.number"] = String(b.lut.number || "").trim().toUpperCase().slice(0, 40);
     for (const k of ["validFrom", "validTo"]) {

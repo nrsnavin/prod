@@ -327,6 +327,17 @@ async function handleIncoming(req) {
 
   // 2. Allow-list: sender's E.164 must be in NotificationSettings.recipients.
   const settings = await NotifSettings.load();
+  // 2a. Not one of ours, but a customer (or their accountant) on file:
+  //     a reply about money they owe — kept, a promise recorded, the
+  //     office told (services/collectionReply.js). It can do nothing else.
+  if (!(settings.recipients || []).includes(senderE164) && String(body).trim()) {
+    const collectionReply = require("../services/collectionReply.js");
+    const customer = await collectionReply.customerForPhone(senderE164);
+    if (customer) {
+      const r = await collectionReply.handle({ from: senderE164, text: String(body).slice(0, 2000), customer });
+      return { status: 200, body: r.ack ? twimlReply(r.ack) : `<?xml version="1.0" encoding="UTF-8"?><Response></Response>` };
+    }
+  }
   if (!(settings.recipients || []).includes(senderE164)) {
     console.warn(`[whatsapp:incoming] sender ${senderE164} not on allow-list`);
     return {
