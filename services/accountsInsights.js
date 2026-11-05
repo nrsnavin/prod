@@ -174,6 +174,100 @@ async function payingDays() {
   return new Map(rows.filter((r) => r.amount > 0).map((r) => [String(r._id), { days: Math.max(0, Math.round(r.weighted / r.amount)), n: r.n }]));
 }
 
+// ── When customers actually pay, learned ──────────────────────────
+//
+// Every receipt of the last two years, invoice by invoice: how many days
+// after the invoice it came, and how far past its terms. Recent payments
+// count more (a half-life of six months), and big ones more than small.
+// A customer with few payments of their own borrows the whole book's
+// habit of paying past terms, until their own history is enough.
+
+const HALF_LIFE_DAYS = 180;
+const OWN_ENOUGH = 4;
+const QUANTILES = [0.1, 0.3, 0.5, 0.7, 0.9];
+
+async function payingProfiles(now = new Date()) {
+  const since = new Date(now.getTime() - 730 * DAY);
+  const rows = await Payment.aggregate([
+    { $match: { kind: 'receipt', status: 'posted', date: { $gte: since } } },
+    { $unwind: '$allocations' },
+    { $match: { 'allocations.docType': 'Invoice' } },
+    { $lookup: { from: 'invoices', localField: 'allocations.doc', foreignField: '_id', as: 'inv' } },
+    { $unwind: '$inv' },
+    { $project: { customer: '$customer', amount: '$allocations.amount', at: '$date', invoiceDate: '$inv.invoiceDate', dueDate: '$inv.dueDate' } },
+  ]);
+  const byCustomer = new Map();
+  const book = [];
+  for (const r of rows) {
+    if (!(r.amount > 0) || !r.invoiceDate) continue;
+    const days = Math.max(0, (new Date(r.at) - new Date(r.invoiceDate)) / DAY);
+    const terms = r.dueDate ? (new Date(r.dueDate) - new Date(r.invoiceDate)) / DAY : null;
+    const w = r.amount * 0.5 ** ((now - new Date(r.at)) / DAY / HALF_LIFE_DAYS);
+    const sample = { days, late: terms == null ? null : days - terms, w };
+    const k = String(r.customer);
+    if (!byCustomer.has(k)) byCustomer.set(k, []);
+    byCustomer.get(k).push(sample);
+    book.push(sample);
+  }
+  return { byCustomer, book };
+}
+
+/** The weighted q-quantile of `field` over samples. */
+function wq(samples, q, field = 'days') {
+  const s = samples.filter((x) => x.w > 0).sort((a, b) => a[field] - b[field]);
+  const total = s.reduce((t, x) => t + x.w, 0);
+  if (!total) return null;
+  let run = 0;
+  for (const x of s) { run += x.w; if (run >= q * total) return x[field]; }
+  return s[s.length - 1][field];
+}
+
+/**
+ * A customer's paying days as samples: their own, and — while they have
+ * fewer than OWN_ENOUGH — the book's lateness on their terms, weighted
+ * for what is missing. Terms alone when nothing at all is known.
+ */
+function profileFor(profiles, customerId, termsDays) {
+  const own = profiles.byCustomer.get(String(customerId)) || [];
+  const n = own.length;
+  if (n >= OWN_ENOUGH) return { samples: own, n, borrowed: false };
+  const late = profiles.book.filter((x) => x.late != null);
+  if (!late.length) return { samples: n ? own : [{ days: termsDays, w: 1 }], n, borrowed: false };
+  const ownW = own.reduce((t, x) => t + x.w, 0) || 1;
+  const bookW = late.reduce((t, x) => t + x.w, 0) || 1;
+  const share = (OWN_ENOUGH - n) / OWN_ENOUGH;
+  const scaleOwn = n ? (1 - share) / ownW : 0;
+  const scaleBook = share / bookW;
+  return {
+    samples: [
+      ...own.map((x) => ({ days: x.days, w: x.w * scaleOwn })),
+      ...late.map((x) => ({ days: Math.max(0, termsDays + x.late), w: x.w * scaleBook })),
+    ],
+    n, borrowed: true,
+  };
+}
+
+/**
+ * Where an open invoice's money is likely to land: five equal shares at
+ * the 10th–90th percentiles of the customer's paying days — counting
+ * only the days past the invoice's age, since it is not paid yet. Past
+ * every day they have ever taken: in one to three weeks.
+ */
+function placeInvoice(profile, invoiceDate, today) {
+  const age = (today - new Date(invoiceDate)) / DAY;
+  let cond = profile.samples.filter((x) => x.days > age);
+  const total = profile.samples.reduce((t, x) => t + x.w, 0);
+  const condW = cond.reduce((t, x) => t + x.w, 0);
+  const lateNow = condW < 0.1 * total;
+  if (lateNow) cond = [7, 14, 21].map((d) => ({ days: age + d, w: 1 }));
+  const days = QUANTILES.map((q) => wq(cond, q));
+  const at = (d) => { const t = new Date(new Date(invoiceDate).getTime() + d * DAY); return t < today ? new Date(today) : t; };
+  return {
+    points: days.map((d) => ({ date: at(d), share: 1 / QUANTILES.length })),
+    p25: Math.round(wq(cond, 0.25)), p50: Math.round(wq(cond, 0.5)), p75: Math.round(wq(cond, 0.75)), lateNow,
+  };
+}
+
 /** Monday 00:00 of the week `d` falls in. */
 const weekStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
 
@@ -282,28 +376,55 @@ async function forecast({ weeks = 6, now = new Date() } = {}) {
   const accounts = await BankAccount.find({ active: true }).lean();
   const balances = await bankBalances.withBalances(accounts);
   const opening = r2(balances.reduce((s, a) => s + a.balance, 0));
-  const [recvAll, payAll, habits, recurring, customers, loose, customerCredits, supplierCredits, statutory] = await Promise.all([
-    outstanding.receivables({ asOf: today }), outstanding.payables({ asOf: today }), payingDays(),
+  const [recvAll, payAll, profiles, recurring, customers, loose, customerCredits, supplierCredits, statutory, promises] = await Promise.all([
+    outstanding.receivables({ asOf: today }), outstanding.payables({ asOf: today }), payingProfiles(today),
     RecurringExpense.find({ active: true }).lean(), Customer.find({}).select('paymentTerms').lean(),
     // Not in the payables: expenses still waiting for approval, and
     // approved ones with no supplier (the payee is paid directly).
     Expense.find({ $or: [{ status: 'pending' }, { status: 'approved', supplier: null }] }).select('expenseNo date dueDate payeeName description totals paidAmount status source').lean(),
     credits.byParty('customer'), credits.byParty('supplier'),
     statutoryAndPayroll(today, end),
+    // A customer's live promise to pay sets the day, whatever their habit.
+    require('../models/CollectionNote').aggregate([
+      { $match: { kind: 'promise', promiseDate: { $gte: today } } },
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: '$customer', date: { $first: '$promiseDate' }, amount: { $first: '$promiseAmount' } } },
+    ]),
   ]);
   const recv = netCredits(recvAll, customerCredits);
   const pay = netCredits(payAll, supplierCredits);
   const terms = new Map(customers.map((c) => [String(c._id), parseInt(c.paymentTerms, 10) || 30]));
   const items = [];
-  for (const r of recv) {
-    const habit = habits.get(String(r.party));
-    const days = habit ? habit.days : terms.get(String(r.party)) ?? 30;
-    let when = new Date(new Date(r.date).getTime() + days * DAY);
-    // Already later than they usually pay: expect it next week, not today.
-    const late = when < today;
-    if (late) when = new Date(today.getTime() + 7 * DAY);
-    const sample = habit ? ` (${habit.n} payment${habit.n === 1 ? '' : 's'})` : '';
-    items.push({ direction: 'in', date: when, amount: r.outstanding, party: r.partyName, docNo: r.docNo, basis: `${habit ? `pays in ${days} days on average${sample}` : `terms ${days} days`}${late ? ', already late' : ''}${r.ahead ? `, less ₹${fmt(r.ahead)} paid ahead` : ''}` });
+  // Promised money, oldest invoices first, up to what was promised.
+  const promised = new Map(promises.map((p) => [String(p._id), { date: new Date(p.date), left: p.amount > 0 ? p.amount : Infinity }]));
+  for (const r of [...recv].sort((a, b) => new Date(a.date) - new Date(b.date))) {
+    const ahead = r.ahead ? `, less ₹${fmt(r.ahead)} paid ahead` : '';
+    const p = promised.get(String(r.party));
+    if (p && p.left > 0.005) {
+      const take = r2(Math.min(p.left, r.outstanding));
+      p.left = r2(p.left - take);
+      items.push({ direction: 'in', date: p.date, amount: take, party: r.partyName, docNo: r.docNo, basis: `promised by ${dmy(p.date)}${ahead}` });
+      if (take >= r.outstanding - 0.005) continue;
+      r.outstanding = r2(r.outstanding - take);
+    }
+    const termsDays = terms.get(String(r.party)) ?? 30;
+    const profile = profileFor(profiles, r.party, termsDays);
+    const place = placeInvoice(profile, r.date, today);
+    const habit = profile.n
+      ? `pays in ${place.p50} days${place.p25 !== place.p75 ? ` (usually ${place.p25}–${place.p75})` : ''} — ${profile.n} payment${profile.n === 1 ? '' : 's'}${profile.borrowed ? ', with the book\'s habit' : ''}`
+      : profile.borrowed ? `terms ${termsDays} days, paid as the book usually pays (${place.p50} days)` : `terms ${termsDays} days`;
+    const basis = `${habit}${place.lateNow ? ', already later than they have ever paid' : ''}${ahead}`;
+    // One item per week its shares land in: the money spread as it is likely to come.
+    const byWeek = new Map();
+    for (const pt of place.points) {
+      const k = Math.floor((pt.date - start) / (7 * DAY));
+      const cur = byWeek.get(k) || { date: pt.date, share: 0 };
+      cur.share += pt.share;
+      byWeek.set(k, cur);
+    }
+    for (const { date, share } of byWeek.values()) {
+      items.push({ direction: 'in', date, amount: r2(r.outstanding * share), party: r.partyName, docNo: r.docNo, basis: share < 0.999 ? `${basis} · ${Math.round(share * 100)}% likely this week` : basis });
+    }
   }
   for (const p of pay) {
     const when = new Date(p.dueDate) < today ? today : new Date(p.dueDate);
@@ -343,7 +464,7 @@ async function forecast({ weeks = 6, now = new Date() } = {}) {
   return {
     opening, weeks: buckets, firstShortWeek: firstShort,
     later: { inflow: r2(beyond.filter((x) => x.direction === 'in').reduce((s, x) => s + x.amount, 0)), outflow: r2(beyond.filter((x) => x.direction === 'out').reduce((s, x) => s + x.amount, 0)) },
-    habits: [...habits.entries()].length,
+    habits: profiles.byCustomer.size,
   };
 }
 
@@ -426,4 +547,4 @@ function checklistText(c, company = 'Balu Elastics') {
   ].join('\n');
 }
 
-module.exports = { anomalies, suggestCategory, forecast, payingDays, closeChecklist, checklistText, itcDeadline };
+module.exports = { anomalies, suggestCategory, forecast, payingDays, payingProfiles, profileFor, placeInvoice, closeChecklist, checklistText, itcDeadline };

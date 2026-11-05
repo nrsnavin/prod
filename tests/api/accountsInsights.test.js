@@ -31,7 +31,7 @@ beforeAll(async () => {
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   M = {};
-  for (const n of ['User', 'Customer', 'Supplier', 'Invoice', 'SupplierBill', 'Expense', 'Payment', 'BankAccount', 'ExpenseCategory', 'RawMaterial', 'RecurringExpense', 'AiSuggestion', 'BankStatement']) {
+  for (const n of ['CollectionNote', 'User', 'Customer', 'Supplier', 'Invoice', 'SupplierBill', 'Expense', 'Payment', 'BankAccount', 'ExpenseCategory', 'RawMaterial', 'RecurringExpense', 'AiSuggestion', 'BankStatement']) {
     M[n] = require(`../../models/${n}.js`);
   }
   admin = await M.User.create({ name: 'Owner', email: 'ins@t.co', password: 'pass1234', role: 'admin', department: 'admin' });
@@ -107,13 +107,54 @@ describe('the cash forecast', () => {
     expect(f.opening).toBe(6000);
     const all = f.weeks.flatMap((w) => w.top);
     expect(all).toEqual(expect.arrayContaining([
-      expect.objectContaining({ direction: 'in', docNo: 'INV/2026-27/0092', amount: 20000, basis: expect.stringMatching(/^pays in (19|20) days on average/) }),
+      expect.objectContaining({ direction: 'in', docNo: 'INV/2026-27/0092', amount: 20000, basis: expect.stringMatching(/^pays in (19|20) days — 1 payment, with the book's habit$/) }),
       expect.objectContaining({ direction: 'out', docNo: 'Factory rent', amount: 30000, basis: 'recurring' }),
     ]));
     const inWeek = f.weeks.findIndex((w) => w.top.some((x) => x.docNo === 'INV/2026-27/0092'));
     expect(inWeek).toBeLessThanOrEqual(2);
     expect(f.firstShortWeek).not.toBeNull();
-    expect(all.find((x) => x.docNo === 'INV/2026-27/0092').basis).toMatch(/\(1 payment\)/);
+    expect(all.find((x) => x.docNo === 'INV/2026-27/0092').basis).toMatch(/1 payment/);
+  });
+
+  it('spreads a customer\'s money over the weeks it is likely to come, waits longer on an invoice already late, and holds to a promise', async () => {
+    n += 1;
+    const c = await M.Customer.create({ name: `Spread ${n}`, contactName: 'R', gstin: `33AAEPS${1000 + n}F1Z2`, paymentTerms: '30', phoneNumber: '9' });
+    await get('/accounts/bank-accounts');
+    const cash = await M.BankAccount.findOne({ kind: 'cash' });
+    const mkInv = async (no, date, grand) => {
+      const inv = await M.Invoice.create({ invoiceNumber: no, financialYear: '2026-27', sequence: Number(no.slice(-3)), invoiceDate: new Date(date), dueDate: new Date(new Date(date).getTime() + 30 * DAY), order: new mongoose.Types.ObjectId(), customer: c._id, buyer: { name: c.name }, supplyType: 'intra', lines: [], totals: { taxable: grand, grand }, status: 'issued' });
+      await require('../../services/partyLedger').post({ partyType: 'customer', party: c._id, date: inv.invoiceDate, docType: 'Invoice', doc: inv._id, docNo: no, debit: grand });
+      return inv;
+    };
+    // Eight payments: some at 30 days, some at 60 — a customer who varies.
+    for (let i = 0; i < 8; i++) {
+      const days = i % 2 ? 60 : 30;
+      const inv = await mkInv(`INV/S${n}/${String(100 + i)}`, Date.now() - (300 - i * 20) * DAY, 1000);
+      await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: c._id, amount: 1000, mode: 'cash', account: cash._id, date: iso(Date.now() - (300 - i * 20 - days) * DAY), allocations: [{ docType: 'Invoice', doc: inv._id, amount: 1000 }] });
+    }
+    // Raised today: its ₹10,000 is spread between about a month and two out.
+    await mkInv(`INV/S${n}/200`, Date.now(), 10000);
+    // Raised 90 days ago: later than they have ever paid.
+    await mkInv(`INV/S${n}/201`, Date.now() - 90 * DAY, 4000);
+    let f = (await get('/accounts/forecast?weeks=12')).body;
+    let all = f.weeks.flatMap((w) => w.items.map((x) => ({ ...x, week: f.weeks.indexOf(w) })));
+    const fresh = all.filter((x) => x.docNo === `INV/S${n}/200`);
+    expect(fresh.length).toBeGreaterThan(1);
+    expect(fresh.reduce((t, x) => t + x.amount, 0)).toBeCloseTo(10000, 0);
+    expect(Math.min(...fresh.map((x) => x.week))).toBeGreaterThanOrEqual(3);
+    expect(Math.max(...fresh.map((x) => x.week))).toBeLessThanOrEqual(9);
+    expect(fresh[0].basis).toMatch(/^pays in \d+ days \(usually 30–60\) — 8 payments · \d+% likely this week$/);
+    const late = all.filter((x) => x.docNo === `INV/S${n}/201`);
+    expect(late.reduce((t, x) => t + x.amount, 0)).toBeCloseTo(4000, 0);
+    expect(late.every((x) => x.week >= 0 && x.week <= 4)).toBe(true);
+    expect(late[0].basis).toMatch(/already later than they have ever paid/);
+
+    // They promise ₹3,000 in nine days: that much of the oldest comes then.
+    await M.CollectionNote.create({ customer: c._id, kind: 'promise', promiseDate: new Date(Date.now() + 9 * DAY), promiseAmount: 3000 });
+    f = (await get('/accounts/forecast?weeks=12')).body;
+    all = f.weeks.flatMap((w) => w.items);
+    expect(all.find((x) => x.docNo === `INV/S${n}/201` && /^promised by/.test(x.basis))).toMatchObject({ amount: 3000 });
+    expect(all.filter((x) => x.docNo === `INV/S${n}/201` && !/^promised/.test(x.basis)).reduce((t, x) => t + x.amount, 0)).toBeCloseTo(1000, 0);
   });
 
   it('counts what no bill shows: expenses paid directly, salaries, TDS, GST — and what a supplier was paid ahead', async () => {
