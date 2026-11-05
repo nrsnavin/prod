@@ -472,14 +472,18 @@ function shiftBefore({ dateKey, shift }) {
 async function previousTimerPhoto(session, machine) {
   if (!mongoose.isValidObjectId(String(machine))) throw new ErrorHandler('Scan the loom again.', 400);
   const before = shiftBefore(session);
-  const out = { shift: { ...before, label: `${shiftLabel(before.shift)} shift · ${dateLabel(before.dateKey)}` }, operator: null, runTime: null, photo: null };
+  const out = { shift: { ...before, label: `${shiftLabel(before.shift)} shift · ${dateLabel(before.dateKey)}` }, operator: null, runTime: null, verified: false, entryId: null, photo: null };
   const plan = await findPlan(before.dateKey, before.shift);
   if (!plan) return out;
   const detail = await ShiftDetail.findOne({ shiftPlan: plan._id, machine })
     .select('employee status timer submittedTimer').populate({ path: 'employee', select: 'name' }).lean();
   if (!detail) return out;
   out.operator = detail.employee?.name || null;
+  // The reading as it stands: the verified run time once the office has
+  // signed it off, else what the floor submitted (shown as not verified yet).
   out.runTime = detail.status === 'closed' ? (detail.timer || null) : (detail.submittedTimer || null);
+  out.verified = detail.status === 'closed';
+  out.entryId = String(detail._id);
   const photo = await TimerPhoto.findOne({ shift: detail._id })
     .sort({ used: -1, createdAt: -1 })
     .select('createdAt uploadedByName readText runTimeUsed used').lean();
@@ -490,6 +494,20 @@ async function previousTimerPhoto(session, machine) {
     };
   }
   return out;
+}
+
+/**
+ * The same, for the office: the reading on this loom the shift before a
+ * given entry (its plan and machine populated or as ids), so whoever
+ * verifies the entry sees what the display read when the last shift
+ * ended — verified or not. Null when the entry has no plan or loom.
+ */
+async function previousReadingFor(detail) {
+  const plan = detail?.shiftPlan;
+  const machine = detail?.machine?._id || detail?.machine;
+  if (!plan?.date || !isShift(plan.shift) || !mongoose.isValidObjectId(String(machine || ''))) return null;
+  // The plan's date as a key, the way findPlan matches it.
+  return previousTimerPhoto({ dateKey: moment(plan.date).format('YYYY-MM-DD'), shift: plan.shift }, machine);
 }
 
 /** Whether a kept photo belongs to the open shift or the one before it — the two the floor may see. */
@@ -548,6 +566,6 @@ module.exports = {
   openFloor, sessionFromToken, issueToken,
   shiftState, machineForShift, resolveMachine, findPlan,
   setOperator, enterProduction, completeFloorPlan,
-  shiftBefore, previousTimerPhoto, photoOnFloor,
+  shiftBefore, previousTimerPhoto, previousReadingFor, photoOnFloor,
   SURFACE, TOKEN_HOURS,
 };

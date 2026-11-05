@@ -718,6 +718,33 @@ describe('the timer photo from the shift before', () => {
     expect((await f.get(`/previous-timer-photo?machine=${s.free._id}`)).body.previous).toMatchObject({ operator: null, photo: null });
     expect((await f.get('/previous-timer-photo?machine=nope')).status).toBe(400);
   });
+
+  it('is shown to the office beside the entry awaiting verification, verified or not', async () => {
+    const s = await seed();
+    // The night before was entered on the floor but never verified.
+    const { detail: nightEntry, photo: night } = await before(s, '2026-10-20', 'NIGHT');
+    const f = floor((await open({ date: DATE, shift: 'DAY' })).body.token);
+    const detailId = (await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).body.detailId;
+    expect((await f.post('/entry', { detailId, production: 820, timer: '7:30' })).status).toBe(200);
+
+    const list = await adminGet('/shift/pending-verification');
+    expect(list.status).toBe(200);
+    const today = list.body.shifts.find((x) => x._id === detailId);
+    expect(today.previous).toMatchObject({
+      shift: { dateKey: '2026-10-20', shift: 'NIGHT', label: 'Night shift · 20 Oct 2026' },
+      operator: 'Ravi', runTime: '7:45:00', verified: false, entryId: String(nightEntry._id),
+      photo: { id: String(night._id), byName: 'Night Sup', readText: '07:45:12', used: true },
+    });
+    // The night entry itself is in the list too, with nothing before it.
+    expect(list.body.shifts.find((x) => x._id === String(nightEntry._id)).previous).toMatchObject({ operator: null, runTime: null, photo: null });
+    // The office opens the night before's photo through its own route.
+    expect((await adminGet(`/ocr/timer/photo/${night._id}/file`)).status).toBe(200);
+
+    // Once verified, the reading shown is the verified one.
+    expect((await adminPost('/shift/verify-production', { shiftId: String(nightEntry._id), productionMeters: 100, timer: '7:50:00' })).status).toBe(200);
+    const again = await adminGet('/shift/pending-verification');
+    expect(again.body.shifts.find((x) => x._id === detailId).previous).toMatchObject({ runTime: '7:50:00', verified: true });
+  });
 });
 
 describe('the QR labels PDF', () => {

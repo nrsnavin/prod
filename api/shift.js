@@ -36,7 +36,7 @@ const { keepRequestContext } = require("../middleware/userContext.js");
 const { shortCode } = require("../utils/shiftSheetPdf");
 const { floorSheetNo } = require("../utils/floorSheetPdf");
 const { headsInUse } = require("../utils/machineHeads");
-const { pinFor, rotatePin, shapePin } = require("../services/floorEntry");
+const { pinFor, rotatePin, shapePin, previousReadingFor } = require("../services/floorEntry");
 
 /** A shift whose machine was being loaded: nothing to enter or verify. */
 const LOADING_SHIFT = "This machine was being loaded this shift — there is no production to enter. Mark the machine running and production counts from then.";
@@ -531,7 +531,13 @@ router.get(
       })
       .sort({ submittedAt: 1 });
 
-    res.json({ success: true, count: shifts.length, shifts });
+    // Beside each entry, what the same loom's timer read the shift
+    // before (verified or still pending), so the run time submitted can
+    // be checked against where the display started.
+    const previous = await Promise.all(shifts.map((s) => previousReadingFor(s).catch(() => null)));
+    const rows = shifts.map((s, i) => Object.assign(s.toJSON(), { previous: previous[i] }));
+
+    res.json({ success: true, count: rows.length, shifts: rows });
   })
 );
 
