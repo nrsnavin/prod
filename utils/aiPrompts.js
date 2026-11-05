@@ -150,6 +150,12 @@ const PROMPTS = Object.freeze({
     notes: 'Drafts a reply to the customer from the complaint, the trace and the root-cause figures; never promises credit or dates not given. Lives in services/complaintIntake.js.',
     system: null,
   },
+  'floor-remark': {
+    version: 'v1.0',
+    notes: 'The remark left with a floor entry, put in a downtime class (beam change, yarn break, mechanical, electrical, power cut, no operator, waiting for material, quality, other) with the minutes lost and whether the fitter should look. Keywords first; the model only refines, within a few seconds. Lives in services/floorRemark.js.',
+    system: null,
+  },
+
   'machine-issue-intake': {
     version: 'v1.0',
     notes: 'A worker\'s words (often Tamil, from speech) or a photo, written up as a machine issue. Lives in services/machineIssueIntake.js.',

@@ -30,9 +30,13 @@ const MachineIssueSchema = new mongoose.Schema(
     // Where the report came from.
     source: {
       type: String,
-      enum: ["worker", "admin"],
+      enum: ["worker", "admin", "floor"],
       default: "worker",
     },
+    // Raised from a floor entry's remark: the supervisor's name (the
+    // floor has no login) and the shift entry it came from.
+    reportedByName: { type: String, default: "" },
+    shiftDetail: { type: mongoose.Types.ObjectId, ref: "ShiftDetail" },
 
     // Brief title for list views.
     title: { type: String, required: true, trim: true },

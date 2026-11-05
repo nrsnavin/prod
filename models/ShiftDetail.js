@@ -108,6 +108,17 @@ const ShiftDetailSchema = new mongoose.Schema(
     verifiedAt: { type: Date },
     // Verified without a person (services/autoVerify.js): what it was
     // checked against, so the office can see why and spot-check it.
+    // The remark left with a floor entry, classed (services/floorRemark.js):
+    // the downtime it reports, the minutes when it says, and whether the
+    // fitter should look — `issue` once it is raised as a machine issue.
+    remark: {
+      kind:         { type: String, enum: ["beam_change", "yarn_break", "mechanical", "electrical", "power_cut", "no_operator", "waiting_material", "quality", "other"] },
+      minutes:      { type: Number },
+      machineFault: { type: Boolean },
+      summary:      { type: String },
+      ai:           { type: Boolean },
+      issue:        { type: mongoose.Schema.Types.ObjectId, ref: "MachineIssue" },
+    },
     autoVerified: {
       at:           { type: Date },
       expected:     { type: Number },

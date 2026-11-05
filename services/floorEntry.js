@@ -655,17 +655,72 @@ async function enterProduction(session, { detailId, production, timer, feedback,
     { userId: null, surface: SURFACE }
   );
   if (out.skipped.length) throw new ErrorHandler(out.skipped[0].reason, 409);
-  await ShiftDetail.updateOne({ _id: detail._id }, { $set: { submittedByName: session.name } });
+  // The remark, classed: the downtime it reports, and whether the fitter
+  // should look. An issue already raised from this entry stays linked.
+  const said = String(feedback || '').trim();
+  const remark = said ? await require('./floorRemark').classify(said, { refId: detail._id }) : null;
+  await ShiftDetail.updateOne({ _id: detail._id }, remark
+    ? { $set: { submittedByName: session.name, 'remark.kind': remark.kind, 'remark.minutes': remark.minutes, 'remark.machineFault': remark.machineFault, 'remark.summary': remark.summary, 'remark.ai': remark.ai } }
+    : { $set: { submittedByName: session.name }, $unset: { remark: 1 } });
   // When the photo and the loom's own rate already agree, nobody need check it.
   const auto = await require('./autoVerify').tryAutoVerify(detail._id);
-  return { detailId: String(detail._id), machineId: String(detail.machine), autoVerified: auto.verified, ...(auto.verified ? {} : { waitsBecause: auto.reasons }) };
+  const linked = remark ? (await ShiftDetail.findById(detail._id).select('remark.issue').lean())?.remark?.issue : null;
+  return {
+    detailId: String(detail._id), machineId: String(detail.machine), autoVerified: auto.verified,
+    ...(auto.verified ? {} : { waitsBecause: auto.reasons }),
+    remark: remark ? { kind: remark.kind, minutes: remark.minutes, machineFault: remark.machineFault, summary: remark.summary, issue: linked ? String(linked) : null } : null,
+  };
+}
+
+// ── A fault in the remark, for the fitter ─────────────────────────
+
+/**
+ * The entry's remark raised as a machine issue, written up the way a
+ * worker's words are (services/machineIssueIntake.js). An open issue on
+ * the loom that is clearly the same fault is linked instead of opening a
+ * second. Raised once per entry: asked again, the same issue comes back.
+ */
+async function raiseIssueFromRemark(session, detailId) {
+  if (!mongoose.isValidObjectId(String(detailId))) throw new ErrorHandler('Scan the loom again.', 400);
+  const plan = await findPlan(session.dateKey, session.shift);
+  const detail = plan && await ShiftDetail.findOne({ _id: detailId, shiftPlan: plan._id }).select('machine employee submittedFeedback remark').lean();
+  if (!detail) throw new ErrorHandler('That loom is not on this shift. Scan it again.', 404);
+  const said = String(detail.submittedFeedback || '').trim();
+  if (!said) throw new ErrorHandler('There is no remark on this entry to raise.', 400);
+  const MachineIssue = require('../models/MachineIssue');
+  if (detail.remark?.issue) {
+    const issue = await MachineIssue.findById(detail.remark.issue).select('title severity status').lean();
+    if (issue) return { issue: { id: String(issue._id), title: issue.title, severity: issue.severity, status: issue.status }, duplicate: false, already: true };
+  }
+  const written = await require('./machineIssueIntake').intake({ machineId: detail.machine, text: said });
+  let issue;
+  let duplicate = false;
+  if (written.duplicateOf) {
+    issue = await MachineIssue.findById(written.duplicateOf).select('title severity status').lean();
+    duplicate = !!issue;
+  }
+  if (!issue) {
+    issue = await MachineIssue.create({
+      machine: detail.machine, employee: detail.employee || undefined, source: 'floor',
+      reportedByName: session.name, shiftDetail: detail._id,
+      title: written.title, description: written.description || said, severity: written.severity,
+    });
+    if (written.aiSuggestion) {
+      await require('./aiLedger').settle(written.aiSuggestion, {
+        accepted: { title: written.title, description: written.description, severity: written.severity },
+        decidedBy: null, expectSurface: 'machine-issue-intake', ignoreMissing: true,
+      }).catch(() => null);
+    }
+  }
+  await ShiftDetail.updateOne({ _id: detail._id }, { $set: { 'remark.issue': issue._id } });
+  return { issue: { id: String(issue._id), title: issue.title, severity: issue.severity, status: issue.status }, duplicate, already: false };
 }
 
 module.exports = {
   pinFor, rotatePin, shapePin,
   openFloor, sessionFromToken, issueToken,
   shiftState, machineForShift, resolveMachine, findPlan,
-  setOperator, enterProduction, completeFloorPlan,
+  setOperator, enterProduction, completeFloorPlan, raiseIssueFromRemark,
   shiftBefore, previousTimerPhoto, previousReadingFor, photoOnFloor, meterHoursOf, operatorSuggestions,
   SURFACE, TOKEN_HOURS,
 };

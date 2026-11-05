@@ -9,6 +9,9 @@
 //                                        shift; the first one makes the plan when
 //                                        nobody did
 //    POST /api/v2/floor/entry            { detailId, production, timer, feedback, operator }
+//    POST /api/v2/floor/remark-issue     { detailId } — the entry's remark raised as a
+//                                        machine issue for the fitter (or the open one
+//                                        it repeats)
 //    POST /api/v2/floor/complete         { force? } — "Create shift plan": the looms noted
 //                                        become the plan, free looms written on it; refused
 //                                        with looms still to enter unless forced
@@ -104,6 +107,14 @@ router.post(
 );
 
 /** The entry this photo is for has to be on the open shift. */
+router.post(
+  '/remark-issue',
+  validate({ body: z.object({ detailId: z.string() }) }),
+  catchAsyncErrors(async (req, res) => {
+    res.json({ success: true, ...(await floor.raiseIssueFromRemark(req.floor, req.body.detailId)) });
+  })
+);
+
 async function detailOnShift(session, detailId) {
   if (!mongoose.isValidObjectId(String(detailId))) return null;
   const plan = await floor.findPlan(session.dateKey, session.shift);

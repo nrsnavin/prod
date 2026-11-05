@@ -673,6 +673,63 @@ describe('reading the run time off a photo', () => {
   });
 });
 
+// ── The remark ────────────────────────────────────────────────────
+
+describe('the remark left with an entry', () => {
+  it('is classed — beam change, with the minutes lost — and the office sees it', async () => {
+    const s = await seed();
+    const f = floor((await open()).body.token);
+    const detailId = (await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).body.detailId;
+    const res = await f.post('/entry', { detailId, production: 400, timer: '7:00', feedback: 'beam change 40 min' });
+    expect(res.status).toBe(200);
+    expect(res.body.remark).toMatchObject({ kind: 'beam_change', minutes: 40, machineFault: false, issue: null });
+    expect((await M.ShiftDetail.findById(detailId).lean()).remark).toMatchObject({ kind: 'beam_change', minutes: 40 });
+    const pending = (await adminGet('/shift/pending-verification')).body.shifts.find((x) => x._id === detailId);
+    expect(pending.remark).toMatchObject({ kind: 'beam_change', minutes: 40 });
+
+    // Saved again without a remark: nothing is left classed.
+    expect((await f.post('/entry', { detailId, production: 400, timer: '7:00', feedback: '' })).body.remark).toBeNull();
+    expect((await M.ShiftDetail.findById(detailId).lean()).remark?.kind).toBeUndefined();
+  });
+
+  it('a fault is offered to the fitter: raised once as a machine issue, or linked to the open one it repeats', async () => {
+    const MachineIssue = require('../../models/MachineIssue');
+    const s = await seed();
+    const f = floor((await open({ name: 'Kumar' })).body.token);
+    const detailId = (await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).body.detailId;
+    const saved = await f.post('/entry', { detailId, production: 300, timer: '6:00', feedback: 'motor bearing noise, head 3 stopped 1 hr' });
+    expect(saved.body.remark).toMatchObject({ kind: 'mechanical', minutes: 60, machineFault: true });
+
+    const raised = await f.post('/remark-issue', { detailId });
+    expect(raised.status).toBe(200);
+    expect(raised.body).toMatchObject({ duplicate: false, already: false, issue: { status: 'open' } });
+    const issue = await MachineIssue.findById(raised.body.issue.id).lean();
+    expect(issue).toMatchObject({ source: 'floor', reportedByName: 'Kumar', employee: s.ravi._id, machine: s.running._id, shiftDetail: new mongoose.Types.ObjectId(detailId) });
+    expect(issue.description).toMatch(/motor bearing noise/);
+    // Asked again: the same issue, not a second.
+    expect((await f.post('/remark-issue', { detailId })).body).toMatchObject({ already: true, issue: { id: raised.body.issue.id } });
+    // Saving the entry again keeps the link.
+    expect((await f.post('/entry', { detailId, production: 310, timer: '6:00', feedback: 'motor bearing noise, head 3 stopped 1 hr' })).body.remark.issue).toBe(raised.body.issue.id);
+
+    // The next shift reports the same fault: linked to the open issue.
+    const night = floor((await open({ shift: 'NIGHT', name: 'Mani' })).body.token);
+    const nightId = (await night.post('/operator', { machine: String(s.running._id), operator: String(s.sita._id) })).body.detailId;
+    await night.post('/entry', { detailId: nightId, production: 200, timer: '5:00', feedback: 'motor bearing noise again, head 3 stopped' });
+    expect((await night.post('/remark-issue', { detailId: nightId })).body).toMatchObject({ duplicate: true, issue: { id: raised.body.issue.id } });
+    expect(await MachineIssue.countDocuments({})).toBe(1);
+  });
+
+  it('is refused on an entry with no remark, or not on this shift', async () => {
+    const s = await seed();
+    const f = floor((await open()).body.token);
+    const detailId = (await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).body.detailId;
+    await f.post('/entry', { detailId, production: 300, timer: '6:00' });
+    expect((await f.post('/remark-issue', { detailId })).status).toBe(400);
+    expect((await f.post('/remark-issue', { detailId: String(new mongoose.Types.ObjectId()) })).status).toBe(404);
+    expect((await request(app).post('/api/v2/floor/remark-issue').send({ detailId })).status).toBe(401);
+  });
+});
+
 // ── The labels ────────────────────────────────────────────────────
 
 // ── What the office sees ──────────────────────────────────────────
