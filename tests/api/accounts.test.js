@@ -382,3 +382,81 @@ describe('ageing, overview and reports', () => {
     expect((await get(`/accounts/statement?partyType=customer&party=${customer._id}`)).body.closing).toBe(10000);
   });
 });
+
+// ── Holes the audit closed ────────────────────────────────────────
+describe('audit: what a voucher may settle, and who a message may go to', () => {
+  it('money in from someone not on file settles nothing; a payment to them can pay an expense', async () => {
+    const cat = await category('Office & stationery'); // approval above 2,000
+    const cash = await cashBox();
+    const ex = (await post('/accounts/expenses', { category: cat._id, description: 'Dyeing lot 9', payeeName: 'Colour Works', amount: 1000 })).body.expense;
+    expect(ex.status).toBe('approved');
+    // A receipt "from" the dyer cannot mark their expense paid.
+    const wrong = await post('/accounts/payments', { kind: 'receipt', partyType: 'other', partyName: 'Colour Works', amount: 1000, mode: 'cash', account: cash._id, allocations: [{ docType: 'Expense', doc: ex._id, amount: 1000 }] });
+    expect(wrong.status).toBe(400);
+    expect(wrong.body.message).toMatch(/cannot settle a Expense/);
+    expect((await M.Expense.findById(ex._id).lean()).paidAmount).toBe(0);
+    // Interest from the bank: a receipt from an other party with nothing to settle.
+    expect((await post('/accounts/payments', { kind: 'receipt', partyType: 'other', partyName: 'Kotak interest', amount: 120, mode: 'bank', account: cash._id })).status).toBe(201);
+    const right = await post('/accounts/payments', { kind: 'payment', partyType: 'other', partyName: 'Colour Works', amount: 1000, mode: 'cash', account: cash._id, allocations: [{ docType: 'Expense', doc: ex._id, amount: 1000 }] });
+    expect(right.status).toBe(201);
+    expect((await M.Expense.findById(ex._id).lean()).paidAmount).toBe(1000);
+    expect((await post(`/accounts/expenses/${ex._id}/pay`, { account: cash._id, mode: 'wire' })).status).toBe(409); // paid already; a bad mode on an open one is 400
+  });
+
+  it('a discount settles the documents ticked — it never becomes money the party has on account', async () => {
+    const { customer, inv } = await customerScene(); // 10,500
+    const bank = (await post('/accounts/bank-accounts', { name: 'Kotak CA', kind: 'bank', openingBalance: 0 })).body.account;
+    // 10,000 received, 500 discount, but only 10,000 ticked: the 500 would be left "on account".
+    const loose = await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: customer._id, amount: 10000, mode: 'bank', account: bank._id, adjustments: [{ kind: 'discount', amount: 500 }], allocations: [{ docType: 'Invoice', doc: inv._id, amount: 10000 }] });
+    expect(loose.status).toBe(400);
+    expect(loose.body.message).toMatch(/Adjustments settle documents/);
+    // 10,000 received, 500 discount, the whole invoice ticked: settled, nothing on account.
+    const res = await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: customer._id, amount: 10000, mode: 'bank', account: bank._id, adjustments: [{ kind: 'discount', amount: 500 }], allocations: [{ docType: 'Invoice', doc: inv._id, amount: 10500 }] });
+    expect(res.status).toBe(201);
+    expect(res.body.payment).toMatchObject({ amount: 10000, unallocated: 0, adjustments: [expect.objectContaining({ kind: 'discount', amount: 500 })] });
+    expect((await M.Invoice.findById(inv._id).lean()).paidAmount).toBe(10500);
+    expect((await get(`/accounts/credits?partyType=customer&party=${customer._id}`)).body.credits).toEqual([]);
+    expect((await get(`/accounts/statement?partyType=customer&party=${customer._id}`)).body.closing).toBe(0);
+  });
+
+  it('a payment on a bill carrying TDS, with no rate on the voucher, records the bill\'s section and rate', async () => {
+    const s = await supplierScene();
+    const cash = await cashBox();
+    const bill = (await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'JW/11', kind: 'service', lines: [{ description: 'Job work', quantity: 1, rate: 50000, gstPercent: 5 }], tds: { applicable: true, section: '194C', rate: 2 } })).body.bill;
+    const res = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51500, mode: 'bank', account: cash._id, allocations: [{ docType: 'SupplierBill', doc: bill._id, amount: 52500 }], date: '2026-07-20' });
+    expect(res.status).toBe(201);
+    expect(res.body.payment.tds).toMatchObject({ section: '194C', rate: 2, amount: 1000, base: 50000 });
+    expect((await get('/accounts/reports/tds?from=2026-07-01&to=2026-07-31')).body.rows).toEqual([expect.objectContaining({ section: '194C', tds: 1000 })]);
+  });
+
+  it('a bill with a debit note on it, and an invoice with a receipt on it, cannot be cancelled', async () => {
+    const s = await supplierScene();
+    const bill = (await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'DN/1', lines: [{ description: 'Yarn', quantity: 10, rate: 100, gstPercent: 5 }] })).body.bill;
+    expect((await post('/accounts/notes', { kind: 'debit', against: { doc: bill._id }, reason: 'Short weight', lines: [{ description: 'Short 2 kg', quantity: 2, rate: 100, gstPercent: 5 }] })).status).toBe(201);
+    const cancel = await post(`/accounts/bills/${bill._id}/cancel`, { reason: 'Entered twice by mistake' });
+    expect(cancel.status).toBe(409);
+    expect((await M.SupplierBill.findById(bill._id).lean()).status).toBe('open');
+  });
+
+  it('an attachment is what it says it is, or it is refused', async () => {
+    const s = await supplierScene();
+    const bill = (await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'AT/1', lines: [{ description: 'Yarn', quantity: 1, rate: 100 }] })).body.bill;
+    const html = await request(app).post(`/api/v2/accounts/bills/${bill._id}/attachments`).set('Cookie', cookie()).attach('file', Buffer.from('<script>alert(1)</script>'), { filename: 'bill.png', contentType: 'image/png' });
+    expect(html.status).toBe(400);
+    expect(html.body.message).toMatch(/not the kind it says it is/);
+    const png = await request(app).post(`/api/v2/accounts/bills/${bill._id}/attachments`).set('Cookie', cookie()).attach('file', Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex'), { filename: 'bill.png', contentType: 'image/png' });
+    expect(png.status).toBe(201);
+    const pdf = await request(app).post(`/api/v2/accounts/bills/${bill._id}/attachments`).set('Cookie', cookie()).attach('file', Buffer.from('%PDF-1.4\n%%EOF\n'), { filename: 'bill.pdf', contentType: 'application/pdf' });
+    expect(pdf.status).toBe(201);
+    expect((await M.SupplierBill.findById(bill._id).lean()).attachments).toHaveLength(2);
+  });
+
+  it('a WhatsApp reminder goes only to a number on a customer or supplier on file', async () => {
+    const { customer } = await customerScene();
+    const sent = await post('/accounts/collections/send', { to: '+91 7000000000', message: 'Please pay what is overdue on your account with us.' });
+    expect(sent.status).toBe(400);
+    expect(sent.body.message).toMatch(/not on any customer or supplier on file/);
+    const ok = await post('/accounts/collections/send', { customer: customer._id, to: `+91 ${customer.phoneNumber}`, message: 'Please pay what is overdue on your account with us.' });
+    expect(ok.status).toBe(200);
+  });
+});

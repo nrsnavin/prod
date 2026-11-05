@@ -131,4 +131,24 @@ function e164(phone) {
   return `+${digits}`;
 }
 
-module.exports = { overdue, draft, template, e164, log, historyOf, nextStep };
+/**
+ * Whether a number (in any form) is a customer's or a supplier's on file:
+ * the party's own number, or their accountant's. Compared as E.164, so
+ * "96777 07535" and "+91 9677707535" are the same number.
+ */
+async function knownPhone(phone) {
+  const want = e164(phone);
+  if (!want) return false;
+  const Supplier = require('../models/Supplier');
+  const [customers, suppliers] = await Promise.all([
+    Customer.find({}).select('phoneNumber accountant.mobile').lean(),
+    Supplier.find({}).select('phoneNumber').lean(),
+  ]);
+  const numbers = [
+    ...customers.flatMap((c) => [c.phoneNumber, c.accountant?.mobile]),
+    ...suppliers.map((s) => s.phoneNumber),
+  ].filter(Boolean).map(e164);
+  return numbers.includes(want);
+}
+
+module.exports = { overdue, draft, template, e164, log, historyOf, nextStep, knownPhone };

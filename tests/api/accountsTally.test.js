@@ -214,3 +214,24 @@ describe('bank reconciliation', () => {
     expect((await get(`/accounts/bank/statements/${up.body.statement}`)).body.statement.lines.map((l) => l.status)).toEqual(['ignored', 'recorded']);
   });
 });
+
+describe('audit: a statement line is placed only where it belongs', () => {
+  it('refuses a voucher going the other way, and a statement of another account', async () => {
+    const s = await scene();
+    const up = await upload(s.bank, csv(['12/07/2026,NEFT CR SOMEONE,UTR9,,2500,102500', '13/07/2026,CHQ 78 PAID,,2500,,100000']));
+    const [inLine, outLine] = up.body.rows;
+    // A payment voucher is money out; the line is money in.
+    const pay = (await post('/accounts/payments', { kind: 'payment', partyType: 'other', partyName: 'Landlord', amount: 2500, mode: 'cheque', account: s.bank._id, date: '2026-07-12', reference: 'CHQ 78' })).body.payment;
+    const wrongWay = await post(`/accounts/bank/statements/${up.body.statement}/lines/${inLine.index}/link`, { voucherType: 'Payment', voucher: pay._id });
+    expect(wrongWay.status).toBe(400);
+    expect(wrongWay.body.message).toMatch(/money in, the voucher money out/);
+    expect((await post(`/accounts/bank/statements/${up.body.statement}/lines/${outLine.index}/link`, { voucherType: 'Payment', voucher: pay._id })).status).toBe(200);
+    // Posting lines against the cash box cannot mark this bank statement's lines posted.
+    const other = await post('/accounts/bank/statement/post', { account: s.cash._id, statement: up.body.statement, rows: [{ index: inLine.index, date: inLine.date, narration: inLine.narration, amount: 2500, direction: 'in', partyType: 'other', partyName: 'Someone' }] });
+    expect(other.status).toBe(400);
+    expect(other.body.message).toMatch(/another account/);
+    const lines = (await get(`/accounts/bank/statements/${up.body.statement}`)).body.statement.lines;
+    expect(lines[0].status).not.toBe('posted');
+    expect(lines[1]).toMatchObject({ status: 'recorded', voucherNo: pay.voucherNo });
+  });
+});

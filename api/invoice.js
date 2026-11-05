@@ -605,18 +605,25 @@ router.post(
       } else {
         portalNote = "The IRN was pasted in, so cancel it on the e-invoice portal as well (within 24 hours of registration).";
       }
-      inv.einvoice.status = "cancelled";
-      inv.einvoice.cancelledAt = new Date();
     }
-    inv.status = "cancelled";
-    inv.cancel = { reason, at: new Date(), by: req.user?._id };
-    await partyLedger.reverse("Invoice", inv._id);
-    inv.fingerprints.push(buildFingerprint(ACTION_CODES.INVOICE_CANCELLED, {
+    const einvoiceSet = inv.einvoice.status === "registered" ? { "einvoice.status": "cancelled", "einvoice.cancelledAt": new Date() } : {};
+    const mark = buildFingerprint(ACTION_CODES.INVOICE_CANCELLED, {
       entityId: inv._id, actor: actorFromRequest(req),
       meta: { invoiceNumber: inv.invoiceNumber, reason, irn: inv.einvoice.irn || "" },
-    }));
-    await inv.save();
-    res.json({ success: true, invoice: publicInvoice(inv), portalNote });
+    });
+    // One conditional write, so a receipt landing between the check
+    // above and here cannot settle a cancelled invoice: the write is
+    // refused once anything is set against it. (No transaction: the
+    // ledger row is dropped after, idempotently; a voucher's own write
+    // is refused by the status once this lands.)
+    const none = (field) => ({ $or: [{ [field]: { $lte: 0 } }, { [field]: null }] });
+    const r = await Invoice.updateOne(
+      { _id: inv._id, status: { $ne: "cancelled" }, $and: [none("paidAmount"), none("creditedAmount"), none("debitedAmount")] },
+      { $set: { status: "cancelled", cancel: { reason, at: new Date(), by: req.user?._id }, ...einvoiceSet }, $push: { fingerprints: mark } }
+    );
+    if (r.matchedCount === 0) return next(new ErrorHandler("A receipt or note was set against this invoice meanwhile — cancel that first.", 409));
+    await partyLedger.reverse("Invoice", inv._id);
+    res.json({ success: true, invoice: publicInvoice(await Invoice.findById(inv._id)), portalNote });
   })
 );
 

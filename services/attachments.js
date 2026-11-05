@@ -9,10 +9,27 @@ const { ATTACHMENT_TYPES } = require('../models/accountsShared');
 
 const MAX_PER_DOC = 5;
 
+/**
+ * Whether the bytes are what the upload says they are. The type comes
+ * from the client's own header; a file served back inline is served with
+ * that type, so something that is not an image or a PDF must not get
+ * in under one of their names.
+ */
+function looksLike(mimetype, buffer) {
+  const b = buffer || Buffer.alloc(0);
+  const starts = (...bytes) => bytes.every((x, i) => b[i] === x);
+  if (mimetype === 'image/jpeg') return starts(0xff, 0xd8, 0xff);
+  if (mimetype === 'image/png') return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
+  if (mimetype === 'image/webp') return starts(0x52, 0x49, 0x46, 0x46) && b.slice(8, 12).toString('ascii') === 'WEBP';
+  if (mimetype === 'application/pdf') return b.slice(0, 5).toString('ascii') === '%PDF-';
+  return false;
+}
+
 /** @returns the attachment's public fields */
 async function attach(Model, kind, id, file) {
   if (!file) throw new ErrorHandler('Attach a file (image or PDF)', 400);
   if (!ATTACHMENT_TYPES.includes(file.mimetype)) throw new ErrorHandler('Only JPEG, PNG, WebP or PDF', 400);
+  if (!looksLike(file.mimetype, file.buffer)) throw new ErrorHandler('The file is not the kind it says it is — attach a JPEG, PNG, WebP or PDF', 400);
   const doc = await Model.findById(id).select('attachments').lean();
   if (!doc) throw new ErrorHandler('Not found', 404);
   if ((doc.attachments || []).length >= MAX_PER_DOC) throw new ErrorHandler(`At most ${MAX_PER_DOC} attachments`, 400);
@@ -43,4 +60,4 @@ async function read(Model, id, aid) {
   return { contentType: a.contentType, filename: a.filename, buffer: Buffer.from(base64, 'base64') };
 }
 
-module.exports = { attach, read, MAX_PER_DOC };
+module.exports = { attach, read, looksLike, MAX_PER_DOC };

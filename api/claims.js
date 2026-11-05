@@ -168,8 +168,10 @@ router.post("/", catchAsyncErrors(async (req, res, next) => {
     });
   } catch (err) {
     if (err?.code === 11000 && b.requestId) {
-      const dup = await Expense.findOne({ requestId: String(b.requestId) }).select(PUBLIC).lean();
+      // Only this person's own claim is a replay; another's with the same id is a clash.
+      const dup = await Expense.findOne({ requestId: String(b.requestId), "claimant.user": req.user._id }).select(PUBLIC).lean();
       if (dup) return res.json({ success: true, claim: dup, replay: true });
+      return next(new ErrorHandler("That request id is already used", 409));
     }
     throw err;
   }

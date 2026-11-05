@@ -249,7 +249,10 @@ router.post("/payments/:id/cheque", isAdmin("admin", "accounts"), catchAsyncErro
     } catch (err) { return fail(err, next); }
   }
   const set = action === "deposited" ? { "cheque.status": "deposited", "cheque.depositedOn": on } : { "cheque.status": "cleared", clearedOn: on, ...(from === "held" ? { "cheque.depositedOn": on } : {}) };
-  await Payment.updateOne({ _id: v._id }, { $set: set, $push: { fingerprints: fp(ACTION_CODES.PDC_UPDATED, v, req, meta) } });
+  // Conditional on the cheque still being where it was read: two people
+  // marking it at once, or a bounce landing meanwhile, cannot both win.
+  const r = await Payment.updateOne({ _id: v._id, status: "posted", "cheque.status": from }, { $set: set, $push: { fingerprints: fp(ACTION_CODES.PDC_UPDATED, v, req, meta) } });
+  if (r.matchedCount === 0) return next(new ErrorHandler("The cheque was updated by someone else meanwhile — reload", 409));
   res.json({ success: true, payment: await Payment.findById(v._id).select("-attachments.data").lean() });
 }));
 

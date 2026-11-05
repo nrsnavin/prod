@@ -72,6 +72,10 @@ router.post("/bank/statements/:id/lines/:index/link", catchAsyncErrors(async (re
   if (!v || v.status !== "posted") return next(new ErrorHandler("Voucher not found", 404));
   const touches = type === "Contra" ? [String(v.from), String(v.to)].includes(String(hit.st.account)) : String(v.account) === String(hit.st.account);
   if (!touches) return next(new ErrorHandler("That voucher is on another account", 400));
+  // Money in on the statement is a receipt (or a contra into this
+  // account); money out a payment (or a contra out of it).
+  const direction = type === "Contra" ? (String(v.to) === String(hit.st.account) ? "in" : "out") : v.kind === "receipt" ? "in" : "out";
+  if (hit.line.direction && direction !== hit.line.direction) return next(new ErrorHandler(`The line is money ${hit.line.direction}, the voucher money ${direction}`, 400));
   const amount = v.amount;
   if (Math.abs(amount - hit.line.amount) > 0.005) return next(new ErrorHandler(`The voucher is for ₹${amount.toFixed(2)}, the line for ₹${hit.line.amount.toFixed(2)}`, 400));
   await reconcile.markCleared(type, v._id, hit.st.account, hit.line.date, { overwrite: true });

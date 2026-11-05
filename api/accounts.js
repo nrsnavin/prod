@@ -394,10 +394,22 @@ router.post("/bills/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   try { reason = reasonFrom(req); await assertOpen(bill.billDate, req, { cancelling: true }); } catch (err) { return next(err); }
   const cancel = { reason, at: new Date(), by: req.user?._id };
   const mark = fp(ACTION_CODES.BILL_CANCELLED, bill, req, { billNo: bill.billNo, reason });
-  await withTxn(async (session) => {
-    await SupplierBill.updateOne({ _id: bill._id }, { $set: { status: "cancelled", cancel }, $push: { fingerprints: mark } }, { session });
-    await partyLedger.reverse("SupplierBill", bill._id, session);
-  });
+  try {
+    await withTxn(async (session) => {
+      // Conditional on nothing having been set against it meanwhile: a
+      // payment landing between the check above and this write would
+      // otherwise settle a bill that no longer exists.
+      const r = await SupplierBill.updateOne(
+        { _id: bill._id, status: { $ne: "cancelled" }, paidAmount: { $lte: 0 }, tdsAmount: { $lte: 0 }, debitedAmount: { $lte: 0 } },
+        { $set: { status: "cancelled", cancel }, $push: { fingerprints: mark } }, { session }
+      );
+      if (r.matchedCount === 0) throw new ErrorHandler("Something was set against this bill meanwhile — cancel that first.", 409);
+      await partyLedger.reverse("SupplierBill", bill._id, session);
+    });
+  } catch (err) {
+    if (err instanceof ErrorHandler) return next(err);
+    throw err;
+  }
   res.json({ success: true, bill: await SupplierBill.findById(bill._id).select("-attachments.data").lean() });
 }));
 
@@ -472,6 +484,7 @@ async function payExpense(expenseId, { account, mode, reference, date, req, vouc
   const when = date || new Date();
   const { financialYear, sequence, number } = voucherNo;
   if (expense.status !== "approved") throw new ErrorHandler(`Only an approved expense can be paid (this one is ${expense.status})`, 409);
+  if (mode !== undefined && mode !== null && mode !== "" && !["cash", "bank", "upi", "cheque"].includes(mode)) throw new ErrorHandler("mode must be cash, bank, upi or cheque", 400);
   const partyType = expense.supplier ? "supplier" : "other";
   const vId = new mongoose.Types.ObjectId();
   const voucherData = {
@@ -657,10 +670,19 @@ router.post("/expenses/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   let reason;
   try { reason = reasonFrom(req); await assertOpen(e.date, req, { cancelling: true }); } catch (err) { return next(err); }
   const mark = fp(ACTION_CODES.EXPENSE_CANCELLED, e, req, { expenseNo: e.expenseNo, reason });
-  await withTxn(async (session) => {
-    await Expense.updateOne({ _id: e._id }, { $set: { status: "cancelled" }, $push: { fingerprints: mark } }, { session });
-    await partyLedger.reverse("Expense", e._id, session);
-  });
+  try {
+    await withTxn(async (session) => {
+      const r = await Expense.updateOne(
+        { _id: e._id, status: { $ne: "cancelled" }, $or: [{ paidAmount: { $lte: 0 } }, { paidAmount: null }] },
+        { $set: { status: "cancelled" }, $push: { fingerprints: mark } }, { session }
+      );
+      if (r.matchedCount === 0) throw new ErrorHandler("This expense was paid meanwhile — cancel the payment voucher first.", 409);
+      await partyLedger.reverse("Expense", e._id, session);
+    });
+  } catch (err) {
+    if (err instanceof ErrorHandler) return next(err);
+    throw err;
+  }
   res.json({ success: true, expense: await Expense.findById(e._id).select("-attachments.data").lean() });
 }));
 
@@ -963,9 +985,13 @@ async function createVoucher(b, req) {
   // The allocations: each names an open document of this party, for a
   // GROSS amount (what the document is settled by); TDS comes off it.
   const rawAlloc = Array.isArray(b.allocations) ? b.allocations : [];
-  const allowedTypes = partyType === "customer" ? ["Invoice", "OpeningBalance"] : partyType === "supplier" ? ["SupplierBill", "Expense", "OpeningBalance"] : ["Expense"];
+  // Money coming in from someone not on file (interest, a refund, a
+  // loan) settles nothing: only a payment to an other party pays an expense.
+  const allowedTypes = partyType === "customer" ? ["Invoice", "OpeningBalance"] : partyType === "supplier" ? ["SupplierBill", "Expense", "OpeningBalance"] : kind === "payment" ? ["Expense"] : [];
   const allocations = [];
   const seen = new Set();
+  // The section the TDS is under: the voucher's, else the bill's own when the rate came from there.
+  let sectionFromDoc = "";
   for (const [i, a] of rawAlloc.entries()) {
     if (!allowedTypes.includes(a?.docType)) throw new ErrorHandler(`Allocation ${i + 1}: a ${kind} to this party cannot settle a ${a?.docType || "?"}`, 400);
     if (!isId(a.doc)) throw new ErrorHandler(`Allocation ${i + 1}: doc is required`, 400);
@@ -986,19 +1012,32 @@ async function createVoucher(b, req) {
     if (gross > left + 0.005) throw new ErrorHandler(`Allocation ${i + 1}: ${docNo} has only ${left.toFixed(2)} outstanding`, 400);
     let rate = 0;
     if (kind === "payment") rate = a.docType === "SupplierBill" ? (tdsRate || (doc.tds?.applicable ? doc.tds.rate : 0)) : tdsRate;
+    if (kind === "payment" && a.docType === "SupplierBill" && !tdsRate && rate > 0 && !sectionFromDoc) sectionFromDoc = String(doc.tds?.section || "").trim().slice(0, 8);
     const tdsBase = rate > 0 ? r2(gross * (a.docType === "OpeningBalance" ? 1 : outstanding.ratio(doc.totals))) : 0;
     const tds = rate > 0 ? r2(tdsBase * rate / 100) : 0;
-    allocations.push({ docType: a.docType, doc: doc._id, docNo, amount: gross, tds, tdsBase });
+    allocations.push({ docType: a.docType, doc: doc._id, docNo, amount: gross, tds, tdsBase, rate });
   }
   const tdsAmount = r2(allocations.reduce((s, a) => s + a.tds, 0));
   const tdsBase = r2(allocations.reduce((s, a) => s + a.tdsBase, 0));
   const gross = r2(allocations.reduce((s, a) => s + a.amount, 0));
+  // A discount, a write-off, bank charges: each settles a document, so
+  // the ticked documents must absorb every adjustment (with the TDS on
+  // them). Otherwise the adjustment would sit as money the party has on
+  // account — a discount they could spend on the next invoice.
   if (adjTotal > 0 && adjTotal > gross + 0.005) throw new ErrorHandler("Adjustments settle documents — tick the documents they settle", 400);
   const settledTotal = r2(amount + tdsAmount + adjTotal);
   if (gross > settledTotal + 0.005) {
     throw new ErrorHandler(`The allocations need ${r2(gross - tdsAmount - adjTotal).toFixed(2)} but the voucher is for ${amount.toFixed(2)}`, 400);
   }
   const unallocated = r2(settledTotal - gross);
+  // Bank charges and TDS the customer deducted are money that really
+  // left the payment, whatever it settles; a discount, a write-off or a
+  // round-off only ever explains why a document was settled short, so
+  // with money left on account there was nothing to explain.
+  const explains = adjustments.filter((a) => ["discount", "write_off", "round_off"].includes(a.kind));
+  if (explains.length && unallocated > 0.005) {
+    throw new ErrorHandler(`Adjustments settle documents — ₹${unallocated.toFixed(2)} would be left on account. Tick the documents the ${explains.map((a) => a.label.toLowerCase()).join(", ")} settles, or take it off`, 400);
+  }
 
   const { financialYear, sequence, number } = await allocate(Payment, kind === "receipt" ? "RCT" : "PAY", { extra: { kind }, at: date });
   const _id = new mongoose.Types.ObjectId();
@@ -1007,7 +1046,7 @@ async function createVoucher(b, req) {
     partyType, customer: partyType === "customer" ? party._id : undefined, supplier: partyType === "supplier" ? party._id : undefined, partyName,
     amount, mode: b.mode, account: account._id, accountName: account.name, reference: String(b.reference || cheque?.number || "").trim().slice(0, 60),
     ...(cheque ? { cheque } : {}),
-    tds: { section: tdsAmount > 0 ? tdsSection || "" : "", rate: tdsAmount > 0 ? tdsRate : 0, amount: tdsAmount, base: tdsBase },
+    tds: { section: tdsAmount > 0 ? tdsSection || sectionFromDoc || "" : "", rate: tdsAmount > 0 ? (tdsRate || allocations.find((a) => a.tds > 0)?.rate || 0) : 0, amount: tdsAmount, base: tdsBase },
     adjustments, allocations, unallocated, narration: String(b.narration || "").trim().slice(0, 300),
     source: b.source === "statement" ? "statement" : "manual", statementLine: String(b.statementLine || "").slice(0, 200),
     clearedOn: b.clearedOn ? readDate(b.clearedOn, "clearedOn") : undefined,
@@ -1365,7 +1404,15 @@ router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
   if (!rows.length) return next(new ErrorHandler("No lines to post", 400));
   if (rows.length > 500) return next(new ErrorHandler("At most 500 lines at a time", 400));
-  const statementId = isId(req.body?.statement) ? req.body.statement : null;
+  // The statement the lines came from, when it is this account's: a line
+  // of one account's statement is never marked posted off another's.
+  let statementId = null;
+  if (isId(req.body?.statement)) {
+    const st = await BankStatement.findById(req.body.statement).select("account").lean();
+    if (!st) return next(new ErrorHandler("Statement not found", 404));
+    if (String(st.account) !== String(req.body.account)) return next(new ErrorHandler("That statement is on another account", 400));
+    statementId = st._id;
+  }
   const results = [];
   for (const [i, r] of rows.entries()) {
     try {
@@ -1415,6 +1462,9 @@ router.post("/collections/send", catchAsyncErrors(async (req, res, next) => {
   const message = String(req.body?.message || "").trim();
   if (!to) return next(new ErrorHandler("A phone number is required", 400));
   if (message.length < 20) return next(new ErrorHandler("The message is too short to send", 400));
+  // The company's WhatsApp line speaks to the parties on file, not to any
+  // number typed in: a reminder goes to a customer's or supplier's number.
+  if (!(await collections.knownPhone(to))) return next(new ErrorHandler("That number is not on any customer or supplier on file — add it to the party first", 400));
   const result = await sendWhatsApp(to, message.slice(0, 1500));
   // Remembered against the customer, so tomorrow's list knows.
   if (isId(req.body?.customer)) {
