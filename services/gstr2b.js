@@ -30,6 +30,21 @@ const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 /** "INV/0012-A" → "INV12A": what two spellings of one number share. */
 const keyOf = (no) => String(no || '').toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/^([A-Z]*)0+(?=\d)/, '$1');
 
+/**
+ * The number inside an invoice number that is its serial: the longest
+ * run of digits that is not a financial year ("SY/118/25-26" → 118,
+ * "2025-26/0118" → 118, "GST-00118" → 118). Null when there is none.
+ */
+function serialOf(no) {
+  // A financial year is two years in a row: "25-26", "2025-26", "2025/2026".
+  const cleaned = String(no || '').replace(/(?:20)?(\d{2})\s*[-/]\s*(?:20)?(\d{2})/g, (m, a, b) => (Number(b) - Number(a) === 1 ? ' ' : m));
+  const real = (cleaned.match(/\d+/g) || []).map((g) => g.replace(/^0+(?=\d)/, '')).filter((g) => !/^20\d{2}$/.test(g));
+  if (!real.length) return null;
+  return real.sort((a, b) => b.length - a.length)[0];
+}
+/** The PAN inside a GSTIN (characters 3 to 12). */
+const panOf = (gstin) => String(gstin || '').toUpperCase().slice(2, 12);
+
 function readDate(v) {
   const s = String(v || '');
   let m = s.match(/^(\d{2})-(\d{2})-(\d{4})/);
@@ -97,19 +112,38 @@ async function reconcile(period) {
     let hit = byKey.get(`${e.supplierGstin}|${e.key}|${e.kind}`);
     let by = 'number';
     if (hit && taken.has(String(hit.doc._id))) hit = null;
+    let note = '';
+    const free = (gstin) => bills.filter((b) => !taken.has(String(b._id)) && String(b.supplierGstin).toUpperCase() === gstin);
     if (!hit && e.kind === 'invoice') {
-      // Same GSTIN, same tax, a date within five days: the number was written differently.
-      hit = bills.map((b) => ({ docType: 'SupplierBill', doc: b })).find(({ doc }) => !taken.has(String(doc._id)) && String(doc.supplierGstin).toUpperCase() === e.supplierGstin
-        && Math.abs(taxOf(doc.totals) - e.tax) <= 1 && e.date && Math.abs(new Date(doc.billDate) - e.date) <= 5 * DAY) || null;
-      by = 'amount';
+      const serial = serialOf(e.number);
+      const same = free(e.supplierGstin);
+      // The same serial inside a number written another way ("118" for "SY/118/25-26").
+      const bySerial = serial ? same.filter((b) => serialOf(b.supplierBillNo) === serial) : [];
+      if (bySerial.length === 1) { hit = { docType: 'SupplierBill', doc: bySerial[0] }; by = 'main number'; note = `Their ${e.number} taken as our ${bySerial[0].supplierBillNo}`; }
+      if (!hit) {
+        // Same GSTIN, same tax, a date within five days — or within a month when only one bill fits.
+        const byTax = same.filter((b) => Math.abs(taxOf(b.totals) - e.tax) <= 1 && e.date);
+        const close = byTax.filter((b) => Math.abs(new Date(b.billDate) - e.date) <= 5 * DAY);
+        const month = byTax.filter((b) => Math.abs(new Date(b.billDate) - e.date) <= 31 * DAY);
+        const pick = close[0] || (month.length === 1 ? month[0] : null);
+        if (pick) { hit = { docType: 'SupplierBill', doc: pick }; by = 'amount'; note = close[0] ? '' : `Their ${e.number} of ${e.date.toISOString().slice(0, 10)} taken as our ${pick.supplierBillNo} by its tax`; }
+      }
+      if (!hit) {
+        // Reported under another GSTIN of the same PAN (another state's registration, or a slip).
+        const pan = panOf(e.supplierGstin);
+        const cands = bills.filter((b) => !taken.has(String(b._id)) && panOf(b.supplierGstin) === pan && String(b.supplierGstin).toUpperCase() !== e.supplierGstin
+          && (keyOf(b.supplierBillNo) === e.key || (serial && serialOf(b.supplierBillNo) === serial)));
+        if (cands.length === 1) { hit = { docType: 'SupplierBill', doc: cands[0] }; by = 'same PAN'; note = `Reported under GSTIN ${e.supplierGstin}; our bill has ${cands[0].supplierGstin} — the supplier must amend it, or we must`; }
+      }
     }
-    const match = { status: 'notInBooks', docType: '', doc: undefined, docNo: '', diff: 0, by: '' };
+    const match = { status: 'notInBooks', docType: '', doc: undefined, docNo: '', diff: 0, by: '', note: '' };
     if (hit) {
       taken.add(String(hit.doc._id));
       const booksTax = taxOf(hit.doc.totals);
       match.docType = hit.docType; match.doc = hit.doc._id; match.docNo = hit.docType === 'SupplierBill' ? hit.doc.billNo : hit.doc.noteNo;
-      match.diff = r2(booksTax - e.tax); match.by = by;
-      match.status = Math.abs(match.diff) <= 1 ? 'matched' : 'mismatch';
+      match.diff = r2(booksTax - e.tax); match.by = by; match.note = note;
+      // Under another GSTIN the credit is not ours as it stands, whatever the tax.
+      match.status = by === 'same PAN' ? 'mismatch' : Math.abs(match.diff) <= 1 ? 'matched' : 'mismatch';
     }
     matches.push({ entry: e, match });
     await Gstr2bEntry.updateOne({ _id: e._id }, { $set: { match } });
@@ -118,7 +152,7 @@ async function reconcile(period) {
   const now = new Date();
   for (const { entry, match } of matches) {
     if (match.docType !== 'SupplierBill') continue;
-    await SupplierBill.updateOne({ _id: match.doc }, { $set: { gstr2b: { status: match.status, period, entry: entry._id, diff: match.diff, note: !entry.itcAvailable ? `ITC not available in 2B: ${entry.reason || 'as reported'}` : match.status === 'mismatch' ? `Tax in books ₹${r2(taxOf(bills.find((b) => String(b._id) === String(match.doc))?.totals)).toFixed(2)}, in 2B ₹${entry.tax.toFixed(2)}` : '', at: now } } });
+    await SupplierBill.updateOne({ _id: match.doc }, { $set: { gstr2b: { status: match.status, period, entry: entry._id, diff: match.diff, note: !entry.itcAvailable ? `ITC not available in 2B: ${entry.reason || 'as reported'}` : match.by === 'same PAN' ? match.note : match.status === 'mismatch' ? `Tax in books ₹${r2(taxOf(bills.find((b) => String(b._id) === String(match.doc))?.totals)).toFixed(2)}, in 2B ₹${entry.tax.toFixed(2)}` : '', at: now } } });
   }
   const monthBills = bills.filter((b) => b.billDate >= from && b.billDate <= to && b.itc?.eligible && !b.reverseCharge && !taken.has(String(b._id)));
   for (const b of monthBills) {
@@ -153,10 +187,55 @@ async function summary(period) {
   };
 }
 
+/**
+ * For each supplier whose bills of the month are missing from 2B (or
+ * reported with the wrong tax or GSTIN), a message asking them to report
+ * or amend it, ready to send: the bills, the tax held up, and their
+ * phone and email on file.
+ */
+async function followUps(period) {
+  const [y, m] = period.split('-').map(Number);
+  const month = new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const bills = await SupplierBill.find({ status: { $ne: 'cancelled' }, 'gstr2b.period': period, 'gstr2b.status': { $in: ['missing', 'mismatch'] } })
+    .select('billNo supplierBillNo supplier supplierName supplierGstin billDate totals gstr2b').sort({ billDate: 1 }).lean();
+  const Supplier = require('../models/Supplier');
+  const DocumentSettings = require('../models/DocumentSettings');
+  const company = (await DocumentSettings.findOne({}).select('companyName gstin').lean()) || {};
+  const taxOf = (t) => r2((t?.cgst || 0) + (t?.sgst || 0) + (t?.igst || 0));
+  const groups = new Map();
+  for (const b of bills) {
+    const k = String(b.supplier);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(b);
+  }
+  const out = [];
+  for (const [id, list] of groups) {
+    const sup = await Supplier.findById(id).select('name phoneNumber email contactPerson').lean();
+    const tax = r2(list.reduce((t, b) => t + taxOf(b.totals), 0));
+    const lines = list.map((b) => `• ${b.supplierBillNo} dated ${new Date(b.billDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })} — ₹${(b.totals?.grand || 0).toLocaleString('en-IN')} (GST ₹${taxOf(b.totals).toLocaleString('en-IN')})${b.gstr2b.status === 'mismatch' ? `: ${b.gstr2b.note || 'reported differently'}` : ': not reported'}`);
+    const hello = sup?.contactPerson ? `Dear ${sup.contactPerson},` : `Dear ${sup?.name || list[0].supplierName},`;
+    out.push({
+      supplier: id, name: sup?.name || list[0].supplierName, gstin: list[0].supplierGstin,
+      phone: sup?.phoneNumber || '', email: sup?.email || '',
+      bills: list.map((b) => ({ _id: b._id, billNo: b.billNo, supplierBillNo: b.supplierBillNo, billDate: b.billDate, grand: b.totals?.grand || 0, tax: taxOf(b.totals), status: b.gstr2b.status, note: b.gstr2b.note || '' })),
+      tax,
+      subject: `GSTR-1: invoices not in our GSTR-2B for ${month}`,
+      message: [
+        hello, '',
+        `Our GSTR-2B for ${month}${company.gstin ? ` (GSTIN ${company.gstin})` : ''} does not show these invoices of yours correctly:`,
+        ...lines, '',
+        `The GST on them, ₹${tax.toLocaleString('en-IN')}, cannot be claimed until they are reported. Please file or amend them in your GSTR-1 (against our GSTIN) and let us know once done.`,
+        '', 'Thank you,', company.companyName || 'Accounts',
+      ].join('\n'),
+    });
+  }
+  return out.sort((a, b) => b.tax - a.tax);
+}
+
 /** Months with a 2B uploaded, newest first. */
 async function periods() {
   const rows = await Gstr2bEntry.aggregate([{ $group: { _id: '$period', n: { $sum: 1 }, at: { $max: '$createdAt' } } }, { $sort: { _id: -1 } }]);
   return rows.map((r) => ({ period: r._id, entries: r.n, uploadedAt: r.at }));
 }
 
-module.exports = { parse, upload, reconcile, summary, periods, keyOf };
+module.exports = { parse, upload, reconcile, summary, periods, followUps, keyOf, serialOf };

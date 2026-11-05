@@ -38,7 +38,9 @@ const Gstr2bEntrySchema = new mongoose.Schema(
       doc:     { type: mongoose.Types.ObjectId },
       docNo:   { type: String, default: "" },
       diff:    { type: Number, default: 0 },                     // tax in books − tax in 2B
-      by:      { type: String, default: "" },                    // "number" or "amount"
+      by:      { type: String, default: "" },                    // "number", "main number", "amount" or "same PAN"
+      // Why a match was taken, when it was not the number exactly.
+      note:    { type: String, default: "" },
     },
     uploadedBy:   { type: mongoose.Types.ObjectId, ref: "User" },
   },

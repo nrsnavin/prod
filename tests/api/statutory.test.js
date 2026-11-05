@@ -147,6 +147,41 @@ describe('GSTR-2B against the books', () => {
     expect(item.detail).toMatch(/1 bill not in 2B/);
   });
 
+  it('matches a number written another way by its serial, by tax within the month, or under another GSTIN of the same PAN — and drafts the follow-ups', async () => {
+    const s = await supplier({ phoneNumber: '9840000011', email: 'accounts@supplier.in', contactPerson: 'Mr. Raju' });
+    // Same PAN (AAAPS…), registered in Karnataka too.
+    const otherState = `29${s.gstin.slice(2)}`;
+    const serial = await bill(s, { supplierBillNo: 'SY/118/26-27', billDate: '2026-10-03' });
+    const late = await bill(s, { supplierBillNo: 'SY-200', billDate: '2026-10-02', lines: [{ description: 'Dyeing', quantity: 1, rate: 12000, gstPercent: 5 }] });
+    const pan = await bill(s, { supplierBillNo: 'SY/310', billDate: '2026-10-08' });
+    const missing = await bill(s, { supplierBillNo: 'SY/400', billDate: '2026-10-12' });
+    const items = (txval, tax) => [{ num: 1, rt: 5, txval, cgst: tax / 2, sgst: tax / 2, igst: 0, cess: 0 }];
+    const json = twoB([
+      { ctin: s.gstin, trdnm: s.name, inv: [
+        { inum: '2026-27/0118', dt: '03-10-2026', val: 10500, pos: '33', rev: 'N', itcavl: 'Y', items: items(10000, 500) },
+        // A different number altogether, reported 20 days on: only one bill of the month has its tax.
+        { inum: 'TAX/7781', dt: '22-10-2026', val: 12600, pos: '33', rev: 'N', itcavl: 'Y', items: items(12000, 600) },
+      ] },
+      { ctin: otherState, trdnm: s.name, inv: [{ inum: 'SY/310', dt: '08-10-2026', val: 10500, pos: '33', rev: 'N', itcavl: 'Y', items: items(10000, 500) }] },
+    ]);
+    const up = await request(app).post('/api/v2/accounts/gstr2b/upload').set('Cookie', cookie()).attach('file', Buffer.from(JSON.stringify(json)), 'gstr2b.json');
+    expect(up.status).toBe(200);
+    const byNo = Object.fromEntries(up.body.rows.map((r) => [r.number, r]));
+    expect(byNo['2026-27/0118'].match).toMatchObject({ status: 'matched', docNo: serial.billNo, by: 'main number', note: 'Their 2026-27/0118 taken as our SY/118/26-27' });
+    expect(byNo['TAX/7781'].match).toMatchObject({ status: 'matched', by: 'amount', docNo: late.billNo, note: 'Their TAX/7781 of 2026-10-22 taken as our SY-200 by its tax' });
+    expect(byNo['SY/310'].match).toMatchObject({ status: 'mismatch', docNo: pan.billNo, by: 'same PAN' });
+    expect((await M.SupplierBill.findById(pan._id).lean()).gstr2b.note).toMatch(new RegExp(`Reported under GSTIN ${otherState}`));
+
+    const fu = (await get('/accounts/gstr2b/follow-ups?period=2026-10')).body.suppliers;
+    expect(fu).toHaveLength(1);
+    expect(fu[0]).toMatchObject({ name: s.name, phone: '9840000011', email: 'accounts@supplier.in', tax: 1000, subject: 'GSTR-1: invoices not in our GSTR-2B for October 2026' });
+    expect(fu[0].bills.map((b) => b.supplierBillNo)).toEqual(['SY/310', 'SY/400']);
+    expect(fu[0].message).toMatch(/^Dear Mr\. Raju,/);
+    expect(fu[0].message).toMatch(/• SY\/310 dated 08 Oct 2026 — ₹10,500 \(GST ₹500\): Reported under GSTIN/);
+    expect(fu[0].message).toMatch(/The GST on them, ₹1,000, cannot be claimed until they are reported/);
+    expect((await get('/accounts/gstr2b/follow-ups?period=Oct')).status).toBe(400);
+  });
+
   it('refuses a file that is not GSTR-2B', async () => {
     const r = await request(app).post('/api/v2/accounts/gstr2b/upload').set('Cookie', cookie()).field('period', '2026-10').attach('file', Buffer.from('{"hello":1}'), 'x.json');
     expect(r.status).toBe(400);

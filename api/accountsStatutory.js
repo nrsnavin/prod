@@ -118,6 +118,14 @@ router.post("/gstr2b/upload", keepRequestContext(upload.single("file")), catchAs
   }
 }));
 
+// For each supplier with bills missing from (or misreported in) the month's
+// 2B: the bills, the tax held up, and a message asking them to report it.
+router.get("/gstr2b/follow-ups", catchAsyncErrors(async (req, res, next) => {
+  const period = String(req.query?.period || "");
+  if (!MONTH.test(period)) return next(new ErrorHandler("period must be YYYY-MM", 400));
+  res.json({ success: true, period, suppliers: await gstr2b.followUps(period) });
+}));
+
 router.post("/gstr2b/reconcile", catchAsyncErrors(async (req, res, next) => {
   const period = String(req.body?.period || "");
   if (!MONTH.test(period)) return next(new ErrorHandler("period must be YYYY-MM", 400));
