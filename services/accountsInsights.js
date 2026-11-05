@@ -58,7 +58,7 @@ async function anomalies(kind, b, user) {
   const flags = [];
   const date = new Date(b.billDate || b.date || Date.now());
   const grand = r2(b.grand ?? b.amount ?? (Array.isArray(b.lines) ? b.lines.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.rate) || 0) * (1 + (Number(l.gstPercent) || 0) / 100), 0) : 0));
-  const supplier = mongoose.Types.ObjectId.isValid(String(b.supplier || '')) ? await Supplier.findById(b.supplier).select('name gstin').lean() : null;
+  const supplier = mongoose.Types.ObjectId.isValid(String(b.supplier || '')) ? await Supplier.findById(b.supplier).select('name gstin pan gstRegistration').lean() : null;
 
   if (date > new Date(Date.now() + DAY)) flags.push({ code: 'FUTURE_DATE', severity: 'warning', message: `Dated ${dmy(date)}, in the future` });
 
@@ -116,6 +116,14 @@ async function anomalies(kind, b, user) {
       if (near >= 1) flags.push({ code: 'UNDER_LIMIT', severity: 'warning', message: `${near + 1} ${cat.name} expenses this week just under the ₹${fmt(limit)} approval limit — one bill split in parts?` });
     }
   }
+  // 6. GST and TDS coding (services/taxCoding.js).
+  const category = mongoose.Types.ObjectId.isValid(String(b.category || '')) ? await ExpenseCategory.findById(b.category).select('name tdsSection itcEligible').lean() : null;
+  const lines = Array.isArray(b.lines) ? b.lines
+    : kind === 'expense' && Number(b.amount) > 0 ? [{ description: b.description || '', quantity: 1, rate: Number(b.amount), gstPercent: b.gstPercent }] : [];
+  flags.push(...await require('./taxCoding').codingFlags({
+    kind, date, supplier, lines, billKind: b.kind, category, description: b.description,
+    reverseCharge: !!b.reverseCharge, itcEligible: b.itcEligible, tds: b.tds,
+  }));
   return flags;
 }
 

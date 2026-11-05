@@ -66,7 +66,7 @@ describe('flags before a bill is saved', () => {
     const codes = check.body.flags.map((f) => f.code);
     expect(codes).toEqual(expect.arrayContaining(['SAME_AMOUNT', 'GSTIN_MISMATCH']));
     expect(check.body.flags.find((f) => f.code === 'SAME_AMOUNT').message).toMatch(/already entered as PB\/.*A2/);
-    const pricey = await post('/accounts/bills/check', { supplier: s._id, billDate: today, lines: [{ rawMaterial: nylon._id, description: 'Nylon', quantity: 10, rate: 340, gstPercent: 5 }] });
+    const pricey = await post('/accounts/bills/check', { supplier: s._id, billDate: today, lines: [{ rawMaterial: nylon._id, description: 'Nylon', hsn: '5402', quantity: 10, rate: 340, gstPercent: 5 }] });
     expect(pricey.body.flags.map((f) => f.code)).toEqual(['RATE_OFF']);
     expect(pricey.body.flags[0].message).toMatch(/averaged ₹301/);
     const old = await post('/accounts/bills/check', { supplier: s._id, billDate: iso(Date.now() - 90 * DAY), lines: [{ description: 'x', quantity: 1, rate: 7 }] });
