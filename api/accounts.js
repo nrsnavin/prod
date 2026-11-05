@@ -330,6 +330,14 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     if (serviceBill.supplierBill) return next(new ErrorHandler("That service bill is already entered in the books", 409));
   }
 
+  // Opened from the bills mailbox: the item must still be waiting.
+  let inboxBill = null;
+  if (isId(b.inboxBill)) {
+    inboxBill = await require("../models/InboxBill").findOne({ _id: b.inboxBill, part: { $gt: 0 } }).select("+data status contentType filename size").lean();
+    if (!inboxBill) return next(new ErrorHandler("That bill from the mailbox is not found", 404));
+    if (inboxBill.status === "entered") return next(new ErrorHandler("That bill from the mailbox is entered already", 409));
+  }
+
   let costCentre;
   try { costCentre = await costCentres.read(b.costCentre); } catch (err) { return next(err); }
 
@@ -358,6 +366,14 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
       await partyLedger.post({ partyType: "supplier", party: supplier._id, date: billDate, docType: "SupplierBill", doc: _id, docNo: number, credit: gst.totals.grand, narration: `Bill ${supplierBillNo}${po ? ` · PO #${po.poNo}` : ""}${reverseCharge ? " · reverse charge" : ""}` }, session);
       if (serviceBill) await MachineServiceBill.updateOne({ _id: serviceBill._id, supplierBill: null }, { $set: { supplierBill: _id } }, { session });
     });
+    if (inboxBill) {
+      // The mailbox item is done, and its file goes with the bill.
+      await require("../models/InboxBill").updateOne({ _id: inboxBill._id, status: { $ne: "entered" } }, { $set: { status: "entered", bill: _id, note: number, decidedBy: req.user?._id, decidedAt: new Date() } });
+      if (inboxBill.data) {
+        const base64 = String(inboxBill.data).split(",")[1] || "";
+        await attachments.attach(SupplierBill, "bills", _id, { buffer: Buffer.from(base64, "base64"), mimetype: inboxBill.contentType, originalname: inboxBill.filename || "bill", size: inboxBill.size }).catch(() => {});
+      }
+    }
     if (serviceBill?.data) {
       // The photo or PDF from the service log becomes the bill's attachment.
       const base64 = String(serviceBill.data).split(",")[1] || "";
@@ -1366,36 +1382,70 @@ router.post("/scan", keepRequestContext(scanUpload.array("files", 4)), catchAsyn
   if (read.problem) {
     return res.json({ success: true, read, supplier: null, purchaseOrders: [], aiSuggestion: suggestionId });
   }
-  // Who it is, on file: the GSTIN settles it; a name is a guess to confirm.
-  let supplier = null;
-  let matchedBy = null;
-  if (read.supplierGstin) {
-    supplier = await Supplier.findOne({ gstin: read.supplierGstin }).select("name gstin").lean();
-    if (supplier) matchedBy = "gstin";
-  }
-  if (!supplier && read.supplierName) {
-    const words = read.supplierName.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3);
-    if (words.length) {
-      const re = new RegExp(words.map((w) => `(?=.*${escapeRegex(w)})`).join(""), "i");
-      supplier = await Supplier.findOne({ name: re }).select("name gstin").lean();
-      if (supplier) matchedBy = "name";
-    }
-  }
-  const already = read.billNo && supplier
-    ? await SupplierBill.findOne({ supplier: supplier._id, supplierBillNo: read.billNo, status: { $ne: "cancelled" } }).select("billNo").lean()
-    : null;
-  // The supplier's POs with something still to bill.
-  let purchaseOrders = [];
-  if (supplier) {
-    const pos = await PurchaseOrder.find({ supplier: supplier._id, status: { $ne: "Cancelled" } }).select("poNo date status").sort({ date: -1 }).limit(10).lean();
-    const billed = new Set((await SupplierBill.find({ purchaseOrder: { $in: pos.map((p) => p._id) }, status: { $ne: "cancelled" } }).select("inwards").lean()).flatMap((b) => (b.inwards || []).map(String)));
-    for (const po of pos) {
-      const inwards = await MaterialInward.find({ purchaseOrder: po._id }).select("quantity").lean();
-      const unbilled = inwards.filter((i) => !billed.has(String(i._id)));
-      purchaseOrders.push({ _id: po._id, poNo: po.poNo, date: po.date, status: po.status, receipts: inwards.length, unbilledReceipts: unbilled.length });
-    }
-  }
-  res.json({ success: true, read, supplier: supplier ? { ...supplier, matchedBy } : null, alreadyEntered: already ? already.billNo : null, purchaseOrders, aiSuggestion: suggestionId });
+  // Who it is on file, whether it is entered already, and what is still to bill (services/billMatch.js).
+  const match = await require("../services/billMatch").matchRead(read);
+  res.json({ success: true, read, supplier: match.supplier, alreadyEntered: match.alreadyEntered, purchaseOrders: match.purchaseOrders, aiSuggestion: suggestionId });
+}));
+
+// ══════════════════════════════════════════════════════════════════
+//  BILLS THAT CAME BY MAIL (services/billMailbox.js)
+// ══════════════════════════════════════════════════════════════════
+//  GET  /bill-inbox?status=new   the mailbox's bills, read and matched
+//  GET  /bill-inbox/status        is the mailbox set up
+//  POST /bill-inbox/run           read the mailbox now
+//  GET  /bill-inbox/:id           one, as a scan returns it, to open as a bill
+//  GET  /bill-inbox/:id/file      the PDF or photo
+//  POST /bill-inbox/:id/dismiss   { reason } — not a bill for the books
+//  Entering it is POST /bills with { inboxBill: id }: the item is marked
+//  entered and the file goes with the bill.
+const InboxBill = require("../models/InboxBill");
+const billMailbox = require("../services/billMailbox");
+const inboxRow = (x) => ({
+  _id: x._id, status: x.status, note: x.note, from: x.from, subject: x.subject, receivedAt: x.receivedAt, filename: x.filename, contentType: x.contentType,
+  supplier: x.supplier, supplierName: x.supplierName, matchedBy: x.matchedBy, senderKnown: !!x.senderKnown, alreadyEntered: x.alreadyEntered, grand: x.grand,
+  billNo: x.read?.billNo || "", billDate: x.read?.billDate || null, confidence: x.read?.confidence ?? null, kind: x.read?.kind || null, bill: x.bill, decidedAt: x.decidedAt,
+});
+router.get("/bill-inbox/status", catchAsyncErrors(async (_req, res) => {
+  res.json({ success: true, ...billMailbox.status(), waiting: await InboxBill.countDocuments({ status: "new" }) });
+}));
+router.post("/bill-inbox/run", catchAsyncErrors(async (_req, res, next) => {
+  if (!billMailbox.configured()) return next(new ErrorHandler("The bills mailbox is not set up on this server (BILLS_IMAP_*).", 400));
+  res.json({ success: true, ...(await billMailbox.run()) });
+}));
+router.get("/bill-inbox", catchAsyncErrors(async (req, res) => {
+  const status = ["new", "entered", "dismissed", "failed", "skipped"].includes(req.query.status) ? req.query.status : "new";
+  // Part 0 is the mail itself (its claim); the bills are its files.
+  const rows = await InboxBill.find({ status, part: { $gt: 0 } }).sort({ receivedAt: -1 }).limit(200).lean();
+  res.json({ success: true, bills: rows.map(inboxRow) });
+}));
+router.get("/bill-inbox/:id", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));
+  const x = await InboxBill.findOne({ _id: req.params.id, part: { $gt: 0 } }).lean();
+  if (!x || !x.read) return next(new ErrorHandler("Not found", 404));
+  // Matched again now: a supplier added or a bill entered since it came in counts.
+  const match = await require("../services/billMatch").matchRead(x.read);
+  res.json({ success: true, item: inboxRow(x), read: x.read, supplier: match.supplier, alreadyEntered: match.alreadyEntered, purchaseOrders: match.purchaseOrders, aiSuggestion: x.aiSuggestion ? String(x.aiSuggestion) : null });
+}));
+router.get("/bill-inbox/:id/file", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));
+  const x = await InboxBill.findOne({ _id: req.params.id, part: { $gt: 0 } }).select("+data contentType filename").lean();
+  if (!x?.data) return next(new ErrorHandler("Not found", 404));
+  const buffer = Buffer.from(String(x.data).split(",", 2)[1] || "", "base64");
+  res.setHeader("Content-Type", x.contentType);
+  res.setHeader("Content-Length", buffer.length);
+  res.setHeader("Content-Disposition", `inline; filename="${String(x.filename || "bill").replace(/[^\w.\- ]/g, "_")}"`);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  res.end(buffer);
+}));
+router.post("/bill-inbox/:id/dismiss", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));
+  const reason = String(req.body?.reason || "").trim().slice(0, 200);
+  const x = await InboxBill.findOneAndUpdate({ _id: req.params.id, part: { $gt: 0 }, status: { $in: ["new", "failed", "skipped"] } },
+    { $set: { status: "dismissed", note: reason || "Dismissed", decidedBy: req.user?._id, decidedAt: new Date() } }, { new: true }).lean();
+  if (!x) return next(new ErrorHandler("Not found, or entered already", 404));
+  // Not settled: "not ours" says nothing about whether it was read right.
+  res.json({ success: true, bill: inboxRow(x) });
 }));
 
 // ══════════════════════════════════════════════════════════════════
