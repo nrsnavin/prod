@@ -40,6 +40,7 @@ const budgets = require("../services/budgets");
 const costCentres = require("../services/costCentres");
 const FixedAsset = require("../models/FixedAsset");
 const Payment = require("../models/Payment");
+const BankAccount = require("../models/BankAccount");
 const confirmations = require("../services/confirmations");
 const overdueInterest = require("../services/overdueInterest");
 const { cancelVoucher } = require("../services/voucherCancel");
@@ -248,7 +249,19 @@ router.post("/payments/:id/cheque", isAdmin("admin", "accounts"), catchAsyncErro
       return res.json({ success: true, payment, bounced: true });
     } catch (err) { return fail(err, next); }
   }
-  const set = action === "deposited" ? { "cheque.status": "deposited", "cheque.depositedOn": on } : { "cheque.status": "cleared", clearedOn: on, ...(from === "held" ? { "cheque.depositedOn": on } : {}) };
+  // Deposited into which account: the voucher's unless told otherwise —
+  // a cheque received is recorded before anyone knows which bank it goes to.
+  let into = {};
+  if (b.account !== undefined && b.account !== null && b.account !== "") {
+    if (!isId(b.account)) return next(new ErrorHandler("account is not an id", 400));
+    const acct = await BankAccount.findById(b.account).lean();
+    if (!acct || acct.active === false) return next(new ErrorHandler("Account not found", 404));
+    if (acct.kind === "cash") return next(new ErrorHandler("A cheque is deposited into a bank account, not the cash box", 400));
+    if (String(acct._id) !== String(v.account)) { into = { account: acct._id, accountName: acct.name }; meta.account = acct.name; }
+  }
+  const set = action === "deposited"
+    ? { "cheque.status": "deposited", "cheque.depositedOn": on, ...into }
+    : { "cheque.status": "cleared", "cheque.clearedOn": on, clearedOn: on, ...(from === "held" ? { "cheque.depositedOn": on } : {}), ...into };
   // Conditional on the cheque still being where it was read: two people
   // marking it at once, or a bounce landing meanwhile, cannot both win.
   const r = await Payment.updateOne({ _id: v._id, status: "posted", "cheque.status": from }, { $set: set, $push: { fingerprints: fp(ACTION_CODES.PDC_UPDATED, v, req, meta) } });

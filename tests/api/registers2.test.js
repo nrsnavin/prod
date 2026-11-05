@@ -79,12 +79,25 @@ describe('post-dated cheques', () => {
     const clr = await post(`/accounts/payments/${r.body.payment._id}/cheque`, { action: 'cleared', on: future(12) });
     expect(clr.body.payment.cheque.status).toBe('cleared');
     expect(clr.body.payment.clearedOn).toBeTruthy();
+    expect(clr.body.payment.cheque.clearedOn).toBeTruthy();
     expect((await post(`/accounts/payments/${r.body.payment._id}/cheque`, { action: 'deposited' })).status).toBe(409);
 
-    // A second cheque, dated today, is taken as deposited; it comes back.
+    // A second cheque, dated today, is received and in hand like any other —
+    // deposited into the bank it went to, on the day; then it comes back.
     const r2 = await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: customer._id, amount: 55000, mode: 'cheque', account: acct._id, cheque: { number: '000413', bank: 'Kotak' }, allocations: [{ docType: 'Invoice', doc: inv._id, amount: 55000 }] });
-    expect(r2.body.payment.cheque.status).toBe('deposited');
+    expect(r2.body.payment.cheque).toMatchObject({ status: 'held', number: '000413' });
+    expect(r2.body.payment.cheque.receivedOn).toBeTruthy();
+    expect((await get('/accounts/pdc')).body.totals.dueToday).toMatchObject({ count: 1, amount: 55000 });
+    const other = await bank();
+    expect((await post(`/accounts/payments/${r2.body.payment._id}/cheque`, { action: 'deposited', account: 'nope' })).status).toBe(400);
+    const dep2 = await post(`/accounts/payments/${r2.body.payment._id}/cheque`, { action: 'deposited', on: future(0), account: other._id });
+    expect(dep2.status).toBe(200);
+    expect(dep2.body.payment).toMatchObject({ account: String(other._id), accountName: other.name, cheque: { status: 'deposited' } });
+    expect(dep2.body.payment.cheque.depositedOn).toBeTruthy();
     expect((await M.Invoice.findById(inv._id).lean()).paidAmount).toBe(105000);
+    // One already banked when it is entered skips the drawer.
+    const r3 = await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: customer._id, amount: 1, mode: 'cheque', account: acct._id, cheque: { number: '000414', deposited: true } });
+    expect(r3.body.payment.cheque).toMatchObject({ status: 'deposited', number: '000414' });
     expect((await post(`/accounts/payments/${r2.body.payment._id}/cheque`, { action: 'bounced' })).status).toBe(400);
     const b = await post(`/accounts/payments/${r2.body.payment._id}/cheque`, { action: 'bounced', reason: 'Funds insufficient', charges: 250 });
     expect(b.status).toBe(200);

@@ -62,14 +62,20 @@ const PaymentSchema = new mongoose.Schema(
     // UTR / cheque number / UPI reference.
     reference: { type: String, default: "", trim: true, maxlength: 60 },
 
-    // A cheque: held (in the drawer, often post-dated), deposited, cleared
-    // or bounced. A bounced cheque cancels the voucher (services/voucherCancel.js).
+    // A cheque, stage by stage: held (received and in the drawer — every
+    // cheque received starts here, a post-dated one stays until its
+    // date), deposited (handed to the bank, on a day, into an account),
+    // cleared (the bank credited it; clearedOn on the voucher is set the
+    // same day, for the reconciliation) or bounced. A bounced cheque
+    // cancels the voucher (services/voucherCancel.js).
     cheque: {
       number:       { type: String, default: "", trim: true, maxlength: 20 },
       bank:         { type: String, default: "", trim: true, maxlength: 80 },
       date:         { type: Date },
       status:       { type: String, enum: ["", "held", "deposited", "cleared", "bounced"], default: "" },
+      receivedOn:   { type: Date },
       depositedOn:  { type: Date },
+      clearedOn:    { type: Date },
       bouncedOn:    { type: Date },
       bounceReason: { type: String, default: "", trim: true, maxlength: 200 },
       // What the bank charged for the return.

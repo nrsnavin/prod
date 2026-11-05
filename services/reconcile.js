@@ -39,6 +39,11 @@ async function markCleared(voucherType, id, account, date, { overwrite = false }
   const q = { _id: id, account };
   if (!overwrite && on) q.clearedOn = { $exists: false };
   const res = await Payment.updateOne(q, on ? { $set: { clearedOn: on } } : { $unset: { clearedOn: 1 } });
+  // The bank showing a cheque is the cheque clearing: its stage moves with the tick.
+  if (on && res.matchedCount > 0) {
+    await Payment.updateOne({ _id: id, mode: 'cheque', 'cheque.status': 'held' }, { $set: { 'cheque.status': 'cleared', 'cheque.depositedOn': on, 'cheque.clearedOn': on } });
+    await Payment.updateOne({ _id: id, mode: 'cheque', 'cheque.status': 'deposited' }, { $set: { 'cheque.status': 'cleared', 'cheque.clearedOn': on } });
+  }
   return res.matchedCount > 0 || !!(await Payment.exists({ _id: id, account }));
 }
 

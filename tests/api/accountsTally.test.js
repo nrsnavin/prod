@@ -195,6 +195,8 @@ describe('bank reconciliation', () => {
     expect(rec2).toMatchObject({ bookBalance: 104150, unmatched: [], difference: 0 });
     // The cheque is presented: ticked cleared by hand.
     expect((await post('/accounts/bank/clear', { voucherType: 'Payment', id: chq._id, account: s.bank._id, clearedOn: '2026-07-20' })).status).toBe(200);
+    // The tick is the cheque clearing: its stage moves with it.
+    expect((await M.Payment.findById(chq._id).lean()).cheque).toMatchObject({ status: 'cleared' });
     const rec3 = (await get(`/accounts/bank/reconciliation?account=${s.bank._id}&asOf=2026-07-31&bankBalance=104150`)).body;
     expect(rec3).toMatchObject({ uncleared: [], expectedBankBalance: 104150, difference: 0, bankBalanceFrom: 'entered' });
   });

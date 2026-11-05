@@ -933,14 +933,21 @@ async function createVoucher(b, req) {
   if (!account || !account.active) throw new ErrorHandler("Account not found", 404);
   const date = readDate(b.date, "date", new Date());
   await assertOpen(date, req);
-  // A cheque: its number, bank and date. Dated after today, it is held
-  // (post-dated); otherwise it is taken as deposited on the voucher date.
+  // A cheque: its number, bank and date. One received is in hand until
+  // someone deposits it (cheque.deposited / depositedOn says it already
+  // was); one issued is with the party from the voucher date. Dated
+  // after today, either is held until its date.
   let cheque;
   if (b.mode === "cheque") {
     const c = b.cheque || {};
     const chequeDate = c.date ? readDate(c.date, "cheque.date") : date;
-    const held = chequeDate > businessDay(new Date());
-    cheque = { number: String(c.number || b.reference || "").trim().slice(0, 20), bank: String(c.bank || "").trim().slice(0, 80), date: chequeDate, status: held ? "held" : "deposited", ...(held ? {} : { depositedOn: date }) };
+    const postDated = chequeDate > businessDay(new Date());
+    const depositedOn = c.depositedOn ? readDate(c.depositedOn, "cheque.depositedOn") : null;
+    const deposited = !postDated && (kind === "payment" || c.deposited === true || !!depositedOn);
+    cheque = {
+      number: String(c.number || b.reference || "").trim().slice(0, 20), bank: String(c.bank || "").trim().slice(0, 80), date: chequeDate,
+      status: deposited ? "deposited" : "held", receivedOn: date, ...(deposited ? { depositedOn: depositedOn || date } : {}),
+    };
   }
 
   // The party.
