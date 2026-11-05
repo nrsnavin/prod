@@ -83,6 +83,8 @@ const { assertOpen } = require("../services/booksLock");
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 } });
 const scanUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 4 } });
+// A supplier's statement can run to six pages.
+const statementPagesUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 6 } });
 
 // ── Helpers ───────────────────────────────────────────────────────
 /** The seller's state, off Settings. */
@@ -1428,6 +1430,41 @@ router.post("/advice/read", keepRequestContext(scanUpload.array("files", 4)), ca
     latencyMs: read.latencyMs, usage: read.usage,
   });
   res.json({ success: true, read, placed, aiSuggestion: suggestionId });
+}));
+
+// ══════════════════════════════════════════════════════════════════
+//  AI: A SUPPLIER'S STATEMENT AGAINST OUR BOOKS
+// ══════════════════════════════════════════════════════════════════
+//  POST /supplier-recon  multipart "files" (PDF / photos / one Excel or
+//  CSV) + supplier → their entries read and set beside our ledger of
+//  them: what matches, what only they have, what only we have, and how
+//  much of the balance difference that explains. Nothing is saved.
+router.post("/supplier-recon", keepRequestContext(statementPagesUpload.array("files", 6)), catchAsyncErrors(async (req, res, next) => {
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (!isId(req.body?.supplier)) return next(new ErrorHandler("Choose the supplier", 400));
+  if (!files.length) return next(new ErrorHandler("Attach their statement — PDF, photo, Excel or CSV", 400));
+  let read;
+  const startedAt = Date.now();
+  try {
+    read = await require("../utils/partyStatementOcr").readStatement({ files: files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype, originalname: f.originalname })) });
+  } catch (err) {
+    if (err.code === "ANTHROPIC_KEY_MISSING") return next(new ErrorHandler("Reading statements is not configured on this server (no AI key).", 503));
+    if (err.code) return next(new ErrorHandler(err.message, 400));
+    await aiLedger.record({ surface: "supplier-statement", model: "?", promptVersion: promptVersion("supplier-statement"), latencyMs: Date.now() - startedAt, error: err.message });
+    return next(new ErrorHandler(`The statement could not be read: ${err.message}`, 502));
+  }
+  await aiLedger.record({
+    surface: "supplier-statement", model: read.model, promptVersion: promptVersion("supplier-statement"), refType: "supplier", refId: req.body.supplier,
+    proposed: { entries: read.entries.length, opening: read.opening, closing: read.closing, from: read.from, to: read.to },
+    latencyMs: read.latencyMs, usage: read.usage,
+  });
+  if (read.problem) return res.json({ success: true, read, recon: null });
+  try {
+    res.json({ success: true, read, recon: await require("../services/supplierRecon").reconcile(req.body.supplier, read) });
+  } catch (err) {
+    if (err.status) return next(new ErrorHandler(err.message, err.status));
+    throw err;
+  }
 }));
 
 // ══════════════════════════════════════════════════════════════════

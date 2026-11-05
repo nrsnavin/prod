@@ -150,6 +150,12 @@ const PROMPTS = Object.freeze({
     notes: 'Drafts a reply to the customer from the complaint, the trace and the root-cause figures; never promises credit or dates not given. Lives in services/complaintIntake.js.',
     system: null,
   },
+  'supplier-statement': {
+    version: 'v1.0',
+    notes: 'A supplier\'s statement of our account (PDF, photo, Excel or CSV) read into its entries as they booked them, with opening and closing balances. Matching to our ledger is services/supplierRecon.js. Lives in utils/partyStatementOcr.js.',
+    system: null,
+  },
+
   'payment-advice': {
     version: 'v1.0',
     notes: 'A customer\'s remittance advice (PDF, photo or pasted mail) read into the money, the reference and, per invoice, what it settles and what was deducted. Which invoices on file those are is services/adviceMatch.js. Lives in utils/adviceOcr.js.',
