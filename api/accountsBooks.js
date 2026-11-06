@@ -375,6 +375,40 @@ router.get("/opening-balances/template.xlsx", catchAsyncErrors(async (_req, res)
   res.end();
 }));
 
+// ── Set once, from the dashboard (services/openingOnboarding.js) ──
+const onboarding = require("../services/openingOnboarding");
+const whoName = (req) => req.user?.name || req.user?.username || "";
+
+router.get("/opening-onboarding", catchAsyncErrors(async (req, res) => {
+  const partyType = req.query.partyType === "customer" || req.query.partyType === "supplier" ? req.query.partyType : "";
+  res.json({ success: true, ...(await onboarding.status({ partyType, search: req.query.search, limit: req.query.limit, by: whoName(req) })) });
+}));
+
+router.put("/opening-onboarding", catchAsyncErrors(async (req, res, next) => {
+  let asOn;
+  try { asOn = readDate(req.body?.asOn, "asOn"); } catch (err) { return next(err); }
+  if (!asOn) return next(new ErrorHandler("asOn is required", 400));
+  if (asOn > new Date()) return next(new ErrorHandler("The balances are as on a day already past", 400));
+  await onboarding.setAsOn(asOn);
+  res.json({ success: true, asOn: asOn.toISOString().slice(0, 10) });
+}));
+
+/** Checked, and nothing was owed either way. */
+router.post("/opening-onboarding/none", catchAsyncErrors(async (req, res, next) => {
+  const partyType = req.body?.partyType === "supplier" ? "supplier" : req.body?.partyType === "customer" ? "customer" : null;
+  if (!partyType) return next(new ErrorHandler("partyType must be customer or supplier", 400));
+  if (!isId(req.body?.party)) return next(new ErrorHandler("party is required", 400));
+  const party = await (partyType === "customer" ? Customer : Supplier).findById(req.body.party).select("name").lean();
+  if (!party) return next(new ErrorHandler(`${partyType} not found`, 404));
+  await onboarding.markNone(partyType, party, req.user);
+  res.json({ success: true });
+}));
+
+/** An admin stops it, with parties still left. */
+router.post("/opening-onboarding/close", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, left: await onboarding.close(req.user) });
+}));
+
 // ══════════════════════════════════════════════════════════════════
 //  SETTINGS AND THE LOCK
 // ══════════════════════════════════════════════════════════════════

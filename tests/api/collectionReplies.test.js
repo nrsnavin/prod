@@ -139,6 +139,9 @@ describe('reminders on a schedule', () => {
     expect(note).toMatchObject({ channel: 'whatsapp', result: 'sent', byName: 'Scheduled reminder', tone: 'gentle' });
     // Once a day, however often asked.
     expect(await reminders.run({ now: new Date('2026-11-05T15:00:00+05:30') })).toMatchObject({ sent: 0, why: 'sent today already' });
+    // The route runs on the real clock: claim the real today first.
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.FACTORY_TZ || 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    await M.AccountsSettings.updateOne({ key: 'accounts' }, { $set: { 'collections.autoRemind.lastRunDate': today } });
     expect((await request(app).post('/api/v2/accounts/collections/auto-remind/run').set('Cookie', cookie())).body).toMatchObject({ why: 'sent today already' });
   });
 });

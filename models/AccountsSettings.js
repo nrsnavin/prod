@@ -136,6 +136,17 @@ const AccountsSettingsSchema = new mongoose.Schema(
       },
     },
 
+    // Setting every customer's and supplier's opening balance, from the
+    // dashboard, once (services/openingOnboarding.js). `asOn` is the day
+    // the balances are dated; done when none is left, or an admin stops it.
+    openingOnboarding: {
+      asOn:        { type: Date, default: null },
+      completedAt: { type: Date, default: null },
+      completedBy: { type: String, default: "" },
+      // Stopped by an admin with this many parties still not set.
+      leftWhenClosed: { type: Number, default: 0 },
+    },
+
     receivables: {
       // Interest charged on overdue invoices, % a year; 0 = none. Days past due before it runs.
       interestRate: { type: Number, default: 0, min: 0, max: 100 },
