@@ -63,24 +63,52 @@ function start({ title, branding = {}, company }) {
   text(title, R - 260, y, { bold: true, size: title.length > 14 ? 14 : 18, width: 260, align: 'right' });
   y = Math.max(ly, y + 56) + 8;
   hline(y, 0.9);
-  return { doc, done, text, hline, L, W, R, RS, y };
+  return { doc, done, text, hline, L, W, R, RS, F, FB, y };
 }
 
-/** Rows of a simple table, with a header band; returns the new y. */
-function table(ctx, y, cols, rows) {
+/**
+ * Rows of a simple table, with a header band; returns the new y.
+ *
+ * Each row is as tall as its tallest cell: a cell that has to wrap
+ * (a long name, a figure in crores) pushes the next row down instead
+ * of printing over it. A row that would cross the foot of the page
+ * starts a new one, under the header band again.
+ */
+function table(ctx, y, cols, rows, { size = 8.5, smallSize = 7.5 } = {}) {
   const { doc, text, L, W } = ctx;
   const xs = []; let x = L;
   for (const c of cols) { xs.push(x); x += c.w * W; }
-  doc.rect(L, y, W, 16).fillColor(BAND).fill();
-  cols.forEach((c, i) => text(c.h, xs[i] + 4, y + 4, { bold: true, size: 8, width: c.w * W - 8, align: c.align }));
-  y += 18;
+  const head = (at) => {
+    doc.rect(L, at, W, 16).fillColor(BAND).fill();
+    cols.forEach((c, i) => text(c.h, xs[i] + 4, at + 4, { bold: true, size: 8, width: c.w * W - 8, align: c.align }));
+    return at + 18;
+  };
+  const foot = () => doc.page.height - 56;
+  y = head(y);
   for (const r of rows) {
-    if (y > doc.page.height - 80) { doc.addPage(); y = 40; }
+    const fs = r.small ? smallSize : size;
+    const cell = (i) => String(r[i] ?? '');
+    // A row may let one cell run on over the empty cells after it.
+    const span = (i) => (r.spanFrom === i ? r.spanTo - i + 1 : 1);
+    const skip = (i) => r.spanFrom !== undefined && i > r.spanFrom && i <= r.spanTo;
+    const width = (i) => cols.slice(i, i + span(i)).reduce((t, c) => t + c.w * W, 0) - 8;
+    const h = Math.max(...cols.map((c, i) => (cell(i) && !skip(i)
+      ? doc.font(r.bold ? ctx.FB : ctx.F).fontSize(fs).heightOfString(cell(i), { width: width(i), align: c.align })
+      : 0)), fs * 1.2);
+    const step = h + (r.small ? 2 : 4);
+    if (y + step > foot()) { doc.addPage(); y = head(40); }
     if (r.rule) { doc.moveTo(L, y - 2).lineTo(L + W, y - 2).lineWidth(0.5).strokeColor(RULE).stroke(); }
-    cols.forEach((c, i) => text(r[i], xs[i] + 4, y, { size: r.small ? 7.5 : 8.5, width: c.w * W - 8, align: c.align, bold: r.bold, color: r.muted ? MUTED : INK }));
-    y += r.small ? 11 : 14;
+    cols.forEach((c, i) => { if (!skip(i)) text(cell(i), xs[i] + 4, y, { size: fs, width: width(i), align: c.align, bold: r.bold, color: r.muted ? MUTED : INK, lineBreak: true }); });
+    y += step;
   }
   return y;
+}
+
+/** Room for `need` points more on this page, else a fresh page; returns the y to draw at. */
+function room(ctx, y, need) {
+  if (y + need <= ctx.doc.page.height - 56) return y;
+  ctx.doc.addPage();
+  return 40;
 }
 
 function finish(ctx, footer) {
@@ -88,7 +116,12 @@ function finish(ctx, footer) {
   const range = doc.bufferedPageRange();
   for (let i = range.start; i < range.start + range.count; i++) {
     doc.switchToPage(i);
-    text(`${footer} · page ${i - range.start + 1} of ${range.count}`, L, doc.page.height - 42, { size: 7, color: MUTED, width: W, align: 'right' });
+    // The footer sits inside the bottom margin; drawn with the margin in
+    // force, pdfkit would carry it onto a fresh, otherwise blank page.
+    const bottom = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    text(`${footer} · page ${i - range.start + 1} of ${range.count}`, L, doc.page.height - 30, { size: 7, color: MUTED, width: W, align: 'right' });
+    doc.page.margins.bottom = bottom;
   }
   doc.end();
   return ctx.done;
@@ -169,9 +202,11 @@ async function buildStatementPdf({ statement, party = {}, partyType = 'customer'
   if (party.gstin) { text(`GSTIN ${party.gstin}`, L, y, { size: 8.5 }); y += 12; }
   if (party.address) { text(party.address, L, y, { size: 8.5, color: MUTED, width: W * 0.6, lineBreak: true }); y += 12; }
   y += 10;
+  // Sized at 8 pt so a date, a voucher number (RCT/2026-27/0001), a
+  // figure in lakhs and a balance with its Dr/Cr each sit on one line.
   const cols = [
-    { h: 'Date', w: 0.1 }, { h: 'Particulars', w: 0.34 }, { h: 'Vch Type', w: 0.1 }, { h: 'Vch No.', w: 0.14 },
-    { h: 'Debit', w: 0.11, align: 'right' }, { h: 'Credit', w: 0.11, align: 'right' }, { h: 'Balance', w: 0.1, align: 'right' },
+    { h: 'Date', w: 0.105 }, { h: 'Particulars', w: 0.24 }, { h: 'Vch Type', w: 0.11 }, { h: 'Vch No.', w: 0.165 },
+    { h: 'Debit', w: 0.12, align: 'right' }, { h: 'Credit', w: 0.12, align: 'right' }, { h: 'Balance', w: 0.14, align: 'right' },
   ];
   const fallbackSide = (b) => (Math.abs(b) < 0.005 ? '' : partyType === 'customer' ? (b > 0 ? 'Dr' : 'Cr') : (b > 0 ? 'Cr' : 'Dr'));
   const bal = (b, side) => `${money(Math.abs(b))} ${side ?? fallbackSide(b)}`.trim();
@@ -181,17 +216,20 @@ async function buildStatementPdf({ statement, party = {}, partyType = 'customer'
   const rows = [Object.assign(['', 'Opening Balance', '', '', ...inCol(s.opening, openSide), bal(s.opening, openSide)], { bold: true })];
   for (const r of s.rows) {
     const particulars = r.particulars ? `${r.toBy || (r.debit ? 'To' : 'By')} ${r.particulars}` : String(r.narration || '');
-    rows.push([dmy(r.date), particulars.slice(0, 56), r.vchType || '', r.docNo, r.debit ? money(r.debit) : '', r.credit ? money(r.credit) : '', bal(r.balance, r.balanceSide)]);
-    if (r.partyRef) rows.push(Object.assign(['', `   ${r.partyRef}`.slice(0, 60), '', '', '', '', ''], { small: true, muted: true }));
+    rows.push([dmy(r.date), particulars.slice(0, 90), r.vchType || '', r.docNo, r.debit ? money(r.debit) : '', r.credit ? money(r.credit) : '', bal(r.balance, r.balanceSide)]);
+    // The lines under a voucher run on over Vch Type and Vch No., which they leave empty.
+    const sub = (t) => Object.assign(['', `   ${t}`.slice(0, 110), '', '', '', '', ''], { small: true, muted: true, spanFrom: 1, spanTo: 3 });
+    if (r.partyRef) rows.push(sub(r.partyRef));
     if (detailed) {
-      for (const l of r.lines || []) rows.push(Object.assign(['', `   ${l.ledger}  ${money(l.amount)}`.slice(0, 60), '', '', '', '', ''], { small: true, muted: true }));
-      for (const b of r.refs || []) rows.push(Object.assign(['', `   ${b.type} ${b.name}  ${money(b.amount)}`.slice(0, 60), '', '', '', '', ''], { small: true, muted: true }));
+      for (const l of r.lines || []) rows.push(sub(`${l.ledger}  ${money(l.amount)}`));
+      for (const b of r.refs || []) rows.push(sub(`${b.type} ${b.name}  ${money(b.amount)}`));
     }
   }
   const totals = s.totals || { debit: s.rows.reduce((t, r) => t + (r.debit || 0), 0), credit: s.rows.reduce((t, r) => t + (r.credit || 0), 0) };
   rows.push(Object.assign(['', 'Current Total', '', '', money(totals.debit), money(totals.credit), ''], { bold: true, rule: true }));
   rows.push(Object.assign(['', 'Closing Balance', '', '', ...inCol(s.closing, closeSide), bal(s.closing, closeSide)], { bold: true }));
-  y = table(ctx, y, cols, rows) + 10;
+  y = table(ctx, y, cols, rows, { size: 8, smallSize: 7 }) + 10;
+  y = room(ctx, y, 60);
   const owes = s.closing > 0;
   const who = partyType === 'customer' ? (owes ? 'Due from you' : 'Held for you') : (owes ? 'Due to you' : 'Paid ahead to you');
   text(`${who}: ${RS} ${money(Math.abs(s.closing))}`, L, y, { bold: true, size: 11 });
