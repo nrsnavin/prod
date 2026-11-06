@@ -215,6 +215,12 @@ async function buildStatementPdf({ statement, party = {}, partyType = 'customer'
   const closeSide = s.closingSide ?? fallbackSide(s.closing);
   const rows = [Object.assign(['', 'Opening Balance', '', '', ...inCol(s.opening, openSide), bal(s.opening, openSide)], { bold: true })];
   for (const r of s.rows) {
+    // A bounced cheque: two lines to read, the cheque and its return, in grey and out of the figures.
+    if (r.memo) {
+      rows.push(Object.assign([dmy(r.date), String(r.particulars || '').slice(0, 90), r.vchType || '', r.docNo, '', '', bal(r.balance, r.balanceSide)], { muted: true }));
+      if (r.partyRef) rows.push(Object.assign(['', `   ${r.partyRef}`.slice(0, 110), '', '', '', '', ''], { small: true, muted: true, spanFrom: 1, spanTo: 3 }));
+      continue;
+    }
     const particulars = r.particulars ? `${r.toBy || (r.debit ? 'To' : 'By')} ${r.particulars}` : String(r.narration || '');
     rows.push([dmy(r.date), particulars.slice(0, 90), r.vchType || '', r.docNo, r.debit ? money(r.debit) : '', r.credit ? money(r.credit) : '', bal(r.balance, r.balanceSide)]);
     // The lines under a voucher run on over Vch Type and Vch No., which they leave empty.

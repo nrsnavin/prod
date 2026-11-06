@@ -208,7 +208,9 @@ router.get("/statement/xlsx", catchAsyncErrors(async (req, res, next) => {
   const open = side(Math.abs(st.opening), st.openingSide);
   ws.addRow(["", "Opening Balance", "", "", "", null, open[0], open[1], Math.abs(st.opening), st.openingSide]).font = { bold: true };
   for (const r of st.rows) {
-    ws.addRow([dd(r.date), `${r.toBy} ${r.particulars}`, r.vchType, r.docNo, r.partyRef || "", null, r.debit || null, r.credit || null, Math.abs(r.balance), r.balanceSide]);
+    // A bounced cheque's lines are to read: no Debit or Credit, in grey.
+    const line = ws.addRow([dd(r.date), r.memo ? r.particulars : `${r.toBy} ${r.particulars}`, r.vchType, r.docNo, r.partyRef || "", null, r.debit || null, r.credit || null, Math.abs(r.balance), r.balanceSide]);
+    if (r.memo) line.font = { italic: true, color: { argb: "FF777777" } };
     for (const l of r.lines || []) ws.addRow(["", `    ${l.ledger}`, "", "", "", l.amount, null, null, null, ""]);
     for (const b of r.refs || []) ws.addRow(["", `    ${b.type} ${b.name}`, "", "", "", b.amount, null, null, null, ""]);
   }

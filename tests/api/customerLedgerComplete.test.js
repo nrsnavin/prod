@@ -203,6 +203,23 @@ describe("a customer's ledger, every transaction", () => {
     expect(st.totals.debit - st.totals.credit).toBeCloseTo(8500, 2);
     // The running balance ends where the closing says.
     expect(st.rows[st.rows.length - 1].balance).toBe(8500);
+    // The bounced cheque is there to read, entered and returned, and counts for nothing.
+    const memo = st.rows.filter((r) => r.memo);
+    expect(memo.map((r) => [r.memo, r.docNo, r.vchType, r.debit, r.credit])).toEqual([
+      ['cheque-entered', S.chq.voucherNo, 'Receipt', 0, 0],
+      ['cheque-returned', S.chq.voucherNo, 'Bounced', 0, 0],
+    ]);
+    expect(memo[0]).toMatchObject({ particulars: 'Cheque 004512 (bounced)', partyRef: `Indian Bank · ₹${inr(S.chq.amount)} · not counted` });
+    expect(memo[1]).toMatchObject({ particulars: 'Cheque 004512 returned', partyRef: `₹${inr(S.chq.amount)} · Insufficient funds · bank charges ₹250.00` });
+    for (const m of memo) {
+      const at = st.rows.indexOf(m);
+      expect(m.balance).toBe(st.rows[at - 1].balance);   // the balance runs on unchanged
+    }
+    // The wrong entry, cancelled but not a bounced cheque, is not shown.
+    expect(st.rows.map((r) => r.docNo)).not.toContain(S.wrong.voucherNo);
+    // Totals are the posted rows alone.
+    const posted = st.rows.filter((r) => !r.memo);
+    expect(st.totals).toEqual({ debit: r2(posted.reduce((t, r) => t + r.debit, 0)), credit: r2(posted.reduce((t, r) => t + r.credit, 0)) });
     const h = await require('../../services/booksHealth').check();
     expect(h.checks.filter((c) => !c.ok).map((c) => `${c.key}: ${c.count}`)).toEqual([]);
   });
@@ -242,6 +259,9 @@ describe("a customer's ledger, every transaction", () => {
     expect(text).toContain('Sunrise Garments & Co.');
     expect(text).toContain(inr(8500));
     expect(text).toContain(inr(43500));
+    expect(text).toContain('Cheque 004512 returned');
+    expect(text).toContain('Insufficient funds · bank charges ₹250.00');
+    expect(text).toContain('Cheque 004512 (bounced)');
 
     const detailed = await file(`/accounts/statement/pdf?${q}&detailed=1`);
     expect(detailed.status).toBe(200);

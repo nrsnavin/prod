@@ -163,14 +163,62 @@ const ledgerNames = async () => ({ ...DEFAULT_LEDGERS, ...Object.fromEntries(Obj
  * The ledger account: partyLedger.statement() with each row described,
  * the period's totals, and the balances' sides.
  */
+// ── Cheques that bounced: shown, never counted ────────────────────
+//  A bounced cheque's voucher is cancelled and its row leaves the
+//  ledger, so the balance is as if it never came. The statement still
+//  says what happened, on the day each thing happened: the cheque as it
+//  was entered, and its return. Both are lines to read, with no Debit
+//  or Credit: the balance runs on past them unchanged.
+const inr = (n) => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+async function bouncedCheques(partyType, party, { from, to } = {}) {
+  const Payment = require('../models/Payment');
+  const list = await Payment.find({ partyType, [partyType]: party, mode: 'cheque', 'cheque.status': 'bounced' })
+    .select('kind voucherNo amount date accountName cheque cancel').lean();
+  const inRange = (d) => (!from || d >= from) && (!to || d <= to);
+  const out = [];
+  for (const p of list) {
+    const c = p.cheque || {};
+    const no = c.number ? `Cheque ${c.number}` : 'Cheque';
+    const returnedOn = c.bouncedOn || p.cancel?.at || p.date;
+    const base = { docType: 'Payment', doc: p._id, docNo: p.voucherNo, debit: 0, credit: 0, memoAmount: r2(p.amount) };
+    if (inRange(new Date(p.date))) {
+      out.push({ ...base, _id: `${p._id}:entered`, memo: 'cheque-entered', date: p.date, vchType: p.kind === 'receipt' ? 'Receipt' : 'Payment',
+        particulars: `${no} (bounced)`, partyRef: [c.bank, `₹${inr(p.amount)}`, 'not counted'].filter(Boolean).join(' · ') });
+    }
+    if (inRange(new Date(returnedOn))) {
+      out.push({ ...base, _id: `${p._id}:returned`, memo: 'cheque-returned', date: returnedOn, vchType: 'Bounced',
+        particulars: `${no} returned`,
+        partyRef: [`₹${inr(p.amount)}`, c.bounceReason, c.charges > 0 ? `bank charges ₹${inr(c.charges)}` : ''].filter(Boolean).join(' · ') });
+    }
+  }
+  return out.sort((a, b) => new Date(a.date) - new Date(b.date));
+}
+
+/** The memo lines placed by date among the posted rows, each carrying the balance as it stood. */
+function withBouncedCheques(posted, memos, opening, partyType) {
+  if (!memos.length) return posted;
+  const out = [];
+  let i = 0;
+  let balance = opening;
+  for (const r of posted) {
+    while (i < memos.length && new Date(memos[i].date) < new Date(r.date)) out.push({ ...memos[i++], balance, balanceSide: sideOf(partyType, balance) });
+    out.push(r);
+    balance = r.balance;
+  }
+  while (i < memos.length) out.push({ ...memos[i++], balance, balanceSide: sideOf(partyType, balance) });
+  return out;
+}
+
 async function ledgerAccount(partyType, party, { from, to } = {}) {
   const s = await partyLedger.statement(partyType, party, { from, to });
   const [ctx, L] = await Promise.all([load(s.rows), ledgerNames()]);
-  const rows = s.rows.map((r) => {
+  const posted = s.rows.map((r) => {
     const x = describe(r, partyType, ctx, L);
     const debitSide = r.debit > 0;
     return { ...r, ...x, toBy: debitSide ? 'To' : 'By', balanceSide: sideOf(partyType, r.balance) };
   });
+  const rows = withBouncedCheques(posted, await bouncedCheques(partyType, party, { from, to }), s.opening, partyType);
   const totals = { debit: r2(rows.reduce((t, r) => t + (r.debit || 0), 0)), credit: r2(rows.reduce((t, r) => t + (r.credit || 0), 0)) };
   return {
     opening: s.opening, openingSide: sideOf(partyType, s.opening),
