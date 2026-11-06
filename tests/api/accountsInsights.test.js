@@ -129,7 +129,9 @@ describe('the cash forecast', () => {
     // Eight payments: some at 30 days, some at 60 — a customer who varies.
     for (let i = 0; i < 8; i++) {
       const days = i % 2 ? 60 : 30;
-      const inv = await mkInv(`INV/S${n}/${String(100 + i)}`, Date.now() - (300 - i * 20) * DAY, 1000);
+      // On the day, as the receipts are: dated at this moment's time of
+      // day, a late run measured 30 days as 29.x and the test failed.
+      const inv = await mkInv(`INV/S${n}/${String(100 + i)}`, iso(Date.now() - (300 - i * 20) * DAY), 1000);
       await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: c._id, amount: 1000, mode: 'cash', account: cash._id, date: iso(Date.now() - (300 - i * 20 - days) * DAY), allocations: [{ docType: 'Invoice', doc: inv._id, amount: 1000 }] });
     }
     // Raised today: its ₹10,000 is spread between about a month and two out.
