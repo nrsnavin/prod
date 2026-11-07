@@ -331,6 +331,16 @@ const fmt = {
     return p?.body || null;
   },
 
+  // services/noticeReminders.js: a government notice's reply is due.
+  statutoryNotice(p) {
+    return p?.body || null;
+  },
+
+  // services/shiftHandover.js: what the next shift should know.
+  shiftHandover(p) {
+    return p?.body || null;
+  },
+
   test(p) {
     return p?.body || "✅ Test message from your factory notifications. If you can read this, WhatsApp alerts are working.";
   },
@@ -375,6 +385,8 @@ const EVENT_FLAG = {
   eveningReport:              "eveningReport",
   shiftEndNudge:              "shiftEndNudge",
   collectionReply:            "collectionReply",
+  statutoryNotice:            "statutoryNotice",
+  shiftHandover:              "shiftHandover",
   // `test` is always allowed (used to verify wiring) — no flag.
 };
 

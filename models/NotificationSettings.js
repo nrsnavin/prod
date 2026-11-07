@@ -51,6 +51,10 @@ const EVENT_DEFAULTS = {
   shiftEndNudge:             { tier: "realtime" },
   // A customer replied on WhatsApp about money they owe (services/collectionReply.js).
   collectionReply:           { tier: "realtime" },
+  // A government notice's reply deadline coming up (services/noticeReminders.js).
+  statutoryNotice:           { tier: "realtime" },
+  // The handover note at a shift's end (services/shiftHandover.js).
+  shiftHandover:             { tier: "realtime" },
 };
 
 function normalizeEventConfig(value, eventName) {
@@ -105,6 +109,8 @@ const NotificationSettingsSchema = new mongoose.Schema(
       eveningReport:          { type: mongoose.Schema.Types.Mixed, default: true },
       shiftEndNudge:          { type: mongoose.Schema.Types.Mixed, default: true },
       collectionReply:        { type: mongoose.Schema.Types.Mixed, default: true },
+      statutoryNotice:        { type: mongoose.Schema.Types.Mixed, default: true },
+      shiftHandover:          { type: mongoose.Schema.Types.Mixed, default: true },
       machineBreakdown:       { type: mongoose.Schema.Types.Mixed, default: true },
       shiftBelowThreshold:    { type: mongoose.Schema.Types.Mixed, default: true },
       wastageHighEvent:       { type: mongoose.Schema.Types.Mixed, default: true },

@@ -80,6 +80,7 @@ function startServer() {
 
   // Payment reminders on WhatsApp at the set hour (off until an admin turns it on).
   require("./services/collectionReminders").start();
+  require("./services/noticeReminders").start();
 
   // create server
   //

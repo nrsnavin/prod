@@ -1829,6 +1829,7 @@ router.get("/collections/:customer/history", catchAsyncErrors(async (req, res, n
 // Contras, opening balances, settings and the lock.
 router.use(require("./accountsBooks"));
 router.use(require("./accountsBanking"));
+router.use(require("./accountsNotices"));
 
 module.exports = router;
 module.exports.createVoucher = createVoucher;
