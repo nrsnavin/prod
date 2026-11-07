@@ -540,6 +540,62 @@ router.post(
 
 
 // ─────────────────────────────────────────────────────────────────────────
+// POST /inward/read?poId=   multipart "files": the supplier's challan or
+// invoice, and/or the cone / bag labels of what came. Read into lines and
+// matched to this PO's materials (a count that differs is never matched).
+// Nothing is received: the inward form is filled for a person to check.
+// ─────────────────────────────────────────────────────────────────────────
+const inwardUpload = require("multer")({ storage: require("multer").memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 6 } });
+router.post(
+  "/inward/read",
+  require("../middleware/userContext").keepRequestContext(inwardUpload.array("files", 6)),
+  catchAsyncErrors(async (req, res, next) => {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return next(new ErrorHandler("Photograph the supplier's challan, invoice or the cone labels", 400));
+    const aiLedger = require("../services/aiLedger");
+    const { promptVersion } = require("../utils/aiPrompts");
+    const { failure } = require("../utils/docRead");
+    let read;
+    try {
+      read = await require("../utils/inwardOcr").readInward(files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype })));
+    } catch (err) {
+      const f = failure(err, "challan");
+      if (f.status === 502) await aiLedger.record({ surface: "inward-dc-ocr", model: "?", promptVersion: promptVersion("inward-dc-ocr"), error: err.message });
+      return next(new ErrorHandler(f.message, f.status));
+    }
+    if (read.problem) return res.json({ success: true, read, rows: [], aiSuggestion: null });
+    const { model, usage, latencyMs, ...fields } = read;
+    // The PO: the one this form is on, else the number the document quotes.
+    let po = null;
+    if (mongoose.isValidObjectId(String(req.query.poId || ""))) po = await PurchaseOrder.findById(req.query.poId).populate("items.rawMaterial", "name").lean();
+    if (!po && fields.poNumber) {
+      const n = Number(String(fields.poNumber).replace(/\D/g, ""));
+      if (n) po = await PurchaseOrder.findOne({ poNo: n }).populate("items.rawMaterial", "name").lean();
+    }
+    const { rank } = require("../utils/fuzzyMatch");
+    const choices = (po?.items || []).filter((it) => it.rawMaterial).map((it) => ({ id: String(it.rawMaterial._id || it.rawMaterial), label: it.rawMaterial.name || "" }));
+    // Lines matched to the PO's materials; several lines of one material (two lots) kept apart.
+    const rows = fields.lines.map((l) => {
+      const m = choices.length ? rank(l.description, choices) : { confident: false, best: null, candidates: [] };
+      const item = m.confident ? po.items.find((it) => String(it.rawMaterial._id || it.rawMaterial) === m.best.id) : null;
+      return {
+        ...l,
+        rawMaterial: m.confident ? m.best.id : null,
+        materialName: m.confident ? m.best.label : null,
+        pending: item ? Math.max(0, (item.quantity || 0) - (item.receivedQuantity || 0)) : null,
+        candidates: (m.candidates || []).slice(0, 4).map((c) => ({ id: c.id, name: c.label, score: c.score })),
+      };
+    });
+    const aiSuggestion = await aiLedger.record({
+      surface: "inward-dc-ocr", model, promptVersion: promptVersion("inward-dc-ocr"), refType: "PurchaseOrder", refId: po?._id,
+      proposed: { dcNo: fields.dcNo, poNumber: fields.poNumber, lines: rows.map((r) => ({ material: r.materialName, quantity: r.quantity, lotNo: r.lotNo, shade: r.shade })) },
+      latencyMs, usage,
+    });
+    res.json({ success: true, read: fields, po: po ? { _id: po._id, poNo: po.poNo } : null, rows, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────────────────
 // POST /inward-stock
 // Body: { poId, items: [{ rawMaterial, quantity, inwardDate?, remarks?,
 //                         lotNo?, shade? }] }
