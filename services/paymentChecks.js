@@ -75,7 +75,7 @@ async function paymentFlags(b, user = null) {
     if (!s) return flags;
     // Danger: the bank account changed lately, or is someone else's too.
     if (s.bank?.changedAt && now - new Date(s.bank.changedAt) < BANK_CHANGE_DAYS * DAY) {
-      flags.push({ code: 'BANK_CHANGED', severity: 'danger', message: `${s.name}'s bank account was changed on ${dmy(s.bank.changedAt)}${s.bank.changedByName ? ` by ${s.bank.changedByName}` : ''} (was ${last4(s.bank.previousAccountNo)}, now ${last4(s.bank.accountNo)}) — call them on the number on file, not one from a mail, before paying` });
+      flags.push({ code: 'BANK_CHANGED', severity: 'danger', message: `${s.name}'s bank account was changed on ${dmy(s.bank.changedAt)}${s.bank.changedByName ? ` by ${s.bank.changedByName}` : ''} (was ${last4(s.bank.previousAccountNo)}, now ${last4(s.bank.accountNo)})${s.bank.source === 'cheque' ? (s.bank.holderMatches === false ? ' — read from a cheque whose holder is NOT their name' : ' — read from their cancelled cheque') : ''} — call them on the number on file, not one from a mail, before paying` });
     }
     if (s.bank?.accountNo) {
       const twin = await Supplier.findOne({ _id: { $ne: s._id }, 'bank.accountNo': s.bank.accountNo, isActive: { $ne: false } }).select('name').lean();

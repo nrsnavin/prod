@@ -1041,8 +1041,44 @@ function readBank(b) {
   const ifsc = String(b?.ifsc || "").trim().toUpperCase();
   if (accountNo && !/^\d{6,18}$/.test(accountNo)) throw new Error("The bank account number is 6 to 18 digits");
   if (ifsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) throw new Error("The IFSC is 11 characters, like HDFC0001234");
-  return { accountNo, ifsc, holder: String(b?.holder || "").trim().slice(0, 120) };
+  const source = b?.source === "cheque" ? "cheque" : "typed";
+  return { accountNo, ifsc, holder: String(b?.holder || "").trim().slice(0, 120), source, holderMatches: source === "cheque" && typeof b?.holderMatches === "boolean" ? b.holderMatches : null };
 }
+
+// ── A cancelled cheque (or passbook page, bank letter) read into bank details ──
+//  POST /read-cheque?name=  multipart "files" → account no., IFSC, bank,
+//  branch, holder — and whether the holder is this supplier's name. Nothing
+//  is saved: the supplier form is.
+const chequeUpload = require("multer")({ storage: require("multer").memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 2 } });
+router.post(
+  "/read-cheque",
+  require("../middleware/userContext").keepRequestContext(chequeUpload.array("files", 2)),
+  catchAsyncErrors(async (req, res, next) => {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return next(new ErrorHandler("Photograph the cancelled cheque", 400));
+    const aiLedger = require("../services/aiLedger");
+    const { promptVersion } = require("../utils/aiPrompts");
+    const { failure } = require("../utils/docRead");
+    const kyc = require("../utils/kycOcr");
+    let read;
+    try { read = await kyc.readCheque(files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype }))); } catch (err) {
+      const f = failure(err, "cheque");
+      if (f.status === 502) await aiLedger.record({ surface: "cheque-ocr", model: "?", promptVersion: promptVersion("cheque-ocr"), error: err.message });
+      return next(new ErrorHandler(f.message, f.status));
+    }
+    if (read.problem) return res.json({ success: true, read, holderMatches: null, aiSuggestion: null });
+    const { model, usage, latencyMs, ...fields } = read;
+    const name = String(req.query.name || "").trim();
+    const holderMatches = name && fields.holder ? kyc.sameName(fields.holder, name) : null;
+    const aiSuggestion = await aiLedger.record({
+      surface: "cheque-ocr", model, promptVersion: promptVersion("cheque-ocr"), refType: "Supplier",
+      // The account's last four only: the ledger is not where bank numbers live.
+      proposed: { accountLast4: fields.accountNo.slice(-4), ifsc: fields.ifsc, holder: fields.holder, holderMatches },
+      latencyMs, usage,
+    });
+    res.json({ success: true, read: fields, holderMatches, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
+  })
+);
 
 router.put(
   "/edit-supplier",
@@ -1062,6 +1098,8 @@ router.put(
         update["bank.accountNo"] = bank.accountNo;
         update["bank.ifsc"] = bank.ifsc;
         update["bank.holder"] = bank.holder;
+        update["bank.source"] = bank.source;
+        update["bank.holderMatches"] = bank.holderMatches;
         if (changed && before.accountNo) {
           update["bank.changedAt"] = new Date();
           update["bank.changedByName"] = req.user?.name || "";

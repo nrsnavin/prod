@@ -71,6 +71,39 @@ function clockToMinutes(timeStr) {
 // and accounts still read and correct employee records below, but a new
 // person on the payroll — and so a new login the admin may hand them —
 // starts with an admin.
+// ── An Aadhaar or PAN card read into the new-employee form ──
+//  POST /read-id  multipart "files" → name, date of birth, gender, PAN and
+//  the Aadhaar number (to the form being filled only, checked by its
+//  Verhoeff digit; the accuracy record keeps its last four). Nothing saved.
+const idUpload = require("multer")({ storage: require("multer").memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 2 } });
+router.post(
+  "/read-id",
+  isAdmin("admin"),
+  require("../middleware/userContext").keepRequestContext(idUpload.array("files", 2)),
+  catchAsyncErrors(async (req, res, next) => {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return next(new ErrorHandler("Photograph the Aadhaar or PAN card", 400));
+    const aiLedger = require("../services/aiLedger");
+    const { promptVersion } = require("../utils/aiPrompts");
+    const { failure } = require("../utils/docRead");
+    let read;
+    try { read = await require("../utils/kycOcr").readIdCard(files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype }))); } catch (err) {
+      const f = failure(err, "ID card");
+      if (f.status === 502) await aiLedger.record({ surface: "id-card-ocr", model: "?", promptVersion: promptVersion("id-card-ocr"), error: err.message });
+      return next(new ErrorHandler(f.message, f.status));
+    }
+    if (read.problem) return res.json({ success: true, read, aiSuggestion: null });
+    const { model, usage, latencyMs, ...fields } = read;
+    const aiSuggestion = await aiLedger.record({
+      surface: "id-card-ocr", model, promptVersion: promptVersion("id-card-ocr"), refType: "Employee",
+      proposed: { kind: fields.kind, name: fields.name, dob: fields.dob, gender: fields.gender, panLast4: fields.pan.slice(-4), aadhaarLast4: fields.aadhaarLast4, aadhaarValid: fields.aadhaarValid },
+      latencyMs, usage,
+    });
+    res.set("Cache-Control", "no-store");
+    res.json({ success: true, read: fields, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
+  })
+);
+
 router.post(
   "/create-employee",
   isAdmin("admin"),

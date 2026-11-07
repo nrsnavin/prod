@@ -74,6 +74,10 @@ const supplierSchema = new mongoose.Schema(
       changedAt:         { type: Date, default: null },
       changedByName:     { type: String, default: "" },
       previousAccountNo: { type: String, default: "" },
+      // "cheque" when read from their cancelled cheque (utils/kycOcr.js),
+      // with whether the holder printed on it is this supplier's name.
+      source:            { type: String, enum: ["", "typed", "cheque"], default: "" },
+      holderMatches:     { type: Boolean, default: null },
     },
 
     // MSME (Udyam) registration. A bill to a micro or small enterprise
