@@ -80,6 +80,8 @@ router.post(
   "/read-id",
   isAdmin("admin"),
   require("../middleware/userContext").keepRequestContext(idUpload.array("files", 2)),
+  // Photos only: no text fields are taken from the body.
+  validate({ body: z.object({}).strict() }),
   catchAsyncErrors(async (req, res, next) => {
     const files = Array.isArray(req.files) ? req.files : [];
     if (!files.length) return next(new ErrorHandler("Photograph the Aadhaar or PAN card", 400));
