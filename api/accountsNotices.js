@@ -10,6 +10,7 @@
 //                                          closed
 //    POST  /accounts/notices/:id/attachments        the notice itself
 //    GET   /accounts/notices/:id/attachments/:aid
+//    GET   /accounts/month-review?month=     the month in plain words
 //
 //  A notice's deadline is the most expensive date to miss in the books:
 //  services/noticeReminders.js sends the reminders.
@@ -180,6 +181,26 @@ router.get(
     res.setHeader("Content-Type", f.contentType);
     res.setHeader("Content-Disposition", `inline; filename="${String(f.filename || "notice").replace(/[^\w.-]+/g, "_")}"`);
     res.send(f.buffer);
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  GET /accounts/month-review?month=YYYY-MM   (services/monthCommentary.js)
+//    The month's figures against the one before, and what changed in
+//    plain words. Defaults to last month.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/month-review",
+  isAdmin("admin", "accounts"),
+  catchAsyncErrors(async (req, res, next) => {
+    let month = String(req.query.month || "");
+    if (!month) {
+      const d = new Date(Date.now() + 5.5 * 3600_000);
+      d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - 1);
+      month = d.toISOString().slice(0, 7);
+    }
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return next(new ErrorHandler("month must be YYYY-MM", 400));
+    res.json({ success: true, ...(await require("../services/monthCommentary").review(month)) });
   })
 );
 
