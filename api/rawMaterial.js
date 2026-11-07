@@ -14,6 +14,7 @@ const MaterialGroup     = require("../models/MaterialGroup");
 const PurchaseOrder     = require("../models/PurchaseOrder");
 const MaterialInward    = require("../models/MaterialInward");
 const MaterialOutward   = require("../models/MaterialOut.cjs");
+const JobOrderForIssue  = require("../models/JobOrder");
 const Supplier          = require("../models/Supplier");
 const Order             = require("../models/Order");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
@@ -1063,15 +1064,22 @@ router.post(
                 lotRef   = lot._id;
                 lotLabel = lot.lotNo;
               }
+              // Issued to a named job (the stores' spoken or typed line):
+              // the job's own consumption, so its P&L carries the yarn.
+              const jobRef = mongoose.Types.ObjectId.isValid(String(item.job || ""))
+                ? await JobOrderForIssue.findById(item.job).select("jobOrderNo order").session(session).lean() : null;
+              if (item.job && !jobRef) throw new Error("That job is not there");
               await MaterialOutward.create([{
                 rawMaterial: material._id,
                 quantity:    Math.abs(applied),
-                type:        "STOCK_ADJUST",
+                type:        jobRef ? "JOB_CONSUMPTION" : "STOCK_ADJUST",
+                job:         jobRef?._id,
+                order:       jobRef?.order,
                 outwardDate: new Date(),
                 // The weighted average, not the latest purchase price —
                 // this row is what the order P&L costs the yarn at.
                 unitPrice:   costOf(material),
-                remarks:     `Stock adjustment: ${reason}`,
+                remarks:     jobRef ? `Issued to J-${jobRef.jobOrderNo}: ${reason}` : `Stock adjustment: ${reason}`,
                 yarnLot:     lotRef || undefined,
                 lotNo:       lotLabel,
               }], { session });
@@ -1111,6 +1119,15 @@ router.post(
       }
     } finally {
       await session.endSession();
+    }
+
+    // Moved from a spoken or typed line: what went through scores the reading.
+    if (mongoose.Types.ObjectId.isValid(String(req.body?.aiSuggestion || "")) && updated.length === 1) {
+      const u = updated[0]; const it = toProcess.find((a) => String(a._id) === String(u.id));
+      await require("../services/aiLedger").settle(req.body.aiSuggestion, {
+        accepted: { action: it?.action || (u.adjustment < 0 ? "issue" : "receive"), quantity: Math.abs(u.adjustment), material: String(u.id), job: it?.job ? String(it.job) : null },
+        decidedBy: req.user?._id, expectSurface: "stores-voice", ignoreMissing: true,
+      }).catch(() => {});
     }
 
     res.status(200).json({
@@ -2109,6 +2126,29 @@ router.post(
       if (id) await aiLedgerForMerge.settle(id, { accepted: { name: result.kept.name }, decidedBy: req.user?._id, expectSurface: "material-dedupe", ignoreMissing: true }).catch(() => {});
     }
     res.json({ success: true, ...result });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════
+//  POST /command { text }   (services/storesCommand.js)
+//    A storekeeper's spoken or typed line — "issue 20 kg 40s black to
+//    job 512" — read into a draft movement. Nothing moves: the screen
+//    confirms it through /bulk-adjust-stock, with the job attached.
+// ══════════════════════════════════════════════════════════════
+router.post(
+  "/command",
+  catchAsyncErrors(async (req, res, next) => {
+    const text = String(req.body?.text || "").trim();
+    if (!text) return next(new ErrorHandler("Say or type what moved", 400));
+    if (text.length > 300) return next(new ErrorHandler("Keep it to one line", 400));
+    const out = await require("../services/storesCommand").read(text);
+    const ledger = require("../services/aiLedger");
+    const aiSuggestion = await ledger.record({
+      surface: "stores-voice", model: out.by === "model" ? TEXT_MODEL : "rules", promptVersion: require("../utils/aiPrompts").promptVersion("stores-voice"),
+      proposed: { action: out.draft.action, quantity: out.draft.quantity, material: out.draft.material?._id || null, job: out.draft.job?._id || null },
+      usage: out.usage || undefined,
+    });
+    res.json({ success: true, draft: out.draft, problems: out.problems, by: out.by, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
   })
 );
 

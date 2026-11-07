@@ -101,6 +101,13 @@ const AI_SURFACES = Object.freeze([
   'quote-enquiry',
   'shift-handover',
   'month-commentary',
+  // A storekeeper's spoken or typed line ("issue 20 kg 40s black to job
+  // 512") read into a stock movement; a journal's narration suggested;
+  // a bill photo fingerprinted against those already entered; cones
+  // counted in a photo for the stock take.
+  'stores-voice',
+  'journal-narration',
+  'cone-count',
   // The beam weights written by hand on a printed covering programme,
   // read from a photo; each row is checked on screen before it is saved.
   'covering-beam-ocr',

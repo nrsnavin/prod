@@ -216,6 +216,24 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'stores-voice': {
+    version: 'v1.0',
+    notes: 'A storekeeper\'s spoken or typed line read into issue / receive / return, quantity, material, job and lot. Rules first, the model only when they cannot; the material is matched by code (numbers never conflict). Lives in services/storesCommand.js.',
+    system: null,
+  },
+
+  'journal-narration': {
+    version: 'v1.0',
+    notes: 'A one-line narration for a journal, from the narrations already used for the same ledgers, else written by the model from the lines. Lives in services/journalNarration.js.',
+    system: null,
+  },
+
+  'cone-count': {
+    version: 'v1.0',
+    notes: 'Cones counted in a photo of a rack, pallet or bag for the stock take: rows × columns where it can, with how sure. Experimental; the count is confirmed by a person. Lives in utils/coneCount.js.',
+    system: null,
+  },
+
   'cheque-ocr': {
     version: 'v1.0',
     notes: 'A cancelled cheque, passbook page or bank letter read into account number, IFSC, bank, branch and holder; the holder compared with the party\'s name. Lives in utils/kycOcr.js.',
