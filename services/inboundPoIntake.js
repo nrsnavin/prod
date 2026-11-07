@@ -29,7 +29,7 @@
 const Customer = require('../models/Customer');
 const Elastic  = require('../models/Elastic');
 
-const { extractPurchaseOrder, phoneKey } = require('../utils/inboundPoOcr');
+const { extractPurchaseOrder, extractPurchaseOrderText, phoneKey } = require('../utils/inboundPoOcr');
 const { rank } = require('../utils/fuzzyMatch');
 const { promptVersion } = require('../utils/aiPrompts');
 const ledger = require('./aiLedger');
@@ -60,13 +60,21 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
     throw err;
   }
 
+  return fromExtracted(extracted, startedAt, { surface: 'inbound-po-ocr' });
+}
+
+/**
+ * What was read, matched against the masters into a draft — the same
+ * for a document and for a typed message. Creates nothing.
+ */
+async function fromExtracted(extracted, startedAt, { surface = 'inbound-po-ocr', refType, refId } = {}) {
   if (!extracted.available) return { available: false };
 
   if (!extracted.ok) {
     await ledger.record({
-      surface: 'inbound-po-ocr',
+      surface,
       model: extracted.model,
-      promptVersion: promptVersion('inbound-po-ocr'),
+      promptVersion: promptVersion(surface),
       latencyMs: Date.now() - startedAt,
       usage: extracted.usage,
       error: 'reply could not be parsed as JSON',
@@ -151,9 +159,9 @@ async function draftFromDocument(buffer, mimetype, { userId } = {}) {
   const unmatched = lines.filter((l) => !l.match.confident).length;
 
   const suggestionId = await ledger.record({
-    surface: 'inbound-po-ocr',
+    surface,
     model: extracted.model,
-    promptVersion: promptVersion('inbound-po-ocr'),
+    promptVersion: promptVersion(surface),
     proposed: {
       customerName: draft.customerName,
       customerMobile: draft.customerMobile,
@@ -235,4 +243,26 @@ async function settleDraft(aiSuggestionId, opts) {
   });
 }
 
-module.exports = { draftFromDocument, settleDraft };
+/**
+ * An order typed into a WhatsApp message, drafted like a document. The
+ * sender is a customer on file (by their number), so the customer is
+ * theirs whatever the text says.
+ */
+async function draftFromText(text, { customer } = {}) {
+  const startedAt = Date.now();
+  let extracted;
+  try {
+    extracted = await extractPurchaseOrderText(text);
+  } catch (err) {
+    await ledger.record({ surface: 'whatsapp-order', model: 'unknown', promptVersion: promptVersion('whatsapp-order'), latencyMs: Date.now() - startedAt, error: err.message });
+    throw err;
+  }
+  const out = await fromExtracted(extracted, startedAt, { surface: 'whatsapp-order' });
+  if (out?.ok && customer) {
+    out.draft.customer = { customerId: String(customer._id), customerName: customer.name, candidates: [{ id: String(customer._id), name: customer.name, score: 1 }], confident: true, matchedBy: 'phone' };
+    out.summary.customerMatched = true;
+  }
+  return out;
+}
+
+module.exports = { draftFromDocument, draftFromText, settleDraft };

@@ -77,6 +77,10 @@ const AI_SURFACES = Object.freeze([
   // A customer's WhatsApp reply about money owed, read into promise /
   // paid / dispute (services/collectionReply.js).
   'collection-reply',
+  // A customer's WhatsApp message sorted (order status, statement, invoice,
+  // a typed order, money, other); a typed order drafted like a PO.
+  'customer-assistant',
+  'whatsapp-order',
   // The beam weights written by hand on a printed covering programme,
   // read from a photo; each row is checked on screen before it is saved.
   'covering-beam-ocr',

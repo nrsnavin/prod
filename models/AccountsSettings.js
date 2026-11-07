@@ -124,6 +124,10 @@ const AccountsSettingsSchema = new mongoose.Schema(
     collections: {
       // Send a short acknowledgement to a customer who replies on WhatsApp.
       acknowledgeReplies: { type: Boolean, default: false },
+      // Answer customers' WhatsApp messages from the records: where an
+      // order is, their statement, an invoice; a typed order drafted for
+      // the office. Off: their messages are read as payment replies only.
+      assistant: { type: Boolean, default: false },
       // Payment reminders sent on WhatsApp each day at `hour` (factory time)
       // to customers past due — not one with a live promise, nor one
       // reminded in the last `everyDays` (services/collectionReminders.js).

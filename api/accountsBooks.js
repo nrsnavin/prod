@@ -451,6 +451,8 @@ router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
   if (b.collections) {
     const c = b.collections;
     if (c.acknowledgeReplies !== undefined) set["collections.acknowledgeReplies"] = !!c.acknowledgeReplies;
+    // Answer customers on WhatsApp (services/customerAssistant.js).
+    if (c.assistant !== undefined) set["collections.assistant"] = !!c.assistant;
     const a = c.autoRemind || {};
     if (a.enabled !== undefined) set["collections.autoRemind.enabled"] = !!a.enabled;
     for (const [k, lo, hi] of [["hour", 0, 23], ["everyDays", 1, 60], ["minOverdueDays", 0, 365]]) {

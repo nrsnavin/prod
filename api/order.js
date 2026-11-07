@@ -235,6 +235,33 @@ async function _refundRawMaterialsForOrder(session, order, actor, userObjectId) 
 
 
 // ════════════════════════════════════════════════════════════════
+//  WHATSAPP ORDERS — typed by a customer, drafted, waiting for the office
+//  (services/customerAssistant.js). Opened as an order (the form filled
+//  from the draft, saved by a person) or dismissed; never ordered alone.
+// ════════════════════════════════════════════════════════════════
+router.get("/requests", catchAsyncErrors(async (req, res) => {
+  const OrderRequest = require("../models/OrderRequest");
+  const status = ["new", "converted", "dismissed"].includes(req.query.status) ? req.query.status : "new";
+  const requests = await OrderRequest.find({ status }).sort({ createdAt: -1 }).limit(50).lean();
+  res.json({ success: true, requests, count: await OrderRequest.countDocuments({ status: "new" }) });
+}));
+
+router.post("/requests/:id/:action(converted|dismissed)", catchAsyncErrors(async (req, res, next) => {
+  const OrderRequest = require("../models/OrderRequest");
+  if (!mongoose.isValidObjectId(req.params.id)) return next(new ErrorHandler("Request not found", 404));
+  const set = { status: req.params.action, decidedBy: req.user?._id, decidedAt: new Date(), note: String(req.body?.note || "").trim().slice(0, 200) };
+  if (req.params.action === "converted") {
+    if (!mongoose.isValidObjectId(req.body?.order)) return next(new ErrorHandler("order is required", 400));
+    const o = await Order.findById(req.body.order).select("orderNo").lean();
+    if (!o) return next(new ErrorHandler("Order not found", 404));
+    Object.assign(set, { order: o._id, orderNo: o.orderNo });
+  }
+  const r = await OrderRequest.findOneAndUpdate({ _id: req.params.id, status: "new" }, { $set: set }, { new: true }).lean();
+  if (!r) return next(new ErrorHandler("That request was already dealt with", 409));
+  res.json({ success: true, request: r });
+}));
+
+// ════════════════════════════════════════════════════════════════
 //  LIST ORDERS  (by status)
 // ════════════════════════════════════════════════════════════════
 router.get(

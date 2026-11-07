@@ -156,6 +156,18 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'customer-assistant': {
+    version: 'v1.0',
+    notes: 'A customer\'s WhatsApp message (English, Tamil or Tanglish) sorted into order_status, statement, invoice_copy, new_order, money or other, with any order or invoice number named. Keywords first; the model only refines. Answers come from the records, never from the model. Lives in services/customerAssistant.js.',
+    system: null,
+  },
+
+  'whatsapp-order': {
+    version: 'v1.0',
+    notes: 'An order typed into a WhatsApp message, read with the inbound PO schema and matched to elastics like a document; the customer is the sender. Drafted into an order request for the office to open as an order. Lives in utils/inboundPoOcr.js (extractPurchaseOrderText) and services/inboundPoIntake.js (draftFromText).',
+    system: null,
+  },
+
   'supplier-statement': {
     version: 'v1.0',
     notes: 'A supplier\'s statement of our account (PDF, photo, Excel or CSV) read into its entries as they booked them, with opening and closing balances. Matching to our ledger is services/supplierRecon.js. Lives in utils/partyStatementOcr.js.',

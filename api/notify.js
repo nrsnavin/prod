@@ -334,6 +334,13 @@ async function handleIncoming(req) {
     const collectionReply = require("../services/collectionReply.js");
     const customer = await collectionReply.customerForPhone(senderE164);
     if (customer) {
+      // Answering customers (orders, statement, invoices, typed orders) when
+      // turned on; else, as before, read as a reply about money owed.
+      const acc = await require("../services/booksLock").getSettings().catch(() => null);
+      if (acc?.collections?.assistant) {
+        const a = await require("../services/customerAssistant.js").handle({ from: senderE164, text: String(body).slice(0, 2000), customer });
+        return { status: 200, body: a.reply ? twimlReply(a.reply) : `<?xml version="1.0" encoding="UTF-8"?><Response></Response>` };
+      }
       const r = await collectionReply.handle({ from: senderE164, text: String(body).slice(0, 2000), customer });
       return { status: 200, body: r.ack ? twimlReply(r.ack) : `<?xml version="1.0" encoding="UTF-8"?><Response></Response>` };
     }

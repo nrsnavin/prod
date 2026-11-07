@@ -19,7 +19,7 @@
 //  and a wrong one gets confirmed.
 // ══════════════════════════════════════════════════════════════════
 
-const { anthropic, VISION_MODEL } = require('./anthropicClient');
+const { anthropic, VISION_MODEL, TEXT_MODEL } = require('./anthropicClient');
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const PDF_TYPE = 'application/pdf';
@@ -235,6 +235,26 @@ async function extractPurchaseOrder(buffer, mimetype) {
 }
 
 /**
+ * An order typed into a WhatsApp message rather than sent as a document:
+ * "2000 m 25mm black, 1500 m 40mm white by Friday, PO 778". Read with
+ * the same schema as a document, so it is matched and checked the same.
+ * The sender is already known from their number; it is not asked for.
+ */
+async function extractPurchaseOrderText(text) {
+  const claude = anthropic();
+  if (!claude) return { available: false };
+  const message = await claude.messages.create({
+    model: TEXT_MODEL,
+    max_tokens: 4096,
+    output_config: { format: { type: 'json_schema', schema: OUTPUT_SCHEMA } },
+    messages: [{ role: 'user', content: [{ type: 'text', text: `${PROMPT}\n\nThis order came as a WhatsApp message, typed as below (English, Tamil or Tanglish). There is no document: read the lines, quantities, units, any PO number and the date wanted from the text alone. Today is ${new Date().toISOString().slice(0, 10)}.\n\nMessage:\n\"\"\"\n${String(text).slice(0, 3000)}\n\"\"\"` }] }],
+  });
+  const parsed = message.stop_reason === 'refusal' ? null : parseJsonReply(textOf(message));
+  if (!parsed) return { available: true, ok: false, model: TEXT_MODEL, usage: message.usage };
+  return { available: true, ok: true, model: TEXT_MODEL, usage: message.usage, draft: normaliseDraft({ ...parsed, sourceType: 'whatsapp_chat' }) };
+}
+
+/**
  * A phone number as written, or null when it is not one: 10 to 13 digits
  * once spaces, dashes, brackets and a leading + are set aside.
  */
@@ -374,6 +394,6 @@ function normaliseDraft(raw) {
 }
 
 module.exports = {
-  extractPurchaseOrder, parseJsonReply, normaliseDraft, phoneIn, phoneKey, isMobile,
+  extractPurchaseOrder, extractPurchaseOrderText, parseJsonReply, normaliseDraft, phoneIn, phoneKey, isMobile,
   OUTPUT_SCHEMA, SOURCE_TYPES, IMAGE_TYPES, PDF_TYPE,
 };
