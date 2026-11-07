@@ -168,6 +168,30 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'elastic-spec-ocr': {
+    version: 'v1.0',
+    notes: 'A technical sheet, a customer\'s drawing or a photo of a sample with its label read into the elastic form: width, weave, colour, ends, pick, hooks, weight and each yarn as written, matched to materials of its kind (a differing count never matched). Lives in utils/elasticSpecOcr.js; route POST /elastic/read-spec.',
+    system: null,
+  },
+
+  'inward-dc-ocr': {
+    version: 'v1.0',
+    notes: 'A supplier\'s delivery challan or invoice photo read into goods received (material, quantity, unit, rate, their DC and PO numbers) and cone or bag labels into lots (lot, count, shade, weight), matched to the open PO lines. Lives in utils/inwardOcr.js.',
+    system: null,
+  },
+
+  'cheque-ocr': {
+    version: 'v1.0',
+    notes: 'A cancelled cheque, passbook page or bank letter read into account number, IFSC, bank, branch and holder; the holder compared with the party\'s name. Lives in utils/kycOcr.js.',
+    system: null,
+  },
+
+  'id-card-ocr': {
+    version: 'v1.0',
+    notes: 'An Aadhaar, PAN card or passbook read into the employee form (name, date of birth, gender, PAN, the Aadhaar\'s last four only, bank). The full Aadhaar number is never returned. Lives in utils/kycOcr.js.',
+    system: null,
+  },
+
   'supplier-statement': {
     version: 'v1.0',
     notes: 'A supplier\'s statement of our account (PDF, photo, Excel or CSV) read into its entries as they booked them, with opening and closing balances. Matching to our ledger is services/supplierRecon.js. Lives in utils/partyStatementOcr.js.',

@@ -81,6 +81,13 @@ const AI_SURFACES = Object.freeze([
   // a typed order, money, other); a typed order drafted like a PO.
   'customer-assistant',
   'whatsapp-order',
+  // A tech sheet / sample photo into the elastic form; a supplier's challan
+  // and cone labels into goods received; a cheque into bank details; an ID
+  // card into the employee form.
+  'elastic-spec-ocr',
+  'inward-dc-ocr',
+  'cheque-ocr',
+  'id-card-ocr',
   // The beam weights written by hand on a printed covering programme,
   // read from a photo; each row is checked on screen before it is saved.
   'covering-beam-ocr',

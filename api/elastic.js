@@ -132,6 +132,58 @@ function _normalisePlan(template) {
 }
 
 
+// ── A tech sheet, drawing or sample photo, read into the new-elastic form ──
+//  POST /read-spec  multipart "files" → the construction as read, each yarn
+//  matched to the materials of its kind (a count or denier that differs is
+//  never matched), and what the reader was unsure of. Nothing is saved.
+const specUpload = require("multer")({ storage: require("multer").memoryStorage(), limits: { fileSize: 8 * 1024 * 1024, files: 3 } });
+router.post(
+  "/read-spec",
+  isAdmin('admin', 'accounts', 'production'),
+  require("../middleware/userContext").keepRequestContext(specUpload.array("files", 3)),
+  catchAsyncErrors(async (req, res, next) => {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return next(new ErrorHandler("Photograph the tech sheet, drawing or sample", 400));
+    const aiLedger = require("../services/aiLedger");
+    const { promptVersion } = require("../utils/aiPrompts");
+    const { failure } = require("../utils/docRead");
+    let read;
+    try {
+      read = await require("../utils/elasticSpecOcr").readSpec(files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype })));
+    } catch (err) {
+      const f = failure(err, "tech sheet");
+      if (f.status === 502) await aiLedger.record({ surface: "elastic-spec-ocr", model: "?", promptVersion: promptVersion("elastic-spec-ocr"), error: err.message });
+      return next(new ErrorHandler(f.message, f.status));
+    }
+    if (read.problem) return res.json({ success: true, read, matches: {}, aiSuggestion: null });
+    const { model, usage, latencyMs, ...fields } = read;
+    // Each yarn against the materials of its kind.
+    const RawMaterial = require("../models/RawMaterial");
+    const { recipeMaterialFilters } = require("../utils/recipeMaterials");
+    const { rank } = require("../utils/fuzzyMatch");
+    const filters = await recipeMaterialFilters();
+    const pool = {};
+    for (const b of ["warp", "rubber", "weft", "covering"]) pool[b] = (await RawMaterial.find({ archived: { $ne: true }, ...filters[b] }).select("name").lean()).map((m) => ({ id: String(m._id), label: m.name }));
+    const match = (y, bucket) => {
+      if (!y?.text) return null;
+      const m = rank(y.text, pool[bucket]);
+      return { text: y.text, weight: y.weight, materialId: m.confident ? m.best.id : null, materialName: m.confident ? m.best.label : null, candidates: m.candidates.slice(0, 4).map((c) => ({ id: c.id, name: c.label, score: c.score })) };
+    };
+    const matches = {
+      warpSpandex: match(fields.warpSpandex, "rubber"),
+      spandexCovering: match(fields.spandexCovering, "covering"),
+      weftYarn: match(fields.weftYarn, "weft"),
+      warpYarn: (fields.warpYarn || []).map((y) => match(y, "warp")),
+    };
+    const aiSuggestion = await aiLedger.record({
+      surface: "elastic-spec-ocr", model, promptVersion: promptVersion("elastic-spec-ocr"), refType: "Elastic",
+      proposed: { name: fields.name, spandexEnds: fields.spandexEnds, yarnEnds: fields.yarnEnds, pick: fields.pick, noOfHook: fields.noOfHook, weight: fields.weight, yarns: [matches.warpSpandex?.materialName, matches.spandexCovering?.materialName, matches.weftYarn?.materialName, ...matches.warpYarn.map((m) => m?.materialName)] },
+      latencyMs, usage,
+    });
+    res.json({ success: true, read: fields, matches, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
+  })
+);
+
 router.post(
   "/create-elastic",
   isAdmin('admin', 'accounts'),
@@ -224,6 +276,13 @@ router.post(
         await session.endSession();
       }
 
+      // Filled from a tech sheet: what was saved, against what was read.
+      if (req.body?.aiSuggestion) {
+        require("../services/aiLedger").settle(req.body.aiSuggestion, {
+          accepted: { name: elastic.name, spandexEnds: elastic.spandexEnds, yarnEnds: elastic.yarnEnds, pick: elastic.pick, noOfHook: elastic.noOfHook, weight: elastic.weight },
+          decidedBy: req.user?._id, expectSurface: "elastic-spec-ocr", ignoreMissing: true,
+        }).catch(() => {});
+      }
       res.status(201).json({ success: true, elastic, costing });
     } catch (err) {
       console.error(err);
