@@ -69,8 +69,7 @@ const FEATURES = [
   { key: "/leave",               label: "Leave",               section: "HR & Payroll",   depts: ["admin", "finance"] },
 
   { key: "/announcements",       label: "Announcements",       section: "Communication",  depts: "all" },
-  // The feedback inbox answers workers' notes: an admin's job (api/feedback.js).
-  { key: "/feedback",            label: "Feedback",            section: "Communication",  depts: ["admin"] },
+  { key: "/feedback",            label: "Feedback",            section: "Communication",  depts: "all" },
   { key: "/claims",              label: "Expense Claims",      section: "Communication",  depts: "all" },
   { key: "/machine-issues",      label: "Machine Issues",      section: "Communication",  depts: "all" },
   { key: "/notification-settings", label: "Notifications",     section: "Communication",  depts: ["admin"] },

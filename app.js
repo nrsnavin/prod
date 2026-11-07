@@ -804,7 +804,7 @@ app.use("/api/v2/dashboard",   gate('production', 'accounts'), dashboard);
 // AI Advisor aggregates across every router. Being admin-ROLE is not
 // enough: /advisor is a revocable feature, so an admin-department
 // account whose list omits it must not reach the aggregate either.
-app.use("/api/v2/advisor",     gate(),
+app.use("/api/v2/advisor",     gate("accounts"),
   requireFeature('/advisor'),
   requireFeatureRead('/advisor'),
   advisor);

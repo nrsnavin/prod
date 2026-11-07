@@ -36,7 +36,9 @@ const MODEL = TEXT_MODEL;
 router.post(
   '/briefing',
   isAuthenticated,
-  isAdmin('admin'),
+  // Finance has the advisor in its menu (utils/features.js); the cards it
+  // sends are the dashboard figures it can already read.
+  isAdmin('admin', 'accounts'),
   async (req, res) => {
     const claude = anthropic();
     if (!claude) {

@@ -8,7 +8,7 @@
 //    • announcements: everyone reads what is up for them now; only an
 //      admin sees drafts, expired notices and other departments'
 //    • feedback: a worker reads, sends and withdraws only their own; the
-//      inbox is the admin's and is no longer in other menus
+//      inbox is the admin's
 // ══════════════════════════════════════════════════════════════════
 
 process.env.JWT_SECRET_KEY = process.env.JWT_SECRET_KEY || 'test-secret';
@@ -53,6 +53,16 @@ describe('the planner, for production', () => {
   });
 });
 
+describe('the advisor, for finance', () => {
+  it('gives finance the briefing its menu offers, and keeps production out', async () => {
+    const User = require('../../models/User.js');
+    const fin = await User.create({ name: 'Acct', email: 'ra5@t.co', password: 'pass1234', role: 'accounts', department: 'finance' });
+    // Past the gate (503 here only because the test server has no AI key).
+    expect([200, 503]).toContain((await as(fin).post('/advisor/briefing', { cards: [] })).status);
+    expect((await as(prod).post('/advisor/briefing', { cards: [] })).status).toBe(403);
+  });
+});
+
 describe('announcements', () => {
   it('shows everyone what is up for them now, and only the admin the rest', async () => {
     const A = require('../../models/Announcement.js');
@@ -91,10 +101,9 @@ describe('feedback', () => {
     expect((await as(workerA).del(`/feedback/${id}`)).status).toBe(200);
   });
 
-  it('keeps the inbox out of every menu but the admin\'s', () => {
-    const { featuresForDepartment } = require('../../utils/features');
-    expect(featuresForDepartment('admin')).toContain('/feedback');
-    for (const d of ['production', 'packing', 'finance', 'marketing']) expect(featuresForDepartment(d)).not.toContain('/feedback');
-    expect(featuresForDepartment('production')).toContain('/announcements');
+  it('keeps the inbox itself the admin\'s', async () => {
+    // Workers send from the employee app; the web page tells anyone else the inbox is the admin's.
+    expect((await as(prod).get('/feedback/')).status).toBe(403);
+    expect((await as(admin).get('/feedback/')).status).toBe(200);
   });
 });
