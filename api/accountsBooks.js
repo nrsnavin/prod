@@ -73,7 +73,7 @@ router.post("/contras", catchAsyncErrors(async (req, res, next) => {
   if (!(amount > 0)) return next(new ErrorHandler("amount must be more than 0", 400));
   let date;
   try { date = readDate(b.date, "date", new Date()); await assertOpen(date, req); } catch (err) { return next(err); }
-  const mode = ["cash", "bank", "upi", "cheque"].includes(b.mode) ? b.mode : from.kind === "cash" || to.kind === "cash" ? "cash" : "bank";
+  const mode = ["cash", "bank", "upi", "cheque", "card"].includes(b.mode) ? b.mode : from.kind === "cash" || to.kind === "cash" ? "cash" : "bank";
   const { financialYear, sequence, number } = await allocate(Contra, "CTR", { at: date });
   const _id = new mongoose.Types.ObjectId();
   try {

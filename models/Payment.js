@@ -63,7 +63,7 @@ const PaymentSchema = new mongoose.Schema(
 
     // The money itself.
     amount:    { type: Number, required: true, min: 0.01 },
-    mode:      { type: String, enum: ["cash", "bank", "upi", "cheque"], required: true },
+    mode:      { type: String, enum: ["cash", "bank", "upi", "cheque", "card"], required: true },
     account:   { type: mongoose.Types.ObjectId, ref: "BankAccount", required: true },
     accountName: { type: String, default: "" },
     // UTR / cheque number / UPI reference.
@@ -87,6 +87,8 @@ const PaymentSchema = new mongoose.Schema(
       bounceReason: { type: String, default: "", trim: true, maxlength: 200 },
       // What the bank charged for the return.
       charges:      { type: Number, default: 0, min: 0 },
+      // The deposit slip it went to the bank on (models/DepositSlip.js).
+      slipNo:       { type: String, default: "" },
     },
 
     // TDS on a payment: section, rate, and the total deducted.

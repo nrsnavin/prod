@@ -964,7 +964,7 @@ async function createVoucher(b, req) {
   }
   const amount = r2(b.amount);
   if (!(amount > 0)) throw new ErrorHandler("amount must be more than 0", 400);
-  if (!["cash", "bank", "upi", "cheque"].includes(b.mode)) throw new ErrorHandler("mode must be cash, bank, upi or cheque", 400);
+  if (!["cash", "bank", "upi", "cheque", "card"].includes(b.mode)) throw new ErrorHandler("mode must be cash, bank, upi, cheque or card", 400);
   if (!isId(b.account)) throw new ErrorHandler("account is required", 400);
   const account = await BankAccount.findById(b.account).lean();
   if (!account || !account.active) throw new ErrorHandler("Account not found", 404);
@@ -973,6 +973,10 @@ async function createVoucher(b, req) {
   // transfer put into the cash box makes the cash book wrong.
   if (b.mode === "cash" && account.kind !== "cash") throw new ErrorHandler(`Cash is received into and paid from a cash account — ${account.name} is a ${account.kind} account`, 400);
   if (b.mode !== "cash" && account.kind === "cash") throw new ErrorHandler(`${account.name} is the cash box — a ${b.mode === "upi" ? "UPI" : b.mode} ${kind} goes through a bank account`, 400);
+  // A credit card account is spent on by card, and nothing else; a card
+  // receipt (a customer paying at the counter) settles into a bank account.
+  if (account.kind === "card" && b.mode !== "card") throw new ErrorHandler(`${account.name} is a credit card — what is paid on it is paid by card. Paying the card bill is a transfer from the bank`, 400);
+  if (b.mode === "card" && !["card", "bank"].includes(account.kind)) throw new ErrorHandler(`A card ${kind} goes through a credit card or bank account`, 400);
   const date = readDate(b.date, "date", new Date());
   await assertOpen(date, req);
   // A cheque: its number, bank and date. One received is in hand until
@@ -1824,6 +1828,7 @@ router.get("/collections/:customer/history", catchAsyncErrors(async (req, res, n
 
 // Contras, opening balances, settings and the lock.
 router.use(require("./accountsBooks"));
+router.use(require("./accountsBanking"));
 
 module.exports = router;
 module.exports.createVoucher = createVoucher;

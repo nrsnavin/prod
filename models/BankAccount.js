@@ -1,6 +1,8 @@
 "use strict";
 // ══════════════════════════════════════════════════════════════════
-//  A PLACE MONEY SITS: a bank account, the cash box, a UPI handle.
+//  A PLACE MONEY SITS: a bank account, the cash box, a UPI handle, or a
+//  credit card (what is spent on it is owed to the card issuer: its
+//  balance runs below zero until the card bill is paid from the bank).
 //
 //  Every receipt and payment names one, so the cash / bank book per
 //  account is a sum over vouchers, and the bank statement matcher
@@ -12,7 +14,7 @@ const mongoose = require("mongoose");
 const BankAccountSchema = new mongoose.Schema(
   {
     name:      { type: String, required: true, trim: true, maxlength: 80 },
-    kind:      { type: String, enum: ["bank", "cash", "upi"], required: true, default: "bank" },
+    kind:      { type: String, enum: ["bank", "cash", "upi", "card"], required: true, default: "bank" },
     bankName:  { type: String, trim: true, default: "", maxlength: 80 },
     accountNo: { type: String, trim: true, default: "", maxlength: 30 },
     ifsc:      { type: String, trim: true, default: "", maxlength: 11 },

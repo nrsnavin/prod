@@ -24,6 +24,7 @@ const Expense         = require("../models/Expense");
 const AccountNote     = require("../models/AccountNote");
 const Payment         = require("../models/Payment");
 const Contra = require("../models/Contra");
+const DepositSlip = require("../models/DepositSlip");
 const Journal = require("../models/Journal");
 const FixedAsset = require("../models/FixedAsset");
 const BalanceConfirmation = require("../models/BalanceConfirmation");
@@ -82,6 +83,7 @@ router.get(
       recentFrom(AccountNote,     "AccountNote",     "noteNo",     limit),
       recentFrom(Payment,         "Payment",         "voucherNo",  limit),
       recentFrom(Contra,          "Contra",          "contraNo",   limit),
+      recentFrom(DepositSlip,     "DepositSlip",     "slipNo",     limit),
       recentFrom(Journal,         "Journal",         "journalNo",  limit),
       recentFrom(OpeningBalance,  "OpeningBalance",  "docNo",      limit),
       recentFrom(FixedAsset,      "FixedAsset",      "assetNo",    limit),

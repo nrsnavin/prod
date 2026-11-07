@@ -25,7 +25,7 @@ const ContraSchema = new mongoose.Schema(
     to:       { type: mongoose.Types.ObjectId, ref: "BankAccount", required: true },
     toName:   { type: String, default: "" },
     amount:   { type: Number, required: true, min: 0.01 },
-    mode:     { type: String, enum: ["cash", "bank", "upi", "cheque"], default: "bank" },
+    mode:     { type: String, enum: ["cash", "bank", "upi", "cheque", "card"], default: "bank" },
     reference: { type: String, default: "", trim: true, maxlength: 60 },
     narration: { type: String, default: "", trim: true, maxlength: 300 },
 
