@@ -176,7 +176,7 @@ describe('documents the other side receives', () => {
   it('a receipt and a statement of account print, and a WhatsApp draft says what was received', async () => {
     const { customer, inv } = await customerWithInvoice();
     const acct = (await get('/accounts/bank-accounts')).body.accounts[0];
-    const r = (await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: customer._id, amount: 10500, mode: 'bank', account: acct._id, reference: 'UTR55', date: '2026-07-06', allocations: [{ docType: 'Invoice', doc: inv._id, amount: 10500 }] })).body.payment;
+    const r = (await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: customer._id, amount: 10500, mode: acct.kind === 'cash' ? 'cash' : 'bank', account: acct._id, reference: 'UTR55', date: '2026-07-06', allocations: [{ docType: 'Invoice', doc: inv._id, amount: 10500 }] })).body.payment;
     const binary = (res, cb) => { const d = []; res.on('data', (c) => d.push(c)); res.on('end', () => cb(null, Buffer.concat(d))); };
     const rp = await request(app).get(`/api/v2/accounts/payments/${r._id}/pdf`).set('Cookie', cookie()).buffer(true).parse(binary);
     const rt = await pdfText(rp.body);

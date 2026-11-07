@@ -75,7 +75,7 @@ async function supplier(extra = {}) {
 }
 const cashBox = async () => { await get('/accounts/bank-accounts'); return M.BankAccount.findOne({ kind: 'cash' }); };
 const bank = async () => (await post('/accounts/bank-accounts', { name: `Kotak ${++n}`, kind: 'bank', openingBalance: 100000 })).body.account;
-const receipt = (c, acct, amount, allocations = [], extra = {}) => post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: c._id, amount, mode: 'bank', account: acct._id, allocations, ...extra });
+const receipt = (c, acct, amount, allocations = [], extra = {}) => post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: c._id, amount, mode: acct.kind === 'cash' ? 'cash' : 'bank', account: acct._id, allocations, ...extra });
 const balanceOf = async (id) => (await get('/accounts/bank-accounts')).body.accounts.find((a) => String(a._id) === String(id)).balance;
 
 describe('credits', () => {
@@ -278,7 +278,7 @@ describe('the books lock', () => {
     // An admin with a reason may.
     expect((await receipt(c, acct, 200, [{ docType: 'Invoice', doc: inv._id, amount: 200 }], { date: '2026-06-20', lockOverride: 'Missed bank entry for June' })).status).toBe(201);
     expect((await receipt(c, acct, 200, [{ docType: 'Invoice', doc: inv._id, amount: 200 }], { date: '2026-06-20', lockOverride: 'Missed bank entry for June' }, )).status).toBe(201);
-    const clerkTry = await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: c._id, amount: 100, mode: 'bank', account: acct._id, date: '2026-06-20', lockOverride: 'Missed bank entry for June' }, clerk);
+    const clerkTry = await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: c._id, amount: 100, mode: 'cash', account: acct._id, date: '2026-06-20', lockOverride: 'Missed bank entry for June' }, clerk);
     expect(clerkTry.status).toBe(409);
     // Reopening needs a reason.
     expect((await post('/accounts/lock', { lockDate: null })).status).toBe(400);

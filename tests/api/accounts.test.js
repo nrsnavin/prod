@@ -284,10 +284,10 @@ describe('receipts and payments', () => {
     expect(docs.body.docs[0]).toMatchObject({ docNo: 'PB/2026-27/0001', outstanding: 52500, tds: { section: '194C', rate: 2 } });
     // Settle 52,500 gross. TDS is on the value net of GST (CBDT circular
     // 23/2017): 2% of 50,000 = 1,000 deducted, 51,500 paid.
-    const over = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51450, mode: 'bank', account: cash._id, tds: { section: '194C', rate: 2 },
+    const over = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51450, mode: 'cash', account: cash._id, tds: { section: '194C', rate: 2 },
       allocations: [{ docType: 'SupplierBill', doc: bill._id, amount: 52500 }], date: '2026-07-20' });
     expect(over.status).toBe(400); // 1,050 off the gross would be wrong; the cash falls 50 short
-    const res = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51500, mode: 'bank', account: cash._id, tds: { section: '194C', rate: 2 },
+    const res = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51500, mode: 'cash', account: cash._id, tds: { section: '194C', rate: 2 },
       allocations: [{ docType: 'SupplierBill', doc: bill._id, amount: 52500 }], date: '2026-07-20' });
     expect(res.status).toBe(201);
     expect(res.body.payment).toMatchObject({ voucherNo: 'PAY/2026-27/0001', tds: { section: '194C', rate: 2, amount: 1000, base: 50000 }, unallocated: 0 });
@@ -396,7 +396,7 @@ describe('audit: what a voucher may settle, and who a message may go to', () => 
     expect(wrong.body.message).toMatch(/cannot settle a Expense/);
     expect((await M.Expense.findById(ex._id).lean()).paidAmount).toBe(0);
     // Interest from the bank: a receipt from an other party with nothing to settle.
-    expect((await post('/accounts/payments', { kind: 'receipt', partyType: 'other', partyName: 'Kotak interest', amount: 120, mode: 'bank', account: cash._id })).status).toBe(201);
+    expect((await post('/accounts/payments', { kind: 'receipt', partyType: 'other', partyName: 'Kotak interest', amount: 120, mode: 'cash', account: cash._id })).status).toBe(201);
     const right = await post('/accounts/payments', { kind: 'payment', partyType: 'other', partyName: 'Colour Works', amount: 1000, mode: 'cash', account: cash._id, allocations: [{ docType: 'Expense', doc: ex._id, amount: 1000 }] });
     expect(right.status).toBe(201);
     expect((await M.Expense.findById(ex._id).lean()).paidAmount).toBe(1000);
@@ -423,7 +423,7 @@ describe('audit: what a voucher may settle, and who a message may go to', () => 
     const s = await supplierScene();
     const cash = await cashBox();
     const bill = (await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'JW/11', kind: 'service', lines: [{ description: 'Job work', quantity: 1, rate: 50000, gstPercent: 5 }], tds: { applicable: true, section: '194C', rate: 2 } })).body.bill;
-    const res = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51500, mode: 'bank', account: cash._id, allocations: [{ docType: 'SupplierBill', doc: bill._id, amount: 52500 }], date: '2026-07-20' });
+    const res = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: 51500, mode: 'cash', account: cash._id, allocations: [{ docType: 'SupplierBill', doc: bill._id, amount: 52500 }], date: '2026-07-20' });
     expect(res.status).toBe(201);
     expect(res.body.payment.tds).toMatchObject({ section: '194C', rate: 2, amount: 1000, base: 50000 });
     expect((await get('/accounts/reports/tds?from=2026-07-01&to=2026-07-31')).body.rows).toEqual([expect.objectContaining({ section: '194C', tds: 1000 })]);

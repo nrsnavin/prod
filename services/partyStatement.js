@@ -58,7 +58,7 @@ async function load(rows) {
     pick(require('../models/SupplierBill'), 'SupplierBill', 'billNo supplierBillNo kind category totals reverseCharge poNo'),
     pick(require('../models/Expense'), 'Expense', 'expenseNo refNo category categoryName description totals itc'),
     pick(require('../models/AccountNote'), 'AccountNote', 'kind noteNo partyType against reason totals partyNoteNo'),
-    pick(require('../models/Payment'), 'Payment', 'kind voucherNo amount mode account accountName reference tds adjustments allocations unallocated narration'),
+    pick(require('../models/Payment'), 'Payment', 'kind voucherNo amount mode account accountName reference tds adjustments allocations unallocated refunds narration'),
     pick(require('../models/OpeningBalance'), 'OpeningBalance', 'docNo refNo kind'),
     pick(require('../models/Journal'), 'Journal', 'journalNo purpose narration reason lines'),
   ]);
@@ -127,6 +127,11 @@ function describe(row, partyType, ctx, L) {
       for (const a of d.adjustments || []) out.lines.push({ ledger: ADJ[a.kind] || L.roundOff, amount: r2(a.amount) });
       for (const a of d.allocations || []) out.refs.push({ type: 'Agst Ref', name: a.docNo, amount: r2(a.amount) });
       if ((d.unallocated || 0) > 0.004) out.refs.push({ type: 'On Account', name: d.voucherNo, amount: r2(d.unallocated) });
+      // A refund: what it paid back, credit by credit.
+      if ((d.refunds || []).length) {
+        out.partyRef = ['Refund', out.partyRef].filter(Boolean).join(' · ');
+        for (const x of d.refunds) out.refs.push({ type: 'Refund of', name: x.docNo, amount: r2(x.amount) });
+      }
       // Only one ledger on the other side: nothing to break down.
       if (out.lines.length === 1) out.lines = [];
       break;

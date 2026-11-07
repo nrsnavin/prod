@@ -244,6 +244,8 @@ router.post("/opening-balances/:id/cancel", catchAsyncErrors(async (req, res, ne
   if (!o) return next(new ErrorHandler("Not found", 404));
   if (o.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
   if ((o.settledAmount || 0) > 0 || (o.applications || []).length) return next(new ErrorHandler("Something is already set against this balance — cancel that first", 409));
+  const refundedBy = await require("../models/Payment").findOne({ status: "posted", "refunds.source": o._id }).select("voucherNo").lean();
+  if (refundedBy) return next(new ErrorHandler(`${o.docNo} was refunded by ${refundedBy.voucherNo} — cancel that first`, 409));
   let reason;
   try { reason = reasonFrom(req); await assertOpen(o.date, req, { cancelling: true }); } catch (err) { return next(err); }
   await withTxn(async (session) => {

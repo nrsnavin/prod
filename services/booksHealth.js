@@ -56,7 +56,7 @@ function initialApplied(n) {
 async function expectedFigures() {
   const exp = { Invoice: new Map(), SupplierBill: new Map(), Expense: new Map(), OpeningBalance: new Map(), Payment: new Map(), AccountNote: new Map() };
   const [payments, notes, advances, journals] = await Promise.all([
-    Payment.find({ status: 'posted' }).select('kind amount tds adjustments allocations unallocated').lean(),
+    Payment.find({ status: 'posted' }).select('kind amount tds adjustments allocations unallocated refunds').lean(),
     AccountNote.find({ status: 'issued' }).select('kind partyType against applied unapplied applications totals.grand').lean(),
     OpeningBalance.find({ status: 'posted', kind: 'advance' }).select('amount applications partyType').lean(),
     require('../models/Journal').find({ status: 'posted', 'lines.refs.0': { $exists: true } }).select('lines').lean(),
@@ -70,7 +70,9 @@ async function expectedFigures() {
       else if (a.docType === 'OpeningBalance') add(exp.OpeningBalance, a.doc, 'settledAmount', a.amount);
       else add(exp[a.docType], a.doc, 'paidAmount', a.amount);
     }
-    exp.Payment.set(String(p._id), { unallocated: r2(settled - allocated) });
+    // A refund pays back credit: it leaves nothing on account itself.
+    const refunded = (p.refunds || []).reduce((t, x) => t + (x.amount || 0), 0);
+    exp.Payment.set(String(p._id), { unallocated: r2(settled - allocated - refunded) });
   }
   for (const n of notes) {
     const field = (docType) => (docType === 'OpeningBalance' ? 'settledAmount' : n.kind === 'debit' && n.partyType === 'customer' ? 'debitedAmount' : docType === 'Invoice' ? 'creditedAmount' : 'debitedAmount');
@@ -96,6 +98,15 @@ async function expectedFigures() {
       add(exp[a.docType], a.doc, a.docType === 'OpeningBalance' ? 'settledAmount' : 'paidAmount', a.amount);
     }
     exp.OpeningBalance.set(String(o._id), { ...(exp.OpeningBalance.get(String(o._id)) || {}), unapplied: r2((o.amount || 0) - later) });
+  }
+  // What each refund paid back came off the credit it named.
+  for (const p of payments) {
+    for (const x of p.refunds || []) {
+      const field = x.sourceType === 'Payment' ? 'unallocated' : 'unapplied';
+      const m = exp[x.sourceType];
+      const cur = m.get(String(x.source));
+      if (cur && cur[field] !== undefined) m.set(String(x.source), { ...cur, [field]: r2(cur[field] - x.amount) });
+    }
   }
   return exp;
 }

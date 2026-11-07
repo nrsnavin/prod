@@ -338,7 +338,8 @@ async function build({ from, to, fresh = true, L, costCentres }) {
       v.cr(bank, pay.amount);
       v.cr(L.tdsPayable, tds);
       for (const a of adjustments) v.cr(ADJ_PAYMENT[a.kind] || L.roundOff, a.amount);
-      if (pay.partyType === 'supplier') {
+      // A supplier paid, or a customer paid back (a refund): their own ledger.
+      if (pay.partyType === 'supplier' || pay.partyType === 'customer') {
         v.dr(p, settled, bills(onAccount));
       } else {
         // Not a supplier on file: the expenses it settles debit their heads.

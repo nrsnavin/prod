@@ -38,7 +38,8 @@ async function due(cfg, now = new Date()) {
   const send = [];
   const skip = [];
   for (const r of rows) {
-    const why = r.held ? `promised to pay by ${new Date(r.promise.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}`
+    const why = r.covered ? `has ₹${Number(r.onAccount).toLocaleString('en-IN', { minimumFractionDigits: 2 })} paid ahead — set it off, not a reminder`
+      : r.held ? `promised to pay by ${new Date(r.promise.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}`
       : recent.has(String(r.party)) ? `contacted in the last ${cfg.everyDays || 7} days`
         : r.oldestDays < (cfg.minOverdueDays ?? 3) ? `only ${r.oldestDays} days past due`
           : r.next.action !== 'remind' ? `${r.next.label.toLowerCase()} — for a person, not a reminder`

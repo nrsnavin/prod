@@ -17,6 +17,8 @@ const { promptVersion } = require('../utils/aiPrompts');
 const ledger = require('./aiLedger');
 
 const money = (n) => (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const inr = (n) => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const day = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 
 /**
@@ -36,6 +38,10 @@ async function overdue({ includeHeld = false } = {}) {
   const rows = await outstanding.receivables();
   const groups = outstanding.byParty(rows).filter((g) => g.overdue > 0);
   const ids = groups.map((g) => g.party);
+  // What each has paid ahead (an advance, an unused credit note, an
+  // opening advance): a customer whose money on account covers what is
+  // overdue owes nothing — the office sets it off; no one chases them.
+  const ahead = await require('./credits').byParty('customer');
   const [customers, notes] = await Promise.all([
     Customer.find({ _id: { $in: ids } }).select('name phoneNumber contactName email accountant purchase paymentTerms').lean(),
     CollectionNote.aggregate([
@@ -64,9 +70,13 @@ async function overdue({ includeHeld = false } = {}) {
       // Contacted in the last 7 days: give them the week.
       recentlyContacted: !!(h?.last && Date.now() - new Date(h.last.createdAt).getTime() < 7 * 86_400_000),
       held: promiseLive,
-      next: nextStep(g.oldestDays),
+      onAccount: r2(ahead.get(String(g.party))?.available || 0),
+      covered: (ahead.get(String(g.party))?.available || 0) + 0.005 >= g.overdue,
+      next: (ahead.get(String(g.party))?.available || 0) + 0.005 >= g.overdue
+        ? { action: 'apply', tone: 'gentle', label: `Set off the ₹${inr(ahead.get(String(g.party)).available)} they paid ahead` }
+        : nextStep(g.oldestDays),
     };
-  }).sort((a, b) => (a.held - b.held) || (a.recentlyContacted - b.recentlyContacted) || (b.priority - a.priority));
+  }).sort((a, b) => (a.held - b.held) || (a.covered - b.covered) || (a.recentlyContacted - b.recentlyContacted) || (b.priority - a.priority));
   return includeHeld ? out : out.filter((r) => !r.held);
 }
 

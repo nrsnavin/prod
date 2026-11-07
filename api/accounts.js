@@ -861,9 +861,25 @@ router.post("/notes/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   // credit off an invoice that never had it.
   const legacy = note.applied === undefined || note.applied === null || (note.applied === 0 && !note.unapplied && !(note.applications || []).length);
   const onAgainst = legacy ? note.totals.grand : note.applied;
+  // A debit note to a customer raised their invoice; once that was paid,
+  // taking it off would leave the invoice settled past what it owes and
+  // the money stranded on it. The receipt comes off first.
+  const raised = note.kind === "debit" && note.partyType === "customer";
+  // Money already refunded out of a note's unapplied credit is gone: the refund comes off first.
+  const refundedBy = raised ? null : await Payment.findOne({ status: "posted", "refunds.source": note._id }).select("voucherNo").lean();
+  if (refundedBy) return next(new ErrorHandler(`${note.noteNo} was refunded by ${refundedBy.voucherNo} — cancel that first`, 409));
   try {
     await withTxn(async (session) => {
-      await AccountNote.updateOne({ _id: note._id }, { $set: { status: "cancelled", cancel, unapplied: 0 }, $push: { fingerprints: mark } }, { session });
+      // Conditional on it still being issued: two cancels at once must not both reverse it.
+      const r = await AccountNote.updateOne({ _id: note._id, status: "issued" }, { $set: { status: "cancelled", cancel, unapplied: 0 }, $push: { fingerprints: mark } }, { session });
+      if (r.modifiedCount === 0) throw new ErrorHandler("Already cancelled", 409);
+      if (raised && onAgainst > 0) {
+        const inv = await Invoice.findById(note.against.doc).session(session).lean();
+        const left = inv ? settle.outstanding("Invoice", inv) : 0;
+        if (inv && inv.status === "issued" && left < onAgainst - 0.005) {
+          throw new ErrorHandler(`${note.against.docNo} has been paid past ₹${r2(left).toFixed(2)} of this note — cancel the receipt that paid it first`, 409);
+        }
+      }
       if (onAgainst > 0) await settle.apply(note.against.docType, note.against.doc, { [noteField(note, note.against.docType)]: -onAgainst }, session);
       for (const a of note.applications || []) {
         await settle.apply(a.docType, a.doc, { [noteField(note, a.docType)]: -a.amount }, session);
@@ -928,6 +944,8 @@ const ADJUSTMENT_LABELS = { bank_charges: "Bank charges", discount: "Discount", 
 
 /** The field a voucher's allocation moves on each kind of document. */
 const VOUCHER_FIELD = { Invoice: "paidAmount", SupplierBill: "paidAmount", Expense: "paidAmount", OpeningBalance: "settledAmount" };
+/** The credits a refund can pay back, by their type. */
+const REFUND_SOURCES = { Payment, AccountNote, OpeningBalance: require("../models/OpeningBalance") };
 
 /**
  * Post a receipt or payment voucher from a request body. Throws an
@@ -950,6 +968,11 @@ async function createVoucher(b, req) {
   if (!isId(b.account)) throw new ErrorHandler("account is required", 400);
   const account = await BankAccount.findById(b.account).lean();
   if (!account || !account.active) throw new ErrorHandler("Account not found", 404);
+  // Cash goes through the cash box, and only cash does: a cash receipt
+  // put into the bank waits forever on the bank reconciliation, and a
+  // transfer put into the cash box makes the cash book wrong.
+  if (b.mode === "cash" && account.kind !== "cash") throw new ErrorHandler(`Cash is received into and paid from a cash account — ${account.name} is a ${account.kind} account`, 400);
+  if (b.mode !== "cash" && account.kind === "cash") throw new ErrorHandler(`${account.name} is the cash box — a ${b.mode === "upi" ? "UPI" : b.mode} ${kind} goes through a bank account`, 400);
   const date = readDate(b.date, "date", new Date());
   await assertOpen(date, req);
   // A cheque: its number, bank and date. One received is in hand until
@@ -973,14 +996,20 @@ async function createVoucher(b, req) {
   const partyType = b.partyType;
   let party = null;
   let partyName = String(b.partyName || "").trim();
+  // Money the other way — paid back to a customer, or paid back to us by
+  // a supplier — is a refund, and comes out of what they have on account.
+  const refunding = (partyType === "customer" && kind === "payment") || (partyType === "supplier" && kind === "receipt");
+  if (refunding && !(Array.isArray(b.refunds) && b.refunds.length)) {
+    throw new ErrorHandler(partyType === "customer"
+      ? "A customer pays us by a receipt — to pay a customer back, refund what they have on account"
+      : "A supplier is paid by a payment — money a supplier pays back is a refund of what we have with them", 400);
+  }
   if (partyType === "customer") {
-    if (kind !== "receipt") throw new ErrorHandler("A customer is paid by a receipt voucher", 400);
     if (!isId(b.customer)) throw new ErrorHandler("customer is required", 400);
     party = await Customer.findById(b.customer).select("name").lean();
     if (!party) throw new ErrorHandler("Customer not found", 404);
     partyName = party.name;
   } else if (partyType === "supplier") {
-    if (kind !== "payment") throw new ErrorHandler("A supplier is paid by a payment voucher", 400);
     if (!isId(b.supplier)) throw new ErrorHandler("supplier is required", 400);
     party = await Supplier.findById(b.supplier).select("name").lean();
     if (!party) throw new ErrorHandler("Supplier not found", 404);
@@ -991,8 +1020,38 @@ async function createVoucher(b, req) {
     throw new ErrorHandler("partyType must be customer, supplier or other", 400);
   }
 
+  // A refund: which credits it pays back, each no more than is left on it.
+  const refundLines = [];
+  if (refunding) {
+    if ((Array.isArray(b.allocations) && b.allocations.length) || (Array.isArray(b.adjustments) && b.adjustments.some((a) => r2(a?.amount))) || Number(b.tds?.rate)) {
+      throw new ErrorHandler("A refund pays back credit on account — it settles no documents and carries no TDS or adjustments", 400);
+    }
+    const seenSrc = new Set();
+    for (const [i, x] of b.refunds.entries()) {
+      const Model = REFUND_SOURCES[x?.sourceType];
+      if (!Model) throw new ErrorHandler(`Refund ${i + 1}: sourceType must be Payment, AccountNote or OpeningBalance`, 400);
+      if (!isId(x.id) || seenSrc.has(String(x.id))) throw new ErrorHandler(`Refund ${i + 1}: a credit, once`, 400);
+      seenSrc.add(String(x.id));
+      const amt = r2(x.amount);
+      if (!(amt > 0)) throw new ErrorHandler(`Refund ${i + 1}: amount must be more than 0`, 400);
+      const src = await Model.findById(x.id).lean();
+      const live = src && (x.sourceType === "AccountNote" ? src.status === "issued" : src.status === "posted");
+      if (!live) throw new ErrorHandler(`Refund ${i + 1}: that credit is not available`, 404);
+      const rules = credits.rulesFor(x.sourceType, src);
+      if (rules.partyType !== partyType || String(rules.party) !== String(party._id)) throw new ErrorHandler(`Refund ${i + 1}: that credit belongs to another party`, 400);
+      // A refund voucher is not itself a credit to refund again.
+      if (x.sourceType === "Payment" && src.kind !== (partyType === "customer" ? "receipt" : "payment")) throw new ErrorHandler(`Refund ${i + 1}: that is not money they have on account`, 400);
+      const field = x.sourceType === "Payment" ? "unallocated" : "unapplied";
+      const no = x.sourceType === "Payment" ? src.voucherNo : x.sourceType === "AccountNote" ? src.noteNo : src.docNo;
+      if (amt > r2(src[field]) + 0.005) throw new ErrorHandler(`Refund ${i + 1}: ${no} has only ₹${r2(src[field]).toFixed(2)} on account`, 400);
+      refundLines.push({ sourceType: x.sourceType, source: src._id, docNo: no, amount: amt, field });
+    }
+    const total = r2(refundLines.reduce((t, x) => t + x.amount, 0));
+    if (Math.abs(total - amount) > 0.005) throw new ErrorHandler(`The refund is for ₹${amount.toFixed(2)} but the credits picked come to ₹${total.toFixed(2)}`, 400);
+  }
+
   // TDS, on payments only.
-  const tdsRate = kind === "payment" ? Number(b.tds?.rate) || 0 : 0;
+  const tdsRate = kind === "payment" && !refunding ? Number(b.tds?.rate) || 0 : 0;
   if (tdsRate < 0 || tdsRate > 100) throw new ErrorHandler("TDS rate must be between 0 and 100", 400);
   const tdsSection = String(b.tds?.section || "").trim().slice(0, 8);
 
@@ -1055,7 +1114,8 @@ async function createVoucher(b, req) {
   if (gross > settledTotal + 0.005) {
     throw new ErrorHandler(`The allocations need ${r2(gross - tdsAmount - adjTotal).toFixed(2)} but the voucher is for ${amount.toFixed(2)}`, 400);
   }
-  const unallocated = r2(settledTotal - gross);
+  // A refund pays credit back: none of it stays on account.
+  const unallocated = refunding ? 0 : r2(settledTotal - gross);
   // Bank charges and TDS the customer deducted are money that really
   // left the payment, whatever it settles; a discount, a write-off or a
   // round-off only ever explains why a document was settled short, so
@@ -1102,6 +1162,7 @@ async function createVoucher(b, req) {
     ...(cheque ? { cheque } : {}),
     tds: { section: tdsAmount > 0 ? tdsSection || sectionFromDoc || "" : "", rate: tdsAmount > 0 ? (tdsRate || allocations.find((a) => a.tds > 0)?.rate || 0) : 0, amount: tdsAmount, base: tdsBase },
     adjustments, allocations, unallocated, narration: String(b.narration || "").trim().slice(0, 300),
+    ...(refundLines.length ? { refunds: refundLines.map(({ field, ...x }) => x) } : {}),
     source: b.source === "statement" ? "statement" : "manual", statementLine: String(b.statementLine || "").slice(0, 200),
     clearedOn: b.clearedOn ? readDate(b.clearedOn, "clearedOn") : undefined,
     createdBy: req.user?._id,
@@ -1113,6 +1174,14 @@ async function createVoucher(b, req) {
   try {
     await withTxn(async (session) => {
       [voucher] = await Payment.create([data], { session });
+      // A refund takes what it pays back off each credit, conditionally:
+      // two refunds of the same advance cannot both spend it.
+      for (const x of refundLines) {
+        const Model = REFUND_SOURCES[x.sourceType];
+        const res = await Model.updateOne({ _id: x.source, [x.field]: { $gte: x.amount - 0.005 } }, { $inc: { [x.field]: -x.amount } }, { session });
+        if (res.matchedCount === 0) throw new ErrorHandler(`${x.docNo} no longer has ₹${x.amount.toFixed(2)} on account`, 409);
+        await Model.updateOne({ _id: x.source }, [{ $set: { [x.field]: { $round: [`$${x.field}`, 2] } } }], { session });
+      }
       for (const a of allocations) {
         if (a.docType === "SupplierBill") {
           await settle.apply("SupplierBill", a.doc, { paidAmount: r2(a.amount - a.tds), tdsAmount: a.tds }, session, { docNo: a.docNo });
@@ -1127,7 +1196,7 @@ async function createVoucher(b, req) {
         await partyLedger.post({
           partyType, party: party._id, date, docType: "Payment", doc: _id, docNo: number,
           ...(kind === "receipt" ? { credit: settledTotal } : { debit: settledTotal }),
-          narration: data.narration || `${kind === "receipt" ? "Received" : "Paid"} by ${b.mode}${data.reference ? ` · ${data.reference}` : ""}${adjTotal ? ` · adjusted ₹${adjTotal.toFixed(2)}` : ""}`,
+          narration: data.narration || (refundLines.length ? `Refund of ${refundLines.map((x) => x.docNo).join(", ")} by ${b.mode}` : null) || `${kind === "receipt" ? "Received" : "Paid"} by ${b.mode}${data.reference ? ` · ${data.reference}` : ""}${adjTotal ? ` · adjusted ₹${adjTotal.toFixed(2)}` : ""}`,
         }, session);
       }
     });

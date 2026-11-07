@@ -115,6 +115,20 @@ const PaymentSchema = new mongoose.Schema(
     // to be applied to a later document (POST /accounts/credits/apply).
     unallocated: { type: Number, default: 0 },
 
+    // A refund: money paid back to a customer out of what they had on
+    // account (or a supplier paying back what we had with them). Each
+    // line is the credit it came out of — a voucher's unallocated, a
+    // note's unapplied, an opening advance — and how much.
+    refunds: {
+      type: [new mongoose.Schema({
+        sourceType: { type: String, enum: ["Payment", "AccountNote", "OpeningBalance"], required: true },
+        source:     { type: mongoose.Types.ObjectId, required: true },
+        docNo:      { type: String, required: true },
+        amount:     { type: Number, required: true, min: 0.01 },
+      }, { _id: false })],
+      default: undefined,
+    },
+
     // Bank reconciliation: the day the bank's statement showed it.
     clearedOn: { type: Date },
 
@@ -147,6 +161,7 @@ PaymentSchema.index({ supplier: 1, date: -1 });
 PaymentSchema.index({ account: 1, date: -1 });
 PaymentSchema.index({ status: 1, date: -1 });
 PaymentSchema.index({ "allocations.doc": 1 });
+PaymentSchema.index({ "refunds.source": 1 }, { sparse: true });
 PaymentSchema.index({ "cheque.status": 1, "cheque.date": 1 });
 
 module.exports = mongoose.model("Payment", PaymentSchema);
