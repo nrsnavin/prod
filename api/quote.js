@@ -303,6 +303,14 @@ router.post(
     });
     await quote.save();
 
+    // Drafted from an enquiry: what was quoted scores the draft.
+    if (mongoose.Types.ObjectId.isValid(req.body?.aiSuggestion)) {
+      await require('../services/aiLedger').settle(req.body.aiSuggestion, {
+        accepted: { customer: customerId ? String(customerId) : null, lines: quote.lines.map((l) => ({ elastic: l.elastic ? String(l.elastic) : null, metres: l.quantityMetres, margin: l.marginPercent })) },
+        decidedBy: req.user?._id, expectSurface: 'quote-enquiry', ignoreMissing: true,
+      }).catch(() => {});
+    }
+
     res.status(201).json({ success: true, quote });
   })
 );
@@ -580,6 +588,47 @@ router.get(
       `inline; filename="${String(quote.quoteNo).replace(/[^\w.-]/g, '_')}.pdf"`
     );
     res.send(pdf);
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+//  POST /from-enquiry   { text, customer? } + up to 3 "files"
+//    A customer's message, email or sample photo drafted into the quote
+//    form: the elastic each item is, its cost a metre, a margin from past
+//    quotes and why, and a cover note. Nothing is saved.
+// ─────────────────────────────────────────────────────────────
+const enquiryUpload = require('multer')({ storage: require('multer').memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 3 } });
+const { keepRequestContext } = require('../middleware/userContext');
+const quoteEnquiry = require('../services/quoteEnquiry');
+const aiLedger = require('../services/aiLedger');
+const { promptVersion } = require('../utils/aiPrompts');
+const { failure } = require('../utils/docRead');
+
+router.post(
+  '/from-enquiry',
+  gate,
+  keepRequestContext(enquiryUpload.array('files', 3)),
+  catchAsyncErrors(async (req, res, next) => {
+    const text = String(req.body?.text ?? '').trim().slice(0, 6000);
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!text && !files.length) return next(new ErrorHandler('Paste the enquiry or attach a photo of it', 400));
+    const customer = mongoose.Types.ObjectId.isValid(req.body?.customer) ? req.body.customer : undefined;
+    let out;
+    try {
+      out = await quoteEnquiry.draft({ text, pages: files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype })), customer });
+    } catch (err) {
+      const f = failure(err, 'enquiry');
+      if (f.status === 502) await aiLedger.record({ surface: 'quote-enquiry', model: '?', promptVersion: promptVersion('quote-enquiry'), error: err.message });
+      return next(new ErrorHandler(f.message, f.status));
+    }
+    if (out.read.problem) return res.json({ success: true, ...out, aiSuggestion: null });
+    const aiSuggestion = await aiLedger.record({
+      surface: 'quote-enquiry', model: out.read.model, promptVersion: promptVersion('quote-enquiry'),
+      proposed: { customer: out.customer?._id || null, lines: out.lines.map((l) => ({ elastic: l.elastic, metres: l.quantityMetres, margin: l.marginPercent })) },
+      latencyMs: out.read.latencyMs, usage: out.read.usage,
+    });
+    const { model, usage, latencyMs, ...read } = out.read;
+    res.json({ success: true, ...out, read, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
   })
 );
 
