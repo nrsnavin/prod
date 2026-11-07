@@ -25,6 +25,9 @@ const { allocate }     = require("../services/docNumbers");
 const partyLedger      = require("../services/partyLedger");
 const { assertOpen, getSettings } = require("../services/booksLock");
 const { isId, r2, readDate, reasonFrom, fp, withTxn, paging, DAY } = require("../services/accountsHelpers");
+const aiLedger = require("../services/aiLedger");
+const { promptVersion } = require("../utils/aiPrompts");
+const TEXT_MODEL_NAME = () => require("../utils/anthropicClient").TEXT_MODEL;
 const { parseCsv, parseDate } = require("../services/bankStatement");
 
 const BankAccount      = require("../models/BankAccount");
@@ -135,7 +138,26 @@ router.post("/journals", catchAsyncErrors(async (req, res, next) => {
   try {
     out = await journals.post({ date, purpose: ["setoff", "writeoff", "accrual", "salary", "depreciation", "stock", "reclass", "other"].includes(b.purpose) ? b.purpose : "other", narration: b.narration, reason: b.reason, lines: read.lines, total: read.total, requestId: b.requestId }, req);
   } catch (err) { if (err instanceof ErrorHandler) return next(err); throw err; }
+  // A narration picked from the suggestions: what was posted scores them.
+  if (isId(b.aiSuggestion) && !out.replay) {
+    const said = String(b.narration || "").trim();
+    await aiLedger.settle(b.aiSuggestion, { accepted: { narrations: [said] }, decidedBy: req.user?._id, expectSurface: "journal-narration", ignoreMissing: true }).catch(() => {});
+  }
   res.status(out.replay ? 200 : 201).json({ success: true, journal: out.journal, ...(out.replay ? { replay: true } : {}) });
+}));
+
+// A narration for the journal being written: the house's own wording for
+// the same ledgers first, then one written from the lines, then a plain one.
+router.post("/journals/narration", catchAsyncErrors(async (req, res, next) => {
+  let read;
+  try { read = await journals.read(req.body || {}); } catch (err) { return next(err); }
+  const purpose = String(req.body?.purpose || "other");
+  const out = await require("../services/journalNarration").suggest({ lines: read.lines, purpose });
+  const aiSuggestion = await aiLedger.record({
+    surface: "journal-narration", model: out.usage ? TEXT_MODEL_NAME() : "rules", promptVersion: promptVersion("journal-narration"),
+    proposed: { narrations: out.suggestions.map((x) => x.text) }, usage: out.usage || undefined,
+  });
+  res.json({ success: true, suggestions: out.suggestions, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
 }));
 
 router.post("/journals/:id/cancel", catchAsyncErrors(async (req, res, next) => {
