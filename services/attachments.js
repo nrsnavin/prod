@@ -42,6 +42,15 @@ async function attach(Model, kind, id, file) {
     { new: true, projection: { attachments: { $slice: -1 } } }
   ).lean();
   if (!res) { await AccountFile.deleteOne({ _id: stored._id }); throw new ErrorHandler(`At most ${MAX_PER_DOC} attachments`, 400); }
+  // A bill or receipt photo is fingerprinted, so the same photo scanned again is recognised.
+  if ((Model.modelName === 'SupplierBill' || Model.modelName === 'Expense') && file.mimetype !== 'application/pdf') {
+    const d = await Model.findById(id).select('billNo supplierName expenseNo payeeName categoryName totals billDate date').lean().catch(() => null);
+    if (d) {
+      await require('./billImages').rememberAttached(file, Model.modelName === 'SupplierBill'
+        ? { docType: 'SupplierBill', docId: d._id, docNo: d.billNo, partyName: d.supplierName, amount: d.totals?.grand, date: d.billDate }
+        : { docType: 'Expense', docId: d._id, docNo: d.expenseNo, partyName: d.payeeName || d.categoryName, amount: d.totals?.grand, date: d.date }).catch(() => null);
+    }
+  }
   const a = res.attachments[res.attachments.length - 1];
   return { _id: a._id, filename: a.filename, contentType: a.contentType, size: a.size, uploadedAt: a.uploadedAt };
 }

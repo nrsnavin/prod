@@ -397,6 +397,7 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
       accepted: { supplierGstin: data.supplierGstin, billNo: data.supplierBillNo, billDate: billDate.toISOString().slice(0, 10), lines: data.lines.map((l) => ({ description: l.description, hsn: l.hsn, quantity: l.quantity, unit: l.unit, rate: l.rate, gstPercent: l.gstPercent })), totals: { taxable: data.totals.taxable, grand: data.totals.grand } },
       decidedBy: req.user?._id, expectSurface: "bill-ocr", ignoreMissing: true,
     }).catch(() => {});
+    await require("../services/billImages").link(data.aiSuggestion, { docType: "SupplierBill", docId: doc._id, docNo: doc.billNo, partyName: doc.supplierName, amount: doc.totals?.grand, date: doc.billDate });
   }
   res.status(201).json({ success: true, bill: doc.toObject() });
 }));
@@ -607,6 +608,7 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
       accepted: { supplierGstin: payeeGstin, billNo: data.refNo, billDate: date.toISOString().slice(0, 10), lines: data.lines.map((l) => ({ description: l.description, quantity: l.quantity, rate: l.rate, gstPercent: l.gstPercent })), totals: { taxable: data.totals.taxable, grand: data.totals.grand } },
       decidedBy: req.user?._id, expectSurface: "bill-ocr", ignoreMissing: true,
     }).catch(() => {});
+    await require("../services/billImages").link(data.aiSuggestion, { docType: "Expense", docId: expense._id, docNo: expense.expenseNo, partyName: expense.payeeName || expense.categoryName, amount: expense.totals?.grand, date: expense.date });
   }
   res.status(201).json({ success: true, expense, voucher: voucher ? { _id: voucher._id, voucherNo: voucher.voucherNo } : null });
 }));
@@ -1480,12 +1482,17 @@ router.post("/scan", keepRequestContext(scanUpload.array("files", 4)), catchAsyn
     proposed: { kind: read.kind, supplierName: read.supplierName, supplierGstin: read.supplierGstin, billNo: read.billNo, billDate: read.billDate, lines: read.lines, totals: read.totals, confidence: read.confidence },
     latencyMs: read.latencyMs, usage: read.usage,
   });
+  // The same photo already on a saved bill or expense (sent twice on WhatsApp, forwarded again).
+  const pages = files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype }));
+  const billImages = require("../services/billImages");
+  const samePhoto = await billImages.check(pages).catch(() => []);
+  await billImages.remember(pages, suggestionId);
   if (read.problem) {
-    return res.json({ success: true, read, supplier: null, purchaseOrders: [], aiSuggestion: suggestionId });
+    return res.json({ success: true, read, supplier: null, purchaseOrders: [], samePhoto, aiSuggestion: suggestionId });
   }
   // Who it is on file, whether it is entered already, and what is still to bill (services/billMatch.js).
   const match = await require("../services/billMatch").matchRead(read);
-  res.json({ success: true, read, supplier: match.supplier, alreadyEntered: match.alreadyEntered, purchaseOrders: match.purchaseOrders, aiSuggestion: suggestionId });
+  res.json({ success: true, read, supplier: match.supplier, alreadyEntered: match.alreadyEntered, purchaseOrders: match.purchaseOrders, samePhoto, aiSuggestion: suggestionId });
 }));
 
 // ══════════════════════════════════════════════════════════════════
