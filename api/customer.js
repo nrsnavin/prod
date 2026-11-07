@@ -22,7 +22,7 @@ const CUSTOMER_FIELDS = [
   "name", "tallyName", "email", "gstin", "status", "contactName", "phoneNumber",
   "address", "city", "pincode", "stateCode",
   "purchase", "accountant", "merchandiser", "paymentTerms", "interestRate", "interestGraceDays", "country", "sez", "currency",
-  "creditLimit", "maxOverdueDays", "tan", "pan",
+  "creditLimit", "maxOverdueDays", "tan", "pan", "group",
 ];
 function pickCustomer(body) {
   const out = {};
@@ -76,6 +76,15 @@ router.put(
 // ── GET /credit/:id ─────────────────────────────────────────────
 // Where a customer stands against their credit limit — read by the
 // order, challan and invoice screens before they commit.
+// The customer groups in use, for the picker on the customer form.
+router.get(
+  "/groups",
+  catchAsyncErrors(async (_req, res) => {
+    const groups = (await Customer.distinct("group", { group: { $nin: ["", null] } })).sort((a, b) => a.localeCompare(b));
+    res.json({ success: true, groups });
+  })
+);
+
 router.get(
   "/credit/:id",
   catchAsyncErrors(async (req, res, next) => {

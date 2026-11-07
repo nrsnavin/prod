@@ -11,6 +11,17 @@ module.exports = (err, req, res, next) => {
   // read that a route surfaced as a 500 is a real fault worth seeing;
   // a VersionError that becomes a 409 is expected traffic and is not
   // reported. Reporting is fail-open and never touches the response.
+  // A document that failed its schema (a required field left out, a value
+  // out of range) is the caller's mistake, not a crash: said plainly, 400.
+  if (err.name === "ValidationError" && err.errors && err.statusCode === 500) {
+    const first = Object.values(err.errors)[0];
+    const field = first?.path ? String(first.path).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\./g, " ").toLowerCase() : "a field";
+    const message = first?.kind === "required" ? `${field[0].toUpperCase()}${field.slice(1)} is required`
+      : first?.kind === "enum" ? `${first.value} is not an allowed ${field}`
+        : first?.message || "Some details are not valid";
+    err = new ErrorHandler(message, 400);
+  }
+
   if (err.statusCode >= 500) reportError(err, req);
 
   // Mongoose optimistic-lock failure (doc.increment() + save raced a

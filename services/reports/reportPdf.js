@@ -51,6 +51,14 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Balu Elast
   const brand = accent && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(accent) ? accent : BRAND;
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: "A4", margin: 40 });
+    // Helvetica has no rupee sign: DejaVu carries it, with Helvetica as the fallback.
+    let REG = "Helvetica"; let BOLD = "Helvetica-Bold"; let ITAL = "Helvetica-Oblique";
+    try {
+      const path = require("path");
+      doc.registerFont("RptBody", path.join(__dirname, "../../utils/fonts/DejaVuSans.ttf"));
+      doc.registerFont("RptBold", path.join(__dirname, "../../utils/fonts/DejaVuSans-Bold.ttf"));
+      REG = "RptBody"; BOLD = "RptBold"; ITAL = "RptBody";
+    } catch { /* built-in fonts */ }
     const chunks = [];
     doc.on("data", (c) => chunks.push(c));
     doc.on("end", () => resolve(Buffer.concat(chunks)));
@@ -71,13 +79,13 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Balu Elast
 
     // ── Header block ────────────────────────────────────────────────
     function drawDocHeader() {
-      doc.fillColor(brand).font("Helvetica-Bold").fontSize(16).text(company, left, 40);
-      doc.fillColor(INK).font("Helvetica-Bold").fontSize(15).text(title, left, 62);
-      doc.fillColor(MUTE).font("Helvetica").fontSize(9)
+      doc.fillColor(brand).font(BOLD).fontSize(16).text(company, left, 40);
+      doc.fillColor(INK).font(BOLD).fontSize(15).text(title, left, 62);
+      doc.fillColor(MUTE).font(REG).fontSize(9)
         .text(`Period: ${rangeLabel || "—"}`, left, 84)
         .text(`Generated: ${new Date().toLocaleString("en-IN")}`, left, 96);
       if (summaryLine) {
-        doc.fillColor(INK).font("Helvetica-Bold").fontSize(10).text(summaryLine, left, 114, { width: contentW });
+        doc.fillColor(INK).font(BOLD).fontSize(10).text(summaryLine, left, 114, { width: contentW });
       }
       doc.moveTo(left, 132).lineTo(right, 132).strokeColor(LINE).lineWidth(1).stroke();
       return 140;
@@ -89,7 +97,7 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Balu Elast
 
     function drawTableHeader(y) {
       doc.rect(left, y, contentW, HEADER_H).fill(brand);
-      doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(9);
+      doc.fillColor("#FFFFFF").font(BOLD).fontSize(9);
       cols.forEach((c, i) => {
         doc.text(String(c.header || ""), xAt(i) + 6, y + 6, {
           width: widths[i] - 12,
@@ -102,7 +110,7 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Balu Elast
 
     let pageNo = 1;
     function drawFooter() {
-      doc.fillColor(MUTE).font("Helvetica").fontSize(8)
+      doc.fillColor(MUTE).font(REG).fontSize(8)
         .text(`Page ${pageNo}`, left, doc.page.height - doc.page.margins.bottom - 6, { width: contentW, align: "right" });
     }
 
@@ -111,7 +119,7 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Balu Elast
     y = drawTableHeader(y);
 
     if (!rows || rows.length === 0) {
-      doc.fillColor(MUTE).font("Helvetica-Oblique").fontSize(10)
+      doc.fillColor(MUTE).font(ITAL).fontSize(10)
         .text("No data for this period.", left, y + 12, { width: contentW, align: "center" });
       drawFooter();
       doc.end();
@@ -127,7 +135,7 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Balu Elast
         y = drawTableHeader(y);
       }
       if (idx % 2 === 1) doc.rect(left, y, contentW, ROW_H).fill(STRIPE);
-      doc.fillColor(INK).font("Helvetica").fontSize(9);
+      doc.fillColor(INK).font(REG).fontSize(9);
       cols.forEach((c, i) => {
         doc.fillColor(i === 0 ? INK : "#33415C").text(fmtCell(row[c.key], c.format), xAt(i) + 6, y + 6, {
           width: widths[i] - 12,
