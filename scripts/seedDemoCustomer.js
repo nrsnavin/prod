@@ -313,7 +313,7 @@ async function seedEmployee() {
     name:        `${DEMO_PREFIX} Demo Operator`,
     designation: "Operator",
     phoneNumber: "9000000001",
-    status:      "Active",
+    status:      "active",
   });
 }
 

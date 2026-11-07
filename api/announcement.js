@@ -61,8 +61,22 @@ router.get(
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/",
-  isAuthenticated, isAdmin('admin'),
+  isAuthenticated,
   catchAsyncErrors(async (req, res, next) => {
+    // Everyone else reads what is up for them now; only an admin sees
+    // the drafts, the expired and the other departments' notices.
+    if (req.user?.role !== "admin") {
+      const now = new Date();
+      const items = await Announcement.find({
+        isActive: true,
+        $and: [
+          { $or: [{ validFrom: { $exists: false } }, { validFrom: null }, { validFrom: { $lte: now } }] },
+          { $or: [{ validUntil: { $exists: false } }, { validUntil: null }, { validUntil: { $gte: now } }] },
+          { $or: [{ audience: "all" }, { audience: "department", department: req.user?.department || "" }] },
+        ],
+      }).sort({ isPinned: -1, createdAt: -1 }).limit(200).lean();
+      return res.json({ success: true, count: items.length, data: items, readOnly: true });
+    }
     // Pinned first, then newest: the cap keeps what matters (utils/listLimit).
     const { rows: items, capped: cut } = await capped(
       Announcement.find().sort({ isPinned: -1, createdAt: -1 }).lean(), res

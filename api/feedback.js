@@ -21,7 +21,7 @@ const Employee  = require("../models/Employee");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { capped } = require("../utils/listLimit");
 const ErrorHandler     = require("../utils/ErrorHandler");
-const { isAuthenticated, isAdmin } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 const { notify } = require("../utils/notify");
 
 const TYPES      = ["complaint", "suggestion"];
@@ -47,6 +47,11 @@ router.post(
     if (!employeeId)        return next(new ErrorHandler("employeeId is required", 400));
     if (!mongoose.Types.ObjectId.isValid(employeeId)) {
       return next(new ErrorHandler("Invalid employee id", 400));
+    }
+    // A worker files feedback as themselves, never in another's name.
+    const office = req.user?.role === "admin" || req.user?.role === "accounts";
+    if (!office && String(req.user?.employee || "") !== String(employeeId)) {
+      return next(new ErrorHandler("You can send feedback only as yourself", 403));
     }
     if (!TYPES.includes(type)) {
       return next(new ErrorHandler(
@@ -98,7 +103,8 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 router.get(
   "/employee/:empId",
-  isAuthenticated,
+  // One's own feedback, or the office's: anonymous notes stay anonymous to everyone else.
+  isAuthenticated, selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
     const items = await Feedback.find({ employee: req.params.empId })
       .sort({ createdAt: -1 })
@@ -177,6 +183,10 @@ router.delete(
     }
     const fb = await Feedback.findById(req.params.id);
     if (!fb) return next(new ErrorHandler("Feedback not found", 404));
+    // Withdrawn by the one who sent it, or an admin — not by anyone signed in.
+    if (req.user?.role !== "admin" && String(req.user?.employee || "") !== String(fb.employee)) {
+      return next(new ErrorHandler("You can withdraw only your own feedback", 403));
+    }
     if (fb.status !== "open") {
       return next(new ErrorHandler(
         "Only open feedback can be withdrawn", 400));

@@ -492,7 +492,8 @@ async function _buildContext(now, horizonDays) {
 // ═══════════════════════════════════════════════════════════════════
 router.get(
   "/suggest-plan",
-  isAdmin("admin"),
+  // Reading the plan is for production too; accepting it stays the admin's.
+  isAdmin("admin", "production"),
   catchAsyncErrors(async (req, res) => {
     // Day granularity throughout: the model counts working days, and a
     // clock reading half past two turns "finishes on the due date" into
@@ -877,7 +878,8 @@ router.post(
 // ═══════════════════════════════════════════════════════════════════
 router.get(
   "/weights",
-  isAdmin("admin"),
+  // Reading the plan is for production too; accepting it stays the admin's.
+  isAdmin("admin", "production"),
   catchAsyncErrors(async (req, res) => {
     res.json({ success: true, data: await plannerLearning.report() });
   })
@@ -904,7 +906,8 @@ router.post(
 // ═══════════════════════════════════════════════════════════════════
 router.get(
   "/latest",
-  isAdmin("admin"),
+  // Reading the plan is for production too; accepting it stays the admin's.
+  isAdmin("admin", "production"),
   catchAsyncErrors(async (req, res) => {
     const plan = await ProductionPlan.findOne({ status: "accepted" })
       .sort({ acceptedAt: -1 }).lean();
