@@ -74,6 +74,8 @@ function startServer() {
 
   // Before each shift ends, the looms still to enter (off until an admin turns it on).
   require("./services/shiftEndNudge").start();
+  // After each shift, the handover note (off until an admin turns it on).
+  require("./services/shiftHandover").start();
 
   // Supplier bills mailed to the bills mailbox, read into drafts (only when BILLS_IMAP_* is set).
   require("./services/billMailbox").start();

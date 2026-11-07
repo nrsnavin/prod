@@ -702,6 +702,19 @@ router.put("/production-settings", isAdmin("admin"), catchAsyncErrors(async (req
       set["shiftEndNudge.phones"] = (Array.isArray(n.phones) ? n.phones : String(n.phones).split(/[,;\n]+/)).map(e164).filter(Boolean).slice(0, 20);
     }
   }
+  if (b.shiftHandover) {
+    const h = b.shiftHandover;
+    if (h.enabled !== undefined) set["shiftHandover.enabled"] = !!h.enabled;
+    if (h.withinMinutes !== undefined) {
+      const m = Number(h.withinMinutes);
+      if (!(Number.isInteger(m) && m >= 10 && m <= 240)) return next(new ErrorHandler("withinMinutes must be a whole number from 10 to 240", 400));
+      set["shiftHandover.withinMinutes"] = m;
+    }
+    if (h.phones !== undefined) {
+      const { e164 } = require("../services/collections");
+      set["shiftHandover.phones"] = (Array.isArray(h.phones) ? h.phones : String(h.phones).split(/[,;\n]+/)).map(e164).filter(Boolean).slice(0, 20);
+    }
+  }
   await autoVerify.settings();
   const settings = await ProductionSettings.findOneAndUpdate({ key: "production" }, { $set: set }, { new: true }).lean();
   res.json({ success: true, settings });
@@ -711,6 +724,22 @@ router.put("/production-settings", isAdmin("admin"), catchAsyncErrors(async (req
 // send it again. Claims nothing, so the timed one still goes.
 router.post("/shift-end-nudge/send", isAdmin("admin"), catchAsyncErrors(async (_req, res) => {
   const out = await require("../services/shiftEndNudge").run({ force: true });
+  res.json({ success: true, ...out });
+}));
+
+// The handover note: a preview for any shift (default the one just ended),
+// and sent now — to try it, or again. Sending claims nothing.
+router.get("/handover", isAdmin("admin", "production"), catchAsyncErrors(async (req, res, next) => {
+  const handover = require("../services/shiftHandover");
+  let which = handover.previousShift(handover.currentShift());
+  if (req.query.dateKey || req.query.shift) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(req.query.dateKey || "")) || !["DAY", "NIGHT"].includes(req.query.shift)) return next(new ErrorHandler("dateKey (YYYY-MM-DD) and shift (DAY or NIGHT) together", 400));
+    which = { dateKey: String(req.query.dateKey), shift: req.query.shift };
+  }
+  res.json({ success: true, ...(await handover.note(which)) });
+}));
+router.post("/handover/send", isAdmin("admin"), catchAsyncErrors(async (_req, res) => {
+  const out = await require("../services/shiftHandover").run({ force: true });
   res.json({ success: true, ...out });
 }));
 

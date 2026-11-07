@@ -32,6 +32,14 @@ const ProductionSettingsSchema = new mongoose.Schema(
       // "YYYY-MM-DD:DAY" sent last, so a shift is nudged once.
       lastSent:      { type: String, default: "" },
     },
+    // The handover note for the shift just ended (services/shiftHandover.js),
+    // sent in the first `withinMinutes` of the next one.
+    shiftHandover: {
+      enabled:       { type: Boolean, default: false },
+      withinMinutes: { type: Number, default: 60, min: 10, max: 240 },
+      phones:        { type: [String], default: [] },
+      lastSent:      { type: String, default: "" },
+    },
     updatedBy: { type: mongoose.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }
