@@ -344,17 +344,23 @@ describe('GET /planner/weights', () => {
     expect(after.body.data.lastResetBy).toBe('Planner');
   });
 
-  test('is admin-only — it reports and changes plant-wide behaviour', async () => {
+  test('production reads it; only an admin resets it — it changes plant-wide behaviour', async () => {
     const worker = await User.create({
       name: 'Op', email: `op-${seq++}@t.co`, password: 'pass1234',
       role: 'production', department: 'production',
     });
     const c = [`token=${jwt.sign({ id: worker._id, role: 'production' }, process.env.JWT_SECRET_KEY)}`];
+    const acct = await User.create({
+      name: 'Acct', email: `acct-${seq++}@t.co`, password: 'pass1234',
+      role: 'accounts', department: 'finance',
+    });
+    const a = [`token=${jwt.sign({ id: acct._id, role: 'accounts' }, process.env.JWT_SECRET_KEY)}`];
 
-    const read = await request(app).get('/api/v2/planner/weights').set('Cookie', c);
-    const write = await request(app).post('/api/v2/planner/weights/reset').set('Cookie', c);
-    expect([401, 403]).toContain(read.status);
-    expect([401, 403]).toContain(write.status);
+    // The planner is in production's menu, so its panel reads the weights.
+    expect((await request(app).get('/api/v2/planner/weights').set('Cookie', c)).status).toBe(200);
+    expect([401, 403]).toContain((await request(app).post('/api/v2/planner/weights/reset').set('Cookie', c)).status);
+    expect([401, 403]).toContain((await request(app).get('/api/v2/planner/weights').set('Cookie', a)).status);
+    await User.deleteOne({ _id: acct._id });
     await User.deleteOne({ _id: worker._id });
   });
 });
