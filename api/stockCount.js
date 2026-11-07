@@ -464,6 +464,10 @@ router.patch(
         line.countedBy  = req.user?._id;
       }
       if (e.reason !== undefined) line.reason = String(e.reason || '').trim();
+      // Counted from a photo of the cones: what was entered scores the count.
+      if (mongoose.Types.ObjectId.isValid(String(e.aiSuggestion || '')) && Number.isFinite(Number(e.cones))) {
+        await require('../services/aiLedger').settle(e.aiSuggestion, { accepted: { cones: Math.round(Number(e.cones)) }, decidedBy: req.user?._id, expectSurface: 'cone-count', ignoreMissing: true }).catch(() => {});
+      }
 
       applied.push({
         lineId: String(line._id),
@@ -788,6 +792,53 @@ router.post(
     }
 
     res.json({ success: true, count: shape(count.toObject()) });
+  })
+);
+
+// ══════════════════════════════════════════════════════════════════
+//  POST /stock-count/:id/cones { lineId, coneWeightKg? } + one "file"
+//    The cones in a photo counted (utils/coneCount.js), and the kg they
+//    make at the cone weight — the weight given here is kept on the
+//    material for next time. Nothing goes on the sheet until the person
+//    enters it (PATCH /:id/lines).
+// ══════════════════════════════════════════════════════════════════
+const coneUpload = require('multer')({ storage: require('multer').memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
+router.post(
+  '/:id/cones',
+  isAdmin('admin', 'accounts', 'production'),
+  require('../middleware/userContext').keepRequestContext(coneUpload.single('file')),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler('Invalid count id', 400));
+    if (!req.file) return next(new ErrorHandler('Photograph the cones', 400));
+    const count = await StockCount.findById(req.params.id).select('countNo status lines').lean();
+    if (!count) return next(new ErrorHandler('Stock count not found', 404));
+    if (count.status === 'posted' || count.status === 'cancelled') return next(new ErrorHandler(`Count #${count.countNo} is ${count.status}`, 409));
+    const line = count.lines.find((l) => String(l._id) === String(req.body?.lineId));
+    if (!line) return next(new ErrorHandler('Not on this count sheet', 400));
+    const RawMaterial = require('../models/RawMaterial');
+    const weight = req.body?.coneWeightKg !== undefined && req.body.coneWeightKg !== '' ? Number(req.body.coneWeightKg) : null;
+    if (weight !== null && !(weight > 0 && weight <= 100)) return next(new ErrorHandler('A cone weighs more than 0 and at most 100 kg', 400));
+    if (weight !== null) await RawMaterial.updateOne({ _id: line.rawMaterial }, { $set: { coneWeightKg: weight } });
+    const mat = await RawMaterial.findById(line.rawMaterial).select('name unit coneWeightKg').lean();
+    const { failure } = require('../utils/docRead');
+    const aiLedger = require('../services/aiLedger');
+    const { promptVersion } = require('../utils/aiPrompts');
+    let read;
+    try {
+      read = await require('../utils/coneCount').readCones([{ buffer: req.file.buffer, mimetype: req.file.mimetype }]);
+    } catch (err) {
+      const f = failure(err, 'photo');
+      if (f.status === 502) await aiLedger.record({ surface: 'cone-count', model: '?', promptVersion: promptVersion('cone-count'), refType: 'StockCount', refId: count._id, error: err.message });
+      return next(new ErrorHandler(f.message, f.status));
+    }
+    if (read.problem) return res.json({ success: true, read, estimate: null, aiSuggestion: null });
+    const per = mat?.coneWeightKg || null;
+    const unit = (mat?.unit || 'kg').toLowerCase();
+    const estimate = unit === 'cones' || unit === 'nos' ? { quantity: read.cones, unit, basis: 'cones' }
+      : per ? { quantity: Math.round(read.cones * per * 1000) / 1000, unit, basis: `${read.cones} cones × ${per} kg` } : null;
+    const aiSuggestion = await aiLedger.record({ surface: 'cone-count', model: read.model, promptVersion: promptVersion('cone-count'), refType: 'StockCount', refId: count._id, proposed: { cones: read.cones, confidence: read.confidence }, latencyMs: read.latencyMs, usage: read.usage });
+    const { model, usage, latencyMs, ...shown } = read;
+    res.json({ success: true, read: shown, material: { name: mat?.name, unit, coneWeightKg: per }, estimate, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
   })
 );
 

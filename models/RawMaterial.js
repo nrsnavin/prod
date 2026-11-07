@@ -123,6 +123,10 @@ const RawMaterialSchema = new mongoose.Schema(
     // documented as per kg, and materialValuation costs against it.
     unit: { type: String, default: 'kg', trim: true },
 
+    // What one full cone of this yarn weighs, for counting stock by the
+    // cone (a photo's count × this = kilograms). Optional.
+    coneWeightKg: { type: Number, default: null, min: 0, max: 100 },
+
     // Per-material override of the supplier's lead time. A dyed yarn
     // from the same supplier as a greige one takes longer, and the
     // difference belongs to the material rather than to the vendor.
