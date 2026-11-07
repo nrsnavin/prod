@@ -83,7 +83,7 @@ async function _rows(from, to, groupBy) {
   if (groupBy === "day") {
     const rows = await DeliveryChallan.aggregate([
       { $match: match },
-      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$dispatchDate" } }, dcs: { $sum: 1 }, quantity: { $sum: "$totalQuantity" }, amount: { $sum: "$totalAmount" } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$dispatchDate", timezone: "Asia/Kolkata" } }, dcs: { $sum: 1 }, quantity: { $sum: "$totalQuantity" }, amount: { $sum: "$totalAmount" } } },
       { $project: { _id: 0, key: "$_id", label: "$_id", dcs: 1, quantity: 1, amount: 1 } },
       { $sort: { label: 1 } },
     ]);
@@ -109,7 +109,7 @@ async function _rows(from, to, groupBy) {
 async function _series(from, to) {
   const rows = await DeliveryChallan.aggregate([
     { $match: matchFor(from, to) },
-    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$dispatchDate" } }, amount: { $sum: "$totalAmount" } } },
+    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$dispatchDate", timezone: "Asia/Kolkata" } }, amount: { $sum: "$totalAmount" } } },
     { $sort: { _id: 1 } },
     { $project: { _id: 0, date: "$_id", amount: 1 } },
   ]);

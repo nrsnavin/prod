@@ -45,7 +45,8 @@ beforeAll(async () => {
   await db.collection("shiftdetails").insertMany([
     // In-window, closed.
     shift({ date: new Date("2026-07-02T06:00:00Z"), shift: "DAY",   machine: m1, employee: e1, productionMeters: 1000, elastics: [{ head: 1, elastic: el1 }, { head: 2, elastic: el2 }] }),
-    shift({ date: new Date("2026-07-02T20:00:00Z"), shift: "NIGHT", machine: m1, employee: e2, productionMeters: 800,  elastics: [{ head: 1, elastic: el1 }] }),
+    // A shift carries its plan's day; 12:00 UTC is still the 2nd in India (days are grouped in IST).
+    shift({ date: new Date("2026-07-02T12:00:00Z"), shift: "NIGHT", machine: m1, employee: e2, productionMeters: 800,  elastics: [{ head: 1, elastic: el1 }] }),
     shift({ date: new Date("2026-07-03T06:00:00Z"), shift: "DAY",   machine: m2, employee: e1, productionMeters: 1200, elastics: [{ head: 1, elastic: el2 }, { head: 2, elastic: el2 }] }),
     shift({ date: new Date("2026-07-03T07:00:00Z"), shift: "DAY",   machine: m2, employee: null, productionMeters: 500, elastics: [] }),
     // Previous window (2026-06-24 .. 2026-07-01), closed.

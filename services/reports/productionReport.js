@@ -43,7 +43,7 @@ async function _summary(from, to) {
     // Distinct machine-days (utilisation denominator).
     ShiftDetail.aggregate([
       { $match: { status: "closed", date: { $gte: from, $lt: to } } },
-      { $group: { _id: { m: "$machine", d: { $dateToString: { format: "%Y-%m-%d", date: "$date" } } } } },
+      { $group: { _id: { m: "$machine", d: { $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: "Asia/Kolkata" } } } } },
       { $count: "machineDays" },
     ]),
     Wastage.aggregate([
@@ -103,7 +103,7 @@ async function _rows(from, to, groupBy) {
 
   // Day grouping keys on a formatted date string.
   const groupId = groupBy === "day"
-    ? { $dateToString: { format: "%Y-%m-%d", date: "$date" } }
+    ? { $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: "Asia/Kolkata" } }
     : field;
 
   const pipeline = [
@@ -150,7 +150,7 @@ async function _rows(from, to, groupBy) {
 async function _series(from, to) {
   const rows = await ShiftDetail.aggregate([
     { $match: { status: "closed", date: { $gte: from, $lt: to } } },
-    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$date" } }, meters: { $sum: "$productionMeters" } } },
+    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: "Asia/Kolkata" } }, meters: { $sum: "$productionMeters" } } },
     { $sort: { _id: 1 } },
     { $project: { _id: 0, date: "$_id", meters: 1 } },
   ]);

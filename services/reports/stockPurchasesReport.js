@@ -129,7 +129,7 @@ async function _series(from, to) {
   const rows = await PurchaseOrder.aggregate([
     { $match: poMatch(from, to) },
     { $unwind: "$items" },
-    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$date" } }, value: ORDERED_VALUE } },
+    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: "Asia/Kolkata" } }, value: ORDERED_VALUE } },
     { $sort: { _id: 1 } },
     { $project: { _id: 0, date: "$_id", value: 1 } },
   ]);

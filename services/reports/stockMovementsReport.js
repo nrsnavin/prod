@@ -69,7 +69,7 @@ function _merge(inRows, outRows) {
 
 async function _rows(from, to, groupBy) {
   if (groupBy === "day") {
-    const fmt = (field) => ({ $dateToString: { format: "%Y-%m-%d", date: field } });
+    const fmt = (field) => ({ $dateToString: { format: "%Y-%m-%d", date: field, timezone: "Asia/Kolkata" } });
     const [inRows, outRows] = await Promise.all([
       MaterialInward.aggregate([{ $match: inMatch(from, to) }, { $group: { _id: fmt("$inwardDate"), qty: { $sum: "$quantity" } } }]),
       MaterialOut.aggregate([{ $match: outMatch(from, to) }, { $group: { _id: fmt("$outwardDate"), qty: { $sum: "$quantity" } } }]),

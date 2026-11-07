@@ -104,7 +104,7 @@ async function _rows(from, to, groupBy) {
   if (groupBy === "supplyMonth") {
     const rows = await Order.aggregate([
       { $match: match },
-      { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$supplyDate" } }, orders: { $sum: 1 }, pendingQty: { $sum: { $sum: "$pendingElastic.quantity" } } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$supplyDate", timezone: "Asia/Kolkata" } }, orders: { $sum: 1 }, pendingQty: { $sum: { $sum: "$pendingElastic.quantity" } } } },
       { $project: { _id: 0, key: "$_id", label: "$_id", orders: 1, pendingQty: 1 } },
       { $sort: { label: 1 } },
     ]);
@@ -126,7 +126,7 @@ async function _rows(from, to, groupBy) {
 async function _series(from, to) {
   const rows = await Order.aggregate([
     { $match: matchFor(from, to) },
-    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$date" } }, quantity: { $sum: { $sum: "$elasticOrdered.quantity" } } } },
+    { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: "Asia/Kolkata" } }, quantity: { $sum: { $sum: "$elasticOrdered.quantity" } } } },
     { $sort: { _id: 1 } },
     { $project: { _id: 0, date: "$_id", quantity: 1 } },
   ]);
