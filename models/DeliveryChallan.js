@@ -142,6 +142,25 @@ const DeliveryChallanSchema = new mongoose.Schema(
 
     remarks: { type: String, default: "" },
 
+    // Proof of delivery: when the customer took it, who, and what they
+    // wrote on the copy. `source` says whether it was read from the
+    // signed copy's photo or typed. A shortage or damage written there
+    // can open a complaint (`complaint`).
+    pod: {
+      type: new mongoose.Schema({
+        deliveredOn: Date,
+        receivedBy:  { type: String, default: "" },
+        remark:      { type: String, default: "" },
+        issue:       { type: String, enum: ["", "short", "damaged", "wrong"], default: "" },
+        stamped:     { type: Boolean, default: false },
+        source:      { type: String, enum: ["photo", "typed"], default: "typed" },
+        complaint:   { type: mongoose.Types.ObjectId, ref: "Complaint" },
+        at:          Date,
+        by:          { type: mongoose.Types.ObjectId, ref: "User" },
+      }, { _id: false }),
+      default: undefined,
+    },
+
     // Shipped more than was in stock, on purpose and with a reason
     // (api/deliveryChallan.js _applyDcItems). Stock never goes below
     // zero, so `short` is what the challan says left beyond what the

@@ -180,6 +180,42 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'pod-ocr': {
+    version: 'v1.0',
+    notes: 'A signed delivery challan copy or a transporter\'s proof of delivery read into delivered-on date, receiver, remark and any shortage/damage. Lives in utils/podOcr.js.',
+    system: null,
+  },
+
+  'notice-ocr': {
+    version: 'v1.0',
+    notes: 'A GST (ASMT-10, DRC-01, DRC-01A/B, REG-03…), income tax, PF or ESI notice read into authority, form, reference, period, amount, issued date and reply deadline. Lives in utils/noticeOcr.js.',
+    system: null,
+  },
+
+  'material-dedupe': {
+    version: 'v1.0',
+    notes: 'Raw materials grouped as likely the same yarn (count, ply, fibre, shade), with a standard name proposed; a person merges. Grouping is by code (services/materialDedupe.js); the model only proposes the standard name.',
+    system: null,
+  },
+
+  'quote-enquiry': {
+    version: 'v1.0',
+    notes: 'A customer\'s enquiry (message, email or sample photo) read into the quote form: elastic spec, quantity, matched elastic; a cover note drafted. Prices come from the cost model and past quotes, never from the model. Lives in services/quoteEnquiry.js.',
+    system: null,
+  },
+
+  'shift-handover': {
+    version: 'v1.0',
+    notes: 'A shift\'s handover note written over figures computed in services/shiftHandover.js (metres vs plan, looms down and why, open issues). Prose only.',
+    system: null,
+  },
+
+  'month-commentary': {
+    version: 'v1.0',
+    notes: 'A month\'s plain-language commentary written over figures computed in services/monthCommentary.js (sales, mix, yarn cost per metre, overdue, unusual expenses). Prose only.',
+    system: null,
+  },
+
   'cheque-ocr': {
     version: 'v1.0',
     notes: 'A cancelled cheque, passbook page or bank letter read into account number, IFSC, bank, branch and holder; the holder compared with the party\'s name. Lives in utils/kycOcr.js.',

@@ -88,6 +88,19 @@ const AI_SURFACES = Object.freeze([
   'inward-dc-ocr',
   'cheque-ocr',
   'id-card-ocr',
+  // A signed challan copy or transporter's POD read into "delivered on",
+  // who received it and any remark; a short or damaged remark drafts a
+  // complaint. A GST / income tax / PF / ESI notice read into its type,
+  // period, amount and reply deadline. Likely duplicate materials grouped
+  // under one standard name. An enquiry read into a quote. A shift's
+  // handover note and the month's commentary, written over figures the
+  // app computed (prose only, never a number of its own).
+  'pod-ocr',
+  'notice-ocr',
+  'material-dedupe',
+  'quote-enquiry',
+  'shift-handover',
+  'month-commentary',
   // The beam weights written by hand on a printed covering programme,
   // read from a photo; each row is checked on screen before it is saved.
   'covering-beam-ocr',

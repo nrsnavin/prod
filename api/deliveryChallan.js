@@ -1553,4 +1553,139 @@ router.post(
   })
 );
 
+// ─────────────────────────────────────────────────────────────
+//  PROOF OF DELIVERY
+//    POST /dc/:id/pod/scan   photo(s) of the signed copy / transporter POD
+//         → { read, checks, complaint }   nothing is saved
+//    POST /dc/:id/pod        { deliveredOn, receivedBy, remark, issue,
+//         stamped, source, aiSuggestion, complaint? }
+//         → a dispatched challan becomes delivered with its POD; a
+//           delivered one has its POD recorded. A shortage or damage can
+//           open a complaint against the order's job, once.
+// ─────────────────────────────────────────────────────────────
+const { readPod } = require("../utils/podOcr");
+const { failure: readFailure } = require("../utils/docRead");
+const { validate, fields: { text, objectId }, z } = require("../middleware/validate");
+const Complaint = require("../models/Complaints");
+
+const ISSUE_CATEGORY = { short: "quantity", damaged: "packing", wrong: "other" };
+const ISSUE_WORDS = { short: "short", damaged: "damaged", wrong: "wrong goods" };
+const istDay = (d) => new Date(d).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+
+/** The jobs a complaint about this challan could be against: its order's. */
+async function complaintTargets(dc) {
+  if (!dc.order) return { customer: null, jobs: [] };
+  const order = await Order.findById(dc.order).select("customer").lean();
+  if (!order) return { customer: null, jobs: [] };
+  const jobs = await JobOrder.find({ order: dc.order }).select("jobOrderNo status").sort({ createdAt: -1 }).limit(20).lean();
+  return { customer: String(order.customer), jobs: jobs.map((j) => ({ _id: String(j._id), jobOrderNo: j.jobOrderNo, status: j.status })) };
+}
+
+function podReason(dc, p) {
+  const when = p.deliveredOn ? new Date(p.deliveredOn).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" }) : "";
+  const who = p.receivedBy ? `received by ${p.receivedBy}` : "received";
+  return `${ISSUE_WORDS[p.issue] || "Remark"} on delivery of ${dc.dcNumber}: “${p.remark || ISSUE_WORDS[p.issue]}” — written on the signed copy, ${who}${when ? ` on ${when}` : ""}.`;
+}
+
+router.post(
+  "/:id/pod/scan",
+  keepRequestContext(lrUpload.array("files", 2)),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(String(req.params.id))) return next(new ErrorHandler("Challan not found", 404));
+    const dc = await DeliveryChallan.findById(req.params.id).select("dcNumber customerName status dispatchDate order pod").lean();
+    if (!dc) return next(new ErrorHandler("Challan not found", 404));
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return next(new ErrorHandler("Photograph the signed challan or the transporter's POD", 400));
+    let read;
+    try {
+      read = await readPod(files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype })));
+    } catch (err) {
+      const f = readFailure(err, "proof of delivery");
+      if (f.status === 502) await aiLedger.record({ surface: "pod-ocr", model: "?", promptVersion: promptVersion("pod-ocr"), refType: "DeliveryChallan", refId: dc._id, error: err.message });
+      return next(new ErrorHandler(f.message, f.status));
+    }
+    if (read.problem) return res.json({ success: true, read, checks: [], complaint: null, aiSuggestion: null });
+
+    const checks = [];
+    if (read.dcNumber && loose(read.dcNumber).replace(/\s/g, "") !== loose(dc.dcNumber).replace(/\s/g, "")) {
+      checks.push(`The copy says challan ${read.dcNumber}; this is ${dc.dcNumber}.`);
+    }
+    if (read.deliveredOn && dc.dispatchDate && read.deliveredOn < istDay(dc.dispatchDate)) {
+      checks.push(`Received on ${read.deliveredOn}, before it was dispatched (${istDay(dc.dispatchDate)}).`);
+    }
+    if (read.deliveredOn && read.deliveredOn > istDay(new Date())) checks.push(`The received date ${read.deliveredOn} is in the future.`);
+    if (!read.deliveredOn) checks.push("No received date on it — enter the date it was delivered.");
+    if (dc.status === "draft") checks.push("This challan has not been dispatched yet.");
+
+    let complaint = null;
+    if (read.issue && !dc.pod?.complaint) {
+      const t = await complaintTargets(dc);
+      if (t.customer) complaint = { customer: t.customer, jobs: t.jobs, category: ISSUE_CATEGORY[read.issue], reason: podReason(dc, read) };
+    }
+    const aiSuggestion = await aiLedger.record({
+      surface: "pod-ocr", model: read.model, promptVersion: promptVersion("pod-ocr"), refType: "DeliveryChallan", refId: dc._id,
+      proposed: { deliveredOn: read.deliveredOn, receivedBy: read.receivedBy, issue: read.issue },
+      latencyMs: read.latencyMs, usage: read.usage,
+    });
+    res.json({ success: true, read, checks, complaint, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
+  })
+);
+
+router.post(
+  "/:id/pod",
+  validate({
+    body: z.object({
+      deliveredOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "must be a date"),
+      receivedBy: text(80).optional(),
+      remark: text(300).optional(),
+      issue: z.enum(["", "short", "damaged", "wrong"]).nullable().optional(),
+      stamped: z.boolean().optional(),
+      source: z.enum(["photo", "typed"]).optional(),
+      aiSuggestion: objectId.nullable().optional(),
+      complaint: z.object({ job: objectId, category: z.enum(Complaint.CATEGORIES).optional(), reason: text(1000).optional() }).nullable().optional(),
+    }).strict(),
+  }),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(String(req.params.id))) return next(new ErrorHandler("Challan not found", 404));
+    const dc = await DeliveryChallan.findById(req.params.id).select("dcNumber status dispatchDate order pod").lean();
+    if (!dc) return next(new ErrorHandler("Challan not found", 404));
+    if (dc.status === "draft") return next(new ErrorHandler(`Dispatch ${dc.dcNumber} before recording its delivery`, 409));
+    if (dc.status === "cancelled") return next(new ErrorHandler(`${dc.dcNumber} is cancelled`, 409));
+    const b = req.body;
+    if (b.deliveredOn > istDay(new Date())) return next(new ErrorHandler("The delivery date cannot be in the future", 400));
+    if (dc.dispatchDate && b.deliveredOn < istDay(dc.dispatchDate)) return next(new ErrorHandler(`It was dispatched on ${istDay(dc.dispatchDate)} — it cannot have been delivered before that`, 400));
+
+    const issue = b.issue || "";
+    // The complaint is checked before anything changes, so a bad job
+    // number leaves the challan as it was.
+    let complaintDoc = null;
+    if (b.complaint && issue && !dc.pod?.complaint) {
+      const t = await complaintTargets(dc);
+      const job = t.jobs.find((j) => j._id === b.complaint.job);
+      if (!t.customer || !job) return next(new ErrorHandler("Pick one of this order's jobs for the complaint", 400));
+      complaintDoc = { customer: t.customer, job: job._id, category: b.complaint.category || ISSUE_CATEGORY[issue], reason: (b.complaint.reason || "").trim() };
+    }
+
+    if (dc.status === "dispatched") await changeDcStatus(dc._id, "delivered", req);
+    const pod = {
+      deliveredOn: new Date(`${b.deliveredOn}T12:00:00+05:30`),
+      receivedBy: (b.receivedBy || "").trim(), remark: (b.remark || "").trim(), issue,
+      stamped: !!b.stamped, source: b.source || "typed", at: new Date(), by: req.user?._id,
+      complaint: dc.pod?.complaint,
+    };
+    if (complaintDoc) {
+      const c = await Complaint.create({ ...complaintDoc, reason: complaintDoc.reason || podReason(dc, pod), date: pod.deliveredOn, status: "Open" });
+      pod.complaint = c._id;
+    }
+    await DeliveryChallan.updateOne({ _id: dc._id }, { $set: { pod } });
+    if (b.aiSuggestion) {
+      aiLedger.settle(b.aiSuggestion, {
+        accepted: { deliveredOn: b.deliveredOn, receivedBy: pod.receivedBy, issue: issue || null },
+        decidedBy: req.user?._id, expectSurface: "pod-ocr", ignoreMissing: true,
+      }).catch(() => {});
+    }
+    res.json({ success: true, status: "delivered", pod, complaint: pod.complaint ? String(pod.complaint) : null });
+  })
+);
+
 module.exports = router;
