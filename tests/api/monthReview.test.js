@@ -40,8 +40,9 @@ beforeAll(async () => {
     inv('2026-09-20', kay, 'Kay Knits', 50000, 12500),
     inv('2026-10-08', sun, 'Sunrise Garments', 180000, 40000, 0),
   ]);
-  await db().collection('supplierbills').insertMany([{ status: 'open', billDate: d('2026-10-03'), totals: { taxable: 90000 } }, { status: 'open', billDate: d('2026-09-03'), totals: { taxable: 60000 } }]);
-  const ex = (date, categoryName, grand) => ({ status: 'paid', date: d(date), categoryName, totals: { grand } });
+  await db().collection('supplierbills').insertMany([{ billNo: 'B/1', status: 'open', billDate: d('2026-10-03'), totals: { taxable: 90000 } }, { billNo: 'B/2', status: 'open', billDate: d('2026-09-03'), totals: { taxable: 60000 } }]);
+  let exNo = 0;
+  const ex = (date, categoryName, grand) => ({ expenseNo: `EXP/${++exNo}`, status: 'paid', date: d(date), categoryName, totals: { grand } });
   await db().collection('expenses').insertMany([ex('2026-07-05', 'Power', 40000), ex('2026-08-05', 'Power', 42000), ex('2026-09-05', 'Power', 41000), ex('2026-10-05', 'Power', 70000), ex('2026-10-06', 'Repairs', 15000)]);
   await db().collection('materialoutwards').insertMany([
     { outwardDate: d('2026-09-12'), quantity: 100, unitPrice: 220 }, { outwardDate: d('2026-10-12'), quantity: 150, unitPrice: 240 },
