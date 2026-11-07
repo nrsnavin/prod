@@ -194,7 +194,7 @@ const PROMPTS = Object.freeze({
 
   'material-dedupe': {
     version: 'v1.0',
-    notes: 'Raw materials grouped as likely the same yarn (count, ply, fibre, shade), with a standard name proposed; a person merges. Grouping is by code (services/materialDedupe.js); the model only proposes the standard name.',
+    notes: 'Raw materials grouped as likely the same yarn (count, ply, denier, fibre, shade) with a standard name proposed; a person merges. Grouping and naming are by rules in services/materialDedupe.js (no model call); the ledger scores the proposed name against the name kept.',
     system: null,
   },
 

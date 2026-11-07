@@ -2063,4 +2063,53 @@ router.post(
   })
 );
 
+// ══════════════════════════════════════════════════════════════
+//  ONE YARN ENTERED MORE THAN ONCE  (services/materialDedupe.js)
+//    GET  /duplicates             likely duplicates, a standard name each
+//    GET  /similar?name=&category=&exclude=   "did you mean" while typing
+//    POST /merge { into, from[], name, proposedName }   admin only
+// ══════════════════════════════════════════════════════════════
+const materialDedupe = require("../services/materialDedupe");
+const { isAdmin: mustBe } = require("../middleware/auth");
+const aiLedgerForMerge = require("../services/aiLedger");
+const { promptVersion: mergePromptVersion } = require("../utils/aiPrompts");
+
+router.get(
+  "/duplicates",
+  catchAsyncErrors(async (_req, res) => {
+    res.json({ success: true, groups: await materialDedupe.groups() });
+  })
+);
+
+router.get(
+  "/similar",
+  catchAsyncErrors(async (req, res) => {
+    const exclude = mongoose.Types.ObjectId.isValid(String(req.query.exclude || "")) ? String(req.query.exclude) : undefined;
+    res.json({ success: true, similar: await materialDedupe.similarTo(String(req.query.name || "").slice(0, 120), String(req.query.category || ""), exclude) });
+  })
+);
+
+router.post(
+  "/merge",
+  mustBe("admin"),
+  catchAsyncErrors(async (req, res, next) => {
+    const { into, from, name, proposedName } = req.body || {};
+    const ids = Array.isArray(from) ? from.map(String) : [];
+    if (!mongoose.Types.ObjectId.isValid(String(into || "")) || !ids.length || ids.length > 20 || ids.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+      return next(new ErrorHandler("Say which material to keep and which to merge into it", 400));
+    }
+    if (name != null && (typeof name !== "string" || name.length > 120)) return next(new ErrorHandler("name must be text, at most 120 characters", 400));
+    const result = await materialDedupe.merge({ into, from: ids, name, by: req.user?._id });
+    // The proposal scored against what was kept: the name, and the members.
+    if (typeof proposedName === "string" && proposedName.trim()) {
+      const id = await aiLedgerForMerge.record({
+        surface: "material-dedupe", model: "rules", promptVersion: mergePromptVersion("material-dedupe"),
+        refType: "RawMaterial", refId: result.kept._id, proposed: { name: proposedName.trim() },
+      });
+      if (id) await aiLedgerForMerge.settle(id, { accepted: { name: result.kept.name }, decidedBy: req.user?._id, expectSurface: "material-dedupe", ignoreMissing: true }).catch(() => {});
+    }
+    res.json({ success: true, ...result });
+  })
+);
+
 module.exports = router;
