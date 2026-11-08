@@ -202,6 +202,16 @@ router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
   }
 });
 
+// A month's payslips checked against each worker's recent months, before
+// they are paid (services/payrollCheck.js). Reads only.
+router.get('/check', isAdmin('admin', 'accounts'), async (req, res) => {
+  try {
+    res.json({ success: true, data: await require('../services/payrollCheck').check({ year: req.query.year, month: req.query.month }) });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, message: err.message });
+  }
+});
+
 router.get('/dashboard', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const year  = +(req.query.year  || new Date().getFullYear());
