@@ -84,6 +84,10 @@ function startServer() {
   require("./services/collectionReminders").start();
   require("./services/noticeReminders").start();
 
+  // The morning digest and evening report, on the server's own clock
+  // (09:00 and 21:00 in India; once a day however many processes run).
+  require("./services/scheduledReports").start();
+
   // create server
   //
   // HOST controls the bind address. Left unset it binds all interfaces

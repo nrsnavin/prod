@@ -832,7 +832,9 @@ app.post("/api/v2/notify/cron/run-digest", async (req, res) => {
     return res.status(401).json({ success: false, message: "bad cron secret" });
   }
   try {
-    const result = await notify.runDigest(false);
+    // Same once-a-day claim as the server's own timer: an old crontab and
+    // the timer never both send it.
+    const result = await require("./services/scheduledReports").runOnce("morningDigest", { trigger: "cron" });
     return res.json({ success: true, ...result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
@@ -852,7 +854,7 @@ app.post("/api/v2/notify/cron/run-evening-report", async (req, res) => {
     return res.status(401).json({ success: false, message: "bad cron secret" });
   }
   try {
-    const result = await notify.runEveningReport(false);
+    const result = await require("./services/scheduledReports").runOnce("eveningReport", { trigger: "cron" });
     return res.json({ success: true, ...result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });

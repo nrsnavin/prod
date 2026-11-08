@@ -71,3 +71,13 @@ Every migration in this repo defines `down`. Read it before running it —
 the feature-grant ones cannot tell a key they added from one an admin
 ticked by hand afterwards, so a rollback puts those accounts back to
 needing a tick.
+
+## Daily reports
+
+The server sends the morning digest (09:00 India time) and the evening
+report (21:00) itself — no crontab needed. Each goes once a day however
+many processes run. Change the times with `DIGEST_AT` / `EVENING_REPORT_AT`
+("HH:MM"), or turn the timer off with `SCHEDULED_REPORTS=off`. Recipients
+and on/off per report are in Notification settings. The old
+`/api/v2/notify/cron/run-digest` route still works and shares the same
+once-a-day claim, so an existing crontab never doubles a report.

@@ -230,6 +230,14 @@ async function runDigest(returnTextOnly = false) {
 
 router.runDigest = runDigest;
 
+// When the server sends the daily reports itself, and how the last ones went.
+router.get(
+  "/scheduled",
+  catchAsyncErrors(async (_req, res) => {
+    res.json({ success: true, data: await require("../services/scheduledReports").status() });
+  })
+);
+
 // ── POST run-evening-report ───────────────────────────────────────
 // Same shape as run-digest. The 9 PM cron triggers this; covers
 // what happened TODAY (the morning digest covers yesterday).
