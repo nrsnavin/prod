@@ -119,4 +119,15 @@ router.get(
   })
 );
 
+// GET /audit/watch?days=7 — the changes worth a second look
+// (services/auditWatch.js): cancellations, deletions, edits after
+// verifying, back-dated money documents, late-night work, stock and
+// login changes. Read-only.
+router.get(
+  "/watch",
+  catchAsyncErrors(async (req, res) => {
+    res.json({ success: true, data: await require("../services/auditWatch").watch({ days: req.query.days }) });
+  })
+);
+
 module.exports = router;

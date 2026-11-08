@@ -37,6 +37,8 @@ function minutesOf(hhmm, fallback) {
 const JOBS = {
   morningDigest: { at: () => minutesOf(process.env.DIGEST_AT, 9 * 60), run: () => require('../api/notify').runDigest(false) },
   eveningReport: { at: () => minutesOf(process.env.EVENING_REPORT_AT, 21 * 60), run: () => require('../api/notify').runEveningReport(false) },
+  // Mondays only: the week's changes worth a second look.
+  auditWatch: { at: () => minutesOf(process.env.AUDIT_WATCH_AT, 9 * 60 + 30), weekday: 1, run: () => require('./auditWatch').runWeekly() },
 };
 
 /** Minutes after midnight in India at `now`. */
@@ -77,6 +79,7 @@ async function tick(now = new Date()) {
   const out = {};
   for (const [job, spec] of Object.entries(JOBS)) {
     const at = spec.at();
+    if (spec.weekday != null && factoryDay.calendarDay(now).getUTCDay() !== spec.weekday) { out[job] = { ran: false, why: 'not today' }; continue; }
     if (mins < at || mins > at + GRACE_MIN) { out[job] = { ran: false, why: 'not now' }; continue; }
     try { out[job] = await runOnce(job, { now }); } catch (err) {
       console.error(`[scheduled-reports] ${job} failed: ${err?.message}`);
@@ -93,7 +96,7 @@ async function status() {
   for (const r of rows) if (!last[r.job]) last[r.job] = { day: r.day, at: r.at, ok: r.ok, error: r.error, trigger: r.trigger };
   return Object.fromEntries(Object.entries(JOBS).map(([job, spec]) => {
     const at = spec.at();
-    return [job, { at: `${String(Math.floor(at / 60)).padStart(2, '0')}:${String(at % 60).padStart(2, '0')}`, last: last[job] || null }];
+    return [job, { at: `${String(Math.floor(at / 60)).padStart(2, '0')}:${String(at % 60).padStart(2, '0')}`, ...(spec.weekday != null ? { weekday: spec.weekday } : {}), last: last[job] || null }];
   }));
 }
 

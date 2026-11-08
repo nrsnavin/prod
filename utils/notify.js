@@ -336,6 +336,11 @@ const fmt = {
     return p?.body || null;
   },
 
+  // services/auditWatch.js: the week's changes worth a second look.
+  auditWatch(p) {
+    return p?.body || null;
+  },
+
   // services/noticeReminders.js: a government notice's reply is due.
   statutoryNotice(p) {
     return p?.body || null;
@@ -391,6 +396,7 @@ const EVENT_FLAG = {
   shiftEndNudge:              "shiftEndNudge",
   collectionReply:            "collectionReply",
   supplierReply:              "supplierReply",
+  auditWatch:                 "auditWatch",
   statutoryNotice:            "statutoryNotice",
   shiftHandover:              "shiftHandover",
   // `test` is always allowed (used to verify wiring) — no flag.

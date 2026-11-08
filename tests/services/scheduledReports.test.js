@@ -34,6 +34,7 @@ beforeEach(async () => {
   evening = jest.fn().mockResolvedValue({ sent: true });
   svc.JOBS.morningDigest.run = digest;
   svc.JOBS.eveningReport.run = evening;
+  svc.JOBS.auditWatch.run = jest.fn().mockResolvedValue({ sent: true });
   delete process.env.DIGEST_AT; delete process.env.EVENING_REPORT_AT;
   delete process.env.CRON_SECRET;
 });
@@ -78,6 +79,14 @@ describe('the morning digest', () => {
     expect(out.morningDigest.why).toBe('failed');
     const st = await svc.status();
     expect(st.morningDigest.last).toMatchObject({ ok: false, error: 'provider down', day: '2026-11-09' });
+  });
+});
+
+describe('the weekly audit summary', () => {
+  it('goes on Monday mornings only', async () => {
+    await svc.tick(at('2026-11-09T04:05:00Z')); // Monday 09:35 IST
+    await svc.tick(at('2026-11-10T04:05:00Z')); // Tuesday
+    expect(svc.JOBS.auditWatch.run).toHaveBeenCalledTimes(1);
   });
 });
 

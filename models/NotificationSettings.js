@@ -53,6 +53,8 @@ const EVENT_DEFAULTS = {
   collectionReply:           { tier: "realtime" },
   // A supplier replied to a late-PO chaser (services/poChaser.js).
   supplierReply:             { tier: "realtime" },
+  // Monday's changes worth a second look (services/auditWatch.js).
+  auditWatch:                { tier: "daily" },
   // A government notice's reply deadline coming up (services/noticeReminders.js).
   statutoryNotice:           { tier: "realtime" },
   // The handover note at a shift's end (services/shiftHandover.js).
@@ -112,6 +114,7 @@ const NotificationSettingsSchema = new mongoose.Schema(
       shiftEndNudge:          { type: mongoose.Schema.Types.Mixed, default: true },
       collectionReply:        { type: mongoose.Schema.Types.Mixed, default: true },
       supplierReply:          { type: mongoose.Schema.Types.Mixed, default: true },
+      auditWatch:             { type: mongoose.Schema.Types.Mixed, default: true },
       statutoryNotice:        { type: mongoose.Schema.Types.Mixed, default: true },
       shiftHandover:          { type: mongoose.Schema.Types.Mixed, default: true },
       machineBreakdown:       { type: mongoose.Schema.Types.Mixed, default: true },
