@@ -1584,6 +1584,35 @@ const inboxRow = (x) => ({
   supplier: x.supplier, supplierName: x.supplierName, matchedBy: x.matchedBy, senderKnown: !!x.senderKnown, alreadyEntered: x.alreadyEntered, grand: x.grand,
   billNo: x.read?.billNo || "", billDate: x.read?.billDate || null, confidence: x.read?.confidence ?? null, kind: x.read?.kind || null, bill: x.bill, decidedAt: x.decidedAt,
 });
+// ── Customer mail (services/customerInbox.js) ─────────────────────
+const InboxMail = require("../models/InboxMail");
+router.get("/customer-mail/status", catchAsyncErrors(async (_req, res) => {
+  res.json({ success: true, ...require("../services/customerInbox").status() });
+}));
+router.post("/customer-mail/run", catchAsyncErrors(async (_req, res, next) => {
+  const inbox = require("../services/customerInbox");
+  if (!inbox.configured()) return next(new ErrorHandler("The customer mailbox is not set up (CUSTOMER_IMAP_*)", 400));
+  res.json({ success: true, ...(await inbox.run()) });
+}));
+router.get("/customer-mail", catchAsyncErrors(async (req, res) => {
+  const status = ["new", "done", "dismissed", "skipped"].includes(req.query.status) ? req.query.status : { $in: ["new", "done"] };
+  const rows = await InboxMail.find({ status }).select("-text -draft").sort({ receivedAt: -1 }).limit(200).lean();
+  res.json({ success: true, rows });
+}));
+router.get("/customer-mail/:id", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));
+  const x = await InboxMail.findById(req.params.id).lean();
+  if (!x) return next(new ErrorHandler("Not found", 404));
+  res.json({ success: true, mail: x });
+}));
+router.post("/customer-mail/:id/:action(dismiss|done)", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));
+  const x = await InboxMail.findOneAndUpdate({ _id: req.params.id, status: { $in: ["new", "done", "skipped"] } },
+    { $set: { status: req.params.action === "dismiss" ? "dismissed" : "done", decidedBy: req.user?._id, decidedAt: new Date() } }, { new: true }).select("-text -draft").lean();
+  if (!x) return next(new ErrorHandler("Not found", 404));
+  res.json({ success: true, mail: x });
+}));
+
 router.get("/bill-inbox/status", catchAsyncErrors(async (_req, res) => {
   res.json({ success: true, ...billMailbox.status(), waiting: await InboxBill.countDocuments({ status: "new" }) });
 }));

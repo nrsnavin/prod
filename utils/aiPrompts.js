@@ -119,6 +119,12 @@ const PROMPTS = Object.freeze({
       '- Do not create a theme for a single complaint unless it is plainly distinct from all others.',
   },
 
+  'inbox-triage': {
+    version: 'v1.0',
+    notes: 'A customer\'s mail sorted into purchase_order, complaint, payment_advice, enquiry or other, with a one-line summary. Keywords first; the model only refines. The mail then goes to that kind\'s own reader. Lives in services/customerInbox.js.',
+    system: null,
+  },
+
   'feedback-themes': {
     version: 'v1.0',
     notes: 'Groups what workers wrote in feedback. Names are never sent; returns an assignment only — every count is computed in services/feedbackThemes.js.',

@@ -341,6 +341,11 @@ const fmt = {
     return p?.body || null;
   },
 
+  // services/customerInbox.js: a customer's mail, and where it went.
+  customerMail(p) {
+    return p?.body || null;
+  },
+
   // services/noticeReminders.js: a government notice's reply is due.
   statutoryNotice(p) {
     return p?.body || null;
@@ -397,6 +402,7 @@ const EVENT_FLAG = {
   collectionReply:            "collectionReply",
   supplierReply:              "supplierReply",
   auditWatch:                 "auditWatch",
+  customerMail:               "customerMail",
   statutoryNotice:            "statutoryNotice",
   shiftHandover:              "shiftHandover",
   // `test` is always allowed (used to verify wiring) — no flag.

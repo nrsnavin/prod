@@ -78,3 +78,15 @@ If it prints `{ skipped:true }`, the `SMTP_*` vars aren't loaded.
 - **Deliverability.** For inboxing (not spam), add SPF/DKIM DNS records for
   the domain per Hostinger's email DNS guide. Hostinger sets these up
   automatically when the mailbox is created on their nameservers.
+
+## Customer mailbox (orders, complaints, payment advices, enquiries)
+
+Give customers one address (say orders@…) and forward it to a mailbox the
+server can read. Set `CUSTOMER_IMAP_HOST`, `CUSTOMER_IMAP_USER`,
+`CUSTOMER_IMAP_PASS` (and `CUSTOMER_IMAP_PORT`, `CUSTOMER_IMAP_SECURE`,
+`CUSTOMER_MAILBOX`, `CUSTOMER_MAIL_EVERY_MIN`, `CUSTOMER_MAIL_MAX_PER_RUN`).
+Each mail is sorted and handed to its reader: purchase orders become order
+requests (Orders), complaints are opened when the job is clear, payment
+advices and enquiries are read for accounts and sales to finish. Senders
+are matched to customers by the e-mail addresses on the customer record.
+Everything appears under Accounts → Inbox → Customer mail.

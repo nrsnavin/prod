@@ -188,4 +188,4 @@ function status() {
   return { configured: configured(c), mailbox: configured(c) ? c.user : '', everyMin: c.everyMin, senders: c.senders };
 }
 
-module.exports = { run, start, stop, handle, status, config, configured, setFetcher, senderOk };
+module.exports = { run, start, stop, handle, status, config, configured, setFetcher, senderOk, imapFetch };

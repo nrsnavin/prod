@@ -139,6 +139,8 @@ const AI_SURFACES = Object.freeze([
   'po-chase-reply',
   // Worker feedback grouped into themes (names never sent).
   'feedback-themes',
+  // A customer's mail sorted into order, complaint, advice or enquiry.
+  'inbox-triage',
 ]);
 
 /** How a suggestion ended up. */
