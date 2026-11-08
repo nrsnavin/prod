@@ -259,7 +259,7 @@ async function tick(now = new Date()) {
   if (mins < cfg.hour * 60 || mins > cfg.hour * 60 + 180) return { ran: false, why: 'not now' };
   const ScheduledRun = require('../models/ScheduledRun');
   const day = factoryDay.ymd(now);
-  try { await ScheduledRun.create({ key: `poChase:${day}`, job: 'poChase', day }); } catch (err) { if (err?.code === 11000) return { ran: false, why: 'already sent today' }; throw err; }
+  try { await ScheduledRun.create({ key: `poChase:${day}`, task: 'poChase', day }); } catch (err) { if (err?.code === 11000) return { ran: false, why: 'already sent today' }; throw err; }
   const sent = await sendDue({ now });
   await ScheduledRun.updateOne({ key: `poChase:${day}` }, { $set: { ok: true } });
   return { ran: true, sent };

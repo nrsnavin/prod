@@ -34,7 +34,9 @@ beforeAll(async () => {
   app = require('../../app.js');
   admin = await require('../../models/User.js').create({ name: 'Owner', email: 'mr@t.co', password: 'pass1234', role: 'admin', department: 'admin' });
   const sun = new mongoose.Types.ObjectId(); const kay = new mongoose.Types.ObjectId();
-  const inv = (date, customer, name, taxable, metres, paid = taxable * 1.05) => ({ status: 'issued', invoiceDate: d(date), dueDate: d(date), customer, buyer: { name }, totals: { taxable, grand: taxable * 1.05 }, paidAmount: paid, lines: [{ name: '25mm Black', unit: 'm', quantity: metres, taxable }] });
+  let invNo = 0;
+  // Each with its own number: the unique index on invoiceNumber may or may not be built yet.
+  const inv = (date, customer, name, taxable, metres, paid = taxable * 1.05) => ({ invoiceNumber: `MR-${++invNo}`, status: 'issued', invoiceDate: d(date), dueDate: d(date), customer, buyer: { name }, totals: { taxable, grand: taxable * 1.05 }, paidAmount: paid, lines: [{ name: '25mm Black', unit: 'm', quantity: metres, taxable }] });
   await db().collection('invoices').insertMany([
     inv('2026-09-10', sun, 'Sunrise Garments', 100000, 25000),
     inv('2026-09-20', kay, 'Kay Knits', 50000, 12500),

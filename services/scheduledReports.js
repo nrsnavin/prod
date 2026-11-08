@@ -49,7 +49,7 @@ function indiaMinutes(now) {
 /** Take the day's run for `job`; false when someone already has. */
 async function claim(job, day, trigger) {
   try {
-    await ScheduledRun.create({ key: `${job}:${day}`, job, day, trigger });
+    await ScheduledRun.create({ key: `${job}:${day}`, task: job, day, trigger });
     return true;
   } catch (err) {
     if (err?.code === 11000) return false;
@@ -91,9 +91,9 @@ async function tick(now = new Date()) {
 
 /** The last run of each job, for the settings page. */
 async function status() {
-  const rows = await ScheduledRun.find({ job: { $in: Object.keys(JOBS) } }).sort({ at: -1 }).limit(20).lean();
+  const rows = await ScheduledRun.find({ task: { $in: Object.keys(JOBS) } }).sort({ at: -1 }).limit(20).lean();
   const last = {};
-  for (const r of rows) if (!last[r.job]) last[r.job] = { day: r.day, at: r.at, ok: r.ok, error: r.error, trigger: r.trigger };
+  for (const r of rows) if (!last[r.task]) last[r.task] = { day: r.day, at: r.at, ok: r.ok, error: r.error, trigger: r.trigger };
   return Object.fromEntries(Object.entries(JOBS).map(([job, spec]) => {
     const at = spec.at();
     return [job, { at: `${String(Math.floor(at / 60)).padStart(2, '0')}:${String(at % 60).padStart(2, '0')}`, ...(spec.weekday != null ? { weekday: spec.weekday } : {}), last: last[job] || null }];
