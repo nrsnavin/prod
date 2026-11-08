@@ -13,6 +13,7 @@
 //    GET  /export/:what           any list or report as Excel
 // ══════════════════════════════════════════════════════════════════
 
+const factoryDay = require("../utils/factoryDay");
 const express = require("express");
 const ExcelJS = require("exceljs");
 const router = express.Router();
@@ -90,7 +91,7 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
     unplaced.set(l.key, l.amount || 0);
     if (!latest) latest = { statement: s._id, account: s.account, accountName: s.accountName };
   }
-  const today = new Date(now); today.setHours(0, 0, 0, 0);
+  const today = factoryDay.calendarDay(now);
   const promised = promisesDue.filter((r) => r.promise?.live && new Date(r.promise.date) <= new Date(today.getTime() + DAY - 1));
   res.json({
     success: true,
@@ -233,7 +234,7 @@ router.get("/export/:what", catchAsyncErrors(async (req, res, next) => {
   try {
     const from = readDate(req.query.from, "from");
     const to = readDate(req.query.to, "to");
-    if (from || to) range = { ...(from ? { $gte: from } : {}), ...(to ? { $lte: new Date(new Date(to).setHours(0, 0, 0, 0) + DAY - 1) } : {}) };
+    if (from || to) range = { ...(from ? { $gte: from } : {}), ...(to ? { $lte: factoryDay.calendarDayEnd(to) } : {}) };
   } catch (err) { return next(err); }
   const rows = await spec.rows({ range });
   const wb = new ExcelJS.Workbook();

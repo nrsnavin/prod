@@ -16,6 +16,7 @@
 
 'use strict';
 
+const factoryDay = require('../utils/factoryDay');
 const express    = require('express');
 const mongoose   = require('mongoose');
 const router     = express.Router();
@@ -113,7 +114,7 @@ router.get('/date-range', async (req, res) => {
     };
 
     const result = [];
-    const cursor = new Date(rangeStart); cursor.setHours(0,0,0,0);
+    const cursor = factoryDay.calendarDay(rangeStart);
     while (cursor <= rangeEnd) {
       const key   = toISODate(cursor);
       const daySlot   = summarise(byDate[key]?.DAY  ||null);
@@ -127,7 +128,7 @@ router.get('/date-range', async (req, res) => {
         totalOperators:(daySlot.operators||0)+(nightSlot.operators||0),
         dayShift:daySlot, nightShift:nightSlot,
       });
-      cursor.setDate(cursor.getDate()+1);
+      cursor.setUTCDate(cursor.getUTCDate()+1);
     }
     return res.json({ success:true, count:result.length, data:result });
   } catch(err) {

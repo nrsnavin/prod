@@ -15,6 +15,7 @@
 //  is left to find. Zero before the month is closed.
 // ══════════════════════════════════════════════════════════════════
 
+const factoryDay = require('../utils/factoryDay');
 const mongoose = require('mongoose');
 const Payment = require('../models/Payment');
 const Contra = require('../models/Contra');
@@ -23,7 +24,7 @@ const BankStatement = require('../models/BankStatement');
 const bankBalances = require('./bankBalances');
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-const endOf = (d) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; };
+const endOf = (d) => factoryDay.calendarDayEnd(d) || new Date(NaN);
 
 /** Mark one book entry cleared on `date` (null clears the mark) — only where it touches `account`. */
 async function markCleared(voucherType, id, account, date, { overwrite = false } = {}) {

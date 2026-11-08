@@ -27,6 +27,7 @@
 //                                      ledgers missing in Tally
 // ══════════════════════════════════════════════════════════════════
 
+const factoryDay = require("../utils/factoryDay");
 const crypto = require("crypto");
 const path = require("path");
 const express = require("express");
@@ -50,7 +51,7 @@ function period(src) {
   const from = readDate(src.from, "from");
   let to = readDate(src.to, "to");
   if (!from || !to) throw new ErrorHandler("from and to are required", 400);
-  to = new Date(new Date(to).setHours(0, 0, 0, 0) + DAY - 1);
+  to = factoryDay.calendarDayEnd(to);
   if (to < from) throw new ErrorHandler("to is before from", 400);
   if (to - from > 400 * DAY) throw new ErrorHandler("Export at most a year at a time", 400);
   return { from, to };
@@ -146,7 +147,7 @@ router.post("/tally/export", catchAsyncErrors(async (req, res, next) => {
   if (lock) {
     const current = (await getSettings()).lockDate;
     if (!current || new Date(current) < p.to) {
-      await AccountsSettings.updateOne({ key: "accounts" }, { $set: { lockDate: new Date(new Date(p.to).setHours(0, 0, 0, 0)), lockedBy: req.user?.name || "", lockedAt: new Date() } });
+      await AccountsSettings.updateOne({ key: "accounts" }, { $set: { lockDate: factoryDay.calendarDay(p.to.toISOString().slice(0, 10)), lockedBy: req.user?.name || "", lockedAt: new Date() } });
     }
   }
   const out = await TallyBatch.findById(_id).lean();

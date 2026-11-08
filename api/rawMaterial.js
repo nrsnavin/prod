@@ -1,5 +1,6 @@
 "use strict";
 
+const factoryDay = require("../utils/factoryDay");
 const express           = require("express");
 const { assertVersion, bumpVersion, explainMiss } = require("../utils/versioning");
 const { renderPdf } = require("../utils/renderPdf");
@@ -1928,8 +1929,8 @@ router.get(
       .replace(/^-+|-+$/g, "")
       .slice(0, 40) || "material";
     const period = [
-      range.from ? range.from.toISOString().slice(0, 10) : "start",
-      range.to ? range.to.toISOString().slice(0, 10) : "today",
+      range.from ? factoryDay.ymd(range.from) : "start",
+      range.to ? factoryDay.ymd(range.to) : "today",
     ].join("_to_");
 
     res.setHeader("Content-Type", "application/pdf");

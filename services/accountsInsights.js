@@ -15,6 +15,7 @@
 //  closeChecklist()   what is left before a month can be closed
 // ══════════════════════════════════════════════════════════════════
 
+const factoryDay = require('../utils/factoryDay');
 const mongoose = require('mongoose');
 const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
@@ -269,7 +270,7 @@ function placeInvoice(profile, invoiceDate, today) {
 }
 
 /** Monday 00:00 of the week `d` falls in. */
-const weekStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
+const weekStart = (d) => { const x = factoryDay.calendarDay(d); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return x; };
 
 /**
  * Take a party's credit off its open documents, oldest due first, so the
@@ -370,7 +371,7 @@ async function statutoryAndPayroll(today, end) {
 }
 
 async function forecast({ weeks = 6, now = new Date() } = {}) {
-  const today = new Date(now); today.setHours(0, 0, 0, 0);
+  const today = factoryDay.calendarDay(now);
   const start = weekStart(today);
   const end = new Date(start.getTime() + weeks * 7 * DAY - 1);
   const accounts = await BankAccount.find({ active: true }).lean();

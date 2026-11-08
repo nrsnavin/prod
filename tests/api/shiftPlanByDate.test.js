@@ -70,7 +70,8 @@ async function seedPlan(dateIso, shift, details) {
 }
 
 const YESTERDAY = '2026-03-01';
-const TODAY_ISO = () => new Date().toISOString().slice(0, 10);
+// The shift day running now: a night shift keeps its date until 08:00 in India.
+const TODAY_ISO = () => require('../../utils/factoryDay').ymd(require('../../utils/factoryDay').shiftDay());
 
 describe('GET /shift/today — metres actually produced', () => {
   test('sums the shifts’ production instead of reporting zero', async () => {

@@ -36,6 +36,7 @@
 // movement logs shifts the whole ledger — which is the honest reading:
 // the movements do not explain that edit.
 
+const factoryDay = require('../utils/factoryDay');
 const MaterialInward = require('../models/MaterialInward');
 const MaterialOutward = require('../models/MaterialOut.cjs');
 const RawMaterial = require('../models/RawMaterial');
@@ -50,21 +51,16 @@ const num = (v) => {
 const round3 = (v) => Math.round(num(v) * 1000) / 1000;
 
 function startOfDay(v) {
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) return null;
-  d.setHours(0, 0, 0, 0);
-  return d;
+  // Movements keep the moment they happened: the day starts at 00:00 in India.
+  return factoryDay.dayStart(v);
 }
 
 function endOfDay(v) {
-  const d = new Date(v);
-  if (Number.isNaN(d.getTime())) return null;
-  d.setHours(23, 59, 59, 999);
-  return d;
+  return factoryDay.dayEnd(v);
 }
 
 /**
- * Widen the caller's `from`/`to` to whole local days.
+ * Widen the caller's `from`/`to` to whole days in India.
  *
  * A user picking 1 March to 31 March means both days included. Passing
  * the raw strings through would give midnight-to-midnight and silently

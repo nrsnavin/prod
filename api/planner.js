@@ -19,6 +19,7 @@
 //  job flow (automate the proposal, keep the approval).
 // ═══════════════════════════════════════════════════════════════════
 
+const factoryDay = require("../utils/factoryDay");
 const express          = require("express");
 const { inStages, POST_PREP_STAGES } = require('../domain/jobStatus');
 const router           = express.Router();
@@ -73,11 +74,7 @@ const _fmt = (d) => (d instanceof Date && !isNaN(d) ? d.toISOString().slice(0, 1
  * that lands on its date pushes the optimiser into genuinely different,
  * worse assignments while it chases the phantom.
  */
-const _startOfDay = (d) => {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-};
+const _startOfDay = (d) => factoryDay.calendarDay(d) || new Date(NaN);
 
 // ── Gather pending order lines, due within the horizon ─────────────
 //

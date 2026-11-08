@@ -1,3 +1,4 @@
+const factoryDay = require("../utils/factoryDay");
 const express  = require("express");
 const { renderPdf } = require("../utils/renderPdf");
 const router   = express.Router();
@@ -1379,11 +1380,8 @@ router.get(
     // same-day despatch — the ones that hit the date exactly — was
     // counted as a miss, which made the figure systematically worse
     // than the truth and worst for the customers served most promptly.
-    const startOfDay = (d) => {
-      const x = new Date(d);
-      x.setHours(0, 0, 0, 0);
-      return x;
-    };
+    // The day a moment falls on in India — a 1 am despatch is that day's.
+    const startOfDay = (d) => factoryDay.calendarDay(d) || new Date(NaN);
     const dayDiff = (a, b) =>
       Math.round((startOfDay(a) - startOfDay(b)) / (24 * 60 * 60 * 1000));
 
@@ -1483,8 +1481,8 @@ router.post(
       const first = (x) => x.split(" ")[0] || "";
       if (!(a.includes(first(b)) || b.includes(first(a)))) checks.push(`The LR is to "${read.consignee}"; this challan is to ${dc.customerName}.`);
     }
-    if (read.lrDate && dc.dispatchDate) {
-      const days = Math.round((new Date(`${read.lrDate}T00:00:00`) - new Date(dc.dispatchDate).setHours(0, 0, 0, 0)) / 86_400_000);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(read.lrDate || "")) && dc.dispatchDate) {
+      const days = Math.round((factoryDay.calendarDay(String(read.lrDate)) - factoryDay.calendarDay(dc.dispatchDate)) / 86_400_000);
       if (days < -1 || days > 5) checks.push(`The LR is dated ${read.lrDate}, ${Math.abs(days)} days ${days < 0 ? "before" : "after"} the challan.`);
     }
     if (dc.lrNumber && read.lrNumber && loose(dc.lrNumber) !== loose(read.lrNumber)) checks.push(`The challan already has LR ${dc.lrNumber}.`);

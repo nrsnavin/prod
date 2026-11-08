@@ -9,6 +9,7 @@
 //              configured); the office edits and sends it
 // ══════════════════════════════════════════════════════════════════
 
+const factoryDay = require('../utils/factoryDay');
 const Customer = require('../models/Customer');
 const CollectionNote = require('../models/CollectionNote');
 const outstanding = require('./outstanding');
@@ -52,7 +53,7 @@ async function overdue({ includeHeld = false } = {}) {
   ]);
   const byId = new Map(customers.map((c) => [String(c._id), c]));
   const history = new Map(notes.map((n) => [String(n._id), n]));
-  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const today = factoryDay.calendarDay();
   const out = groups.map((g) => {
     const c = byId.get(String(g.party)) || {};
     const h = history.get(String(g.party));

@@ -18,6 +18,7 @@
 //                                      through /collections/send
 // ══════════════════════════════════════════════════════════════════
 
+const factoryDay = require("../utils/factoryDay");
 const express = require("express");
 const router = express.Router();
 
@@ -32,7 +33,7 @@ const { asInvoice } = require("../services/noteDocument");
 const partyStatement = require("../services/partyStatement");
 const outstanding = require("../services/outstanding");
 const { e164 } = require("../services/collections");
-const { isId, readDate, DAY } = require("../services/accountsHelpers");
+const { isId, readDate } = require("../services/accountsHelpers");
 
 const AccountNote = require("../models/AccountNote");
 const Payment = require("../models/Payment");
@@ -159,7 +160,7 @@ async function statementFor(q) {
   if (!isId(q.party)) throw new ErrorHandler("party is required", 400);
   const from = readDate(q.from, "from");
   let to = readDate(q.to, "to");
-  if (to) to = new Date(new Date(to).setHours(0, 0, 0, 0) + DAY - 1);
+  if (to) to = factoryDay.calendarDayEnd(to);
   const party = await partyOf(partyType, q.party);
   if (!party) throw new ErrorHandler("Party not found", 404);
   const statement = await partyStatement.ledgerAccount(partyType, q.party, { from, to });
@@ -186,7 +187,7 @@ async function sendXlsx(res, name, wb) {
 const dateRange = (q) => {
   const from = readDate(q.from, "from");
   let to = readDate(q.to, "to");
-  if (to) to = new Date(new Date(to).setHours(0, 0, 0, 0) + DAY - 1);
+  if (to) to = factoryDay.calendarDayEnd(to);
   return { from, to };
 };
 

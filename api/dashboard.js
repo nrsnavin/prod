@@ -10,6 +10,7 @@
 // ══════════════════════════════════════════════════════════════
 "use strict";
 
+const factoryDay = require("../utils/factoryDay");
 const express      = require("express");
 const router       = express.Router();
 
@@ -70,8 +71,11 @@ const KPI_TTL_MS = 5_000;
 const LIVE_ORDER_STATUSES = ["Open", "Approved", "InProgress"];
 
 async function computeKpis() {
-  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
-  const endOfToday   = new Date(); endOfToday.setHours(23, 59, 59, 999);
+  // India's today for supply dates. Attendance is the shift day running
+  // now: at 2 am the register on the floor is last night's shift's.
+  const startOfToday = factoryDay.calendarDay();
+  const shiftToday   = factoryDay.shiftDay();
+  const shiftTodayEnd = factoryDay.calendarDayEnd(shiftToday);
 
   const [
     openJobs,
@@ -84,7 +88,7 @@ async function computeKpis() {
     JobOrder.countDocuments({ status: { $in: ACTIVE_JOB_STATUSES } }),
     LeaveRequest.countDocuments({ status: "pending" }),
     Attendance.aggregate([
-      { $match: { date: { $gte: startOfToday, $lte: endOfToday } } },
+      { $match: { date: { $gte: shiftToday, $lte: shiftTodayEnd } } },
       { $group: { _id: "$status", count: { $sum: 1 } } },
     ]),
     // The five lowest materials AND how many there are, in ONE pass.

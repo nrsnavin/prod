@@ -11,6 +11,7 @@
 // Mirrors the morning-digest pattern so the WhatsApp message
 // glance-reads the same way.
 
+const factoryDay = require("./factoryDay");
 const ShiftPlan       = require("../models/ShiftPlan.js");
 const Wastage         = require("../models/Wastage.js");
 const DeliveryChallan = require("../models/DeliveryChallan.js");
@@ -57,18 +58,21 @@ function formatEveningReport(d) {
 
 // ── Aggregator ───────────────────────────────────────────────────
 async function buildEveningReportData(now = new Date()) {
-  const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
-  const endToday   = new Date(now); endToday.setHours(23, 59, 59, 999);
+  // India's today. Shift plans keep a calendar date (UTC midnight);
+  // wastage and despatches keep the moment, so their day starts at
+  // 00:00 in India.
+  const startToday = factoryDay.calendarDay(now);
+  const endToday   = factoryDay.calendarDayEnd(now);
 
   const [production, wastage, deliveries] = await Promise.all([
     _production(startToday, endToday),
-    _wastage(startToday, endToday),
-    _deliveries(startToday, endToday),
+    _wastage(factoryDay.dayStart(now), factoryDay.dayEnd(now)),
+    _deliveries(factoryDay.dayStart(now), factoryDay.dayEnd(now)),
   ]);
 
   return {
     dateLabel: startToday.toLocaleDateString("en-IN",
-      { day: "numeric", month: "short", year: "numeric" }),
+      { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }),
     production, wastage, deliveries,
   };
 }

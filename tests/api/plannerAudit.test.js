@@ -76,7 +76,8 @@ afterEach(async () => {
   }
 });
 
-const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+// The planner's day: India's calendar date, whatever the server's clock.
+const startOfDay = (d) => require('../../utils/factoryDay').calendarDay(d);
 
 const makeElastic = (hooks = 8) =>
   Elastic.create({

@@ -9,6 +9,7 @@
 //  caller records on the document's fingerprint.
 // ══════════════════════════════════════════════════════════════════
 
+const factoryDay = require('../utils/factoryDay');
 const AccountsSettings = require('../models/AccountsSettings');
 const ErrorHandler = require('../utils/ErrorHandler');
 
@@ -16,7 +17,7 @@ async function getSettings() {
   return AccountsSettings.findOneAndUpdate({ key: 'accounts' }, { $setOnInsert: { key: 'accounts' } }, { upsert: true, new: true }).lean();
 }
 
-const dayEnd = (d) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; };
+const dayEnd = (d) => factoryDay.calendarDayEnd(d) || new Date(NaN);
 
 async function lockDate() {
   const s = await AccountsSettings.findOne({ key: 'accounts' }).select('lockDate').lean();

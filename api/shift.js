@@ -1,5 +1,6 @@
 "use strict";
 
+const factoryDay = require("../utils/factoryDay");
 const express  = require("express");
 const { renderPdf } = require("../utils/renderPdf");
 const router   = express.Router();
@@ -78,7 +79,7 @@ router.use((req, res, next) => {
 });
 
 function normDate(raw) {
-  return new Date(new Date(raw).setHours(0, 0, 0, 0));
+  return factoryDay.calendarDay(raw) || new Date(NaN);
 }
 
 // applyProductionCascade + _checkLowOutputShift + _checkMachineAnomaly
@@ -97,9 +98,10 @@ router.get(
     if (raw && Number.isNaN(new Date(raw).getTime())) {
       return next(new ErrorHandler("date is not a valid date", 400));
     }
-    const today    = normDate(raw ? new Date(raw) : new Date());
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    // No date: the shift day running now — a night shift keeps its
+    // start date until the day shift begins at 08:00.
+    const today    = raw ? normDate(raw) : factoryDay.shiftDay();
+    const tomorrow = new Date(today.getTime() + 86_400_000);
 
     const plans = await ShiftPlan.find({
       date: { $gte: today, $lt: tomorrow },
@@ -624,8 +626,7 @@ async function verifyShiftProduction({ shiftId, productionMeters, timer, feedbac
       // as "verify-but-no-work-done", admin should mark manually).
       let attendanceAutoMarked = false;
       if (prodValue > 0 && shift.employee) {
-        const dayStart = new Date(shift.date);
-        dayStart.setHours(0, 0, 0, 0);
+        const dayStart = factoryDay.calendarDay(shift.date);
         const dayEnd = new Date(dayStart.getTime() + 86_400_000);
         const existing = await Attendance.findOne({
           employee: shift.employee,
@@ -1133,8 +1134,7 @@ router.get("/production-anomalies", isAdmin('admin', 'production'), async (req, 
     const dropPct   = Math.max(1, parseFloat(req.query.dropPct)   || 30);
     const minShifts = Math.max(1, parseInt(req.query.minShifts, 10) || 5);
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = factoryDay.shiftDay();
     const tomorrow = new Date(today.getTime() + 86_400_000);
     const monthAgo = new Date(today.getTime() - 30 * 86_400_000);
 
@@ -1213,8 +1213,7 @@ router.get("/production-anomalies", isAdmin('admin', 'production'), async (req, 
 router.get("/attendance-mismatch", isAdmin('admin', 'production'), async (req, res) => {
   try {
     const days = Math.max(1, parseInt(req.query.days, 10) || 7);
-    const since = new Date(Date.now() - days * 86_400_000);
-    since.setHours(0, 0, 0, 0);
+    const since = factoryDay.calendarDay(new Date(Date.now() - days * 86_400_000));
 
     const shifts = await ShiftDetail.find({
       status: "closed",
@@ -1235,8 +1234,7 @@ router.get("/attendance-mismatch", isAdmin('admin', 'production'), async (req, r
     const empIds  = [...new Set(shifts.map((s) => String(s.employee?._id ?? s.employee)))];
     const dates   = [...new Set(shifts.map((s) => dayKey(s.date)))];
     const minDate = new Date(Math.min(...dates.map((d) => new Date(d).getTime())));
-    const maxDate = new Date(Math.max(...dates.map((d) => new Date(d).getTime())));
-    maxDate.setHours(23, 59, 59, 999);
+    const maxDate = factoryDay.calendarDayEnd(new Date(Math.max(...dates.map((d) => new Date(d).getTime()))));
 
     const att = await Attendance.find({
       employee: { $in: empIds },

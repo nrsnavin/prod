@@ -238,16 +238,16 @@ describe('composeRows', () => {
 
 // ── parseRange ────────────────────────────────────────────────────
 describe('parseRange', () => {
-  it('widens `to` to the end of that day', () => {
+  // Days are India's, whatever clock the server keeps: 00:00 there is
+  // 18:30 UTC the day before.
+  it('widens `to` to the end of that day in India', () => {
     const { to } = svc.parseRange({ to: '2025-03-31' });
-    expect(to.getHours()).toBe(23);
-    expect(to.getMinutes()).toBe(59);
+    expect(to.toISOString()).toBe('2025-03-31T18:29:59.999Z');
   });
 
-  it('widens `from` to the start of that day', () => {
+  it('widens `from` to the start of that day in India', () => {
     const { from } = svc.parseRange({ from: '2025-03-01' });
-    expect(from.getHours()).toBe(0);
-    expect(from.getMinutes()).toBe(0);
+    expect(from.toISOString()).toBe('2025-02-28T18:30:00.000Z');
   });
 
   it('accepts an open range', () => {
@@ -347,14 +347,27 @@ describe('materialLedger', () => {
   });
 
   it('includes a movement dated on the last day of the range', async () => {
-    // The whole point of widening `to` to end-of-day.
+    // The whole point of widening `to` to end-of-day: 11 pm on the 31st in India.
     const m = await makeMaterial({ stock: 100 });
-    await inward(m, { quantity: 100, inwardDate: new Date('2025-03-31T18:30:00.000Z') });
+    await inward(m, { quantity: 100, inwardDate: new Date('2025-03-31T17:30:00.000Z') });
 
     const led = await svc.materialLedger(m._id, svc.parseRange({
       from: '2025-03-01', to: '2025-03-31',
     }));
     expect(led.count).toBe(1);
+  });
+
+  it('puts a movement in the small hours of the 1st in the new month, as India counts it', async () => {
+    // 01:00 on 1 April in India is still 31 March on the server's UTC clock.
+    const m = await makeMaterial({ stock: 100 });
+    await inward(m, { quantity: 60, inwardDate: new Date('2025-03-31T19:30:00.000Z') });
+    await inward(m, { quantity: 40, inwardDate: new Date('2025-02-28T19:30:00.000Z') }); // 1 am, 1 March
+
+    const led = await svc.materialLedger(m._id, svc.parseRange({
+      from: '2025-03-01', to: '2025-03-31',
+    }));
+    expect(led.count).toBe(1);
+    expect(led.rows[0].quantity).toBe(40);
   });
 
   it('skips a reversed issue rather than showing it and netting it off', async () => {

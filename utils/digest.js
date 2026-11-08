@@ -13,6 +13,7 @@
 // the existing /projected-stockout and /maintenance-due route logic
 // so the numbers match what the admin app shows.
 
+const factoryDay = require("./factoryDay");
 const ShiftPlan       = require("../models/ShiftPlan.js");
 const ShiftDetail     = require("../models/ShiftDetail.js");
 const Wastage         = require("../models/Wastage.js");
@@ -154,30 +155,33 @@ async function buildDigestData(now = new Date(), opts = {}) {
   const issueWindow  = opts.issueWindowDays       || 30;
   const issueThresh  = opts.issueThreshold        || 3;
 
-  // "Yesterday" window — local midnight to midnight. Kept simple
-  // (server tz); the digest is a glance, not an accounting report.
-  const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
+  // "Yesterday" is India's. Calendar dates (shift plans, attendance)
+  // are kept at UTC midnight; moments (createdAt, despatch) start the
+  // day at 00:00 in India. Each query takes the bound for its field.
+  const startToday = factoryDay.calendarDay(now);
   const startYday  = new Date(startToday.getTime() - 86_400_000);
+  const momentToday = factoryDay.dayStart(now);
+  const momentYday  = new Date(momentToday.getTime() - 86_400_000);
 
   const [production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift,
          attendance, leave, complaints, repeatOffenders, commercial] =
     await Promise.all([
       _production(startYday, startToday),
-      _wastage(startYday, startToday),
+      _wastage(momentYday, momentToday),
       _stockouts(now, lookbackDays, horizonDays),
       _maintenance(now, maintDays),
       _predictedLate(now),
-      _orderActivity(startYday, startToday),
+      _orderActivity(momentYday, momentToday),
       _posteriorDrift(now),
       _attendance(startYday, startToday),
       _leavePending(),
-      _complaints(startYday, startToday),
+      _complaints(momentYday, momentToday),
       _repeatOffenders(now, issueWindow, issueThresh),
-      _commercial(startYday, startToday, now),
+      _commercial(momentYday, momentToday, now),
     ]);
 
   return {
-    dateLabel: startYday.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
+    dateLabel: startYday.toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: "UTC" }),
     production, wastage, stockouts, maintenance, predictedLate, orderActivity, posteriorDrift,
     attendance, leave, complaints, repeatOffenders, commercial,
     issueWindow, issueThresh,

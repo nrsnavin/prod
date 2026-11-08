@@ -6,6 +6,7 @@
 // plain payroll object plus an `_advanceRecoveries` plan the route applies
 // transactionally.
 
+const factoryDay = require('../utils/factoryDay');
 const mongoose        = require('mongoose');
 const Attendance      = require('../models/Attendence');
 const Employee        = require('../models/Employee');
@@ -248,8 +249,7 @@ async function computePayroll(empId, year, month) {
   // yet (generating mid-month) or that is still open/running/awaiting
   // verification is not "unmarked" — it just hasn't happened / been closed
   // — so it must never be penalised as an absent.
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
+  const startOfToday = factoryDay.calendarDay(); // India's today, not the server's
   const attSet = new Set(records.map((r) => dayKey(r.date, r.shift)));
   const scheduled = await ShiftDetail.find({
     employee: empId,

@@ -137,12 +137,39 @@ describe('late orders', () => {
       { ...base, orderNo: 9006, status: 'Cancelled', supplyDate: past },
       { ...base, orderNo: 9007, status: 'Deleted', supplyDate: past },
       // Due today is not late yet — there is still the day to ship it.
-      { ...base, orderNo: 9008, status: 'Open', supplyDate: (() => { const d = new Date(); d.setHours(12, 0, 0, 0); return d; })() },
+      { ...base, orderNo: 9008, status: 'Open', supplyDate: require('../../utils/factoryDay').calendarDay() }, // India's today
     ]);
     try {
       expect((await kpis()).body.data.lateOrders).toBe(3);
     } finally {
       await Order.collection.deleteMany({ orderNo: { $gte: 9001, $lte: 9008 } });
+    }
+  });
+
+  it("counts the attendance of the shift running now, by India's clock", async () => {
+    // A night shift keeps the date it started on until the day shift
+    // begins at 08:00. The server's UTC clock turned the dashboard over
+    // at 05:30 in India, in the middle of the night shift.
+    const Attendance = require('../../models/Attendence');
+    const [a, b] = [new mongoose.Types.ObjectId(), new mongoose.Types.ObjectId()];
+    await Attendance.collection.insertMany([
+      { employee: a, date: new Date('2026-11-07T00:00:00Z'), shift: 'NIGHT', status: 'present' },
+      { employee: b, date: new Date('2026-11-08T00:00:00Z'), shift: 'DAY', status: 'absent' },
+    ]);
+    jest.useFakeTimers({
+      // 06:30 on the 8th in India: the server's UTC clock already says
+      // the 8th, but the 7th's night shift runs until 08:00.
+      now: new Date('2026-11-08T01:00:00Z'),
+      doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'],
+    });
+    try {
+      const today = (await kpis()).body.data.attendanceToday;
+      expect(today.totalMarked).toBe(1);
+      expect(today.breakdown.present).toBe(1);
+      expect(today.breakdown.absent).toBe(0);
+    } finally {
+      jest.useRealTimers();
+      await Attendance.collection.deleteMany({ employee: { $in: [a, b] } });
     }
   });
 });

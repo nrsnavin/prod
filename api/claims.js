@@ -18,6 +18,7 @@
 //    POST /claims/:id/withdraw    while it waits for approval
 // ══════════════════════════════════════════════════════════════════
 
+const factoryDay = require("../utils/factoryDay");
 const express = require("express");
 const mongoose = require("mongoose");
 const multer = require("multer");
@@ -140,7 +141,7 @@ router.post("/", catchAsyncErrors(async (req, res, next) => {
   if (date > new Date(Date.now() + DAY)) return next(new ErrorHandler("The date is in the future", 400));
   // A head may cap what one person claims in a day.
   if (category.claimDailyLimit > 0) {
-    const dayStart = new Date(date); dayStart.setHours(0, 0, 0, 0);
+    const dayStart = factoryDay.calendarDay(date);
     const [row] = await Expense.aggregate([
       { $match: { "claimant.user": new mongoose.Types.ObjectId(String(req.user._id)), category: category._id, status: { $nin: ["rejected", "cancelled"] }, date: { $gte: dayStart, $lt: new Date(dayStart.getTime() + DAY) } } },
       { $group: { _id: null, total: { $sum: "$totals.grand" } } },

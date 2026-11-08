@@ -11,6 +11,7 @@
 // notify() throttles per-event, so a chronic condition only repeats
 // on the cadence the settings allow.
 
+const factoryDay = require("./factoryDay");
 const Wastage         = require("../models/Wastage.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
@@ -83,7 +84,8 @@ async function checkPosteriorDrifts(now = new Date()) {
 // baseline itself is above a noise floor.
 async function checkWastageAnomalyDay(now = new Date()) {
   try {
-    const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
+    // Wastage keeps the moment it was logged: India's days, from 00:00 there.
+    const startToday = factoryDay.dayStart(now);
     const startYday  = new Date(startToday.getTime() - 86_400_000);
     const startHist  = new Date(startToday.getTime() - 30 * 86_400_000);
 
@@ -97,7 +99,7 @@ async function checkWastageAnomalyDay(now = new Date()) {
         { $match: { createdAt: { $gte: startHist, $lt: startYday } } },
         { $group: {
             _id: {
-              $dateToString: { date: "$createdAt", format: "%Y-%m-%d" },
+              $dateToString: { date: "$createdAt", format: "%Y-%m-%d", timezone: "Asia/Kolkata" },
             },
             meters: { $sum: "$quantity" },
         } },

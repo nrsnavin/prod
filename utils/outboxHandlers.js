@@ -1,4 +1,5 @@
 'use strict';
+const factoryDay = require("./factoryDay");
 // Outbox handler registry — maps an event `kind` to the async function
 // the dispatcher runs to deliver it. Handlers re-read whatever they need
 // by id (the payload carries identifiers plus the values known at commit
@@ -46,7 +47,7 @@ const HANDLERS = {
     const job = await JobOrder.findById(jobId).select("machine jobOrderNo").lean();
     if (!job?.machine) return;
 
-    const startToday = new Date(); startToday.setHours(0, 0, 0, 0);
+    const startToday = factoryDay.shiftDay(); // the shift day running now
     const rows = await ShiftDetail.aggregate([
       { $match: {
           status:  "closed",
@@ -96,8 +97,9 @@ const HANDLERS = {
     if (!orderDoc?.supplyDate || !dc) return;
 
     const dispatched = dc.dispatchDate ? new Date(dc.dispatchDate) : new Date();
-    const promised   = new Date(orderDoc.supplyDate);
-    const lateMs     = dispatched.getTime() - promised.setHours(23, 59, 59, 999);
+    // Late only once the promised day is over in India.
+    const promised   = factoryDay.dayEnd(orderDoc.supplyDate);
+    const lateMs     = dispatched.getTime() - promised.getTime();
     if (lateMs <= 0) return;
 
     let custName = dc.customerName;

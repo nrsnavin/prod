@@ -10,6 +10,7 @@
 // fed by the same computation — a report whose screen and paper versions
 // can disagree is worse than having only one of them.
 
+const factoryDay = require('../utils/factoryDay');
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const JobOrder = require('../models/JobOrder');
@@ -33,11 +34,7 @@ const qtyFor = (rows, id) =>
  */
 function daysUntil(date) {
   if (!date) return null;
-  const midnight = (d) => {
-    const x = new Date(d);
-    x.setHours(0, 0, 0, 0);
-    return x;
-  };
+  const midnight = (d) => factoryDay.calendarDay(d) || new Date(NaN);
   const diff = midnight(date) - midnight(new Date());
   return Math.round(diff / 86_400_000);
 }

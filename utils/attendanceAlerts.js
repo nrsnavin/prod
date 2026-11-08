@@ -5,6 +5,7 @@
 // pinging the owner. notify() handles the throttle (24h per
 // (date,shift)) so re-marking the same shift doesn't spam.
 
+const factoryDay = require("./factoryDay");
 const Attendance = require("../models/Attendence.js");
 const { notify } = require("./notify.js");
 
@@ -22,10 +23,9 @@ function _effective(rows) {
 
 async function maybeFireAttendanceCrashed({ date, shift }) {
   try {
-    const day = new Date(date);
-    day.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(day);
-    dayEnd.setHours(23, 59, 59, 999);
+    const day = factoryDay.calendarDay(date);
+    if (!day) return;
+    const dayEnd = factoryDay.calendarDayEnd(date);
 
     const todayRows = await Attendance.find({
       date: { $gte: day, $lte: dayEnd },
@@ -38,8 +38,7 @@ async function maybeFireAttendanceCrashed({ date, shift }) {
     // 30d trailing baseline: same shift, excluding today. Average
     // per distinct date so a thinly-marked day doesn't pull the
     // baseline down.
-    const since = new Date(day);
-    since.setDate(since.getDate() - 30);
+    const since = new Date(day.getTime() - 30 * 86_400_000);
     const histRows = await Attendance.find({
       date: { $gte: since, $lt: day },
       shift,

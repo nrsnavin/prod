@@ -11,6 +11,7 @@
 //  DELETE /:id              — employee cancels pending request (AUTH)
 // ══════════════════════════════════════════════════════════════
 'use strict';
+const factoryDay = require('../utils/factoryDay');
 const express      = require('express');
 const mongoose     = require('mongoose');
 const router       = express.Router();
@@ -103,7 +104,7 @@ router.post('/request', isAuthenticated, validate({ body: LEAVE_REQUEST }), asyn
       return res.status(400).json({ success:false,
         message:'date is not a valid date.' });
     }
-    dateObj.setHours(0,0,0,0);
+    dateObj.setTime(factoryDay.calendarDay(typeof date === 'string' ? date : dateObj).getTime());
 
     const leave = await LeaveRequest.create({
       employee: employeeId,
@@ -149,7 +150,7 @@ router.post('/admin-request', isAuthenticated, isAdmin('admin', 'accounts'), asy
     const dateObj = new Date(date);
     if (Number.isNaN(dateObj.getTime()))
       return res.status(400).json({ success:false, message:'date is not a valid date.' });
-    dateObj.setHours(0,0,0,0);
+    dateObj.setTime(factoryDay.calendarDay(typeof date === 'string' ? date : dateObj).getTime());
 
     const doc = {
       employee: employeeId,
@@ -283,7 +284,7 @@ router.put('/:id/approve', isAuthenticated, isAdmin('admin', 'accounts'), async 
         if (!leave) return;
 
         // Auto-update linked Attendance record if it exists
-        const dateObj = new Date(leave.date); dateObj.setHours(0,0,0,0);
+        const dateObj = factoryDay.calendarDay(leave.date);
         const shiftsToUpdate = leave.shift === 'BOTH' ? ['DAY','NIGHT'] : [leave.shift];
         for (const s of shiftsToUpdate) {
           await Attendance.findOneAndUpdate(
@@ -371,8 +372,7 @@ router.get('/conflicts', isAuthenticated, isAdmin('admin', 'accounts'), async (_
   try {
     // We only care about leaves that haven't yet finished — historical
     // overlaps are noise.
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = factoryDay.calendarDay();
 
     // Leave is a single date + shift, so an upcoming leave is one whose
     // date is today or later. This used to filter and match on

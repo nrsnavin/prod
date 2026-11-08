@@ -22,6 +22,7 @@
 //  formOne()   the half-year return's rows
 // ══════════════════════════════════════════════════════════════════
 
+const factoryDay = require('../utils/factoryDay');
 const Supplier = require('../models/Supplier');
 const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
@@ -29,7 +30,7 @@ const Payment = require('../models/Payment');
 
 const DAY = 86_400_000;
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-const dayStart = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
+const dayStart = (d) => factoryDay.calendarDay(d) || new Date(NaN);
 
 /** Days the law gives this supplier: what was agreed in writing (≤45), else 15. */
 const statutoryDays = (s) => Math.min(45, Math.max(0, Number(s?.msme?.agreedDays) || 0) || 15);

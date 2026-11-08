@@ -12,6 +12,7 @@
 // ══════════════════════════════════════════════════════════════
 'use strict';
 
+const factoryDay = require('../utils/factoryDay');
 const express    = require('express');
 const mongoose   = require('mongoose');
 const router     = express.Router();
@@ -623,8 +624,7 @@ router.get('/recurring-latecomers', isAdmin('admin', 'accounts'), async (req, re
     const days      = Math.max(1, parseInt(req.query.days, 10)      || 30);
     const threshold = Math.max(1, parseInt(req.query.threshold, 10) || 3);
 
-    const since = new Date(Date.now() - days * 86_400_000);
-    since.setHours(0, 0, 0, 0);
+    const since = factoryDay.calendarDay(new Date(Date.now() - days * 86_400_000));
 
     const rows = await Attendance.aggregate([
       { $match: { status: 'late', date: { $gte: since } } },
@@ -673,8 +673,7 @@ router.get('/repeatedly-unmarked', isAdmin('admin', 'accounts'), async (req, res
     const days      = Math.max(1, parseInt(req.query.days, 10)      || 7);
     const threshold = Math.max(1, parseInt(req.query.threshold, 10) || 2);
 
-    const since = new Date(Date.now() - days * 86_400_000);
-    since.setHours(0, 0, 0, 0);
+    const since = factoryDay.calendarDay(new Date(Date.now() - days * 86_400_000));
 
     // 1. Pull every attendance row in the window, only the fields we
     // need. One round-trip; the dataset for a single week is tiny.
