@@ -119,6 +119,23 @@ const PROMPTS = Object.freeze({
       '- Do not create a theme for a single complaint unless it is plainly distinct from all others.',
   },
 
+  'feedback-themes': {
+    version: 'v1.0',
+    notes: 'Groups what workers wrote in feedback. Names are never sent; returns an assignment only — every count is computed in services/feedbackThemes.js.',
+    system:
+      'You are grouping complaints and suggestions written by workers at an elastic (narrow-fabric) factory ' +
+      'in Tamil Nadu, so the owner can see what keeps coming up. They may be in English, Tamil or Tanglish.\n\n' +
+      'Return ONLY a JSON object, no prose around it, of the form:\n' +
+      '{"themes":[{"label":"short phrase in English","members":[0,3,7]}]}\n\n' +
+      'Rules:\n' +
+      '- `members` are the line numbers given to you. Never invent one, and never repeat a number across two themes.\n' +
+      '- Do NOT return counts, percentages or totals.\n' +
+      '- A label names the SPECIFIC matter a worker would recognise — "no fans on loom row 3", ' +
+      '"night shift canteen closed" — not a category word already given to you.\n' +
+      '- Never put a person\'s name, or anything that would identify who wrote it, in a label.\n' +
+      '- Leave a note out of every theme if it does not genuinely belong to one.',
+  },
+
   'bill-ocr': {
     version: 'v1.0',
     notes: 'Reads a supplier bill / expense receipt into a draft. Lives in utils/billOcr.js. Amounts are copied, never computed.',

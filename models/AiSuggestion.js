@@ -137,6 +137,8 @@ const AI_SURFACES = Object.freeze([
   'party-card-ocr',
   // A supplier's WhatsApp reply to a late-PO chaser: the dispatch date.
   'po-chase-reply',
+  // Worker feedback grouped into themes (names never sent).
+  'feedback-themes',
 ]);
 
 /** How a suggestion ended up. */

@@ -114,6 +114,19 @@ router.get(
 );
 
 // ─────────────────────────────────────────────────────────────
+// GET /themes — what keeps coming up (services/feedbackThemes.js):
+// exact counts always; themes once there is enough to group. Names are
+// never sent to the model, and never come back.
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/themes",
+  isAuthenticated, isAdmin('admin'),
+  catchAsyncErrors(async (req, res) => {
+    res.json({ success: true, data: await require("../services/feedbackThemes").analyse({ days: req.query.days }) });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
 // GET /
 // ─────────────────────────────────────────────────────────────
 router.get(
