@@ -352,6 +352,15 @@ async function handleIncoming(req) {
       const r = await collectionReply.handle({ from: senderE164, text: String(body).slice(0, 2000), customer });
       return { status: 200, body: r.ack ? twimlReply(r.ack) : `<?xml version="1.0" encoding="UTF-8"?><Response></Response>` };
     }
+    // 2b. A supplier on file: a reply about a late purchase order — kept
+    //     on the PO, a dispatch date taken as their promise, the office
+    //     told (services/poChaser.js). It can do nothing else.
+    const poChaser = require("../services/poChaser.js");
+    const supplier = await poChaser.supplierForPhone(senderE164);
+    if (supplier) {
+      const r = await poChaser.handleReply({ from: senderE164, text: String(body).slice(0, 2000), supplier });
+      if (r.po) return { status: 200, body: r.ack ? twimlReply(r.ack) : `<?xml version="1.0" encoding="UTF-8"?><Response></Response>` };
+    }
   }
   if (!(settings.recipients || []).includes(senderE164)) {
     console.warn(`[whatsapp:incoming] sender ${senderE164} not on allow-list`);

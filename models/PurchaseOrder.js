@@ -57,6 +57,27 @@ const PurchaseOrderSchema = new mongoose.Schema(
     forJob:   { type: mongoose.Types.ObjectId, ref: "JobOrder" },
     forOrder: { type: mongoose.Types.ObjectId, ref: "Order" },
 
+    // Following up a late delivery (services/poChaser.js): the chasers
+    // sent, what the supplier said back, and the date they now promise.
+    // `expectedDate` stays what was asked for; the promise sits beside it.
+    chase: {
+      count:        { type: Number, default: 0 },
+      lastAt:       { type: Date, default: null },
+      promisedDate: { type: Date, default: null },
+      history: {
+        type: [{
+          _id: false,
+          at:      { type: Date, default: Date.now },
+          kind:    { type: String, enum: ["sent", "reply"] },
+          channel: { type: String, default: "whatsapp" },
+          text:    { type: String, default: "" },
+          read:    { kind: String, date: Date, summary: String },
+          by:      { type: String, default: "" },
+          status:  { type: String, default: "" },
+        }],
+        default: [],
+      },
+    },
     // Tamper-evident audit trail (edit/delete with reason). Same shape as
     // Order/JobOrder fingerprints so the UI can render them uniformly.
     fingerprints: { type: Array, default: [] },

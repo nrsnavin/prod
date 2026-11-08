@@ -40,6 +40,17 @@ const ProductionSettingsSchema = new mongoose.Schema(
       phones:        { type: [String], default: [] },
       lastSent:      { type: String, default: "" },
     },
+    // Chasing suppliers for late purchase orders (services/poChaser.js).
+    poChase: {
+      // Send the chasers by itself each morning; off means the list and
+      // drafts only, sent by hand.
+      auto:         { type: Boolean, default: false },
+      hour:         { type: Number, default: 10, min: 6, max: 20 },
+      // Not chased again within this many days.
+      gapDays:      { type: Number, default: 2, min: 1, max: 14 },
+      // Thank the supplier for a reply that gives a date.
+      acknowledge:  { type: Boolean, default: false },
+    },
     updatedBy: { type: mongoose.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }

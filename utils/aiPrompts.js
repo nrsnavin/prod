@@ -150,6 +150,12 @@ const PROMPTS = Object.freeze({
     notes: 'Drafts a reply to the customer from the complaint, the trace and the root-cause figures; never promises credit or dates not given. Lives in services/complaintIntake.js.',
     system: null,
   },
+  'po-chase-reply': {
+    version: 'v1.0',
+    notes: 'A supplier\'s WhatsApp reply to a chaser about a late purchase order, read into promise (a dispatch date), dispatched, problem or other. Keywords first; the model only refines, within a few seconds. Lives in services/poChaser.js.',
+    system: null,
+  },
+
   'collection-reply': {
     version: 'v1.0',
     notes: 'A customer\'s WhatsApp reply to a payment reminder read into promise, paid, dispute, statement or other, with the date promised, the amount and any reference. Keywords first; the model only refines, within a few seconds. Lives in services/collectionReply.js.',

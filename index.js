@@ -87,6 +87,8 @@ function startServer() {
   // The morning digest and evening report, on the server's own clock
   // (09:00 and 21:00 in India; once a day however many processes run).
   require("./services/scheduledReports").start();
+  // Chasers to suppliers for late POs, each morning (off until an admin turns it on).
+  require("./services/poChaser").start();
 
   // create server
   //

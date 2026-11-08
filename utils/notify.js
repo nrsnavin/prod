@@ -331,6 +331,11 @@ const fmt = {
     return p?.body || null;
   },
 
+  // services/poChaser.js: what a supplier said back about a late PO.
+  supplierReply(p) {
+    return p?.body || null;
+  },
+
   // services/noticeReminders.js: a government notice's reply is due.
   statutoryNotice(p) {
     return p?.body || null;
@@ -385,6 +390,7 @@ const EVENT_FLAG = {
   eveningReport:              "eveningReport",
   shiftEndNudge:              "shiftEndNudge",
   collectionReply:            "collectionReply",
+  supplierReply:              "supplierReply",
   statutoryNotice:            "statutoryNotice",
   shiftHandover:              "shiftHandover",
   // `test` is always allowed (used to verify wiring) — no flag.

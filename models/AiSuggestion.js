@@ -135,6 +135,8 @@ const AI_SURFACES = Object.freeze([
   'lr-ocr',
   // A visiting card or letterhead read into a customer or supplier form.
   'party-card-ocr',
+  // A supplier's WhatsApp reply to a late-PO chaser: the dispatch date.
+  'po-chase-reply',
 ]);
 
 /** How a suggestion ended up. */

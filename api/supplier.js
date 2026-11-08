@@ -335,6 +335,49 @@ router.delete(
 // GET /get-pos
 // Query: page, limit, status, supplierId, search (poNo)
 // ─────────────────────────────────────────────────────────────────────────
+// ── Late POs: the chaser list, sending one, the settings ──────────
+// services/poChaser.js. Placed before any "/po/:id" route.
+router.get(
+  "/po/chase",
+  catchAsyncErrors(async (_req, res) => {
+    const chaser = require("../services/poChaser");
+    res.json({ success: true, rows: await chaser.overdue(), settings: await chaser.settings() });
+  })
+);
+
+router.post(
+  "/po/chase/send-due",
+  catchAsyncErrors(async (req, res) => {
+    const out = await require("../services/poChaser").sendDue({ by: req.user?.name || "" });
+    res.json({ success: true, sent: out });
+  })
+);
+
+router.put(
+  "/po/chase/settings",
+  catchAsyncErrors(async (req, res, next) => {
+    const b = req.body || {};
+    const set = {};
+    if (typeof b.auto === "boolean") set["poChase.auto"] = b.auto;
+    if (typeof b.acknowledge === "boolean") set["poChase.acknowledge"] = b.acknowledge;
+    if (b.hour != null) { const h = Number(b.hour); if (!Number.isInteger(h) || h < 6 || h > 20) return next(new ErrorHandler("hour must be 6 to 20", 400)); set["poChase.hour"] = h; }
+    if (b.gapDays != null) { const g = Number(b.gapDays); if (!Number.isInteger(g) || g < 1 || g > 14) return next(new ErrorHandler("gapDays must be 1 to 14", 400)); set["poChase.gapDays"] = g; }
+    const ProductionSettings = require("../models/ProductionSettings");
+    await ProductionSettings.findOneAndUpdate({ key: "production" }, { $set: { ...set, updatedBy: req.user?._id } }, { upsert: true });
+    res.json({ success: true, settings: await require("../services/poChaser").settings() });
+  })
+);
+
+router.post(
+  "/po/:id/chase",
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Invalid PO id", 400));
+    const r = await require("../services/poChaser").send(req.params.id, { by: req.user?.name || "" });
+    if (r.error && !r.text) return next(new ErrorHandler(r.error, 400));
+    res.json({ success: true, ...r });
+  })
+);
+
 router.get(
   "/get-pos",
   catchAsyncErrors(async (req, res, next) => {
