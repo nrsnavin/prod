@@ -31,6 +31,7 @@ const { isAuthenticated } = require("../middleware/auth");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const { promptVersion } = require("../utils/aiPrompts");
 const ledger = require("../services/aiLedger");
+const assistantReports = require("../services/assistantReports");
 
 // ── Tool implementations (read-only Mongo queries) ─────────────────
 const TOOLS = {
@@ -226,6 +227,9 @@ const TOOL_FEATURES = {
   get_cash_position:        ['/accounts'],
   get_cash_forecast:        ['/accounts'],
   get_close_checklist:      ['/accounts'],
+  // Any figure across the datasets, through the report engine — which
+  // checks the caller's role per dataset on top of this.
+  run_report:               ['/reports'],
 };
 
 // Same allow rule as requireFeature, and it has to stay the same or
@@ -244,6 +248,9 @@ const SYSTEM =
   "Answer the admin's questions about orders, production, wastage, machines, materials and the books " +
   "(receivables, payables, statements, expenses, cash) by calling " +
   "the provided read-only tools, then giving a concise, direct answer with the actual numbers. " +
+  "For any figure the specific tools do not cover — production by operator or loom, sales or purchases by customer, " +
+  "group, item or supplier, dispatch, wastage, stock, expenses over any period — use run_report; if it errors, fix the query and try once more. " +
+  "When you used run_report, say the report can be opened from your answer to download or save. " +
   "Prefer a tool call over guessing. If the data shows nothing, say so. Keep answers short (a few " +
   "sentences or a tight list). You cannot change anything — recommend actions, but note the admin must do them.";
 
@@ -269,6 +276,9 @@ router.post(
     // below, because what the model calls is not a trust boundary.
     const allowedTools = new Set(allowedToolNames(req.user));
     const tools = TOOL_SCHEMAS.filter((t) => allowedTools.has(t.name));
+    const reportTool = allowedTools.has("run_report") ? assistantReports.toolFor(req.user) : null;
+    if (reportTool) tools.push(reportTool); else allowedTools.delete("run_report");
+    const reports = [];
 
     const toolsUsed = [];
     // One ledger row per QUESTION, not per hop. A tool-calling answer is
@@ -313,7 +323,13 @@ router.post(
                 // somewhere it shouldn't go. Refuse rather than read.
                 output = { error: "You don't have access to this feature." };
               } else {
-                output = TOOLS[block.name] ? await TOOLS[block.name](block.input || {}) : { error: "unknown tool" };
+                if (block.name === "run_report") {
+                  const r = await assistantReports.run(block.input || {}, req.user);
+                  if (r.report) reports.push(r.report);
+                  output = r.forModel || r;
+                } else {
+                  output = TOOLS[block.name] ? await TOOLS[block.name](block.input || {}) : { error: "unknown tool" };
+                }
               }
             } catch (err) {
               output = { error: err.message };
@@ -326,7 +342,7 @@ router.post(
 
         const reply = (resp.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
         await logAnswer(reply);
-        return res.json({ success: true, reply, toolsUsed: [...new Set(toolsUsed)] });
+        return res.json({ success: true, reply, toolsUsed: [...new Set(toolsUsed)], reports });
       }
       // Six hops and no answer. Recorded as a failure because that is
       // what it is from the asker's side, however calmly it reads.

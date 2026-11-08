@@ -281,8 +281,8 @@ const PROMPTS = Object.freeze({
   },
 
   'assistant-answer': {
-    version: 'v1.0',
-    notes: 'Read-only tool-calling agent over whitelisted queries.',
+    version: 'v1.1',
+    notes: 'Read-only tool-calling agent over whitelisted queries; v1.1 adds run_report over the report engine.',
     system: null,   // lives in api/assistant.js
   },
 });
