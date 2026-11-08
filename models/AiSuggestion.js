@@ -141,6 +141,8 @@ const AI_SURFACES = Object.freeze([
   'feedback-themes',
   // A customer's mail sorted into order, complaint, advice or enquiry.
   'inbox-triage',
+  // A notice for workers put into Tamil and Hindi.
+  'notice-translate',
 ]);
 
 /** How a suggestion ended up. */

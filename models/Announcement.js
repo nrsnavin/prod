@@ -39,6 +39,14 @@ const AnnouncementSchema = new mongoose.Schema(
     attachmentUrl: { type: String, default: "" },
 
     isActive: { type: Boolean, default: true, index: true },
+
+    // The notice in the workers' languages (services/noticeTranslate.js):
+    // drafted by the model when posted, correctable by an admin — `by`
+    // says which. Workers see their language; English is the fallback.
+    translations: {
+      ta: { _id: false, title: String, body: String, by: { type: String, enum: ["ai", "person"] }, at: Date },
+      hi: { _id: false, title: String, body: String, by: { type: String, enum: ["ai", "person"] }, at: Date },
+    },
   },
   { timestamps: true }
 );

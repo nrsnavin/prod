@@ -119,6 +119,12 @@ const PROMPTS = Object.freeze({
       '- Do not create a theme for a single complaint unless it is plainly distinct from all others.',
   },
 
+  'notice-translate': {
+    version: 'v1.0',
+    notes: 'A notice for factory workers put into plain Tamil and Hindi, numbers, dates and names kept exactly. An admin can correct either. Lives in services/noticeTranslate.js.',
+    system: null,
+  },
+
   'inbox-triage': {
     version: 'v1.0',
     notes: 'A customer\'s mail sorted into purchase_order, complaint, payment_advice, enquiry or other, with a one-line summary. Keywords first; the model only refines. The mail then goes to that kind\'s own reader. Lives in services/customerInbox.js.',

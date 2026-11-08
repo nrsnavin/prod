@@ -15,6 +15,7 @@
 const express      = require("express");
 const mongoose     = require("mongoose");
 const router       = express.Router();
+const noticeTranslate = require("../services/noticeTranslate");
 const Announcement = require("../models/Announcement");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -52,7 +53,9 @@ router.get(
       .sort({ isPinned: -1, createdAt: -1 })
       .lean();
 
-    res.json({ success: true, count: items.length, data: items });
+    // In the worker's language when asked (?lang=ta, or Accept-Language).
+    const lang = noticeTranslate.langOf(req);
+    res.json({ success: true, count: items.length, data: items.map((a) => noticeTranslate.localise(a, lang)) });
   })
 );
 
@@ -75,7 +78,8 @@ router.get(
           { $or: [{ audience: "all" }, { audience: "department", department: req.user?.department || "" }] },
         ],
       }).sort({ isPinned: -1, createdAt: -1 }).limit(200).lean();
-      return res.json({ success: true, count: items.length, data: items, readOnly: true });
+      const lang = noticeTranslate.langOf(req);
+      return res.json({ success: true, count: items.length, data: items.map((a) => noticeTranslate.localise(a, lang)), readOnly: true });
     }
     // Pinned first, then newest: the cap keeps what matters (utils/listLimit).
     const { rows: items, capped: cut } = await capped(
@@ -145,6 +149,27 @@ router.post(
     });
 
     res.status(201).json({ success: true, data: a });
+
+    // Into Tamil and Hindi, after answering: posting never waits on it.
+    if (req.body.translate !== false) {
+      noticeTranslate.applyTo(a._id).catch((err) => console.warn(`[notice-translate] ${err?.message}`));
+    }
+  })
+);
+
+// ─────────────────────────────────────────────────────────────
+// POST /:id/translate — put it into Tamil and Hindi again now,
+// replacing the model's earlier wording (an admin's own stays unless
+// ?force=1).
+// ─────────────────────────────────────────────────────────────
+router.post(
+  "/:id/translate",
+  isAuthenticated, isAdmin('admin'),
+  catchAsyncErrors(async (req, res, next) => {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Invalid announcement id", 400));
+    const doc = await noticeTranslate.applyTo(req.params.id, { force: req.query.force === "1" });
+    if (!doc) return next(new ErrorHandler("Announcement not found", 404));
+    res.json({ success: true, data: doc, translated: !!(doc.translations?.ta?.title || doc.translations?.hi?.title) });
   })
 );
 
@@ -193,10 +218,27 @@ router.put(
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return next(new ErrorHandler("Invalid announcement id", 400));
     }
+    // An admin's own wording for a language, kept as a person's.
+    const tr = req.body.translations;
+    if (tr && typeof tr === "object") {
+      for (const k of Object.keys(noticeTranslate.LANGS)) {
+        const t = tr[k];
+        if (!t) continue;
+        if (!String(t.title || "").trim() || !String(t.body || "").trim()) return next(new ErrorHandler(`${noticeTranslate.LANGS[k]} needs a title and a body`, 400));
+        update[`translations.${k}`] = { title: String(t.title).trim().slice(0, 300), body: String(t.body).trim().slice(0, 5000), by: "person", at: new Date() };
+      }
+    }
+    const before = await Announcement.findById(req.params.id).select("title body").lean();
     const doc = await Announcement.findByIdAndUpdate(
       req.params.id, { $set: update }, { new: true });
     if (!doc) return next(new ErrorHandler("Announcement not found", 404));
     res.json({ success: true, data: doc });
+
+    // The English changed: the translations no longer say the same — redo them all.
+    const englishChanged = before && ((update.title !== undefined && String(update.title).trim() !== before.title) || (update.body !== undefined && String(update.body).trim() !== before.body));
+    if (englishChanged && !tr) {
+      noticeTranslate.applyTo(doc._id, { force: true }).catch((err) => console.warn(`[notice-translate] ${err?.message}`));
+    }
   })
 );
 
