@@ -175,3 +175,26 @@ describe('bad input', () => {
     expect(missing.status).toBe(404);
   });
 });
+
+describe('the list says how many there are', () => {
+  it('sends the total and page count with each page', async () => {
+    // The web list headed itself "undefined customers": the route sent
+    // a page of customers and nothing about how many there were.
+    await makeCustomer({ name: 'A', phoneNumber: '9000000011' });
+    await makeCustomer({ name: 'B', phoneNumber: '9000000012' });
+    await makeCustomer({ name: 'C', phoneNumber: '9000000013' });
+    const gone = await makeCustomer({ name: 'D', phoneNumber: '9000000014' });
+    await archive(gone, true);
+
+    const res = await list({ limit: 2 });
+    expect(res.status).toBe(200);
+    expect(res.body.customers).toHaveLength(2);
+    expect(res.body.total).toBe(3); // the archived one is not counted
+    expect(res.body.page).toBe(1);
+    expect(res.body.pages).toBe(2);
+
+    const second = await list({ limit: 2, page: 2 });
+    expect(second.body.customers).toHaveLength(1);
+    expect(second.body.total).toBe(3);
+  });
+});

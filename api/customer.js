@@ -116,12 +116,22 @@ router.get(
     // still count as active.
     if (req.query.includeArchived !== "true") query.archived = { $ne: true };
 
-    const customers = await Customer.find(query)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
+    // The total and page count go with the page of customers. Without
+    // them the web list headed itself "undefined customers" and could
+    // never offer a second page.
+    const [customers, counted] = await Promise.all([
+      Customer.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      Customer.countDocuments(query),
+    ]);
+    const total = Number(counted) || 0;
 
-    res.status(200).json({ success: true, customers });
+    res.status(200).json({
+      success: true,
+      customers,
+      total,
+      page,
+      pages: Math.max(1, Math.ceil(total / limit)),
+    });
   })
 );
 
