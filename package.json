@@ -18,6 +18,10 @@
     "testEnvironment": "node",
     "testMatch": [
       "**/tests/**/*.test.js"
+    ],
+    "testTimeout": 20000,
+    "setupFilesAfterEnv": [
+      "<rootDir>/tests/setup/waitForIndexes.js"
     ]
   },
   "author": "nawin27",
