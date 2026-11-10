@@ -1,7 +1,8 @@
 const { AsyncLocalStorage, AsyncResource } = require('node:async_hooks');
-const jwt = require('jsonwebtoken');
-const User = require('../models/User.js');
+const session = require('../utils/session.js');
 const { dbForUser, runInDb } = require('../db/tenants.js');
+const { clean: cleanOperators } = require('./sanitizeMongo.js');
+const { blankRefsToNull } = require('../utils/blankRefs.js');
 
 // Per-request store for the authenticated user. Schema pre-save hooks
 // (see models/plugins/auditFields.js) read from here to stamp
@@ -12,18 +13,22 @@ const userStorage = new AsyncLocalStorage();
 // run the rest of the request inside the user-context store. Never blocks
 // — unauthenticated routes (login, sign-up) keep working as before.
 const setUserContext = async (req, res, next) => {
-  try {
-    const { token } = req.cookies || {};
-    if (token) {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
-      // Accept both 'id' (canonical) and 'userid' (legacy) payload shapes.
-      const userId = decoded.id || decoded.userid;
-      if (userId) {
-        req.user = await User.findById(userId);
-      }
+  // The same check isAuthenticated makes (utils/session.js), made once
+  // here and kept on the request for it. This used to accept any token
+  // that verified — one whose sessions had been ended still set
+  // req.user for everything that reads it without the login gate.
+  const token = req.cookies?.[session.COOKIE];
+  if (token) {
+    try {
+      const { user, claims } = await session.read(token);
+      req.user = user;
+      req.auth = { token, claims };
+    } catch (err) {
+      // Expired, ended or not ours — carry on signed out so the public
+      // routes still work; the login gate answers with this reason.
+      req.authError = err;
+      req.authTokenTried = token;
     }
-  } catch (_) {
-    // Invalid/expired token — ignore so unauth routes still work.
   }
 
   if (req.user) {
@@ -77,10 +82,24 @@ const setUserContext = async (req, res, next) => {
 
 /**
  * Wrap a middleware that finishes from a stream event (any multer
- * upload) so the request's stores survive it.
+ * upload) so the request's stores survive it — and so the form's fields
+ * are cleaned like any other body.
+ *
+ * The app-wide cleaners (sanitizeMongo, blankRefs) run before the
+ * routers, when a multipart request still has no body at all: its fields
+ * are only read by the upload middleware. So on every upload route a
+ * field named `supplier[$ne]` reached the handler as { $ne: … }, a query
+ * operator, and an unpicked <select> arrived as "" on a reference. Both
+ * are dealt with here, once the fields exist.
  */
 const keepRequestContext = (middleware) => (req, res, next) =>
-  middleware(req, res, AsyncResource.bind(next));
+  middleware(req, res, AsyncResource.bind((err) => {
+    if (!err && req.body && typeof req.body === "object") {
+      cleanOperators(req.body);
+      blankRefsToNull(req.body);
+    }
+    next(err);
+  }));
 
 const getCurrentUser = () => userStorage.getStore()?.user || null;
 

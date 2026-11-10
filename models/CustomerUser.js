@@ -43,7 +43,7 @@ const CustomerUserSchema = new mongoose.Schema(
     password: {
       type:      String,
       required:  [true, "Please set a password"],
-      minLength: [6, "Password should be at least 6 characters"],
+      minLength: [8, "Password must be at least 8 characters"],
       select:    false,
     },
     role: {
@@ -87,6 +87,7 @@ CustomerUserSchema.methods.getJwtToken = function () {
     {
       audience:  "portal",
       expiresIn: process.env.PORTAL_JWT_EXPIRES || "7d",
+      algorithm: "HS256",
     }
   );
 };

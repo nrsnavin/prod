@@ -1,46 +1,30 @@
 const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("./catchAsyncErrors");
-const jwt = require("jsonwebtoken");
-const User = require("../models/User");
+const session = require("../utils/session");
 
+// ── Is this request signed in? ──────────────────────────────────
+// What makes a session stand (the token verifies, the account exists,
+// its sessions have not been ended, this one has not been signed out)
+// is decided in utils/session.js and nowhere else.
+//
+// setUserContext (middleware/userContext.js) runs first in app.js and
+// has already made that check for this request: `req.auth` is its
+// answer when the session stands, `req.authError` when it does not. So
+// the account is read once per request, not twice. A router mounted on
+// its own, without setUserContext, is checked here.
 exports.isAuthenticated = catchAsyncErrors(async (req, res, next) => {
-    const { token } = req.cookies;
+    const token = req.cookies?.[session.COOKIE];
 
     if (!token) {
         return next(new ErrorHandler("Please login to continue", 401));
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
+    if (req.auth?.token === token && req.user) return next();
+    if (req.authError && req.authTokenTried === token) return next(req.authError);
 
-    // BUG FIX: support both 'id' (canonical) and 'userid' (legacy) JWT
-    // payload shapes. generateToken() in api/user.js used to put 'userid',
-    // so reading decoded.id alone returned undefined and req.user was null,
-    // causing every authenticated route to crash.
-    const userId = decoded.id || decoded.userid;
-    req.user = await User.findById(userId);
-
-    if (!req.user) {
-        return next(new ErrorHandler("Session is invalid — please login again", 401));
-    }
-
-    // ── Has this account's sessions been ended since? ──────────────
-    // The app holds a token for ninety days, so "wait for it to
-    // expire" is not an answer to a lost phone. Bumping
-    // User.tokenVersion invalidates every token already issued for
-    // the account, on every device, immediately.
-    //
-    // Tokens minted before the claim existed carry no `v`, and those
-    // are honoured rather than rejected — deliberately, and for the
-    // same reason the `userid` fallback above exists. Rejecting them
-    // would sign out every user in the mill the moment this deploys,
-    // which is a worse outage than the narrow window it closes. They
-    // age out on their own within 24 hours, since every token issued
-    // before this change was a 24-hour one.
-    if (decoded.v !== undefined && decoded.v !== (req.user.tokenVersion ?? 0)) {
-        return next(new ErrorHandler(
-            "You have been signed out. Please login again.", 401));
-    }
-
+    const { user, claims } = await session.read(token);
+    req.user = user;
+    req.auth = { token, claims };
     next();
 });
 

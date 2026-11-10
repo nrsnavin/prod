@@ -7,7 +7,8 @@ const Employee = require("../models/Employee.js");
 const router = express.Router();
 const ErrorHandler = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const sendToken = require("../utils/jwtToken.js");
+const session = require("../utils/session");
+const { passwordProblem } = require("../utils/passwordPolicy");
 const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 const { DEPARTMENTS, roleForDepartment, isDepartment } = require("../utils/roles");
@@ -44,6 +45,8 @@ const S = {
     employee: z.union([objectId, z.literal(""), z.null()]).optional(), selfService: z.boolean().optional(),
   }),
   pin: z.object({ pin: textish(12).optional() }),
+  // A route that takes nothing: whatever is sent is dropped.
+  nothing: z.object({}),
   idParam: z.object({ id: objectId }),
   employeeParam: z.object({ employeeId: objectId }),
 };
@@ -52,9 +55,45 @@ const {
   PIN_MAX_ATTEMPTS, PIN_LOCK_MINUTES, placeholderEmail, isPlaceholderEmail,
   normalisePhone, pinProblem, loginDepartmentFor,
 } = require("../utils/workerLogin");
-var jwt = require('jsonwebtoken');
 
 const RESET_TTL_MINUTES = 30;
+
+// ── A login whose person has left ───────────────────────────────────
+// The rule itself is the session's (utils/session.js closedReason): the
+// same one that ends a session already open. Here it refuses the sign-in.
+async function closedBecauseLeft(user) {
+  const why = await session.closedReason(user);
+  if (!why) return null;
+  const err = new ErrorHandler(why, 403);
+  err.code = "LOGIN_CLOSED";
+  return err;
+}
+
+/** The body every sign-in answers with (and the cookie beside it). */
+function sendSession(req, res, user) {
+  const longLived = session.wantsLongSession(req);
+  const token = session.issue(user, { longLived });
+  res
+    .status(201)
+    .cookie(session.COOKIE, token, session.cookieOptions({ longLived }))
+    .json({
+      username: user.name,
+      id: user._id,
+      role: user.role,
+      department: user.department || null,
+      // The effective list: what the account was given, else its
+      // department's defaults. The web reads this to draw the nav.
+      features: Array.isArray(user.features)
+        ? user.features
+        : featuresForDepartment(user.department || user.role),
+      // The employee view's switch, and whose records it reads.
+      employee: user.employee || null,
+      selfService: isSelfServiceOnly(user),
+      // Both mobile apps keep the token themselves and send it back as a
+      // Cookie header; the web ignores this copy and rides the cookie.
+      token,
+    });
+}
 
 
 // Sign-up is admin-only — accepting `role` from req.body otherwise lets
@@ -75,6 +114,8 @@ router.post("/sign-up",
   // Users page and the feature gates rely on. Role is derived and the
   // feature list sanitized here exactly as /manage/create does.
   const department = req.body.department || null;
+  const weak = passwordProblem(req.body.password, { email: req.body.email, name: req.body.name });
+  if (weak) return next(new ErrorHandler(weak, 400));
   // Intersect with what the department can reach, the same way
   // /manage/create does — otherwise this path can store keys the role
   // gate will always refuse, which reads as access the user doesn't have.
@@ -136,30 +177,10 @@ router.post(
         return next(new ErrorHandler("Invalid email or password", 401));
       }
 
-      const longLived = wantsLongSession(req);
-      const token = generateToken(user, { longLived });
+      const closed = await closedBecauseLeft(user);
+      if (closed) return next(closed);
 
-      res
-        .status(201)
-        .cookie("token", token, {
-          httpOnly: true,
-          sameSite: "none",
-          secure: true,
-          maxAge: longLived ? APP_MAX_AGE : WEB_MAX_AGE,
-        })
-        .json({
-          username: user.name,
-          id: user._id,
-          role: user.role,
-          department: user.department || null,
-          features: Array.isArray(user.features)
-            ? user.features
-            : featuresForDepartment(user.department || user.role),
-          // The employee view's switch, and whose records it reads.
-          employee: user.employee || null,
-          selfService: isSelfServiceOnly(user),
-          token: token,
-        });
+      sendSession(req, res, user);
     } catch (error) {
       return next(new ErrorHandler(error.message, 500));
     }
@@ -277,9 +298,6 @@ router.post(
     if (!rawToken || !password) {
       return next(new ErrorHandler("Token and new password are required", 400));
     }
-    if (password.length < 4) {
-      return next(new ErrorHandler("Password should be greater than 4 characters", 400));
-    }
 
     const hashed = User.hashResetToken(rawToken);
     const user = await User.findOne({
@@ -291,10 +309,23 @@ router.post(
       return next(new ErrorHandler("This reset link is invalid or has expired. Request a new one.", 400));
     }
 
+    // Checked once the link is known to be good, so a bad link learns
+    // nothing about the rule and a good one hears it against its own name.
+    const weak = passwordProblem(password, { email: user.email, name: user.name });
+    if (weak) return next(new ErrorHandler(weak, 400));
+
     user.password = password;            // pre-save hook hashes it
     user.resetPasswordToken = undefined;
     user.resetPasswordExpire = undefined;
+    // A reset is what someone does when they think another person has
+    // their password. Every session open under the old one ends here —
+    // it used to carry on, signed in, for the rest of its day (or its
+    // ninety, on a phone). Any sign-in code still waiting goes too.
+    user.tokenVersion = (user.tokenVersion ?? 0) + 1;
+    user.revokedSessions = undefined;
+    user.clearLoginOtp();
     await user.save();
+    await recordAccess(req, ACTION_CODES.LOGIN_UPDATED, user, { password: "reset by emailed link", sessions: "ended" });
 
     return res.status(200).json({
       success: true,
@@ -474,53 +505,42 @@ router.post(
       return fail();
     }
 
-    if ((user.otpAttempts || 0) >= OTP_MAX_ATTEMPTS) {
-      user.clearLoginOtp();
-      await user.save({ validateBeforeSave: false });
+    // ── Each guess takes one of the five tries, in the database ─────
+    // The count used to be read, compared, then written back: guesses
+    // sent together all read the same count, so a burst of them never
+    // reached the limit — the same race the PIN sign-in below had. A
+    // try is now claimed in one operation BEFORE the code is looked at,
+    // and only against the code that was read (a newer code starts its
+    // own count), so the fifth guess is the fifth however they arrive.
+    const claimed = await User.findOneAndUpdate(
+      { _id: user._id, otpCode: user.otpCode, otpAttempts: { $lt: OTP_MAX_ATTEMPTS } },
+      { $inc: { otpAttempts: 1 } },
+      { new: true }
+    ).select("+otpCode +otpAttempts").lean();
+    if (!claimed) {
+      // Out of tries (or the code was replaced meanwhile): it is dead.
+      await User.updateOne({ _id: user._id, otpCode: user.otpCode }, { $unset: { otpCode: 1, otpExpire: 1 }, $set: { otpAttempts: 0 } });
       return fail();
     }
 
-    const hashed = User.hashResetToken(otp); // same sha256 helper
-    if (hashed !== user.otpCode) {
-      user.otpAttempts = (user.otpAttempts || 0) + 1;
-      await user.save({ validateBeforeSave: false });
-      return fail();
-    }
+    const want = Buffer.from(String(user.otpCode), "hex");
+    const got = Buffer.from(User.hashResetToken(otp), "hex"); // same sha256 helper
+    if (want.length !== got.length || !crypto.timingSafeEqual(want, got)) return fail();
 
-    user.clearLoginOtp();
-    await user.save({ validateBeforeSave: false });
+    // Single use: gone before the session is issued, and only once.
+    const used = await User.updateOne(
+      { _id: user._id, otpCode: user.otpCode },
+      { $unset: { otpCode: 1, otpExpire: 1 }, $set: { otpAttempts: 0 } }
+    );
+    if (!used.modifiedCount) return fail();
 
-    const otpLongLived = wantsLongSession(req);
-    const token = generateToken(user, { longLived: otpLongLived });
-    res
-      .status(201)
-      .cookie("token", token, {
-        httpOnly: true,
-        sameSite: "none",
-        secure: true,
-        maxAge: otpLongLived ? APP_MAX_AGE : WEB_MAX_AGE,
-      })
-      .json({
-        username: user.name,
-        id: user._id,
-        role: user.role,
-        department: user.department || null,
-        // The comment above promises the SAME shape as /login-user, and
-        // it did not: `features` was missing here. The web app offers
-        // ONLY the OTP path, and its session mapper reads
-        // `res.features ?? undefined` — so every web login landed with
-        // no feature list, and the client fell back to the DEPARTMENT
-        // defaults. Per-user access was invisible in the UI: nav entries
-        // and buttons the admin had revoked stayed on screen, and the
-        // API's 403 was the first anyone heard of it.
-        features: Array.isArray(user.features)
-          ? user.features
-          : featuresForDepartment(user.department || user.role),
-        // The employee view's switch, and whose records it reads.
-        employee: user.employee || null,
-        selfService: isSelfServiceOnly(user),
-        token: token,
-      });
+    const closed = await closedBecauseLeft(user);
+    if (closed) return next(closed);
+
+    // The SAME shape as /login-user (sendSession) — `features` included:
+    // the web offers only this path, and without the list every web
+    // login fell back to the department defaults.
+    sendSession(req, res, user);
   })
 );
 
@@ -613,28 +633,7 @@ router.post(
       await User.updateOne({ _id: user._id }, { $set: { pinAttempts: 0 }, $unset: { pinLockedUntil: 1 } });
     }
 
-    const longLived = wantsLongSession(req);
-    const token = generateToken(user, { longLived });
-    res
-      .status(201)
-      .cookie("token", token, {
-        httpOnly: true,
-        sameSite: "none",
-        secure: true,
-        maxAge: longLived ? APP_MAX_AGE : WEB_MAX_AGE,
-      })
-      .json({
-        username: user.name,
-        id: user._id,
-        role: user.role,
-        department: user.department || null,
-        features: Array.isArray(user.features)
-          ? user.features
-          : featuresForDepartment(user.department || user.role),
-        employee: user.employee || null,
-        selfService: isSelfServiceOnly(user),
-        token: token,
-      });
+    sendSession(req, res, user);
   })
 );
 
@@ -661,14 +660,11 @@ router.get(
       // gets nothing extra here and keeps its 24 hours, because its
       // cookie is httpOnly and it has no use for a token in the body.
       const body = { success: true, user };
-      if (wantsLongSession(req)) {
-        const fresh = generateToken(user, { longLived: true });
-        res.cookie("token", fresh, {
-          httpOnly: true,
-          sameSite: "none",
-          secure: true,
-          maxAge: APP_MAX_AGE,
-        });
+      if (session.wantsLongSession(req)) {
+        // (Someone who has left never reaches here: their session no
+        // longer stands, so there is nothing to renew.)
+        const fresh = session.issue(user, { longLived: true });
+        res.cookie(session.COOKIE, fresh, session.cookieOptions({ longLived: true }));
         // The app stores the token itself and sends it as a header —
         // it does not keep a cookie jar — so the cookie above is not
         // enough on its own.
@@ -752,8 +748,42 @@ router.patch(
     // Trim now so downstream uniqueness / regex checks see the
     // canonical form the user will actually be saved with.
     const cleanName  = typeof name === "string" ? name.trim() : undefined;
-    const cleanEmail = typeof email === "string" ? email.trim().toLowerCase() : undefined;
-    const cleanPhone = typeof phoneNumber === "string" ? phoneNumber.trim() : undefined;
+    // An empty email is "no change": a login always has one (a worker's
+    // is a placeholder the apps show as blank), so blank cannot mean
+    // "remove it" — and it used to be refused as a malformed address,
+    // which left a worker with no email unable to save anything else.
+    const typedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+    const cleanEmail = typedEmail ? typedEmail : undefined;
+    let cleanPhone = typeof phoneNumber === "string" ? phoneNumber.trim() : undefined;
+
+    // A phone number is what a worker signs in with. It has to be a
+    // number, and it has to be THEIRS: nothing stopped a login setting
+    // its number to a colleague's, after which the colleague's phone
+    // sign-in matched two people and stopped working. (A login with no
+    // employee record has nowhere to keep a number; it is ignored, as
+    // it always was.)
+    if (cleanPhone !== undefined) {
+      const me = await User.findById(req.user.id).select("employee +pin").lean();
+      const emp = me?.employee ? await Employee.findById(me.employee).select("phoneNumber").lean() : null;
+      if (!emp) {
+        cleanPhone = undefined;
+      } else if (cleanPhone === (emp.phoneNumber || "")) {
+        // Unchanged (the app sends it with every save): an old record's
+        // number is left as it is, whatever shape it has.
+        cleanPhone = undefined;
+      } else if (cleanPhone === "") {
+        if (me.pin) return next(new ErrorHandler("Your phone number is how you sign in — it cannot be left empty", 400));
+      } else {
+        const digits = normalisePhone(cleanPhone);
+        if (!digits) return next(new ErrorHandler("Enter a 10-digit phone number", 400));
+        // The same rule as the employee's own page: one number, one person.
+        const clash = digits === emp.phoneNumber
+          ? null
+          : await Employee.exists({ phoneNumber: digits, _id: { $ne: emp._id } });
+        if (clash) return next(new ErrorHandler("That phone number belongs to another employee", 409));
+        cleanPhone = digits;
+      }
+    }
 
     if (cleanEmail !== undefined) {
       // Simple but strict enough: requires user@host.tld, no spaces.
@@ -772,9 +802,9 @@ router.patch(
       }
     }
 
-    const session = await mongoose.startSession();
+    const dbSession = await mongoose.startSession();
     try {
-      await session.withTransaction(async () => {
+      await dbSession.withTransaction(async () => {
         const userUpdate = {};
         if (cleanName  !== undefined) userUpdate.name  = cleanName;
         if (cleanEmail !== undefined) userUpdate.email = cleanEmail;
@@ -782,7 +812,7 @@ router.patch(
           await User.updateOne(
             { _id: req.user.id },
             { $set: userUpdate },
-            { session, runValidators: true },
+            { session: dbSession, runValidators: true },
           );
         }
 
@@ -798,13 +828,21 @@ router.patch(
             await Employee.updateOne(
               { _id: user.employee },
               { $set: empUpdate },
-              { session, runValidators: true },
+              { session: dbSession, runValidators: true },
             );
           }
         }
       });
     } finally {
-      session.endSession();
+      dbSession.endSession();
+    }
+
+    // The address a sign-in code goes to is a credential. Changing it
+    // is recorded like any other change to a login, with who it was.
+    if (cleanEmail !== undefined && cleanEmail !== String(req.user.email || "").toLowerCase()) {
+      await recordAccess(req, ACTION_CODES.LOGIN_UPDATED, { _id: req.user._id, name: cleanName ?? req.user.name, email: cleanEmail }, {
+        email: { from: isPlaceholderEmail(req.user.email) ? null : req.user.email, to: cleanEmail }, via: "own profile",
+      });
     }
 
     // Return the canonical /me shape so the client can swap state.
@@ -847,26 +885,29 @@ router.get(
   })
 );
 
-// log out user
-router.get(
-  "/logout",
-  catchAsyncErrors(async (req, res, next) => {
+// ── Signing out ────────────────────────────────────────────────────
+//  Clearing the cookie only tells THIS browser to forget the token; the
+//  token itself stayed good until it expired, and the web app did not
+//  even call this (it cleared its own state and left the cookie in the
+//  browser of a shared office desktop). Signing out now ends the session
+//  itself (utils/session.js): the token is refused from here on, on any
+//  machine, while the account's other sessions carry on.
+//
+//  POST only. It was a GET, which a link or an image on any other page
+//  can make a browser send; no app of ours ever called it.
+router.post("/logout", validate({ body: S.nothing }), catchAsyncErrors(async (req, res) => {
+  const token = req.cookies?.[session.COOKIE];
+  if (token) {
     try {
-      res.cookie("token", null, {
-        expires: new Date(Date.now()),
-        httpOnly: true,
-        sameSite: "none",
-        secure: true,
-      });
-      res.status(201).json({
-        success: true,
-        message: "Log out successful!",
-      });
-    } catch (error) {
-      return next(new ErrorHandler(error.message, 500));
+      const { user, claims } = await session.read(token);
+      await session.end(user, claims);
+    } catch (_) {
+      // Already expired, ended or not ours: there is nothing left to end.
     }
-  })
-);
+  }
+  res.cookie(session.COOKIE, "", session.clearedCookieOptions());
+  res.status(200).json({ success: true, message: "Log out successful!" });
+}));
 
 
 // BUG FIX: payload key is 'id' (not 'userid') so middleware/auth.js
@@ -901,36 +942,9 @@ router.get(
 //  inside three months and the session simply continues.
 // ══════════════════════════════════════════════════════════════
 
-const WEB_SESSION  = "24h";
-const APP_SESSION  = "90d";
-const WEB_MAX_AGE  = 24 * 60 * 60 * 1000;
-const APP_MAX_AGE  = 90 * 24 * 60 * 60 * 1000;
-
-/**
- * True when the caller identified itself as the mobile app.
- *
- * Read from an explicit header rather than sniffed from the
- * user-agent: a guess about who is calling should not decide how long
- * a credential lives. Anything that does not ask, gets the short one.
- */
-function wantsLongSession(req) {
-  return String(req.get("X-Client") || "").toLowerCase() === "mobile";
-}
-
-function generateToken(user, { longLived = false } = {}) {
-  const payload = {
-    id: user._id,
-    username: user.name,
-    role: user.role,
-    // The generation this token belongs to. Compared on every
-    // request; see middleware/auth.js.
-    v: user.tokenVersion ?? 0,
-  };
-  const options = {
-    expiresIn: longLived ? APP_SESSION : WEB_SESSION,
-  };
-  return jwt.sign(payload, process.env.JWT_SECRET_KEY, options);
-}
+// The token, its cookie and how long each lasts live in utils/session.js
+// (issue, cookieOptions, wantsLongSession); every sign-in above answers
+// through sendSession().
 
 // ══════════════════════════════════════════════════════════════
 //  USER MANAGEMENT (admin-only) — backs the web app's Users screen.
@@ -1035,8 +1049,8 @@ router.post(
       return next(new ErrorHandler("name, email, password and department are required", 400));
     if (!isDepartment(department))
       return next(new ErrorHandler(`Invalid department: ${department}`, 400));
-    if (password.length < 4)
-      return next(new ErrorHandler("Password must be at least 4 characters", 400));
+    const weak = passwordProblem(password, { email, name });
+    if (weak) return next(new ErrorHandler(weak, 400));
 
     const exists = await User.findOne({ email }).lean();
     if (exists) return next(new ErrorHandler("A user with this email already exists", 409));
@@ -1112,9 +1126,13 @@ router.put(
       user.role       = roleForDepartment(req.body.department);
     }
     if (typeof req.body.password === "string" && req.body.password) {
-      if (req.body.password.length < 4)
-        return next(new ErrorHandler("Password must be at least 4 characters", 400));
+      const weak = passwordProblem(req.body.password, { email: user.email, name: user.name });
+      if (weak) return next(new ErrorHandler(weak, 400));
       user.password = req.body.password; // pre-save hook re-hashes
+      // A new password is given when the old one may be known to someone
+      // else: whatever is signed in under the old one is signed out.
+      user.tokenVersion = (user.tokenVersion ?? 0) + 1;
+      user.revokedSessions = undefined;
     }
     if (Array.isArray(req.body.features)) {
       // Scope to the user's (possibly just-changed) department/role.

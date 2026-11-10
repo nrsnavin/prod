@@ -6,7 +6,7 @@
 //    • only an admin offboards, with a last working day and a reason;
 //    • it is refused while they are on a shift after that day;
 //    • their worker sign-in is closed at once (PIN gone, sessions ended),
-//      and a manager login is reported, not touched;
+//      and a manager login is reported (it stops after the last day);
 //    • from the day after, they are out of the employee list (but in
 //      "left"), out of the pickers, and cannot be put on a shift;
 //    • someone serving notice is still here until their last day;
@@ -148,12 +148,13 @@ describe('their sign-in', () => {
     expect(again.body.message).toMatch(/has left/);
   });
 
-  it('a manager login is reported, for the admin to remove', async () => {
+  it('a manager login is reported: it stops by itself after the last day, and is the admin\'s to remove', async () => {
     const sup = await worker('Floor', '9100000003');
     await M.User.updateOne({ _id: supervisor._id }, { employee: sup._id });
     const res = await offboard(sup, { lastWorkingDay: dayKey(-1), reason: 'retired' });
     expect(res.body.workerLoginClosed).toBe(false);
-    expect(res.body.managerLogin).toEqual({ id: String(supervisor._id), email: 'floor@t.co' });
+    // (tests/api/loginClosedWhenLeft.test.js holds what "stops" means.)
+    expect(res.body.managerLogin).toEqual({ id: String(supervisor._id), email: 'floor@t.co', staysOpen: false });
     await M.User.updateOne({ _id: supervisor._id }, { $unset: { employee: 1 } });
   });
 

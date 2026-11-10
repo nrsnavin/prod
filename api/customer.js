@@ -308,24 +308,31 @@ router.post(
     const customer = await Customer.findById(id);
     if (!customer) return next(new ErrorHandler("Customer not found", 404));
 
-    const { name, email, phone, role, password } = req.body || {};
+    const { phone, role, password } = req.body || {};
+    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+    const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
     if (!name || !email || !password) {
       return next(new ErrorHandler("name, email, and password are required", 400));
     }
+    if (email.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return next(new ErrorHandler("That is not an email address", 400));
+    }
+    // The same rule as a staff login (utils/passwordPolicy.js): this
+    // one opens a customer's orders and invoices to whoever guesses it.
+    const weak = require("../utils/passwordPolicy").passwordProblem(password, { email, name });
+    if (weak) return next(new ErrorHandler(weak, 400));
     // Constrain the portal role to the known set rather than trusting
     // the raw body value (defence-in-depth; the schema enum also guards).
     const PORTAL_ROLES = ["buyer", "viewer", "accountant"];
     const portalRole = PORTAL_ROLES.includes(role) ? role : "buyer";
-    const dupe = await CustomerUser.findOne({
-      email: String(email).toLowerCase().trim(),
-    });
+    const dupe = await CustomerUser.findOne({ email });
     if (dupe) return next(new ErrorHandler("Email already registered", 409));
 
     const user = await CustomerUser.create({
       customer: customer._id,
       name,
       email,
-      phone: phone || "",
+      phone: typeof phone === "string" ? phone.trim().slice(0, 30) : "",
       role:  portalRole,
       password,
     });

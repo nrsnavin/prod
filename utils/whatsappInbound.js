@@ -107,7 +107,11 @@ async function getWhatsAppBotToken() {
       role:     "admin",
     });
   }
-  _cachedBotToken = bot.getJwtToken();
+  // An ordinary 24-hour session (utils/session.js), so it carries the
+  // account's session generation like every other token: ending the
+  // bot's sessions really ends them. (It used to be minted by a separate
+  // helper that threw outright when JWT_EXPIRES was not set.)
+  _cachedBotToken = require("./session").issue(bot);
   _cachedBotTokenExpiresAt = Date.now() + 23 * 60 * 60 * 1000;
   return _cachedBotToken;
 }

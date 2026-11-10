@@ -33,8 +33,12 @@ module.exports = function requestLogger(req, res, next) {
         ms:     Math.round(ms * 10) / 10,
       };
       if (req.user?._id) line.user = req.user._id.toString();
-      const ip = req.headers["x-forwarded-for"] || req.socket?.remoteAddress;
-      if (ip) line.ip = String(ip).split(",")[0].trim();
+      // req.ip, not the raw X-Forwarded-For: that header's first entry
+      // is whatever the caller typed, so the log would name any address
+      // an attacker chose. req.ip is the one the trusted proxy vouches for
+      // (app.js sets `trust proxy`).
+      const ip = req.ip || req.socket?.remoteAddress;
+      if (ip) line.ip = String(ip);
       console.log(JSON.stringify(line));
     } catch (_) {
       /* never let logging break a request */

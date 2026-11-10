@@ -24,6 +24,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { capped } = require("../utils/listLimit");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
+const { staffOnly } = require("../middleware/staffOnly");
 const { resolveEmployeeId } = require("../utils/resolveEmployee");
 const multer = require("multer");
 const { keepRequestContext } = require("../middleware/userContext");
@@ -217,12 +218,18 @@ router.get(
 router.put(
   "/:id/status",
   isAdmin('admin', 'production', 'accounts'),
+  // A worker's own login has the role "production" too: it may report an
+  // issue and see the list, but closing one (its own, or anybody's) is
+  // the office's call. The role gate alone let it through.
+  staffOnly,
   catchAsyncErrors(async (req, res, next) => {
-    const { status, resolutionNotes = "" } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Issue not found", 404));
+    const { status } = req.body || {};
     if (!STATUSES.includes(status)) {
       return next(new ErrorHandler(
         `status must be one of: ${STATUSES.join(", ")}`, 400));
     }
+    const resolutionNotes = typeof req.body.resolutionNotes === "string" ? req.body.resolutionNotes.slice(0, 2000) : "";
 
     const update = { status, resolutionNotes };
     if (status === "resolved" || status === "rejected") {

@@ -42,3 +42,8 @@ module.exports = function sanitizeMongo(req, _res, next) {
   if (req.params) _clean(req.params);
   next();
 };
+
+// For a body that only exists later: a multipart form is parsed by the
+// route's own upload middleware, long after this ran on an empty body
+// (middleware/userContext.js keepRequestContext cleans it there).
+module.exports.clean = _clean;

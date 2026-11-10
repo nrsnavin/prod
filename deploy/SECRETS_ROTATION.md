@@ -12,6 +12,20 @@ your entire database and mint admin login tokens.
 
 Total time: ~20 minutes. Order matters — follow top to bottom.
 
+## How to tell whether this has been done
+
+The server now says so itself (`utils/configRisks.js`). While either
+published value is still in use:
+
+- the start-up log carries `[config] RISK: JWT_SECRET_KEY is a value
+  that is public …` and/or `… The database password is one that is
+  public …` (`journalctl -u jarvis | grep '\[config\]'`);
+- `GET /api/v2/health/build` (admin) lists it under `security.risks`;
+- the owner gets a WhatsApp message each morning until it is fixed.
+
+None of them print the value, only which setting and why. A production
+server with **no** `JWT_SECRET_KEY` at all does not start.
+
 ## 1. Rotate the MongoDB password (Atlas)
 
 1. https://cloud.mongodb.com → your project → **Database Access**.

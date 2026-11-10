@@ -28,6 +28,9 @@
 
 const express = require('express');
 const multer = require('multer');
+// Uploads finish from a stream event: keep the request's stores, and
+// clean the form's fields (middleware/userContext.js).
+const { keepRequestContext } = require('../middleware/userContext');
 const mongoose = require('mongoose');
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const ErrorHandler = require('../utils/ErrorHandler');
@@ -124,7 +127,7 @@ async function detailOnShift(session, detailId) {
 
 router.post(
   '/timer-photo',
-  (req, res, next) => upload.single('photo')(req, res, (err) => {
+  (req, res, next) => keepRequestContext(upload.single('photo'))(req, res, (err) => {
     if (err?.code === 'LIMIT_FILE_SIZE') return next(new ErrorHandler('That photo is too large (over 8 MB). Try again with a smaller one.', 400));
     return next(err);
   }),

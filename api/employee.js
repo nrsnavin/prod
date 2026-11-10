@@ -504,8 +504,11 @@ router.get(
 //  planned loom would be left with nobody on it; move it first.
 //
 //  A worker login (phone + PIN) is closed at once: the PIN removed and
-//  every open session ended. A manager login (email) is left for the
-//  admin to remove under Users, and the reply says so.
+//  every open session ended. Any other login of theirs stops working
+//  the day after the last working day, sessions already open included
+//  (utils/session.js closedReason) — except an administrator's, which an
+//  HR entry never closes. The reply says which; either way the login
+//  stays listed under Users for the admin to remove.
 // ══════════════════════════════════════════════════════════════
 const OFFBOARD_BODY = z.object({
   lastWorkingDay: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "lastWorkingDay must look like 2026-10-31"),
@@ -606,8 +609,11 @@ router.post(
       success: true,
       employee: { id: String(employee._id), name: employee.name, status: "offboarded", lastWorkingDay: last, reason: req.body.reason },
       workerLoginClosed: !!(login && isSelfServiceOnly(login)),
-      // Left in place: an email login is the admin's to remove.
-      managerLogin: login && !isSelfServiceOnly(login) ? { id: String(login._id), email: login.email } : null,
+      // Still listed under Users. `staysOpen`: an administrator's login,
+      // which leaving does not close — that one the admin must remove.
+      managerLogin: login && !isSelfServiceOnly(login)
+        ? { id: String(login._id), email: login.email, staysOpen: login.role === "admin" }
+        : null,
     });
   })
 );

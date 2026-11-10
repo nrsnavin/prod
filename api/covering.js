@@ -592,6 +592,9 @@ router.delete(
 //  same people as /beam-entry — covering operators record their own.
 // ─────────────────────────────────────────────────────────────
 const multer = require("multer");
+// Uploads finish from a stream event: keep the request's stores, and
+// clean the form's fields (middleware/userContext.js).
+const { keepRequestContext } = require("../middleware/userContext");
 const ledger = require("../services/aiLedger");
 const { PROMPTS } = require("../utils/aiPrompts");
 const { readCoveringBeams, MAX_PAGES } = require("../utils/coveringBeamOcr");
@@ -629,7 +632,7 @@ function markRows(rows, recorded) {
 
 router.post(
   "/:id/beam-sheet",
-  (req, res, next) => beamSheetUpload.array("photos", MAX_PAGES)(req, res, (err) => {
+  (req, res, next) => keepRequestContext(beamSheetUpload.array("photos", MAX_PAGES))(req, res, (err) => {
     if (err?.code === "LIMIT_FILE_SIZE") return next(new ErrorHandler("That photo is too large (over 8 MB). Try again with a smaller one.", 400));
     if (err?.code === "LIMIT_FILE_COUNT" || err?.code === "LIMIT_UNEXPECTED_FILE") {
       return next(new ErrorHandler(`At most ${MAX_PAGES} photos at a time.`, 400));

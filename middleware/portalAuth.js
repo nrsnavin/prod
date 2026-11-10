@@ -30,7 +30,7 @@ exports.isCustomerAuthenticated = catchAsyncErrors(async (req, _res, next) => {
     decoded = jwt.verify(
       token,
       process.env.PORTAL_JWT_SECRET_KEY || process.env.JWT_SECRET_KEY,
-      { audience: "portal" }
+      { audience: "portal", algorithms: ["HS256"] }
     );
   } catch (_err) {
     return next(new ErrorHandler("Portal session is invalid — please log in again", 401));

@@ -68,16 +68,15 @@ module.exports = (err, req, res, next) => {
     err = new ErrorHandler(message, 400);
   }
 
-  // wrong jwt error
+  // A token that does not verify, wherever it surfaced. Sessions answer
+  // for themselves in utils/session.js; this is the backstop, and it is
+  // a 401 for the same reason: every client sends a 401 back to sign in,
+  // where a 400 about "your url" left people staring at an error.
   if (err.name === "JsonWebTokenError") {
-    const message = `Your url is invalid please try again letter`;
-    err = new ErrorHandler(message, 400);
+    err = new ErrorHandler("Session is invalid — please login again", 401);
   }
-
-  // jwt expired
   if (err.name === "TokenExpiredError") {
-    const message = `Your Url is expired please try again letter!`;
-    err = new ErrorHandler(message, 400);
+    err = new ErrorHandler("Your session has expired. Please login again.", 401);
   }
 
   // Surface diagnostic fields only when the route attached them via

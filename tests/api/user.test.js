@@ -26,7 +26,7 @@ describe("POST /api/v2/user/sign-up", () => {
 
     const res = await request(app)
       .post("/api/v2/user/sign-up")
-      .send({ name: "Alice", email: "alice@test.com", password: "secret" });
+      .send({ name: "Alice", email: "alice@test.com", password: "loomshed-42" });
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -38,9 +38,21 @@ describe("POST /api/v2/user/sign-up", () => {
 
     const res = await request(app)
       .post("/api/v2/user/sign-up")
-      .send({ name: "Alice" });
+      .send({ name: "Alice", email: "alice@test.com", password: "loomshed-42" });
 
     expect(res.status).toBe(500);
+  });
+
+  it("refuses a password that is too short, before anything is stored", async () => {
+    User.create = jest.fn();
+
+    const res = await request(app)
+      .post("/api/v2/user/sign-up")
+      .send({ name: "Alice", email: "alice@test.com", password: "secret" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/at least 8/i);
+    expect(User.create).not.toHaveBeenCalled();
   });
 });
 
@@ -91,12 +103,18 @@ describe("POST /api/v2/user/login-user", () => {
   });
 });
 
-describe("GET /api/v2/user/logout", () => {
+describe("POST /api/v2/user/logout", () => {
   it("clears the cookie and returns success", async () => {
-    const res = await request(app).get("/api/v2/user/logout");
+    const res = await request(app).post("/api/v2/user/logout");
 
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ success: true, message: /log out/i });
+    expect(String(res.headers["set-cookie"])).toMatch(/token=;/);
+  });
+
+  it("is not a GET: a link on another page must not be able to sign someone out", async () => {
+    const res = await request(app).get("/api/v2/user/logout");
+    expect(res.status).toBe(404);
   });
 });
 

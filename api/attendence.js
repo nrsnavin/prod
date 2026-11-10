@@ -126,7 +126,10 @@ function fmtRecord(a) {
 
 router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const { date, shift, records = [], markedBy = 'admin' } = req.body;
+    const { date, shift, records = [] } = req.body;
+    // Who marked it is whoever is signed in — it used to be read from
+    // the request ("admin" unless the caller said otherwise).
+    const markedBy = req.user?.name || 'admin';
 
     if (!date || !shift)
       return res.status(400).json({ success: false, message: 'date and shift required.' });
@@ -337,11 +340,13 @@ router.get('/active', isAdmin('admin', 'accounts'), async (req, res) => {
 router.put('/:id', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const { id } = req.params;
-    const allowed = ['status','checkIn','checkOut','workedMinutes','lateMinutes','overtimeMinutes','leaveType','notes','markedBy'];
+    const allowed = ['status','checkIn','checkOut','workedMinutes','lateMinutes','overtimeMinutes','leaveType','notes'];
     const update  = {};
     for (const k of allowed) {
       if (req.body[k] !== undefined) update[k] = req.body[k];
     }
+    // The last person to correct it, from the session — not the request.
+    if (Object.keys(update).length) update.markedBy = req.user?.name || 'admin';
 
     // If in/out times are edited without an explicit workedMinutes, recompute
     // the worked duration so pay stays in step with the corrected times.

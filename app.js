@@ -137,6 +137,10 @@ const corsConfig = {
 app.use(helmet());
 app.use(cors(corsConfig));
 app.options('*', cors(corsConfig));
+// A request another site's page makes from a signed-in browser — see
+// middleware/crossSite.js. After CORS (which has already refused a
+// foreign Origin) and before anything reads the session.
+app.use("/api", require("./middleware/crossSite.js").crossSiteGuard((origin) => _allowedOrigins.has(origin)));
 // Bound the JSON body. The default (100kb) is fine for this API; the
 // old 50mb urlencoded ceiling was a DoS amplifier for the bulk-array
 // endpoints. File uploads bypass this and carry their own multer
@@ -290,6 +294,12 @@ app.get("/api/v2/health/build", isAuthenticated, isAdmin("admin"), async (req, r
       name: mongoose.connection?.name || null,
       host: mongoose.connection?.host || null,
     },
+    // Settings that leave the system open — a signing key or database
+    // password that is public (utils/configRisks.js). Which setting and
+    // why; never the value.
+    security: {
+      risks: require("./utils/configRisks.js").configRisks().map(({ key, level, message }) => ({ key, level, message })),
+    },
     // Code that has landed but whose database changes have not. A
     // non-empty list here is the answer to "why is the new page
     // missing?" — run `npm run migrate`.
@@ -410,7 +420,13 @@ app.get(
 
     const to = typeof req.query.test === "string" ? req.query.test.trim() : "";
     if (to) {
-      if (!mailer.isConfigured()) {
+      if (req.fromAnotherSite) {
+        // A GET that sends mail: a link on another site must not be able
+        // to make an admin's browser send one. Typed or pasted, it works.
+        out.test = { sent: false, reason: "Opened from another site — type or paste this address yourself to send a test" };
+      } else if (to.length > 254 || !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(to)) {
+        out.test = { sent: false, reason: "That is not one email address" };
+      } else if (!mailer.isConfigured()) {
         out.test = { sent: false, reason: "SMTP is not configured on this server" };
       } else {
         try {
@@ -700,6 +716,9 @@ app.use("/api/v2/yarn-lots",   gate('production', 'accounts'),
 // on top of it.
 app.use("/api/v2/stock-counts", gate('production', 'accounts'),
   requireFeature('/materials'),
+  // Reads too: without this an account with Materials unticked could
+  // still open every count — what was counted, the variances, the value.
+  requireFeatureRead('/materials'),
   stockCount);
 // warping/covering/wastage/packing/attendance/payroll/leave/bonus gate
 // themselves inside their own router — several mix admin-only data with
@@ -892,8 +911,11 @@ app.post("/api/v2/notify/cron/run-close-checklist", async (req, res) => {
     const { getDocumentSettings } = require("./services/documentSettings");
     const NotificationSettings = require("./models/NotificationSettings.js");
     const { sendWhatsApp } = require("./utils/whatsapp");
-    const d = new Date(); const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
-    const month = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+    // "Last month" on India's calendar: on the server's own clock a run
+    // at 00:30 IST on the 1st was still the previous day in UTC, and the
+    // checklist came out for the month before last.
+    const [y, m] = require("./utils/factoryDay").ymd().split("-").map(Number);
+    const month = new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7);
     const checklist = await insights.closeChecklist(month);
     const text = insights.checklistText(checklist, (await getDocumentSettings()).companyName || "Balu Elastics");
     const settings = await NotificationSettings.load();
@@ -932,6 +954,10 @@ app.use("/api/v2/notify",      ADMIN_GATE,
 // ── Customer portal API (v3) ────────────────────────────────────
 // Mounted unauthenticated at the router level — the portal auth
 // middleware is applied per-router (login is public, /me is gated).
+// The same ceilings as /api/v2: this mount had none at all, so the
+// customer sign-in could be guessed at without limit.
+app.use("/api/v3", apiLimiter);
+app.use("/api/v3/portal/auth/login", loginAddressLimiter, loginAccountLimiter);
 app.use("/api/v3/portal/auth", portalAuth);
 
 

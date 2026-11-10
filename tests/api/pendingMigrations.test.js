@@ -148,6 +148,11 @@ describe('GET /health/build — which database', () => {
 
     const body = JSON.stringify(res.body);
     expect(body).not.toMatch(/:\/\/[^/"]*:[^/"]*@/);
-    expect(body).not.toMatch(/password|secret/i);
+    // `security` names the settings that are at risk ("JWT_SECRET_KEY is
+    // …") — which one and why, never its value. Everything else must not
+    // so much as mention one.
+    const { security, ...rest } = res.body;
+    expect(JSON.stringify(rest)).not.toMatch(/password|secret/i);
+    expect(JSON.stringify(security)).not.toContain(process.env.JWT_SECRET_KEY);
   });
 });

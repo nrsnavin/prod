@@ -38,6 +38,11 @@ if (cluster.isPrimary && WORKERS > 1) {
 }
 
 function startServer() {
+  // The settings, read the way an attacker would: a missing signing key
+  // stops a production start here, with the reason; a published or
+  // guessable one is logged (and sent to the owner each morning).
+  require('./utils/configRisks').announce();
+
   const app = require('./app');
   const connectDatabase = require('./db/Database');
 

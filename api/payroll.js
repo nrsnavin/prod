@@ -861,15 +861,33 @@ router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
   }
 });
 
+// ── What may be asked for as an advance ─────────────────────────────
+// A rupee amount above zero, to the paisa, and not more than anybody is
+// ever advanced. The schema refused a negative one too, but as a 500
+// with a validation dump; "abc" got the same. The cap is there so a
+// slipped decimal point is caught at the form, not on the ledger.
+const MAX_ADVANCE = 1000000;
+function advanceAmount(raw) {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+  if (!Number.isFinite(n) || n < 1 || n > MAX_ADVANCE) return null;
+  return Math.round(n * 100) / 100;
+}
+const ADVANCE_AMOUNT_MESSAGE = `The amount must be between ₹1 and ₹${MAX_ADVANCE.toLocaleString('en-IN')}`;
+const advanceReason = (raw) => (typeof raw === 'string' ? raw.trim().slice(0, 500) : '');
+
 router.get('/advance', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const filter = {};
-    if (req.query.employeeId) filter.employee = req.query.employeeId;
-    if (req.query.status)     filter.status   = req.query.status;
+    if (typeof req.query.employeeId === 'string' && req.query.employeeId) {
+      if (!mongoose.isValidObjectId(req.query.employeeId)) return res.json({ success: true, data: [] });
+      filter.employee = req.query.employeeId;
+    }
+    if (typeof req.query.status === 'string' && req.query.status) filter.status = req.query.status;
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
     const advances = await AdvanceRequest.find(filter)
       .populate('employee', 'name department')
       .sort({ createdAt: -1 })
-      .limit(+(req.query.limit || 100))
+      .limit(limit)
       .lean();
     res.json({ success: true, data: advances });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
@@ -881,11 +899,18 @@ router.get('/advance', isAdmin('admin', 'accounts'), async (req, res) => {
 // worker-facing POST /advance below, which creates a pending request.
 router.post('/advance/admin-create', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const { employee, amount, deductMonth, deductYear, reason = '' } = req.body;
-    if (!employee || !amount)
+    const { employee, deductMonth, deductYear } = req.body;
+    const reason = advanceReason(req.body.reason);
+    if (!employee || !req.body.amount)
       return res.status(400).json({ success: false, message: 'employee and amount required' });
+    const amount = advanceAmount(req.body.amount);
+    if (amount == null) return res.status(400).json({ success: false, message: ADVANCE_AMOUNT_MESSAGE });
     if (!deductMonth || !deductYear)
       return res.status(400).json({ success: false, message: 'deductMonth and deductYear required (which payroll month recovers it)' });
+    const month = Number(deductMonth), year = Number(deductYear);
+    if (!Number.isInteger(month) || month < 1 || month > 12 || !Number.isInteger(year) || year < 2000 || year > 2100)
+      return res.status(400).json({ success: false, message: 'deductMonth must be 1-12 and deductYear a year' });
+    if (!mongoose.isValidObjectId(employee)) return res.status(404).json({ success: false, message: 'Employee not found' });
     const emp = await Employee.findById(employee, 'name').lean();
     if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
 
@@ -919,16 +944,19 @@ router.post('/advance/admin-create', isAdmin('admin', 'accounts'), async (req, r
 // FOR THEMSELVES. Admins may request on behalf of anyone.
 router.post('/advance', async (req, res) => {
   try {
-    const { amount, reason = '' } = req.body;
+    const reason = advanceReason(req.body?.reason);
     const employeeId = resolveEmployeeId(req);
     if (!employeeId)
       return res.status(403).json({ success: false, message: 'Cannot determine employee — your account has no linked employee' });
-    if (!amount)
+    if (!req.body?.amount)
       return res.status(400).json({ success: false, message: 'amount required' });
+    const amount = advanceAmount(req.body.amount);
+    if (amount == null) return res.status(400).json({ success: false, message: ADVANCE_AMOUNT_MESSAGE });
+    if (!mongoose.isValidObjectId(employeeId)) return res.status(404).json({ success: false, message: 'Employee not found' });
     const emp = await Employee.findById(employeeId, 'name').lean();
     if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
 
-    const adv = await AdvanceRequest.create({ employee: employeeId, amount: +amount, reason });
+    const adv = await AdvanceRequest.create({ employee: employeeId, amount, reason });
     res.json({ success: true, message: `Advance request submitted for ${emp.name}`, data: adv });
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
 });
@@ -948,9 +976,16 @@ async function advanceNotChangeable(id, verb, res) {
 
 router.put('/advance/:id/approve', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const { deductMonth, deductYear, adminNotes = '', approvedBy = 'admin' } = req.body;
+    const { deductMonth, deductYear } = req.body;
+    const adminNotes = advanceReason(req.body.adminNotes);
+    // Who approved is whoever is signed in. It used to be read from the
+    // request ("admin" when not sent, anything at all when it was).
+    const approvedBy = req.user?.name || 'admin';
     if (!deductMonth || !deductYear)
       return res.status(400).json({ success: false, message: 'deductMonth and deductYear required' });
+    if (!Number.isInteger(+deductMonth) || +deductMonth < 1 || +deductMonth > 12 || !Number.isInteger(+deductYear) || +deductYear < 2000 || +deductYear > 2100)
+      return res.status(400).json({ success: false, message: 'deductMonth must be 1-12 and deductYear a year' });
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ success: false, message: 'Not found' });
     // Approval commits to the advance but no cash has moved yet, so nothing
     // is booked to the ledger until it is paid out (PUT /advance/:id/pay-out).
     // Only an advance no cash has moved on can be approved (a request,
@@ -1005,7 +1040,7 @@ router.put('/advance/:id/reject', isAdmin('admin', 'accounts'), async (req, res)
     // so rejecting a paid-out one wrote the money off without a word.
     const adv = await AdvanceRequest.findOneAndUpdate(
       { _id: req.params.id, status: { $in: ['requested', 'pending', 'approved'] } },
-      { $set: { status: 'rejected', adminNotes: req.body.adminNotes || '' } },
+      { $set: { status: 'rejected', adminNotes: advanceReason(req.body.adminNotes) } },
       { new: true }
     ).populate('employee', 'name');
     if (!adv) return advanceNotChangeable(req.params.id, 'rejected', res);

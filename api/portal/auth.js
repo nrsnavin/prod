@@ -81,7 +81,12 @@ router.post(
 // Clears the portal cookie. Stateless — the cookie was the session.
 // ─────────────────────────────────────────────────────────────────
 router.post("/logout", (_req, res) => {
-  res.clearCookie(PORTAL_COOKIE, { path: "/" });
+  // Cleared with the attributes it was set with. Without SameSite=None a
+  // browser will not take a cookie change from another site's page at
+  // all, so on the live portal "log out" left the customer signed in.
+  // (No maxAge here: Express would turn it back into a future expiry.)
+  const { maxAge: _maxAge, ...attributes } = cookieOptions();
+  res.clearCookie(PORTAL_COOKIE, attributes);
   return res.json({ success: true });
 });
 

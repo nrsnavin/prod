@@ -65,13 +65,15 @@ describe("error middleware", () => {
     );
   });
 
+  // 401, not 400: it is the session that is wrong, and a 401 is what
+  // both apps act on by sending the person back to sign in.
   it("handles JsonWebTokenError", () => {
     const err = { name: "JsonWebTokenError" };
     const res = buildRes();
 
     errorMiddleware(err, {}, res, jest.fn());
 
-    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ message: expect.stringContaining("invalid") })
     );
@@ -83,7 +85,7 @@ describe("error middleware", () => {
 
     errorMiddleware(err, {}, res, jest.fn());
 
-    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({ message: expect.stringContaining("expired") })
     );

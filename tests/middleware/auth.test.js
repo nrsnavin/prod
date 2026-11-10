@@ -28,10 +28,14 @@ describe("isAuthenticated", () => {
     expect(err.message).toMatch(/login/i);
   });
 
+  // What makes a session stand is decided in utils/session.js; these
+  // hold what the gate does with its answer.
+  const found = (user) => jest.fn().mockReturnValue({ select: jest.fn().mockResolvedValue(user) });
+
   it("verifies token and attaches user to req", async () => {
     const fakeUser = { _id: "user123", name: "Test" };
     jwt.verify = jest.fn().mockReturnValue({ id: "user123" });
-    User.findById = jest.fn().mockResolvedValue(fakeUser);
+    User.findById = found(fakeUser);
 
     const req = { cookies: { token: "valid.token.here" } };
     const res = {};
@@ -39,13 +43,15 @@ describe("isAuthenticated", () => {
 
     await isAuthenticated(req, res, next);
 
-    expect(jwt.verify).toHaveBeenCalledWith("valid.token.here", "test-secret");
+    // One algorithm, named: a token signed any other way is not ours.
+    expect(jwt.verify).toHaveBeenCalledWith("valid.token.here", "test-secret", { algorithms: ["HS256"] });
     expect(User.findById).toHaveBeenCalledWith("user123");
     expect(req.user).toEqual(fakeUser);
+    expect(req.auth).toEqual({ token: "valid.token.here", claims: { id: "user123" } });
     expect(next).toHaveBeenCalledWith(); // called with no args = success
   });
 
-  it("forwards jwt.verify errors to next", async () => {
+  it("forwards jwt.verify errors to next, as a 401", async () => {
     jwt.verify = jest.fn().mockImplementation(() => { throw new Error("invalid token"); });
 
     const req = { cookies: { token: "bad.token" } };
@@ -55,6 +61,47 @@ describe("isAuthenticated", () => {
     await isAuthenticated(req, res, next);
 
     expect(next).toHaveBeenCalledWith(expect.any(Error));
+    expect(next.mock.calls[0][0].statusCode).toBe(401);
+    expect(req.user).toBeUndefined();
+  });
+
+  it("an expired token says so", async () => {
+    jwt.verify = jest.fn().mockImplementation(() => { const e = new Error("jwt expired"); e.name = "TokenExpiredError"; throw e; });
+    const next = buildNext();
+    await isAuthenticated({ cookies: { token: "old.token" } }, {}, next);
+    expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 401, message: expect.stringMatching(/expired/i) });
+  });
+
+  it("refuses a token whose sessions have all been ended, or that was signed out", async () => {
+    jwt.verify = jest.fn().mockReturnValue({ id: "user123", v: 1, sid: "s1" });
+    User.findById = found({ _id: "user123", tokenVersion: 2 });
+    let next = buildNext();
+    await isAuthenticated({ cookies: { token: "t" } }, {}, next);
+    expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 401, message: expect.stringMatching(/signed out/i) });
+
+    User.findById = found({ _id: "user123", tokenVersion: 1, revokedSessions: [{ sid: "s1" }] });
+    next = buildNext();
+    await isAuthenticated({ cookies: { token: "t" } }, {}, next);
+    expect(next.mock.calls[0][0]).toMatchObject({ statusCode: 401, message: expect.stringMatching(/signed out/i) });
+  });
+
+  it("uses the answer the request already has, without reading the account again", async () => {
+    // setUserContext runs first in the app and has made the same check.
+    jwt.verify = jest.fn();
+    User.findById = jest.fn();
+    const req = { cookies: { token: "t" }, user: { _id: "user123" }, auth: { token: "t", claims: {} } };
+    const next = buildNext();
+    await isAuthenticated(req, {}, next);
+    expect(next).toHaveBeenCalledWith();
+    expect(jwt.verify).not.toHaveBeenCalled();
+    expect(User.findById).not.toHaveBeenCalled();
+
+    // …and its refusal, for the same token.
+    const refused = new Error("signed out"); refused.statusCode = 401;
+    const next2 = buildNext();
+    await isAuthenticated({ cookies: { token: "t" }, authError: refused, authTokenTried: "t" }, {}, next2);
+    expect(next2).toHaveBeenCalledWith(refused);
+    expect(User.findById).not.toHaveBeenCalled();
   });
 });
 

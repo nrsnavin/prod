@@ -1,6 +1,5 @@
 const mongoose = require("mongoose");
 const { hashPassword, verifyPassword } = require("../utils/passwordHash");
-const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 
 const userSchema = new mongoose.Schema(
@@ -20,7 +19,7 @@ const userSchema = new mongoose.Schema(
     password: {
       type: String,
       required: [true, "Please enter your password"],
-      minLength: [4, "Password should be greater than 4 characters"],
+      minLength: [8, "Password must be at least 8 characters"],
       select: false,
     },
     role: {
@@ -69,6 +68,13 @@ const userSchema = new mongoose.Schema(
     // still honoured; see middleware/auth.js for why that is
     // deliberate rather than an oversight.
     tokenVersion: { type: Number, default: 0 },
+    // Sessions signed out one by one (utils/session.js): each is this
+    // session's id and when its token would have expired anyway.
+    revokedSessions: {
+      type: [{ _id: false, sid: String, exp: Date }],
+      select: false,
+      default: undefined,
+    },
 
     // Optional link to the Employee document. Set on User creation
     // for any user that's also a workforce member, so the mobile
@@ -142,12 +148,7 @@ userSchema.pre("save", async function () {
   this.password = await hashPassword(this.password);
 });
 
-// jwt token
-userSchema.methods.getJwtToken = function () {
-  return jwt.sign({ id: this._id,role:this.role,name:this.name,email:this.email}, process.env.JWT_SECRET_KEY,{
-    expiresIn: process.env.JWT_EXPIRES,
-  });
-};
+// A session token is issued in utils/session.js (issue), nowhere else.
 
 // compare password
 // Checks the password, and quietly upgrades a legacy bcrypt hash to the
