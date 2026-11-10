@@ -20,7 +20,8 @@ const PayrollSettings  = require('../models/PayrollSettings');
 const AdvanceRequest   = require('../models/Advance');
 const ShiftDetail      = require('../models/ShiftDetail');
 const Wastage          = require('../models/Wastage');
-const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead, requireFeatureReadPaths } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
+const { ownRecordsOr } = require('../middleware/ownRecords');
 const { EMPLOYEE_CARD_FIELDS } = require('../utils/populateFields');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
 // The ~200-line pure pay computation lives in services/payrollService.js.
@@ -37,21 +38,21 @@ router.use(isAuthenticated);
 // reads (own payslip/ledger/history/range) are exempt from the read gate
 // for the same reason: a worker's own pay record is answerable to their
 // identity, not to whether the admin ticked their Payroll checkbox.
-router.use((req, res, next) => {
-  if (req.method === 'POST' && req.path === '/advance') return next();
-  const isSelfRead = (req.method === 'GET' || req.method === 'HEAD') &&
-    (req.path.startsWith('/slip/') || req.path.startsWith('/ledger/') ||
-     req.path.startsWith('/history/') || req.path.startsWith('/range/'));
-  if (isSelfRead) return next();
-  requireFeature('/payroll')(req, res, (err) => {
-    if (err) return next(err);
-    // The Employees detail page shows a pay summary card, so /employees
-    // may read that ONE rollup — not the payroll module at large.
-    requireFeatureReadPaths(['/payroll'], {
-      '/employee-overview': ['/employees'],
-    })(req, res, next);
-  });
-});
+//
+// Whose slip it is matters (middleware/ownRecords.js): one's OWN slip,
+// ledger and history pass on identity; someone else's needs Payroll —
+// or Employees, whose page shows a person's pay beside their record.
+// These paths used to pass for whoever asked, so a finance login with
+// Payroll unticked could still read every employee's pay.
+router.use(ownRecordsOr({
+  features: ['/payroll'],
+  ownPrefixes: ['/slip/', '/ledger/', '/history/', '/range/'],
+  alsoRead: ['/employees'],
+  open: (req) => req.method === 'POST' && req.path === '/advance',
+  // The Employees detail page shows a pay summary card, so /employees
+  // may read that ONE rollup — not the payroll module at large.
+  readPaths: { '/employee-overview': ['/employees'] },
+}));
 
 const r2 = (n) => Math.round(n * 100) / 100;
 

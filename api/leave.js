@@ -19,8 +19,9 @@ const LeaveRequest = require('../models/LeaveRequest');
 const Attendance   = require('../models/Attendence.js');
 const ShiftDetail  = require('../models/ShiftDetail');
 const Employee     = require('../models/Employee');
-const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
+const { ownRecordsOr } = require('../middleware/ownRecords');
 const { validate, fields: { text, objectId }, z } = require('../middleware/validate');
 
 // A worker's own request (middleware/validate.js). The shift is matched
@@ -44,15 +45,16 @@ const LEAVE_REQUEST = z.object({
 // the same reason — a worker's own leave history is answerable to their
 // identity, not to whether the admin ticked their Leave checkbox.
 // (req.user is set by the mount-level isAuthenticated in app.js.)
-router.use((req, res, next) => {
-  if (req.method === 'POST' && req.path === '/request') return next();
-  if (req.method === 'DELETE') return next();
-  if ((req.method === 'GET' || req.method === 'HEAD') && req.path.startsWith('/employee/')) return next();
-  requireFeature('/leave')(req, res, (err) => {
-    if (err) return next(err);
-    requireFeatureRead('/leave')(req, res, next);
-  });
-});
+//
+// Whose history it is matters (middleware/ownRecords.js): one's own
+// passes on identity; someone else's needs Leave — or Employees, whose
+// page shows a person's leave beside their record.
+router.use(ownRecordsOr({
+  features: ['/leave'],
+  ownPrefixes: ['/employee/'],
+  alsoRead: ['/employees'],
+  open: (req) => (req.method === 'POST' && req.path === '/request') || req.method === 'DELETE',
+}));
 
 function toISODate(d)   { return new Date(d).toISOString().split('T')[0]; }
 function toDateLabel(d) {

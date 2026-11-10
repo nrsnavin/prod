@@ -30,6 +30,7 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const helmet = require("helmet");
 const sanitizeMongo = require("./middleware/sanitizeMongo.js");
+const { staffOnly } = require("./middleware/staffOnly.js");
 const { setUserContext } = require("./middleware/userContext.js");
 const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead, requireFeatureReadPaths } = require("./middleware/auth.js");
 
@@ -568,8 +569,10 @@ app.use("/api/v2/me", isAuthenticated, require("./api/me.js"));
 app.use("/api/v2/settings",    gate('production', 'accounts'), settings);
 app.use("/api/v2/pdf-templates", gate('production', 'accounts'), pdfTemplates);
 // Per-user feature enforcement — requireFeature (writes) and
-// requireFeatureRead (reads). Machine head assignment is also written
-// AND read from the Jobs screen, Machine Issues, and Analytics.
+// requireFeatureRead (reads). The Jobs screen, Machine Issues and
+// Analytics READ the machine list; none of them writes a machine. Job
+// Orders used to be accepted for every machine write, so an account
+// with Jobs alone could create machines and add or delete service bills.
 app.use("/api/v2/machine",     gate('production'),
   // Machine Issues resolves an issue by logging service against the
   // machine, so THAT ONE WRITE accepts /machine-issues. It must not go
@@ -577,10 +580,14 @@ app.use("/api/v2/machine",     gate('production'),
   // configured user holds it, and adding it there would silently remove
   // the feature gate from every machine write (create/delete included).
   (req, res, next) => {
-    const keys = (req.method === 'POST' && req.path === '/add-service-log')
-      ? ['/machines', '/jobs', '/machine-issues']
-      : ['/machines', '/jobs'];
-    return requireFeature(...keys)(req, res, next);
+    const serviceLog = req.method === 'POST' && req.path === '/add-service-log';
+    const keys = serviceLog ? ['/machines', '/machine-issues'] : ['/machines'];
+    return requireFeature(...keys)(req, res, (err) => {
+      if (err) return next(err);
+      // …and since everyone holds /machine-issues, the office-only check
+      // has to be made here: a worker's own login logs no service.
+      return serviceLog ? staffOnly(req, res, next) : next();
+    });
   },
   requireFeatureReadPaths(['/machines'], {
     '/get-machines': ['/jobs', '/machine-issues', '/analytics'],
@@ -665,6 +672,10 @@ app.use("/api/v2/supplier",    gate('accounts'),
 // accounts gate the purchase orders sit behind.
 app.use("/api/v2/quote",       gate('accounts'),
   requireFeature('/quotes'),
+  // Reads too. This mount gated writes only, so an account with
+  // Quotations unticked — or with nothing ticked at all — could still
+  // list every quote, its costing and the win/loss record.
+  requireFeatureRead('/quotes'),
   quote);
 app.use("/api/v2/order",       gate('accounts'),
   requireFeature('/orders'),
@@ -777,8 +788,14 @@ app.use("/api/v2/dispatch",    gate('accounts', 'production', 'marketing'),
   requireFeature('/dispatch'),
   requireFeatureRead('/dispatch'),
   require("./api/dispatch.js"));
-// QC is a leaf, but the Jobs screen reads QC results, so /jobs passes too.
-app.use("/api/v2/qc",          gate('production'), requireFeature('/qc', '/jobs'), requireFeatureRead('/qc', '/jobs'), require("./api/qc.js"));
+// QC is a leaf. The Jobs screen records a result against a job and
+// reads that job's results and certificate — those three routes, not
+// the module: with Jobs alone an account could run the photo reader and
+// export the training dataset.
+app.use("/api/v2/qc",          gate('production'),
+  (req, res, next) => requireFeature(...(req.method === 'POST' && req.path === '/create' ? ['/qc', '/jobs'] : ['/qc']))(req, res, next),
+  requireFeatureReadPaths(['/qc'], { '/by-job': ['/jobs'], '/coa': ['/jobs'] }),
+  require("./api/qc.js"));
 // Complaints carry the blast-radius trace, which names other customers
 // and the jobs still on the floor carrying the same lot. Finance is in
 // the gate because the people who field the customer's call are the ones

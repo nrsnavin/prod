@@ -34,7 +34,7 @@ const Payroll          = require("../models/Payroll");
 const PDFDocument      = require("pdfkit");
 const ledger           = require("../services/ledgerService");
 const LedgerEntry      = require("../models/LedgerEntry");
-const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
+const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 const { EMPLOYEE_CARD_FIELDS } = require("../utils/populateFields");
 
 router.use(isAuthenticated);
@@ -44,15 +44,15 @@ router.use(isAuthenticated);
 // identity, not to whether the admin ticked their Bonus checkbox, so
 // those reads are exempt from the feature gate below. PUT
 // /employee/:id/percent is a write (admin-only) and is NOT exempt.
-router.use((req, res, next) => {
-  const isSelfRead = (req.method === 'GET' || req.method === 'HEAD') &&
-    req.path.startsWith('/employee/');
-  if (isSelfRead) return next();
-  requireFeature('/bonus')(req, res, (err) => {
-    if (err) return next(err);
-    requireFeatureRead('/bonus')(req, res, next);
-  });
-});
+//
+// Whose bonus it is matters (middleware/ownRecords.js): one's own passes
+// on identity; someone else's needs Bonus — or Payroll or Employees,
+// whose screens show a person's bonus beside their pay and record.
+router.use(require("../middleware/ownRecords").ownRecordsOr({
+  features: ['/bonus'],
+  ownPrefixes: ['/employee/'],
+  alsoRead: ['/payroll', '/employees'],
+}));
 
 function currentYear() {
   return new Date().getFullYear();

@@ -31,7 +31,9 @@ const EmployeeFeedbackSchema = new mongoose.Schema(
     subject: { type: String, required: true, trim: true },
     body:    { type: String, required: true, trim: true },
 
-    // Worker can flag if they want to stay anonymous in the admin UI.
+    // The worker asked to stay anonymous. The author is still recorded
+    // (so they can see and withdraw the note) but is never sent to anyone
+    // else — api/feedback.js forOffice.
     isAnonymous: { type: Boolean, default: false },
 
     status: {

@@ -20,7 +20,7 @@ const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
 const { employedFrom } = require('../utils/employeeStatus');
 const ShiftDetail= require('../models/ShiftDetail');
-const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require('../middleware/auth');
+const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 const { maybeFireAttendanceCrashed } = require('../utils/attendanceAlerts');
 const { saveIf } = require('../utils/conditionalSave');
 const attendanceForecast = require('../services/attendanceForecast');
@@ -32,15 +32,15 @@ router.use(isAuthenticated);
 // the admin ticked their Attendance checkbox, so those two reads are
 // exempt from the feature gate below. Everything else on this router
 // (marking, editing, date/summary/latecomer views) needs '/attendance'.
-router.use((req, res, next) => {
-  const isSelfRead = (req.method === 'GET' || req.method === 'HEAD') &&
-    (req.path.startsWith('/employee/') || req.path.startsWith('/monthly/'));
-  if (isSelfRead) return next();
-  requireFeature('/attendance')(req, res, (err) => {
-    if (err) return next(err);
-    requireFeatureRead('/attendance')(req, res, next);
-  });
-});
+//
+// Whose attendance it is matters (middleware/ownRecords.js): one's own
+// passes on identity; someone else's needs Attendance — or Employees,
+// whose page shows a person's attendance beside their record.
+router.use(require('../middleware/ownRecords').ownRecordsOr({
+  features: ['/attendance'],
+  ownPrefixes: ['/employee/', '/monthly/'],
+  alsoRead: ['/employees'],
+}));
 
 function toISODate(d) {
   return new Date(d).toISOString().split('T')[0];

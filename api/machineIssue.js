@@ -172,6 +172,7 @@ router.get(
 router.get(
   "/anomalies",
   isAdmin('admin', 'production'),
+  staffOnly, // a roll-up for the office; a worker's own login has the same role
   catchAsyncErrors(async (req, res) => {
     const days = Math.min(Math.max(Number(req.query.days) || 30, 1), 365);
     const threshold = Math.max(2, Number(req.query.threshold) || 3);

@@ -458,6 +458,12 @@ describe('every revocable feature is actually enforced somewhere', () => {
           }
         }
       }
+      // The modules that also show people their own records gate through
+      // ownRecordsOr({ features: [...] }) (middleware/ownRecords.js), which
+      // applies requireFeature and the read gate to those keys.
+      for (const m of src.matchAll(/ownRecordsOr\s*\(\s*\{[\s\S]*?\bfeatures:\s*\[([^\]]*)\]/g)) {
+        for (const key of m[1].matchAll(/['"](\/[^'"]*)['"]/g)) gated.add(key[1]);
+      }
     }
 
     const revocable = FEATURES.map((f) => f.key).filter((k) => !ALWAYS_ON.includes(k));

@@ -24,6 +24,21 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAuthenticated, isAdmin, selfOrAdmin } = require("../middleware/auth");
 const { notify } = require("../utils/notify");
 
+// ── A note sent anonymously stays that way ─────────────────────────
+// The employee app offers "Submit anonymously". The record still names
+// its author — it has to, so they can see it and withdraw it — and the
+// office list used to send that name along with every note, anonymous
+// or not: the web page then printed it. Whoever reads a note that is not
+// theirs gets it through here, with no trace of who wrote it.
+function forOffice(item) {
+  if (!item || !item.isAnonymous) return item;
+  const plain = typeof item.toObject === "function" ? item.toObject() : { ...item };
+  plain.employee = null;
+  delete plain.createdBy;
+  delete plain.updatedBy;
+  return plain;
+}
+
 const TYPES      = ["complaint", "suggestion"];
 const CATEGORIES = ["machine", "safety", "management", "facilities", "payroll", "other"];
 const STATUSES   = ["open", "in_review", "resolved", "rejected", "closed"];
@@ -61,8 +76,12 @@ router.post(
       return next(new ErrorHandler(
         `category must be one of: ${CATEGORIES.join(", ")}`, 400));
     }
-    if (!subject?.trim()) return next(new ErrorHandler("subject is required", 400));
-    if (!body?.trim())    return next(new ErrorHandler("body is required", 400));
+    // Text, of a size someone would type: a number or a list here used
+    // to crash .trim() with a 500.
+    if (typeof subject !== "string" || !subject.trim()) return next(new ErrorHandler("subject is required", 400));
+    if (typeof body !== "string" || !body.trim())       return next(new ErrorHandler("body is required", 400));
+    if (subject.length > 200) return next(new ErrorHandler("Keep the subject under 200 characters", 400));
+    if (body.length > 5000)   return next(new ErrorHandler("Keep the message under 5,000 characters", 400));
 
     const emp = await Employee.findById(employeeId, "name");
     if (!emp) return next(new ErrorHandler("Employee not found", 404));
@@ -72,7 +91,7 @@ router.post(
       type, category,
       subject:  subject.trim(),
       body:     body.trim(),
-      isAnonymous,
+      isAnonymous: isAnonymous === true || isAnonymous === "true",
     });
 
     res.status(201).json({ success: true, data: fb });
@@ -106,7 +125,16 @@ router.get(
   // One's own feedback, or the office's: anonymous notes stay anonymous to everyone else.
   isAuthenticated, selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
-    const items = await Feedback.find({ employee: req.params.empId })
+    if (!mongoose.Types.ObjectId.isValid(req.params.empId)) {
+      return next(new ErrorHandler("Invalid employee id", 400));
+    }
+    // Asking for one person's notes by their id would name the author of
+    // every anonymous one among them. Only that person gets those.
+    const own = String(req.user?.employee || "") === String(req.params.empId);
+    const items = await Feedback.find({
+      employee: req.params.empId,
+      ...(own ? {} : { isAnonymous: { $ne: true } }),
+    })
       .sort({ createdAt: -1 })
       .lean();
     res.json({ success: true, count: items.length, data: items });
@@ -148,7 +176,7 @@ router.get(
         .lean(),
       res
     );
-    res.json({ success: true, count: items.length, data: items, ...(cut ? { capped: true } : {}) });
+    res.json({ success: true, count: items.length, data: items.map(forOffice), ...(cut ? { capped: true } : {}) });
   })
 );
 
@@ -162,7 +190,8 @@ router.put(
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return next(new ErrorHandler("Invalid feedback id", 400));
     }
-    const { response = "", status } = req.body;
+    const { status } = req.body || {};
+    const response = typeof req.body?.response === "string" ? req.body.response.slice(0, 4000) : "";
     if (status && !STATUSES.includes(status)) {
       return next(new ErrorHandler(
         `status must be one of: ${STATUSES.join(", ")}`, 400));
@@ -180,7 +209,7 @@ router.put(
       req.params.id, { $set: update }, { new: true })
       .populate("employee", "name");
     if (!doc) return next(new ErrorHandler("Feedback not found", 404));
-    res.json({ success: true, data: doc });
+    res.json({ success: true, data: forOffice(doc) });
   })
 );
 
