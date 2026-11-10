@@ -352,6 +352,8 @@ describe('the lists and the cards', () => {
     // dc2: 400 × 12.5 = 5,000 + 300 × 40 = 12,000 → 17,000 + 5% / 12% → 5,250 + 13,440
     expect(byOrder.body.totals.invoiced).toBe(18690);
     expect(byOrder.body.uninvoicedDcs.map((d) => d.dcNumber)).toEqual([dc1.dcNumber]);
+    // What the order's rail needs to say paid or owed.
+    expect(byOrder.body.invoices[0]).toEqual(expect.objectContaining({ paidAmount: 0, creditedAmount: 0 }));
 
     const byCustomer = await get(`/invoice/by-customer?id=${customer._id}`);
     expect(byCustomer.body.total).toBe(2);

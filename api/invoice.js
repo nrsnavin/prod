@@ -668,7 +668,9 @@ router.post(
 );
 
 // ── GET /by-order ──────────────────────────────────────────────
-const SUMMARY = "invoiceNumber invoiceDate orderNo status totals supplyType einvoice.status einvoice.irn dcs lines.name lines.quantity lines.unit buyer.name createdAt";
+// With what has been received against each, so the order's progress rail
+// and the customer card can say paid, part paid or owed.
+const SUMMARY = "invoiceNumber invoiceDate dueDate orderNo status totals supplyType einvoice.status einvoice.irn dcs lines.name lines.quantity lines.unit buyer.name createdAt paidAmount creditedAmount debitedAmount";
 
 router.get(
   "/by-order",
