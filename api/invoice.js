@@ -37,7 +37,8 @@ const { financialYearLong } = require("../utils/financialYear");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { getDocumentSettings, getPdfBranding } = require("../services/documentSettings");
 const { computeInvoice, amountInWords, stateCodeFromGstin } = require("../services/gst");
-const { readDate } = require("../services/accountsHelpers");
+const { readDate, withTxn } = require("../services/accountsHelpers");
+const { onceAtATime } = require("../utils/onceAtATime");
 const { buildEinvoiceJson, readiness } = require("../services/einvoice");
 const { getProvider } = require("../services/einvoiceProvider");
 const partyLedger = require("../services/partyLedger");
@@ -257,93 +258,109 @@ router.post(
     try { when = readDate(invoiceDate, "invoiceDate", new Date()); } catch (err) { return next(err); }
     try { await assertOpen(when, req); } catch (err) { return next(err); }
 
-    if (requestId) {
-      const dup = await Invoice.findOne({ requestId: String(requestId) });
-      if (dup) return res.status(200).json({ success: true, invoice: publicInvoice(dup), replay: true });
-    }
-
-    const order = await populateOrder(Order.findById(orderId).select("orderNo po customer status elasticOrdered")).lean();
-    if (!order) return next(new ErrorHandler("Order not found", 404));
-    if (!order.customer) return next(new ErrorHandler("The order has no customer", 409));
-    let creditOverride = null;
-    try { creditOverride = await creditControl.enforce(order.customer._id || order.customer, req, "this invoice"); } catch (err) { return next(err); }
-
-    const all = await invoiceableDcs(order);
-    const wanted = new Set(dcIds.map(String));
-    const chosen = all.filter((d) => wanted.has(String(d._id)));
-    if (chosen.length !== wanted.size) return next(new ErrorHandler("A chosen challan does not belong to this order", 400));
-    const bad = chosen.find((d) => !d.eligible);
-    if (bad) {
-      return next(new ErrorHandler(
-        bad.invoicedOn
-          ? `${bad.dcNumber} is already on invoice ${bad.invoicedOn}`
-          : `${bad.dcNumber} is ${bad.status} — only despatched or delivered challans can be invoiced`,
-        409
-      ));
-    }
-
-    const settings = await getDocumentSettings();
-    const seller = sellerFrom(settings);
-    const buyer = buyerFrom(order.customer);
-    const lines = await buildLines(order, chosen, settings, overrides);
-    if (!lines.length) return next(new ErrorHandler("Those challans carry no elastic lines", 409));
-    const unpriced = lines.filter((l) => !(l.rate > 0));
-    if (unpriced.length) {
-      return next(new ErrorHandler(
-        `No rate for ${unpriced.map((l) => l.name).join(", ")} — price the order line, or enter a rate on the invoice.`, 409));
-    }
-    // An export, SEZ or deemed-export supply: zero-rated under LUT, or IGST.
-    let exp;
-    try { exp = exportSupply.read(req.body.export, { lut: (await getBooksSettings()).lut, invoiceDate: when, customer: order.customer }); } catch (err) { return next(err); }
-    const priced = computeInvoice(lines, { sellerStateCode: seller.stateCode, buyerStateCode: buyer.stateCode, ...exportSupply.pricing(exp) });
-
-    const fy = financialYearLong(when);
-    const sequence = await nextInvoiceSeq(fy);
-    const number = invoiceNumber(fy, sequence);
-
-    const actor = actorFromRequest(req);
-    const doc = new Invoice({
-      invoiceNumber: number, requestId: requestId ? String(requestId) : undefined, financialYear: fy, sequence,
-      invoiceDate: when,
-      ...(creditOverride ? { creditOverride } : {}),
-      order: order._id, orderNo: order.orderNo, customer: order.customer._id, customerPo: order.po || "",
-      // The customer's payment terms ("30" days) decide when it falls due.
-      dueDate: new Date(when.getTime() + (Math.max(0, parseInt(order.customer.paymentTerms, 10) || 0)) * 86_400_000),
-      seller, buyer,
-      shipTo: String(req.body.shipTo ?? "").trim().slice(0, 300) || shipToFor(chosen, buyer),
-      supplyType: priced.supplyType, placeOfSupply: priced.placeOfSupply,
-      ...(exp ? { export: exp } : {}),
-      dcs: chosen.map((d) => ({ dc: d._id, dcNumber: d.dcNumber, dispatchDate: d.dispatchDate })),
-      lines: priced.lines.map((l) => ({
-        elastic: l.elastic, name: l.name, hsn: l.hsn, unit: l.unit, quantity: l.quantity, boxes: l.boxes || 0, rate: l.rate,
-        taxable: l.taxable, gstPercent: l.gstPercent, cgst: l.cgst, sgst: l.sgst, igst: l.igst, amount: l.amount, dcNumbers: l.dcNumbers,
-      })),
-      totalBoxes: priced.lines.reduce((a, l) => a + (l.boxes || 0), 0),
-      totals: priced.totals,
-      amountInWords: amountInWords(priced.totals.grand),
-      notes: String(notes || "").trim().slice(0, 500),
-      createdBy: req.user?._id,
-    });
-    doc.fingerprints.push(buildFingerprint(ACTION_CODES.INVOICE_CREATED, {
-      entityId: doc._id, actor,
-      meta: { invoiceNumber: number, orderNo: order.orderNo, dcs: doc.dcs.map((d) => d.dcNumber), grand: priced.totals.grand, ...(exp ? { export: exp.kind } : {}) },
-    }));
-    try {
-      await doc.save();
-    } catch (err) {
-      // A retry that lost the race above: hand back the one that won.
-      if (err?.code === 11000 && requestId) {
+    // One invoice at a time for an order. Which challans are still to be
+    // invoiced is worked out and then the invoice is created: two requests
+    // together both found the same challan free and both invoiced it. The
+    // second now waits for the first, and is then told the challan is
+    // taken — or, for a resend, handed the invoice that was just raised.
+    await onceAtATime(`invoice:order:${orderId}`, async () => {
+      if (requestId) {
         const dup = await Invoice.findOne({ requestId: String(requestId) });
         if (dup) return res.status(200).json({ success: true, invoice: publicInvoice(dup), replay: true });
       }
-      throw err;
-    }
-    // On the customer's account from the day it is issued.
-    await partyLedger.post({
-      partyType: "customer", party: doc.customer, date: doc.invoiceDate, docType: "Invoice", doc: doc._id,
-      docNo: doc.invoiceNumber, debit: doc.totals.grand, narration: `Sales — order #${order.orderNo}`,
-    });
-    res.status(201).json({ success: true, invoice: publicInvoice(doc) });
+
+      const order = await populateOrder(Order.findById(orderId).select("orderNo po customer status elasticOrdered")).lean();
+      if (!order) return next(new ErrorHandler("Order not found", 404));
+      if (!order.customer) return next(new ErrorHandler("The order has no customer", 409));
+      let creditOverride = null;
+      try { creditOverride = await creditControl.enforce(order.customer._id || order.customer, req, "this invoice"); } catch (err) { return next(err); }
+
+      const all = await invoiceableDcs(order);
+      const wanted = new Set(dcIds.map(String));
+      const chosen = all.filter((d) => wanted.has(String(d._id)));
+      if (chosen.length !== wanted.size) return next(new ErrorHandler("A chosen challan does not belong to this order", 400));
+      const bad = chosen.find((d) => !d.eligible);
+      if (bad) {
+        return next(new ErrorHandler(
+          bad.invoicedOn
+            ? `${bad.dcNumber} is already on invoice ${bad.invoicedOn}`
+            : `${bad.dcNumber} is ${bad.status} — only despatched or delivered challans can be invoiced`,
+          409
+        ));
+      }
+
+      const settings = await getDocumentSettings();
+      const seller = sellerFrom(settings);
+      const buyer = buyerFrom(order.customer);
+      const lines = await buildLines(order, chosen, settings, overrides);
+      if (!lines.length) return next(new ErrorHandler("Those challans carry no elastic lines", 409));
+      const unpriced = lines.filter((l) => !(l.rate > 0));
+      if (unpriced.length) {
+        return next(new ErrorHandler(
+          `No rate for ${unpriced.map((l) => l.name).join(", ")} — price the order line, or enter a rate on the invoice.`, 409));
+      }
+      // An export, SEZ or deemed-export supply: zero-rated under LUT, or IGST.
+      let exp;
+      try { exp = exportSupply.read(req.body.export, { lut: (await getBooksSettings()).lut, invoiceDate: when, customer: order.customer }); } catch (err) { return next(err); }
+      const priced = computeInvoice(lines, { sellerStateCode: seller.stateCode, buyerStateCode: buyer.stateCode, ...exportSupply.pricing(exp) });
+
+      const fy = financialYearLong(when);
+      const sequence = await nextInvoiceSeq(fy);
+      const number = invoiceNumber(fy, sequence);
+
+      const actor = actorFromRequest(req);
+      const _id = new mongoose.Types.ObjectId();
+      const data = {
+        _id,
+        invoiceNumber: number, requestId: requestId ? String(requestId) : undefined, financialYear: fy, sequence,
+        invoiceDate: when,
+        ...(creditOverride ? { creditOverride } : {}),
+        order: order._id, orderNo: order.orderNo, customer: order.customer._id, customerPo: order.po || "",
+        // The customer's payment terms ("30" days) decide when it falls due.
+        dueDate: new Date(when.getTime() + (Math.max(0, parseInt(order.customer.paymentTerms, 10) || 0)) * 86_400_000),
+        seller, buyer,
+        shipTo: String(req.body.shipTo ?? "").trim().slice(0, 300) || shipToFor(chosen, buyer),
+        supplyType: priced.supplyType, placeOfSupply: priced.placeOfSupply,
+        ...(exp ? { export: exp } : {}),
+        dcs: chosen.map((d) => ({ dc: d._id, dcNumber: d.dcNumber, dispatchDate: d.dispatchDate })),
+        lines: priced.lines.map((l) => ({
+          elastic: l.elastic, name: l.name, hsn: l.hsn, unit: l.unit, quantity: l.quantity, boxes: l.boxes || 0, rate: l.rate,
+          taxable: l.taxable, gstPercent: l.gstPercent, cgst: l.cgst, sgst: l.sgst, igst: l.igst, amount: l.amount, dcNumbers: l.dcNumbers,
+        })),
+        totalBoxes: priced.lines.reduce((a, l) => a + (l.boxes || 0), 0),
+        totals: priced.totals,
+        amountInWords: amountInWords(priced.totals.grand),
+        notes: String(notes || "").trim().slice(0, 500),
+        createdBy: req.user?._id,
+        fingerprints: [buildFingerprint(ACTION_CODES.INVOICE_CREATED, {
+          entityId: _id, actor,
+          meta: { invoiceNumber: number, orderNo: order.orderNo, dcs: chosen.map((d) => d.dcNumber), grand: priced.totals.grand, ...(exp ? { export: exp.kind } : {}) },
+        })],
+      };
+      // The invoice and its row on the customer's account, together: it
+      // is on the account from the day it is issued, or it was not issued.
+      // (They were two writes; one failing between them left an invoice
+      // the customer's balance did not know about, and a resend handed
+      // back the invoice without ever posting the row.)
+      let doc;
+      try {
+        await withTxn(async (session) => {
+          [doc] = await Invoice.create([data], { session });
+          await partyLedger.post({
+            partyType: "customer", party: data.customer, date: data.invoiceDate, docType: "Invoice", doc: _id,
+            docNo: number, debit: priced.totals.grand, narration: `Sales — order #${order.orderNo}`,
+          }, session);
+        });
+      } catch (err) {
+        // A retry that lost the race above: hand back the one that won.
+        if (err?.code === 11000 && requestId) {
+          const dup = await Invoice.findOne({ requestId: String(requestId) });
+          if (dup) return res.status(200).json({ success: true, invoice: publicInvoice(dup), replay: true });
+        }
+        throw err;
+      }
+      res.status(201).json({ success: true, invoice: publicInvoice(doc) });
+    }, { what: "An invoice for this order" });
   })
 );
 

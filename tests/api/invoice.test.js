@@ -23,7 +23,9 @@ process.env.PDF_IN_THREAD = '1';
 const request  = require('supertest');
 const mongoose = require('mongoose');
 const jwt      = require('jsonwebtoken');
-const { MongoMemoryServer } = require('mongodb-memory-server');
+// A replica set: an invoice and its row on the customer's account are
+// written in one transaction.
+const { MongoMemoryReplSet } = require('mongodb-memory-server');
 const { pdfText } = require('../helpers/pdfText');
 
 let mongo, app, Order, Customer, Elastic, DeliveryChallan, Invoice, User, admin;
@@ -36,7 +38,7 @@ const asPdf = (r) => r.buffer(true).parse((res, cb) => {
 });
 
 beforeAll(async () => {
-  mongo = await MongoMemoryServer.create();
+  mongo = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   Order = require('../../models/Order');
@@ -386,5 +388,66 @@ describe('invoice settings', () => {
 
     expect((await put('/settings/document', { invoice: { pincode: '12' } })).status).toBe(400);
     expect((await put('/settings/document', { invoice: { defaultGstPercent: 120 } })).status).toBe(400);
+  });
+});
+
+describe('raised once, whole or not at all', () => {
+  const PartyLedgerEntry = () => require('../../models/PartyLedgerEntry');
+  const create = (order, dcs, extra = {}) => post('/invoice/create', { orderId: order._id, dcIds: dcs.map((d) => d._id), ...extra });
+
+  it('two people invoicing the same challan at the same moment: one invoice, the other is told it is taken', async () => {
+    // Which challans are free was worked out and then the invoice created,
+    // so both found the challan free and both invoiced it.
+    const { order, dc1 } = await scene();
+    const [x, y] = await Promise.all([create(order, [dc1]), create(order, [dc1])]);
+    expect([x.status, y.status].sort()).toEqual([201, 409]);
+    const refused = x.status === 409 ? x : y;
+    expect(refused.body.message).toMatch(/is already on invoice INV\//);
+    expect(await Invoice.countDocuments({})).toBe(1);
+    expect(await PartyLedgerEntry().countDocuments({ docType: 'Invoice' })).toBe(1);
+  });
+
+  it('the same request sent twice at once is one invoice, handed to both, and uses one number', async () => {
+    const { order, dc1, dc2 } = await scene();
+    const [x, y] = await Promise.all([create(order, [dc1], { requestId: 'tap-1' }), create(order, [dc1], { requestId: 'tap-1' })]);
+    expect([x.status, y.status].sort()).toEqual([200, 201]);
+    expect(x.body.invoice.invoiceNumber).toBe(y.body.invoice.invoiceNumber);
+    expect(await Invoice.countDocuments({})).toBe(1);
+
+    // No number was drawn and thrown away: the next invoice is the next number.
+    const first = Number(x.body.invoice.invoiceNumber.split('/').pop());
+    const next = await create(order, [dc2]);
+    expect(next.status).toBe(201);
+    expect(Number(next.body.invoice.invoiceNumber.split('/').pop())).toBe(first + 1);
+  });
+
+  it('CONTROL: two different orders are invoiced side by side', async () => {
+    const one = await scene();
+    const customer = await makeCustomer({ name: 'Zenith Apparel', gstin: '33AAEPZ2222F1Z9' });
+    const el = await makeElastic();
+    const other = await makeOrder(customer, [{ elastic: el, quantity: 100, rate: 10 }]);
+    const dc = await makeDc(other, [{ elastic: el, quantity: 100 }]);
+    const [x, y] = await Promise.all([create(one.order, [one.dc1]), create(other, [dc])]);
+    expect([x.status, y.status]).toEqual([201, 201]);
+    expect(x.body.invoice.invoiceNumber).not.toBe(y.body.invoice.invoiceNumber);
+  });
+
+  it('an invoice that could not be put on the customer\'s account was not issued', async () => {
+    // They were two writes. The second failing left an invoice the
+    // customer's balance did not know about.
+    const partyLedger = require('../../services/partyLedger');
+    const { order, dc1 } = await scene();
+    const spy = jest.spyOn(partyLedger, 'post').mockImplementation(() => Promise.reject(Object.assign(new Error('write refused'), { name: 'MongoServerError' })));
+    const failed = await create(order, [dc1], { requestId: 'tap-2' });
+    spy.mockRestore();
+    expect(failed.status).toBe(500);
+    expect(await Invoice.countDocuments({})).toBe(0);
+    expect(await PartyLedgerEntry().countDocuments({})).toBe(0);
+
+    // Sent again, it goes through — whole.
+    const again = await create(order, [dc1], { requestId: 'tap-2' });
+    expect(again.status).toBe(201);
+    const row = await PartyLedgerEntry().findOne({ docType: 'Invoice', doc: again.body.invoice._id }).lean();
+    expect(row).toMatchObject({ docNo: again.body.invoice.invoiceNumber, debit: again.body.invoice.totals.grand });
   });
 });

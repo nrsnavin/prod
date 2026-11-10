@@ -190,6 +190,45 @@ describe('expenses', () => {
     expect((await post('/accounts/expenses', { category: cat._id, description: 'Toner', amount: 2500 })).body.expense.status).toBe('pending');
   });
 
+  it('two people deciding one expense at the same moment: the first decision stands', async () => {
+    // Each read "waiting for approval" and then wrote its decision. The
+    // later write won: an expense already approved and on the supplier's
+    // account became "rejected", or a rejected one was approved and posted.
+    const Expense = require('../../models/Expense');
+    const cat = await category('Job work');
+    const s = await supplierScene();
+    const raise = async (description) => (await post('/accounts/expenses', { category: cat._id, description, supplier: s.supplier._id, amount: 4000, gstPercent: 12 }, clerk)).body.expense._id;
+    // The copy the slower one works from: read while it was still waiting.
+    const readBefore = async (id) => {
+      const stale = await Expense.findById(id);
+      jest.spyOn(Expense, 'findById').mockImplementationOnce(() => Promise.resolve(stale));
+    };
+
+    // Approved first; the rejection arrives late.
+    const a = await raise('Dyeing lot 7');
+    const staleA = await Expense.findById(a);
+    expect((await post(`/accounts/expenses/${a}/approve`, {})).status).toBe(200);
+    jest.spyOn(Expense, 'findById').mockImplementationOnce(() => Promise.resolve(staleA));
+    const lateReject = await post(`/accounts/expenses/${a}/reject`, { reason: 'Duplicate of EXP/0003' });
+    expect(lateReject.status).toBe(409);
+    expect(lateReject.body.code).toBe('CHANGED_MEANWHILE');
+    expect((await Expense.findById(a).lean()).status).toBe('approved');
+
+    // Rejected first; the approval arrives late.
+    const b = await raise('Dyeing lot 8');
+    await readBefore(b);
+    const staleB = await Expense.findById(b); // consumes the stub: the same stale copy
+    expect((await post(`/accounts/expenses/${b}/reject`, { reason: 'Not ours to pay' })).status).toBe(200);
+    jest.spyOn(Expense, 'findById').mockImplementationOnce(() => Promise.resolve(staleB));
+    const lateApprove = await post(`/accounts/expenses/${b}/approve`, {});
+    expect(lateApprove.status).toBe(409);
+    expect((await Expense.findById(b).lean()).status).toBe('rejected');
+    // Only the approved one is on the supplier's account.
+    const st = await get(`/accounts/statement?partyType=supplier&party=${s.supplier._id}`);
+    expect(st.body.rows.map((r) => r.docType)).toEqual(['Expense']);
+    jest.restoreAllMocks();
+  });
+
   it('a rejected expense says why; a supplier expense sits on the supplier account once approved', async () => {
     const cat = await category('Job work'); // always approved
     const s = await supplierScene();

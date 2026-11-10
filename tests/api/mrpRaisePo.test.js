@@ -481,3 +481,40 @@ describe('raising a PO for a whole order', () => {
     expect(fp.meta.source).toBe('order-mrp-shortfall');
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  RAISED ONCE — however the taps arrive
+//
+//  What is short is worked out and then bought. Two requests together
+//  both found nothing on order yet, and each raised the purchase
+//  orders. They now go one at a time (utils/onceAtATime.js): the second
+//  waits for the first, and is told the material is already on order.
+// ══════════════════════════════════════════════════════════════════
+describe('two taps at once raise the purchase orders once', () => {
+  const raiseForOrder = (id) =>
+    request(app).post(`/api/v2/order/${id}/raise-po`).set('Cookie', adminCookie()).send({});
+
+  it('from the job', async () => {
+    const supplier = await makeSupplier('Kumar Yarns');
+    const material = await makeMaterial({ stock: 30, supplier: supplier._id });
+    const { job } = await makeJob([{ material, grams: 100 }]);
+
+    const [x, y] = await Promise.all([raise(job._id), raise(job._id)]);
+    expect([x.status, y.status].sort()).toEqual([201, 400]);
+    expect((x.status === 400 ? x : y).body.message).toMatch(/Already on order/);
+    const pos = await PurchaseOrder.find({}).lean();
+    expect(pos).toHaveLength(1);
+    expect(pos[0].items[0].quantity).toBe(70);
+  });
+
+  it('from the order', async () => {
+    const supplier = await makeSupplier('Kumar Yarns');
+    const material = await makeMaterial({ stock: 30, supplier: supplier._id });
+    const { order } = await makeJob([{ material, grams: 100 }]);
+
+    const [x, y] = await Promise.all([raiseForOrder(order._id), raiseForOrder(order._id)]);
+    expect([x.status, y.status].sort()).toEqual([201, 400]);
+    expect((x.status === 400 ? x : y).body.message).toMatch(/Already on order/);
+    expect(await PurchaseOrder.countDocuments({})).toBe(1);
+  });
+});

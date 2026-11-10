@@ -11,6 +11,7 @@ const Elastic = require("../models/Elastic.js");
 const { computeMaterialRequirement } = require("../utils/materialRequirement.js");
 const creditControl = require("../services/creditControl");
 const ErrorHandler = require("../utils/ErrorHandler.js");
+const { onceAtATime } = require("../utils/onceAtATime");
 const { sendError } = require("../utils/routeError");
 const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 const { buildOrderStatusReport } = require("../services/orderStatusReport.js");
@@ -2284,91 +2285,97 @@ router.post(
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return next(new ErrorHandler('Invalid order id', 400));
     }
-    const order = await Order.findById(req.params.id)
-      .select('orderNo elasticOrdered status')
-      .lean();
-    if (!order) return next(new ErrorHandler('Order not found', 404));
+    // One at a time for an order. What is short is worked out and then
+    // bought: two taps together both found nothing on order yet and each
+    // raised the purchase orders. The second now waits for the first and
+    // is told the material is already on order.
+    await onceAtATime(`raise-po:order:${req.params.id}`, async () => {
+      const order = await Order.findById(req.params.id)
+        .select('orderNo elasticOrdered status')
+        .lean();
+      if (!order) return next(new ErrorHandler('Order not found', 404));
 
-    // Buying for an order happens BEFORE it is approved. Approval
-    // allocates the stock to the order — takes it out of the balance
-    // and holds it — so from that point the order's material question
-    // is settled and a purchase raised against it would be buying for
-    // a requirement already met.
-    //
-    // A forced approval is the exception the rule has to survive: it
-    // allocated only what was there, and the rest is genuinely owed.
-    // That gap is bought from the job that needs it or from the
-    // purchase-order screen directly, both of which stay open — this
-    // route is the one that used to double up, because it is the one
-    // sitting next to the requirement.
-    if (order.status !== 'Open') {
-      const err = new ErrorHandler(
-        `Stock for order #${order.orderNo} was allocated when it was approved — ` +
-        `raise purchase orders before approval, or from the job that needs the material.`,
-        400
+      // Buying for an order happens BEFORE it is approved. Approval
+      // allocates the stock to the order — takes it out of the balance
+      // and holds it — so from that point the order's material question
+      // is settled and a purchase raised against it would be buying for
+      // a requirement already met.
+      //
+      // A forced approval is the exception the rule has to survive: it
+      // allocated only what was there, and the rest is genuinely owed.
+      // That gap is bought from the job that needs it or from the
+      // purchase-order screen directly, both of which stay open — this
+      // route is the one that used to double up, because it is the one
+      // sitting next to the requirement.
+      if (order.status !== 'Open') {
+        const err = new ErrorHandler(
+          `Stock for order #${order.orderNo} was allocated when it was approved — ` +
+          `raise purchase orders before approval, or from the job that needs the material.`,
+          400
+        );
+        err.code = 'ORDER_ALREADY_APPROVED';
+        return next(err);
+      }
+
+      const requirement = await computeMaterialRequirement(order.elasticOrdered || [], {
+        allocated: await issuedForOrder(order._id),
+      });
+      const { orderable, noSupplier, unresolved, anyShort, awaitingDelivery } =
+        triageShortfall(requirement, req.body?.materials);
+
+      if (!anyShort) {
+        return next(new ErrorHandler(
+          awaitingDelivery.length
+            ? `Already on order — ${awaitingDelivery
+                .map((m) => m.name)
+                .join(', ')} ${awaitingDelivery.length === 1 ? 'is' : 'are'} short but bought and awaiting delivery.`
+            : 'Nothing is short on this order — no purchase order to raise.',
+          400
+        ));
+      }
+      if (orderable.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'None of the short materials has a supplier set — set one before raising a PO.',
+          skipped: skipReasons(unresolved, noSupplier),
+        });
+      }
+
+      const created = await createShortfallPos(
+        orderable,
+        { forOrder: order._id },
+        {
+          expectedDate: req.body?.expectedDate,
+          notes: req.body?.notes,
+          defaultNote: `Raised for order #${order.orderNo} material shortfall`,
+        }
       );
-      err.code = 'ORDER_ALREADY_APPROVED';
-      return next(err);
-    }
 
-    const requirement = await computeMaterialRequirement(order.elasticOrdered || [], {
-      allocated: await issuedForOrder(order._id),
-    });
-    const { orderable, noSupplier, unresolved, anyShort, awaitingDelivery } =
-      triageShortfall(requirement, req.body?.materials);
+      try {
+        const doc = await Order.findById(order._id);
+        if (doc) {
+          // buildFingerprint + push: this router imports the builder, not
+          // the stamper, and the two produce the same row.
+          doc.fingerprints.push(buildFingerprint(ACTION_CODES.PO_RAISED, {
+            entityId: doc._id,
+            actor: actorFromRequest(req),
+            meta: {
+              source: 'order-mrp-shortfall',
+              purchaseOrders: created.map((c) => ({ poNo: c.poNo, supplier: c.supplierName })),
+            },
+          }));
+          await doc.save();
+        }
+      } catch (fpErr) {
+        console.warn('[order raise-po] fingerprint failed:', fpErr.message);
+      }
 
-    if (!anyShort) {
-      return next(new ErrorHandler(
-        awaitingDelivery.length
-          ? `Already on order — ${awaitingDelivery
-              .map((m) => m.name)
-              .join(', ')} ${awaitingDelivery.length === 1 ? 'is' : 'are'} short but bought and awaiting delivery.`
-          : 'Nothing is short on this order — no purchase order to raise.',
-        400
-      ));
-    }
-    if (orderable.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'None of the short materials has a supplier set — set one before raising a PO.',
+      res.status(201).json({
+        success: true,
+        purchaseOrders: created,
         skipped: skipReasons(unresolved, noSupplier),
       });
-    }
-
-    const created = await createShortfallPos(
-      orderable,
-      { forOrder: order._id },
-      {
-        expectedDate: req.body?.expectedDate,
-        notes: req.body?.notes,
-        defaultNote: `Raised for order #${order.orderNo} material shortfall`,
-      }
-    );
-
-    try {
-      const doc = await Order.findById(order._id);
-      if (doc) {
-        // buildFingerprint + push: this router imports the builder, not
-        // the stamper, and the two produce the same row.
-        doc.fingerprints.push(buildFingerprint(ACTION_CODES.PO_RAISED, {
-          entityId: doc._id,
-          actor: actorFromRequest(req),
-          meta: {
-            source: 'order-mrp-shortfall',
-            purchaseOrders: created.map((c) => ({ poNo: c.poNo, supplier: c.supplierName })),
-          },
-        }));
-        await doc.save();
-      }
-    } catch (fpErr) {
-      console.warn('[order raise-po] fingerprint failed:', fpErr.message);
-    }
-
-    res.status(201).json({
-      success: true,
-      purchaseOrders: created,
-      skipped: skipReasons(unresolved, noSupplier),
-    });
+    }, { what: 'Purchase orders for this order' });
   })
 );
 

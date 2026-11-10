@@ -35,7 +35,13 @@ async function saveIf(doc, filter, options) {
     await doc.save(options);
     return true;
   } catch (err) {
-    if (err?.name === 'DocumentNotFoundError') return false;
+    // Either is "the stored document did not match". Which one Mongoose
+    // raises depends on what else the save carries: with an array push
+    // in it (a fingerprint, a history line) the same miss is reported
+    // as a VersionError, which used to escape from here and reach the
+    // caller as the general "changed by someone else" instead of the
+    // answer the caller had ready.
+    if (err?.name === 'DocumentNotFoundError' || err?.name === 'VersionError') return false;
     throw err;
   } finally {
     doc.$where = before;

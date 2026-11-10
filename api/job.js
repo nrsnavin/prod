@@ -8,6 +8,7 @@ const mongoose = require('mongoose');
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const { assertVersion } = require('../utils/versioning');
 const ErrorHandler     = require('../utils/ErrorHandler');
+const { onceAtATime }  = require('../utils/onceAtATime');
 const { sendError } = require('../utils/routeError');
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
 
@@ -2362,71 +2363,75 @@ router.post('/:jobId/raise-po', async (req, res) => {
     if (!/^[a-f\d]{24}$/i.test(jobId))
       return res.status(400).json({ success: false, message: 'Invalid job ID.' });
 
-    const job = await JobOrder.findById(jobId)
-      .select('jobOrderNo order elastics')
-      .populate('order', 'rawMaterialRequired')
-      .lean();
-    if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
+    // One at a time for a job: two taps together each found nothing on
+    // order yet and each raised the purchase orders (utils/onceAtATime.js).
+    return await onceAtATime(`raise-po:job:${jobId}`, async () => {
+      const job = await JobOrder.findById(jobId)
+        .select('jobOrderNo order elastics')
+        .populate('order', 'rawMaterialRequired')
+        .lean();
+      if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
 
-    const requirement = await jobRequirement(job);
-    const { orderable, noSupplier, unresolved, anyShort, awaitingDelivery } =
-      triageShortfall(requirement, req.body?.materials);
+      const requirement = await jobRequirement(job);
+      const { orderable, noSupplier, unresolved, anyShort, awaitingDelivery } =
+        triageShortfall(requirement, req.body?.materials);
 
-    if (!anyShort) {
-      return res.status(400).json({
-        success: false,
-        message: awaitingDelivery.length
-          ? `Already on order — ${awaitingDelivery
-              .map((m) => m.name)
-              .join(', ')} ${awaitingDelivery.length === 1 ? 'is' : 'are'} short but bought and awaiting delivery.`
-          : 'Nothing is short on this job — no purchase order to raise.',
-      });
-    }
-    if (orderable.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'None of the short materials has a supplier set — set one before raising a PO.',
+      if (!anyShort) {
+        return res.status(400).json({
+          success: false,
+          message: awaitingDelivery.length
+            ? `Already on order — ${awaitingDelivery
+                .map((m) => m.name)
+                .join(', ')} ${awaitingDelivery.length === 1 ? 'is' : 'are'} short but bought and awaiting delivery.`
+            : 'Nothing is short on this job — no purchase order to raise.',
+        });
+      }
+      if (orderable.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'None of the short materials has a supplier set — set one before raising a PO.',
+          skipped: skipReasons(unresolved, noSupplier),
+        });
+      }
+
+      const created = await createShortfallPos(
+        orderable,
+        // `order` is populated for the requirement split above, so take the
+        // id off it — the PO's ref is an id, not the document.
+        { forJob: job._id, forOrder: job.order?._id || job.order || undefined },
+        {
+          expectedDate: req.body?.expectedDate,
+          notes: req.body?.notes,
+          defaultNote: `Raised for job J-${job.jobOrderNo} material shortfall`,
+        }
+      );
+
+      // Audit on the job: raising a PO commits money from this screen, and
+      // the job is where someone looks for why.
+      try {
+        const jobDoc = await JobOrder.findById(jobId);
+        if (jobDoc) {
+          stampFingerprint(jobDoc, ACTION_CODES.PO_RAISED, {
+            req,
+            meta: {
+              source: 'mrp-shortfall',
+              purchaseOrders: created.map((c) => ({ poNo: c.poNo, supplier: c.supplierName })),
+            },
+          });
+          await jobDoc.save();
+        }
+      } catch (fpErr) {
+        // The POs exist either way; losing the audit line is not worth
+        // failing the request and leaving the caller unsure what was made.
+        console.warn('[raise-po] fingerprint failed:', fpErr.message);
+      }
+
+      return res.status(201).json({
+        success: true,
+        purchaseOrders: created,
         skipped: skipReasons(unresolved, noSupplier),
       });
-    }
-
-    const created = await createShortfallPos(
-      orderable,
-      // `order` is populated for the requirement split above, so take the
-      // id off it — the PO's ref is an id, not the document.
-      { forJob: job._id, forOrder: job.order?._id || job.order || undefined },
-      {
-        expectedDate: req.body?.expectedDate,
-        notes: req.body?.notes,
-        defaultNote: `Raised for job J-${job.jobOrderNo} material shortfall`,
-      }
-    );
-
-    // Audit on the job: raising a PO commits money from this screen, and
-    // the job is where someone looks for why.
-    try {
-      const jobDoc = await JobOrder.findById(jobId);
-      if (jobDoc) {
-        stampFingerprint(jobDoc, ACTION_CODES.PO_RAISED, {
-          req,
-          meta: {
-            source: 'mrp-shortfall',
-            purchaseOrders: created.map((c) => ({ poNo: c.poNo, supplier: c.supplierName })),
-          },
-        });
-        await jobDoc.save();
-      }
-    } catch (fpErr) {
-      // The POs exist either way; losing the audit line is not worth
-      // failing the request and leaving the caller unsure what was made.
-      console.warn('[raise-po] fingerprint failed:', fpErr.message);
-    }
-
-    return res.status(201).json({
-      success: true,
-      purchaseOrders: created,
-      skipped: skipReasons(unresolved, noSupplier),
-    });
+    }, { what: 'Purchase orders for this job' });
   } catch (err) {
     console.error('[POST /jobs/:jobId/raise-po]', err);
     return sendError(req, res, err, 'Failed to raise purchase orders');

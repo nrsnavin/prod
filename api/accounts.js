@@ -28,6 +28,7 @@ const router   = express.Router();
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 const { isAdmin }      = require("../middleware/auth");
 const { keepRequestContext } = require("../middleware/userContext");
 const { sendStoredFile } = require("../utils/sendFile");
@@ -634,7 +635,11 @@ router.post("/expenses/:id/approve", isAdmin("admin", "accounts"), catchAsyncErr
   const payNo = payNow ? await payVoucherNo(new Date()) : null;
   try {
     await withTxn(async (session) => {
-      await Expense.updateOne({ _id: e._id }, { $set: { status: "approved", approval }, $push: { fingerprints: mark } }, { session });
+      // Approved only while it is still waiting: the check above was
+      // made on a copy read before this transaction, and a rejection
+      // landing in between used to be written over, and posted.
+      const waiting = await Expense.updateOne({ _id: e._id, status: "pending" }, { $set: { status: "approved", approval }, $push: { fingerprints: mark } }, { session });
+      if (waiting.matchedCount === 0) throw changedMeanwhile(`Expense ${e.expenseNo}`, "approved or rejected");
       if (e.supplier) {
         await partyLedger.post({ partyType: "supplier", party: e.supplier, date: e.date, docType: "Expense", doc: e._id, docNo: e.expenseNo, credit: e.totals.grand, narration: `${e.categoryName}: ${e.description}` }, session);
       }
@@ -658,7 +663,13 @@ router.post("/expenses/:id/reject", isAdmin("admin", "accounts"), catchAsyncErro
   e.status = "rejected";
   e.approval = { required: true, by: req.user?._id, byName: req.user?.name || "", at: new Date(), note: reason };
   e.fingerprints.push(fp(ACTION_CODES.EXPENSE_REJECTED, e, req, { expenseNo: e.expenseNo, reason }));
-  await e.save();
+  // Saved only while it is still waiting. Approved by somebody else in
+  // the moment between the check above and here — and perhaps paid with
+  // it — this used to write "rejected" over an expense already in the
+  // books.
+  if (!(await saveIf(e, { status: "pending" }))) {
+    return next(changedMeanwhile(`Expense ${e.expenseNo}`, "approved or rejected"));
+  }
   res.json({ success: true, expense: e.toObject() });
 }));
 
