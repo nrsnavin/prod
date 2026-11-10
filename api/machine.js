@@ -18,6 +18,7 @@ const multer           = require("multer");
 const { keepRequestContext } = require("../middleware/userContext.js");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { dateFrom } = require("../utils/requestDate");
 const { saveIf } = require("../utils/conditionalSave");
 const ShiftDetail      = require("../models/ShiftDetail");
 const MachineIssue     = require("../models/MachineIssue");
@@ -944,6 +945,7 @@ router.post(
     if (!type)        return next(new ErrorHandler("type is required", 400));
     if (!description?.trim())
       return next(new ErrorHandler("description is required", 400));
+    const nextService = dateFrom(nextServiceDate, "nextServiceDate");
 
     const validTypes = ["Preventive", "Corrective", "Breakdown", "Inspection", "Other"];
     if (!validTypes.includes(type)) {
@@ -961,7 +963,7 @@ router.post(
       description: description.trim(),
       technician:  technician?.trim() || "",
       cost:        Number(cost) || 0,
-      nextServiceDate: nextServiceDate ? new Date(nextServiceDate) : null,
+      nextServiceDate: nextService,
       resolved:    Boolean(resolved),
     };
 
@@ -1154,6 +1156,7 @@ router.post(
     const { machineId, serviceLogId, kind, amount, vendor, billNo, billDate, partName, notes } =
       req.body;
 
+    const billedOn = dateFrom(billDate, "billDate");
     if (!req.file) {
       return next(new ErrorHandler('No file uploaded (field name must be "file").', 400));
     }
@@ -1188,7 +1191,7 @@ router.post(
       amount:      Number(amount) > 0 ? Number(amount) : 0,
       vendor:      vendor   || "",
       billNo:      billNo   || "",
-      billDate:    billDate ? new Date(billDate) : null,
+      billDate:    billedOn,
       partName:    partName || "",
       notes:       notes    || "",
       uploadedBy:  req.user?._id ?? null,

@@ -31,6 +31,7 @@ const Elastic          = require("../models/Elastic");
 const ProductionPlan   = require("../models/ProductionPlan");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { dateFrom } = require("../utils/requestDate");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const { getPairRate, toMetersPerMachineDay } = require("../utils/etaPosterior");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
@@ -677,6 +678,7 @@ router.post(
     if (!Array.isArray(machines)) {
       return res.status(400).json({ success: false, message: "machines[] is required" });
     }
+    const planGeneratedAt = dateFrom(generatedAt, "generatedAt", new Date());
 
     // ── Learning from the edit ────────────────────────────────────
     //
@@ -825,7 +827,7 @@ router.post(
         );
         const [created] = await ProductionPlan.create([{
           horizonDays: Number(horizonDays) || 7,
-          generatedAt: generatedAt ? new Date(generatedAt) : new Date(),
+          generatedAt: planGeneratedAt,
           acceptedBy: actor,
           objective: objective || {},
           assignments,

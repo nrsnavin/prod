@@ -101,3 +101,105 @@ describe('POST /shift/finalize-plan/:id', () => {
     expect(fresh.finalized).toBe(false);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Finalising while the plan is changing.
+//
+//  Finalise read the plan, counted the unverified entries, and saved.
+//  A loom added in between — the floor scanning one the plan left out —
+//  ended up, unverified, on a finalised shift. The lock is now a write
+//  made only while the plan is unlocked, and adding or changing an entry
+//  writes to the plan too, so the two collide in the database.
+// ══════════════════════════════════════════════════════════════════
+describe('finalising while the plan is changing', () => {
+  const DAY = 86_400_000;
+  let n = 0;
+  const finalize = (id) => request(app).post(`/api/v2/shift/finalize-plan/${id}`).set('Cookie', cookie);
+  const unfinalize = (id) => request(app).post(`/api/v2/shift/unfinalize-plan/${id}`).set('Cookie', cookie);
+
+  /** A plan of its own day, with its one entry verified. */
+  async function verifiedPlan() {
+    const date = new Date(Date.UTC(2031, 0, 1) + (n++) * DAY);
+    const { insertedId: id } = await ShiftPlan.collection.insertOne({ date, shift: 'DAY', totalProduction: 100, status: 'confirmed', plan: [] });
+    const { insertedId: entry } = await ShiftDetail.collection.insertOne({
+      date, shift: 'DAY', status: 'closed', productionMeters: 100, shiftPlan: id, timer: '10:00:00',
+    });
+    await ShiftPlan.collection.updateOne({ _id: id }, { $set: { plan: [entry] } });
+    return id;
+  }
+
+  test('a loom added while it is being finalised is never left, unverified, on a finalised shift', async () => {
+    const { addMachineToPlan } = require('../../services/shiftPlanCreate');
+    const Machine = require('../../models/Machine.js');
+    const outcomes = new Set();
+
+    for (let round = 0; round < 10; round++) {
+      const planId = await verifiedPlan();
+      const { insertedId: machine } = await Machine.collection.insertOne({ ID: `RACE-${round}`, status: 'free', elastics: [] });
+      const operator = new mongoose.Types.ObjectId();
+
+      const [fin, added] = await Promise.all([
+        finalize(planId),
+        addMachineToPlan(planId, { machine, operator }).then(() => 'added', (e) => e.statusCode || String(e)),
+      ]);
+
+      const fresh = await ShiftPlan.findById(planId).lean();
+      const unverified = await ShiftDetail.countDocuments({ _id: { $in: fresh.plan }, status: { $nin: ['closed', 'loading'] } });
+      // The thing that must never be: locked, with an entry nobody verified.
+      expect(Boolean(fresh.finalized) && unverified > 0).toBe(false);
+      // And each was answered by what the other did.
+      if (fin.status === 200) {
+        expect(added).toBe(409);
+        expect(fresh.plan).toHaveLength(1);
+        // Nothing half-added either: no entry left pointing at the plan.
+        expect(await ShiftDetail.countDocuments({ shiftPlan: planId })).toBe(1);
+      } else {
+        expect([fin.status, added]).toEqual([400, 'added']);
+        expect(fin.body.message).toMatch(/1 entry is not verified/);
+        expect(fresh.finalized).toBeFalsy();
+        expect(fresh.plan).toHaveLength(2);
+      }
+      outcomes.add(fin.status);
+    }
+    expect([...outcomes].every((s) => s === 200 || s === 400)).toBe(true);
+  }, 120_000);
+
+  test('finalised by two people at once: one does, the other is told it already is', async () => {
+    const planId = await verifiedPlan();
+    const both = await Promise.all([finalize(planId), finalize(planId)]);
+    expect(both.map((r) => r.status).sort()).toEqual([200, 400]);
+    expect(both.find((r) => r.status === 400).body.message).toBe('Shift is already finalised');
+    expect((await ShiftPlan.findById(planId).lean()).finalized).toBe(true);
+  });
+
+  test('a loom cannot be added once it is finalised, and can again when it is reopened', async () => {
+    const { addMachineToPlan } = require('../../services/shiftPlanCreate');
+    const Machine = require('../../models/Machine.js');
+    const planId = await verifiedPlan();
+    const { insertedId: machine } = await Machine.collection.insertOne({ ID: 'LATE-1', status: 'free', elastics: [] });
+    const operator = new mongoose.Types.ObjectId();
+
+    expect((await finalize(planId)).status).toBe(200);
+    await expect(addMachineToPlan(planId, { machine, operator })).rejects.toMatchObject({ statusCode: 409 });
+    expect((await unfinalize(planId)).status).toBe(200);
+    const detail = await addMachineToPlan(planId, { machine, operator });
+    expect((await ShiftPlan.findById(planId).lean()).plan.map(String)).toContain(String(detail._id));
+    // …and with an entry now unverified, it will not finalise.
+    expect((await finalize(planId)).status).toBe(400);
+  });
+
+  test('reopening says when there is nothing to reopen', async () => {
+    const planId = await verifiedPlan();
+    const notLocked = await unfinalize(planId);
+    expect([notLocked.status, notLocked.body.message]).toEqual([400, 'Shift is not finalised']);
+    expect((await unfinalize(new mongoose.Types.ObjectId())).status).toBe(404);
+    expect((await finalize(new mongoose.Types.ObjectId())).status).toBe(404);
+    expect((await finalize('nope')).status).toBe(400);
+  });
+
+  test('a plan with nothing on it has nothing to finalise', async () => {
+    const { insertedId: empty } = await ShiftPlan.collection.insertOne({ date: new Date(Date.UTC(2032, 0, 1)), shift: 'NIGHT', plan: [] });
+    const res = await finalize(empty);
+    expect([res.status, res.body.message]).toEqual([400, 'Nothing to finalise — the shift has no production entries']);
+  });
+});

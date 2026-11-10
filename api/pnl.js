@@ -26,6 +26,7 @@ const router = express.Router();
 const catchAsyncErrors = require('../middleware/catchAsyncErrors.js');
 const { isAdmin } = require('../middleware/auth.js');
 const ErrorHandler = require('../utils/ErrorHandler.js');
+const { dateFrom } = require('../utils/requestDate');
 const Order = require('../models/Order.js');
 const JobOrder = require('../models/JobOrder.js');
 const CostSettings = require('../models/CostSettings.js');
@@ -277,8 +278,8 @@ router.get(
     }
     if (req.query.from || req.query.to) {
       filter.date = {};
-      if (req.query.from) filter.date.$gte = new Date(req.query.from);
-      if (req.query.to) filter.date.$lte = new Date(req.query.to);
+      if (req.query.from) filter.date.$gte = dateFrom(req.query.from, 'from');
+      if (req.query.to) filter.date.$lte = dateFrom(req.query.to, 'to');
     }
 
     const total = await Order.countDocuments(filter);

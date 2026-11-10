@@ -43,6 +43,11 @@ const ShiftPlanSchema = new mongoose.Schema(
     finalized:   { type: Boolean, default: false },
     finalizedAt: { type: Date },
     finalizedBy: { type: String },
+    // When an entry of this plan was last verified, corrected or removed.
+    // Those steps write it inside their own transaction, which is what
+    // makes each of them collide with a finalise committing beside it
+    // (api/shift.js assertPlanNotFinalized) instead of slipping past it.
+    entriesChangedAt: { type: Date },
 
     plan: [
       {

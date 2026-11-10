@@ -17,6 +17,7 @@ const YarnLot = require("../models/YarnLot");
 const RawMaterial = require("../models/RawMaterial");
 const WarpingBatch = require("../models/WarpingBatch");
 const ErrorHandler = require("../utils/ErrorHandler");
+const { dateFrom } = require("../utils/requestDate");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { creditLot, unplacedQuantity, appendLotMovement } = require("../services/yarnLotService");
@@ -87,6 +88,8 @@ router.post("/create", isAdmin("admin", "production", "accounts"), catchAsyncErr
   if (!String(lotNo || "").trim()) {
     return next(new ErrorHandler("lotNo is required", 400));
   }
+  // None sent stays "not given", so the lot's own default (today) applies.
+  const receivedOn = dateFrom(receivedDate, "receivedDate") ?? undefined;
   const qty = Number(quantity);
   if (!Number.isFinite(qty) || qty <= 0) {
     return next(new ErrorHandler("quantity must be a positive number", 400));
@@ -139,7 +142,7 @@ router.post("/create", isAdmin("admin", "production", "accounts"), catchAsyncErr
         shade,
         dyer,
         supplier,
-        receivedDate: receivedDate ? new Date(receivedDate) : undefined,
+        receivedDate: receivedOn,
       }, session);
 
       if (remarks) {

@@ -1612,31 +1612,51 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const { shiftPlanId } = req.params;
     if (!mongoose.Types.ObjectId.isValid(shiftPlanId)) return next(new ErrorHandler("Invalid shift plan id", 400));
+    const finalizedBy = req.user?.name || "admin";
 
-    const plan = await ShiftPlan.findById(shiftPlanId).populate("plan", "status");
-    if (!plan) return next(new ErrorHandler("Shift plan not found", 404));
-    if (plan.finalized) return next(new ErrorHandler("Shift is already finalised", 400));
+    // Read, checked and locked in one transaction. This used to read the
+    // plan, count the unverified entries and then save: a loom added to
+    // the plan in between (the floor scanning one the plan left out)
+    // ended up, unverified, on a finalised shift. Now the lock is a write
+    // to the plan made only while it is still unlocked, and whoever adds
+    // or changes an entry writes to the plan too — so one of the two is
+    // made to start again, and sees what the other did.
+    let finalizedAt;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const plan = await ShiftPlan.findById(shiftPlanId).select("finalized plan").session(session).lean();
+        if (!plan) throw new ErrorHandler("Shift plan not found", 404);
+        if (plan.finalized) throw new ErrorHandler("Shift is already finalised", 400);
 
-    const details = plan.plan || [];
-    if (details.length === 0) return next(new ErrorHandler("Nothing to finalise — the shift has no production entries", 400));
-    // A loading shift has nothing to verify: it is done as it stands.
-    const unverified = details.filter((d) => !["closed", "loading"].includes(d.status)).length;
-    if (unverified > 0) {
-      return next(new ErrorHandler(
-        `Cannot finalise — ${unverified} entr${unverified > 1 ? "ies are" : "y is"} not verified yet. Verify every entry first.`,
-        400
-      ));
+        const details = await ShiftDetail.find({ _id: { $in: plan.plan || [] } })
+          .select("status").session(session).lean();
+        if (details.length === 0) throw new ErrorHandler("Nothing to finalise — the shift has no production entries", 400);
+        // A loading shift has nothing to verify: it is done as it stands.
+        const unverified = details.filter((d) => !["closed", "loading"].includes(d.status)).length;
+        if (unverified > 0) {
+          throw new ErrorHandler(
+            `Cannot finalise — ${unverified} entr${unverified > 1 ? "ies are" : "y is"} not verified yet. Verify every entry first.`,
+            400
+          );
+        }
+
+        finalizedAt = new Date();
+        const locked = await ShiftPlan.updateOne(
+          { _id: plan._id, finalized: { $ne: true } },
+          { $set: { finalized: true, finalizedAt, finalizedBy } },
+          { session }
+        );
+        if (locked.matchedCount === 0) throw new ErrorHandler("Shift is already finalised", 400);
+      });
+    } finally {
+      await session.endSession();
     }
-
-    plan.finalized   = true;
-    plan.finalizedAt = new Date();
-    plan.finalizedBy = req.user?.name || "admin";
-    await plan.save();
 
     res.json({
       success: true,
       message: "Shift finalised — production entries are now locked",
-      finalized: true, finalizedAt: plan.finalizedAt, finalizedBy: plan.finalizedBy,
+      finalized: true, finalizedAt, finalizedBy,
     });
   })
 );
@@ -1647,13 +1667,17 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const { shiftPlanId } = req.params;
     if (!mongoose.Types.ObjectId.isValid(shiftPlanId)) return next(new ErrorHandler("Invalid shift plan id", 400));
-    const plan = await ShiftPlan.findById(shiftPlanId);
-    if (!plan) return next(new ErrorHandler("Shift plan not found", 404));
-    if (!plan.finalized) return next(new ErrorHandler("Shift is not finalised", 400));
-    plan.finalized = false;
-    plan.finalizedAt = undefined;
-    plan.finalizedBy = undefined;
-    await plan.save();
+    // Only while it is finalised, in the one write.
+    const reopened = await ShiftPlan.updateOne(
+      { _id: shiftPlanId, finalized: true },
+      { $set: { finalized: false }, $unset: { finalizedAt: 1, finalizedBy: 1 } }
+    );
+    if (reopened.matchedCount === 0) {
+      const exists = await ShiftPlan.exists({ _id: shiftPlanId });
+      return next(exists
+        ? new ErrorHandler("Shift is not finalised", 400)
+        : new ErrorHandler("Shift plan not found", 404));
+    }
     res.json({ success: true, message: "Shift reopened — entries can be corrected again", finalized: false });
   })
 );
@@ -1680,11 +1704,26 @@ function submitWhileOpen(shiftId, allowed, changes) {
 
 async function assertPlanNotFinalized(shift, session) {
   if (!shift?.shiftPlan) return;
-  const q = ShiftPlan.findById(shift.shiftPlan).select("finalized");
-  const plan = session ? await q.session(session) : await q;
-  if (plan?.finalized) {
-    throw new ErrorHandler("This shift is finalised — its production entries are locked. An admin must reopen (unfinalise) it first.", 400);
+  const locked = () => new ErrorHandler("This shift is finalised — its production entries are locked. An admin must reopen (unfinalise) it first.", 400);
+  if (!session) {
+    const plan = await ShiftPlan.findById(shift.shiftPlan).select("finalized");
+    if (plan?.finalized) throw locked();
+    return;
   }
+  // Inside a transaction this is a WRITE to the plan, made only while it
+  // is unlocked — not a look at it. A look does not collide with a
+  // finalise committing beside this transaction: both would go through,
+  // and the entry would change on a shift that had just been locked. Two
+  // writes to the one plan cannot both commit; the later is run again and
+  // finds the plan as the other left it.
+  const touched = await ShiftPlan.updateOne(
+    { _id: shift.shiftPlan, finalized: { $ne: true } },
+    { $set: { entriesChangedAt: new Date() } },
+    { session }
+  );
+  if (touched.matchedCount > 0) return;
+  const plan = await ShiftPlan.findById(shift.shiftPlan).select("finalized").session(session).lean();
+  if (plan?.finalized) throw locked();
 }
 
 router.put(

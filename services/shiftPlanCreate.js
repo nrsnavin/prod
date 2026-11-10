@@ -165,7 +165,15 @@ async function addMachineToPlan(planId, { machine, operator }) {
         shiftPlan: plan._id, elastics,
         status: startingStatus(machineDoc), timer: '00:00:00',
       }], { session });
-      await ShiftPlan.updateOne({ _id: plan._id }, { $push: { plan: detail._id } }, { session });
+      // Added only while the plan is still unlocked, in the write itself:
+      // a finalise committing beside this must not gain an entry nobody
+      // verified. (The check above reads; this is what collides.)
+      const added = await ShiftPlan.updateOne(
+        { _id: plan._id, finalized: { $ne: true } },
+        { $push: { plan: detail._id }, $set: { entriesChangedAt: new Date() } },
+        { session }
+      );
+      if (added.matchedCount === 0) throw new ErrorHandler('This shift is finalised; nothing can be added to it.', 409);
       if (machineDoc.orderRunning) {
         await JobOrder.updateOne({ _id: machineDoc.orderRunning }, { $addToSet: { shiftDetails: detail._id } }, { session });
       }

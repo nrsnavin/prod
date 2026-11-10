@@ -39,6 +39,7 @@ const JobOrder  = require("../models/JobOrder");
 const multer = require("multer");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { dateFrom } = require("../utils/requestDate");
 const { keepRequestContext } = require("../middleware/userContext");
 const intakeService = require("../services/complaintIntake");
 const aiLedger = require("../services/aiLedger");
@@ -89,6 +90,7 @@ router.post(
       return next(new ErrorHandler(`category must be one of: ${CATEGORIES.join(", ")}`, 400));
     }
     if (!reason?.trim()) return next(new ErrorHandler("reason is required", 400));
+    const complainedOn = dateFrom(date, "date", new Date());
 
     // The job is what the trail runs through, so a complaint against a
     // job that does not exist is worse than useless — it produces an
@@ -110,7 +112,7 @@ router.post(
       category,
       reason: reason.trim(),
       feedback: String(feedback || "").trim(),
-      date: date ? new Date(date) : new Date(),
+      date: complainedOn,
       attachments: Array.isArray(attachments) ? attachments : [],
     });
 

@@ -8,6 +8,7 @@ const moment           = require("moment");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { dateFrom } = require("../utils/requestDate");
 
 const Wastage       = require("../models/Wastage");
 const JobOrder      = require("../models/JobOrder");
@@ -83,6 +84,7 @@ router.post(
     if (!elasticId)  return next(new ErrorHandler("elastic is required", 400));
     if (!employeeId) return next(new ErrorHandler("Cannot determine employee — your account has no linked employee", 403));
     if (!reason?.trim()) return next(new ErrorHandler("reason is required", 400));
+    const happenedOn = dateFrom(incidentDate, "incidentDate", new Date());
     if (typeof quantity !== "number" || quantity <= 0)
       return next(new ErrorHandler("quantity must be a positive number", 400));
 
@@ -118,7 +120,7 @@ router.post(
           quantity, penalty: penalty || 0, reason: reason.trim(),
           // When the wastage happened — drives which payroll month the
           // penalty lands in. Defaults to now if the client doesn't send it.
-          incidentDate: incidentDate ? new Date(incidentDate) : new Date(),
+          incidentDate: happenedOn,
           ...(requestId ? { requestId } : {}),
         }], { session });
 
