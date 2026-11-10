@@ -20,6 +20,7 @@
 //    }
 // ═════════════════════════════════════════════════════════════════
 const PDFDocument = require('pdfkit');
+const { drawLine, hasOtherScript } = require('./pdfScripts');
 const QRCode      = require('qrcode');
 
 const RED    = '#E23744';
@@ -162,6 +163,14 @@ async function buildShiftSheetPdf(plan) {
       const y = top + ri * rowH;
       doc.rect(left, y, right - left, rowH).fill(ri % 2 ? '#FFFFFF' : FILLBG);
       const put = (ci, val, opts = {}) => {
+        // An operator's name in Tamil or Hindi, in a font that has it
+        // (utils/pdfScripts.js): the built-in one printed other letters.
+        if (hasOtherScript(val)) {
+          drawLine(doc, val, colX(ci) + 4, y + rowH / 2 - 5, {
+            bold: !!opts.bold, size: opts.size || 8.5, width: cols[ci].w - 8, color: opts.color || INK,
+          });
+          return;
+        }
         doc.fillColor(opts.color || INK).font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(opts.size || 8.5)
           .text(String(val ?? ''), colX(ci) + 4, y + rowH / 2 - 5, { width: cols[ci].w - 8 });
       };

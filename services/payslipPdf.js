@@ -20,6 +20,7 @@
 const PDFDocument = require('pdfkit');
 const { isMemoLine, moneyLines } = require('../utils/payslipLines');
 const { latin1 } = require('../utils/pdfLatin');
+const { drawLine, hasOtherScript } = require('../utils/pdfScripts');
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const rupee = (n) => `Rs. ${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -54,6 +55,10 @@ function writePayslip(p, { year, month }, out) {
 
   // Only what the built-in font can print (utils/pdfLatin.js).
   const clean = latin1;
+  // A name or department as written — in Tamil or Hindi too, which is
+  // drawn in a font that has it (utils/pdfScripts.js) — or a dash when
+  // there is nothing of it that can be printed.
+  const asWritten = (v) => (hasOtherScript(v) || clean(v) ? String(v) : '-');
 
   let y = M;
 
@@ -71,8 +76,8 @@ function writePayslip(p, { year, month }, out) {
 
   // ── Employee details table (2 columns of label/value) ──────
   const detail = [
-    ['Employee',    clean(p.employee?.name) || '-'],
-    ['Department',  clean(p.employee?.department) || '-'],
+    ['Employee',    asWritten(p.employee?.name)],
+    ['Department',  asWritten(p.employee?.department)],
     ['Hourly rate', rupee(p.hourlyRate)],
     ['Shifts',      `${p.presentShifts ?? 0} present / ${p.absentShifts ?? 0} absent / ${p.approvedLeaveShifts ?? 0} leave`],
   ];
@@ -85,8 +90,7 @@ function writePayslip(p, { year, month }, out) {
     const x = M + col * dCol, ry = y + row * dRowH;
     doc.font('Helvetica').fontSize(8.5).fillColor(MUTE)
        .text(lab.toUpperCase(), x + 8, ry + 6.5, { width: dLabW });
-    doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK)
-       .text(val, x + 8 + dLabW, ry + 5.5, { width: dCol - dLabW - 16, ellipsis: true, lineBreak: false });
+    drawLine(doc, val, x + 8 + dLabW, ry + 5.5, { bold: true, size: 9.5, width: dCol - dLabW - 16, color: INK });
   });
   for (let r = 1; r < dRows; r++)
     doc.moveTo(M, y + r * dRowH).lineTo(RIGHT, y + r * dRowH).lineWidth(0.5).strokeColor(HAIR).stroke();

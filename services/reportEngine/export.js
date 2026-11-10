@@ -15,6 +15,7 @@
 const path = require('path');
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
+const { drawLine, hasOtherScript } = require('../../utils/pdfScripts');
 const { toCsv: csvOf } = require('../reports/csv');
 
 const BRAND = '#1D6FEB';
@@ -142,7 +143,16 @@ function toPdf(result, meta = {}) {
     result.rows.forEach((r, n) => {
       if (y + 16 > bottom) newPage();
       if (n % 2) doc.rect(left, y, W, 16).fill(STRIPE);
-      cols.forEach((c, i) => doc.fillColor(INK).font(REG).fontSize(8).text(cut(fmt(r[c.key], c.type), widths[i] - 8, REG, 8), xAt(i) + 4, y + 4, { width: widths[i] - 8, align: isNum(c) ? 'right' : 'left', lineBreak: false }));
+      cols.forEach((c, i) => {
+        const cell = fmt(r[c.key], c.type);
+        // A name in Tamil or Hindi: this sheet's font has neither, and
+        // printed a row of empty boxes (utils/pdfScripts.js).
+        if (!isNum(c) && hasOtherScript(cell)) {
+          drawLine(doc, cell, xAt(i) + 4, y + 4, { latinFont: REG, clean: (t) => t, size: 8, width: widths[i] - 8, color: INK });
+          return;
+        }
+        doc.fillColor(INK).font(REG).fontSize(8).text(cut(cell, widths[i] - 8, REG, 8), xAt(i) + 4, y + 4, { width: widths[i] - 8, align: isNum(c) ? 'right' : 'left', lineBreak: false });
+      });
       y += 16;
     });
     if (result.rows.length && Object.keys(result.totals || {}).length) {

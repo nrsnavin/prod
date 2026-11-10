@@ -38,12 +38,35 @@ describe('the bonus certificate', () => {
     expect(text).toMatch(/Status: PAID/);
   });
 
-  it('a name the built-in font cannot print is not printed as the wrong letters', async () => {
-    // The font has no Tamil. The name used to go to it as it was.
-    const text = pdfText(await render(record({ employee: { name: 'ரவி குமார்', department: 'weaving', role: '' } }), null));
-    expect(text).toMatch(/Name\s+: -/);
+  it('a name the built-in font cannot print is printed in a font that can', async () => {
+    // The built-in font has no Tamil. The name used to go to it as it
+    // was (the wrong letters), and then not at all (a dash).
+    const buf = await render(record({ employee: { name: 'ரவி குமார்', department: 'weaving', role: '' } }), null);
+    expect(buf.toString('latin1')).toMatch(/NotoSansTamil-Regular/);
+    const text = pdfText(buf);
+    expect(text).not.toMatch(/Name\s+: -/);
+    expect(text).toMatch(/Department\s+: weaving/);   // the rows under it are where they were
     expect(text).toMatch(/Role\s+: -/);
+    expect(text).toMatch(/Year\s+: 2026/);
     expect(text).toMatch(/Annual Bonus 2026/); // no label set: the plain one
+  });
+
+  it('a label in Tamil, and a department in Hindi, are printed too', async () => {
+    const buf = await render(
+      record({ employee: { name: 'Priya S', department: 'पैकिंग', role: 'operator' } }),
+      { bonusLabel: 'தீபாவளி போனஸ் 2026', bonusDate: new Date('2026-11-08') }
+    );
+    const raw = buf.toString('latin1');
+    expect(raw).toMatch(/NotoSansTamil-Regular/);
+    expect(raw).toMatch(/NotoSansDevanagari-Regular/);
+    const text = pdfText(buf);
+    expect(text).toMatch(/Name\s+: Priya S/);
+    expect(text).toMatch(/Payout date/);
+  });
+
+  it('CONTROL: a certificate all in Latin carries no extra font', async () => {
+    const buf = await render(record(), { bonusLabel: 'Diwali 2026' });
+    expect(buf.toString('latin1')).not.toMatch(/NotoSans/);
   });
 
   it('is named for the person and the year', () => {

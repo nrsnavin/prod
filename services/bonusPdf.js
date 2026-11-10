@@ -7,13 +7,16 @@
 //
 //    writeBonusCertificate(record, config, year, out)
 //
-//  The name, department, role and label are printed through latin1():
-//  the built-in font has no Tamil, and a name written in it used to come
-//  out as a row of the wrong letters.
+//  The name, department, role and label are printed as written: Latin
+//  through latin1() in the built-in font, Tamil and Hindi in the fonts
+//  that have them (utils/pdfScripts.js). The built-in font has neither,
+//  and a name in Tamil used to come out as a row of the wrong letters,
+//  then as nothing at all.
 // ══════════════════════════════════════════════════════════════════
 
 const PDFDocument = require('pdfkit');
 const { latin1 } = require('../utils/pdfLatin');
+const { drawLine, hasOtherScript } = require('../utils/pdfScripts');
 
 /** "bonus-Ravi_Kumar-2026.pdf", and the name to fall back on when that cannot be sent. */
 function bonusFileName(record, year) {
@@ -31,8 +34,12 @@ function writeBonusCertificate(record, config, year, out) {
   doc.fillColor("#FFFFFF")
      .font("Helvetica-Bold").fontSize(22)
      .text("Yearly Bonus Certificate", 50, 38);
-  doc.font("Helvetica").fontSize(11).fillColor("#A8C0E0")
-     .text(latin1(config?.bonusLabel) || `Annual Bonus ${year}`, 50, 70);
+  doc.font("Helvetica").fontSize(11).fillColor("#A8C0E0");
+  if (hasOtherScript(config?.bonusLabel)) {
+    drawLine(doc, config.bonusLabel, 50, 70, { size: 11, width: doc.page.width - 100, color: "#A8C0E0" });
+  } else {
+    doc.text(latin1(config?.bonusLabel) || `Annual Bonus ${year}`, 50, 70);
+  }
   if (config?.bonusDate) {
     doc.text(
       `Payout date: ${new Date(config.bonusDate).toLocaleDateString("en-IN", { day:"2-digit", month:"long", year:"numeric" })}`,
@@ -43,11 +50,29 @@ function writeBonusCertificate(record, config, year, out) {
   doc.moveDown(3);
   doc.fillColor("#1B2B45").font("Helvetica-Bold").fontSize(13)
      .text("EMPLOYEE", 50, 140);
-  doc.font("Helvetica").fontSize(12).fillColor("#0D1B2A")
-     .text(`Name        : ${latin1(record.employee?.name) || "-"}`, 50, 160)
-     .text(`Department  : ${latin1(record.employee?.department) || "-"}`)
-     .text(`Role        : ${latin1(record.employee?.role) || "-"}`)
-     .text(`Year        : ${year}`);
+  // One row each, one under the other. A value in Tamil or Hindi is
+  // drawn after its label in the font that has it; any other row is the
+  // one line of text it always was.
+  const who = [
+    ["Name        : ", record.employee?.name],
+    ["Department  : ", record.employee?.department],
+    ["Role        : ", record.employee?.role],
+    ["Year        : ", String(year)],
+  ];
+  let rowY = 160;
+  for (const [label, value] of who) {
+    doc.font("Helvetica").fontSize(12).fillColor("#0D1B2A");
+    if (hasOtherScript(value)) {
+      const labelW = doc.widthOfString(label);
+      doc.text(label, 50, rowY, { lineBreak: false });
+      drawLine(doc, value, 50 + labelW, rowY, { size: 12, width: doc.page.width - 100 - labelW, color: "#0D1B2A" });
+      doc.x = 50;
+      doc.y = rowY + doc.currentLineHeight(true);
+    } else {
+      doc.text(`${label}${latin1(value) || "-"}`, 50, rowY);
+    }
+    rowY = doc.y;
+  }
 
   doc.moveDown(1.5);
   doc.fillColor("#1B2B45").font("Helvetica-Bold").fontSize(13).text("BONUS DETAILS");

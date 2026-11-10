@@ -81,3 +81,33 @@ describe('the printed payslip', () => {
     expect(payslipFileName({ employee: null }, { year: 2026, month: 1 }).name).toBe('payslip-employee-January-2026.pdf');
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  A name written in Tamil or Hindi. The built-in font has neither: the
+//  name came out as the wrong letters, and then (once those were
+//  dropped) as a dash. It is printed now, in a font that has it.
+// ══════════════════════════════════════════════════════════════════
+describe('a name the built-in font does not have', () => {
+  const raw = async (employee) => (await render(slip({ employee }))).toString('latin1');
+
+  it('is printed in a font that has it — Tamil, Hindi, and beside Latin', async () => {
+    const tamil = await raw({ name: 'முருகன் K', department: 'weaving' });
+    expect(tamil).toMatch(/NotoSansTamil-Bold/);
+    const hindi = await raw({ name: 'राजेश कुमार', department: 'पैकिंग' });
+    expect(hindi).toMatch(/NotoSansDevanagari-Bold/);
+    // The Latin beside it is still there to be read.
+    expect(pdfText(await render(slip({ employee: { name: 'முருகன் K', department: 'weaving' } })))).toMatch(/weaving/);
+  });
+
+  it('CONTROL: a Latin name prints as it always did, with no font added to the file', async () => {
+    const buf = await render(slip());
+    expect(buf.toString('latin1')).not.toMatch(/NotoSans/);
+    expect(pdfText(buf)).toMatch(/Ravi Kumar/);
+  });
+
+  it('a name of nothing printable is a dash, as before', async () => {
+    const text = pdfText(await render(slip({ employee: { name: '😀', department: '' } })));
+    expect(text).toMatch(/EMPLOYEE\s*-/);
+  });
+});
+

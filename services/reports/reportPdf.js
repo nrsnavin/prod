@@ -16,6 +16,7 @@
 // ═════════════════════════════════════════════════════════════════
 
 const PDFDocument = require("pdfkit");
+const { drawLine, hasOtherScript } = require("../../utils/pdfScripts");
 
 const BRAND = "#1D6FEB";
 const INK = "#0D1B2A";
@@ -137,7 +138,16 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Balu Elast
       if (idx % 2 === 1) doc.rect(left, y, contentW, ROW_H).fill(STRIPE);
       doc.fillColor(INK).font(REG).fontSize(9);
       cols.forEach((c, i) => {
-        doc.fillColor(i === 0 ? INK : "#33415C").text(fmtCell(row[c.key], c.format), xAt(i) + 6, y + 6, {
+        const cell = fmtCell(row[c.key], c.format);
+        // A name in Tamil or Hindi, in a font that has it (utils/pdfScripts.js).
+        if (!isNum(c) && hasOtherScript(cell)) {
+          drawLine(doc, cell, xAt(i) + 6, y + 6, {
+            latinFont: REG, clean: (t) => t, size: 9, width: widths[i] - 12, color: i === 0 ? INK : "#33415C",
+          });
+          doc.font(REG).fontSize(9);
+          return;
+        }
+        doc.fillColor(i === 0 ? INK : "#33415C").text(cell, xAt(i) + 6, y + 6, {
           width: widths[i] - 12,
           align: isNum(c) ? "right" : "left",
           lineBreak: false,
