@@ -26,7 +26,7 @@ EC2 → Launch instance:
 
 | Setting | Value |
 |---|---|
-| AMI | Ubuntu Server 24.04 LTS, 64-bit (x86) |
+| AMI | Ubuntu Server 24.04 LTS, 64-bit (x86). Not the console's default, Amazon Linux: on that one, use the last section, [On Amazon Linux 2023](#on-amazon-linux-2023) |
 | Type | `t3.medium` (2 vCPU, 4 GiB) with Atlas; `t3.large` (8 GiB) if MongoDB runs on this box |
 | Storage | gp3, 30 GiB with Atlas; 60 GiB or more with MongoDB on the box |
 | Key pair | create or choose one, and keep the `.pem` file |
@@ -344,3 +344,126 @@ sudo chown -R caddy:caddy /var/www/erp
   server changes for them.
 - The **one-off scripts** in `scripts/` read `MONGO_URI` or `DB_URL`.
   Set it to `MONGO_URL`'s value for the one command you run.
+
+## On Amazon Linux 2023
+
+The steps above are written for Ubuntu. If the instance runs Amazon
+Linux (you log in as `ec2-user` and `apt` is "command not found"),
+every step is the same except the ones below. Check the version first:
+
+```sh
+grep -E '^(NAME|VERSION)=' /etc/os-release   # want NAME="Amazon Linux", VERSION="2023"
+```
+
+On `VERSION="2"` (Amazon Linux 2), stop: Node 22 does not run there.
+Launch Ubuntu 24.04 or Amazon Linux 2023 instead.
+
+**Step 1.** Log in as `ec2-user`: `ssh -i your-key.pem ec2-user@NEW_IP`.
+`~` is `/home/ec2-user`, so the code lands in `/home/ec2-user/prod`.
+
+**Step 2. Basics, Node.js 22 and swap.** `curl` is already installed.
+Amazon's own Node package names the binary `node-22`, and `alternatives`
+points `node` at it:
+
+```sh
+sudo dnf -y upgrade
+sudo dnf install -y git gcc-c++ make
+sudo dnf install -y nodejs22 nodejs22-npm
+sudo alternatives --set node /usr/bin/node-22
+node -v        # v22.x
+npm -v
+which node     # /usr/bin/node — what deploy/jarvis.service runs
+```
+
+Swap, if the instance has 2 GiB of memory or less (`dd` rather than
+`fallocate`, which a swap file on this disk's XFS may refuse):
+
+```sh
+sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap defaults 0 0' | sudo tee -a /etc/fstab
+```
+
+**Step 4, only with MongoDB on the box (skip it with Atlas).** MongoDB's
+repository for Amazon Linux 2023 replaces the four apt lines:
+
+```sh
+sudo tee /etc/yum.repos.d/mongodb-org-8.0.repo > /dev/null <<'EOF'
+[mongodb-org-8.0]
+name=MongoDB Repository
+baseurl=https://repo.mongodb.org/yum/amazon/2023/mongodb-org/8.0/$basearch/
+gpgcheck=1
+enabled=1
+gpgkey=https://pgp.mongodb.com/server-8.0.asc
+EOF
+sudo dnf install -y mongodb-org
+```
+
+If `mongosh` then stops with an OpenSSL error, swap in the build that
+uses the system's OpenSSL 3:
+`sudo dnf swap -y mongodb-mongosh mongodb-mongosh-shared-openssl3`.
+The rest of step 4 (`replSetName: rs0`, `rs.initiate`) is unchanged.
+
+**Step 8.** The unit names the `ubuntu` user and its home. Install it
+with yours:
+
+```sh
+sed 's#ubuntu#ec2-user#g' ~/prod/deploy/jarvis.service \
+  | sudo tee /etc/systemd/system/jarvis.service > /dev/null
+grep -E '^(User|WorkingDirectory|EnvironmentFile|ExecStart)=' /etc/systemd/system/jarvis.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now jarvis
+```
+
+**Step 11. Caddy.** There is no Caddy package for Amazon Linux, so this
+installs Caddy's own static binary and its official systemd unit. Then
+copy the Caddyfile and start it, as on Ubuntu:
+
+```sh
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+curl -fsSL -o /tmp/caddy "https://caddyserver.com/api/download?os=linux&arch=${ARCH}"
+sudo install -m 0755 /tmp/caddy /usr/bin/caddy
+caddy version      # v2.x
+
+sudo groupadd --system caddy
+sudo useradd --system --gid caddy --create-home --home-dir /var/lib/caddy \
+  --shell /usr/sbin/nologin --comment "Caddy web server" caddy
+
+sudo tee /etc/systemd/system/caddy.service > /dev/null <<'EOF'
+[Unit]
+Description=Caddy
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo mkdir -p /etc/caddy
+sudo cp ~/prod/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo chown -R caddy:caddy /var/www/erp
+sudo systemctl daemon-reload
+sudo systemctl enable --now caddy
+journalctl -u caddy --since "5 min ago" | grep -i certificate
+```
+
+A binary installed this way does not update with the system: to move to
+a newer Caddy, run those first four lines again, then
+`sudo systemctl restart caddy`.
+
+**Step 14.** Security updates are
+`sudo dnf upgrade --releasever=latest`, monthly; reboot when the kernel
+changes. The journald cap is the same.
