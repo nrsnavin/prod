@@ -14,10 +14,34 @@
 // Message formatters are pure functions (no I/O) so they're unit-
 // testable without a provider or a DB — see tests/utils/notify.test.js.
 
+const crypto               = require("crypto");
+const mongoose             = require("mongoose");
 const NotificationSettings = require("../models/NotificationSettings.js");
 const Notification         = require("../models/Notification.js");
 const NotifyThrottle       = require("../models/NotifyThrottle.js");
 const { sendWhatsApp }     = require("./whatsapp.js");
+
+// ── What an alert is about ───────────────────────────────────────
+// The log files each alert under an entity id, and throttles on it. The
+// column is an ObjectId — right for an order or a material, and wrong
+// for the alerts about things that are not records: a day's wastage, a
+// shift's attendance, "delivery is failing". Those name their subject
+// with a string ("2026-11-09:DAY", "delivery"), and the throttle lookup
+// threw a cast error on it before anything was sent. Every throttled
+// alert of that kind — delivery failing, still in dry-run, projected
+// stock-out, yield drift, the stale model, attendance — had never once
+// gone out, and the rest could not be logged.
+//
+// A name now gets a stable id of its own (the same name, the same id),
+// and the name itself is kept beside it as `key`.
+function entityRef(entity) {
+  if (!entity || entity.id == null || entity.id === "") return entity || null;
+  if (entity.id instanceof mongoose.Types.ObjectId) return entity;
+  const text = String(entity.id);
+  if (/^[0-9a-fA-F]{24}$/.test(text)) return { ...entity, id: new mongoose.Types.ObjectId(text) };
+  const hex = crypto.createHash("sha256").update(`${entity.type || ""}:${text}`).digest("hex").slice(0, 24);
+  return { ...entity, id: new mongoose.Types.ObjectId(hex), key: text.slice(0, 200) };
+}
 
 // ── Pure formatters ──────────────────────────────────────────────
 // Each returns a plain-text WhatsApp body. Keep them short — owner
@@ -236,6 +260,17 @@ const fmt = {
     ].filter(Boolean).join("\n");
   },
 
+  // utils/configRisks.js: a setting that leaves the system open — a
+  // published signing key, a published database password.
+  configAtRisk(p) {
+    const risks = Array.isArray(p.risks) ? p.risks.filter(Boolean) : [];
+    return [
+      "🔐 *This server's settings put it at risk*",
+      ...risks.slice(0, 5).map((r) => `• ${r}`),
+      "Whoever looks after the server has to fix this. The message repeats each morning until it is.",
+    ].join("\n");
+  },
+
   projectedStockoutAlert(p) {
     const lines = [
       "📉 *Projected stockouts within 3 days*",
@@ -393,6 +428,7 @@ const EVENT_FLAG = {
   notificationDeliveryFailed: "notificationDeliveryFailed",
   cronDigestSkipped:          "cronDigestSkipped",
   notifyDryRunStillActive:    "notifyDryRunStillActive",
+  configAtRisk:               "configAtRisk",
   projectedStockoutAlert:     "projectedStockoutAlert",
   posteriorDriftDetected:     "posteriorDriftDetected",
   wastageAnomalyDay:          "wastageAnomalyDay",
@@ -425,7 +461,7 @@ const EVENT_FLAG = {
 //   - throttleSeconds — N seconds since the last "sent" row for
 //                       (event, entity.id) → skip "throttled"
 async function notify(eventType, payload = {}) {
-  const auditEntity = payload?._entity || null;
+  const auditEntity = entityRef(payload?._entity);
   const auditActor  = payload?._actor  || null;
 
   try {

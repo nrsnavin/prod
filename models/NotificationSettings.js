@@ -43,6 +43,8 @@ const EVENT_DEFAULTS = {
   notificationDeliveryFailed: { tier: "hourly" },
   cronDigestSkipped:         { tier: "daily"  },
   notifyDryRunStillActive:   { tier: "daily"  },
+  // A published or guessable key still in use (utils/configRisks.js).
+  configAtRisk:              { tier: "daily"  },
   projectedStockoutAlert:    { tier: "daily"  },
   posteriorDriftDetected:    { tier: "hourly" },
   wastageAnomalyDay:         { tier: "daily"  },
@@ -157,6 +159,11 @@ const NotificationSettingsSchema = new mongoose.Schema(
       notifyDryRunStillActive: {
         type: mongoose.Schema.Types.Mixed,
         default: { enabled: true, recipients: [], tier: "daily", throttleSeconds: 86400 },
+      },
+      // Once a day, every day, until the setting is fixed.
+      configAtRisk: {
+        type: mongoose.Schema.Types.Mixed,
+        default: { enabled: true, recipients: [], tier: "daily", throttleSeconds: 72000 },
       },
       // 3-day throttle per material — we want a heads-up, not a daily nag.
       projectedStockoutAlert: {

@@ -108,11 +108,29 @@ async function checkDryRunStillActive() {
   }
 }
 
-// Run all three in sequence. Called from the digest cron.
+// Fire while a setting leaves the system open — the signing key or the
+// database password still one that is public (utils/configRisks.js).
+// The start-up log says so too, but nobody reads that; this reaches the
+// owner, each morning, until it is fixed.
+async function checkConfigRisks(env = process.env) {
+  try {
+    const risks = require("./configRisks.js").configRisks(env).filter((r) => r.level !== "note");
+    if (!risks.length) return;
+    await notify("configAtRisk", {
+      risks: risks.map((r) => r.message),
+      _entity: { type: "SystemHealth", id: "config" },
+    });
+  } catch (err) {
+    console.warn(`[systemHealth] config check: ${err.message}`);
+  }
+}
+
+// Run them in sequence. Called from the digest cron.
 async function runSystemHealthChecks() {
   await checkCronDigestSkipped();
   await checkNotificationDeliveryFailed();
   await checkDryRunStillActive();
+  await checkConfigRisks();
 }
 
 function _modeReason(reasons) {
@@ -130,6 +148,7 @@ module.exports = {
   checkNotificationDeliveryFailed,
   checkCronDigestSkipped,
   checkDryRunStillActive,
+  checkConfigRisks,
   runSystemHealthChecks,
   DELIVERY_ERROR_FLOOR,
   DELIVERY_ERROR_RATIO,

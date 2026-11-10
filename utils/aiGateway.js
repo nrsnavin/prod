@@ -261,4 +261,10 @@ function _reset() {
   }
 }
 
-module.exports = { guard, gatewayState, isVision, isOutage, _reset };
+/** The longest one guarded call can run, once it has a slot: every attempt. */
+function longestCallMs() {
+  const cfg = config();
+  return Math.max(cfg.textTimeoutMs, cfg.visionTimeoutMs) * (cfg.maxRetries + 1);
+}
+
+module.exports = { guard, gatewayState, isVision, isOutage, longestCallMs, _reset };

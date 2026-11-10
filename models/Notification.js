@@ -57,6 +57,9 @@ const NotificationSchema = new mongoose.Schema(
     entity: {
       type:    { type: String },                // "Order" | "Job" | …
       id:      { type: mongoose.Types.ObjectId, refPath: "entity.type" },
+      // What the alert named, when that is not a record: a day, a shift,
+      // "delivery". `id` is then derived from it (utils/notify.js).
+      key:     { type: String },
     },
 
     // Snapshot of the actor that triggered the notification, when

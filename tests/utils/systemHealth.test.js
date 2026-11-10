@@ -124,3 +124,36 @@ describe("checkDryRunStillActive", () => {
     expect(notifyMock).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────
+// configAtRisk — a published signing key or database password
+// ─────────────────────────────────────────────────────────────────
+describe("checkConfigRisks", () => {
+  const GOOD = {
+    NODE_ENV: "PRODUCTION",
+    JWT_SECRET_KEY: "q7Jx2mVt9LpA4sWd8FhK3nBz6RcY1uEo5GiT0aXvM",
+    MONGO_URL: "mongodb+srv://jarvis_prod:Zk4v9QmT2xLp8RwY@c.example.net/baluElastics",
+    AADHAAR_KEY: "set", CORS_ORIGINS: "https://erp.example.com",
+  };
+
+  test("tells the owner while the published key is still in use", async () => {
+    await health.checkConfigRisks({ ...GOOD, JWT_SECRET_KEY: "balutapes" });
+    expect(notifyMock).toHaveBeenCalledWith(
+      "configAtRisk",
+      expect.objectContaining({ risks: [expect.stringMatching(/JWT_SECRET_KEY is a value that is public/)] }),
+    );
+    // Which setting and why — never the value.
+    expect(JSON.stringify(notifyMock.mock.calls)).not.toContain("balutapes");
+  });
+
+  test("stays silent once the settings are sound", async () => {
+    await health.checkConfigRisks(GOOD);
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  test("a note is not worth a message", async () => {
+    await health.checkConfigRisks({ ...GOOD, CORS_ORIGINS: "" });
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+});
+

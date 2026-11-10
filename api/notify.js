@@ -568,12 +568,16 @@ router.get(
     const { event, recipient, status, entityType, entityId } = req.query;
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
 
+    // One plain value each: a repeated ?event=a&event=b arrives as a list.
+    const one = (v) => (typeof v === "string" && v ? v : null);
     const q = {};
-    if (event)      q.event      = event;
-    if (recipient)  q.recipient  = recipient;
-    if (status)     q.status     = status;
-    if (entityType) q["entity.type"] = entityType;
-    if (entityId)   q["entity.id"]   = entityId;
+    if (one(event))      q.event      = one(event);
+    if (one(recipient))  q.recipient  = one(recipient);
+    if (one(status))     q.status     = one(status);
+    if (one(entityType)) q["entity.type"] = one(entityType);
+    // A record's id, or the name an alert filed itself under ("delivery",
+    // "2026-11-09:DAY") — see entityRef in utils/notify.js.
+    if (one(entityId))   q[/^[0-9a-fA-F]{24}$/.test(entityId) ? "entity.id" : "entity.key"] = one(entityId);
 
     const rows = await Notification.find(q).sort({ createdAt: -1 }).limit(limit).lean();
     res.json({ success: true, count: rows.length, rows });

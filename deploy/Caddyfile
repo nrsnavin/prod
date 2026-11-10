@@ -19,10 +19,14 @@
 api.baluelastics.com {
 	encode gzip
 
-	# Allow the 5 MB multer file uploads (OCR / data import). The Node
-	# app enforces its own 1 MB JSON cap and 5 MB file cap.
+	# The largest file the app itself accepts is 25 MB (a scanned shift
+	# sheet); bills and statements are 10–20 MB and a phone photo is
+	# often over 6. This was 6MB, which refused uploads the app would
+	# have taken. The Node app enforces its own 1 MB JSON cap and a cap
+	# per upload route. tests/deploy/proxyLimits.test.js holds this
+	# above the app's largest.
 	request_body {
-		max_size 6MB
+		max_size 26MB
 	}
 
 	reverse_proxy 127.0.0.1:2701 {

@@ -274,6 +274,14 @@ describe('notify.formatMessage — system health', () => {
     expect(body).toMatch(/No digest seen in 25h/);
   });
 
+  test('configAtRisk lists each risk and says it will repeat', () => {
+    const body = formatMessage('configAtRisk', { risks: ['JWT_SECRET_KEY is a value that is public.', 'The database password is one that is public.'] });
+    expect(body).toMatch(/settings put it at risk/);
+    expect(body).toMatch(/• JWT_SECRET_KEY is a value that is public\./);
+    expect(body).toMatch(/• The database password/);
+    expect(body).toMatch(/repeats each morning/);
+  });
+
   test('notifyDryRunStillActive shows dry-run count + how to fix', () => {
     const body = formatMessage('notifyDryRunStillActive', {
       windowLabel: 'last 24h', dryRunCount: 12,
