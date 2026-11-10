@@ -27,6 +27,7 @@ const { maybeFireAttendanceCrashed } = require('../utils/attendanceAlerts');
 const { saveIf, changedMeanwhile } = require('../utils/conditionalSave');
 const attendanceForecast = require('../services/attendanceForecast');
 const marks = require('../services/attendanceMarks');
+const { monthOf, monthRange } = require('../utils/periods');
 
 router.use(isAuthenticated);
 
@@ -538,15 +539,13 @@ router.get('/monthly/:empId', selfOrAdmin, async (req, res) => {
   try {
     const { empId } = req.params;
     // With nothing asked for: the factory's month, not the server's.
-    const [thisYear, thisMonth] = factoryDay.ymd().split('-').map(Number);
-    const year  = parseInt(req.query.year,  10) || thisYear;
-    const month = parseInt(req.query.month, 10) || thisMonth;
-    if (month < 1 || month > 12 || year < 2000 || year > 2100)
+    const asked = monthOf(req.query);
+    if (!asked)
       return res.status(400).json({ success:false, message:'year and month are not a valid month.' });
+    const [year, month] = asked;
 
     // The month as calendar dates (UTC midnights), whatever the server's zone.
-    const start = new Date(Date.UTC(year, month-1, 1));
-    const end   = new Date(Date.UTC(year, month,   0, 23, 59, 59, 999));
+    const { start, end } = monthRange(asked);
 
     const [records, employee] = await Promise.all([
       Attendance.find({ employee:empId, date:{ $gte:start, $lte:end } })

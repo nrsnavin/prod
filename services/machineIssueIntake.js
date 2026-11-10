@@ -50,14 +50,8 @@ function firstSentence(text) {
   return s.length > 70 ? `${s.slice(0, 67).trim()}…` : s;
 }
 
-function parseJson(text) {
-  if (!text) return null;
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const body = fenced ? fenced[1] : text;
-  const s = body.indexOf('{'); const e = body.lastIndexOf('}');
-  if (s === -1 || e === -1) return null;
-  try { return JSON.parse(body.slice(s, e + 1)); } catch { return null; }
-}
+// The object in the model's reply, or null (utils/modelJson.js).
+const { parseJson } = require('../utils/modelJson');
 
 function fallback(text, open) {
   const dup = open.map((o) => ({ o, score: overlap(text, `${o.title} ${o.description}`) })).sort((x, y) => y.score - x.score)[0];

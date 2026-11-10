@@ -11,7 +11,7 @@
 const Payment = require('../models/Payment');
 const Contra = require('../models/Contra');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 
 /** Map<accountId, { inflow, outflow }> for posted vouchers and contras matching `dateMatch`. */
 async function movements(dateMatch) {

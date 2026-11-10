@@ -30,7 +30,7 @@ const mongoose = require('mongoose');
 const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const fmt = (n) => Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
 const GST_RATES = new Set([0, 0.1, 0.25, 1, 1.5, 3, 5, 6, 7.5, 12, 18, 28, 40]);

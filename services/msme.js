@@ -29,7 +29,7 @@ const Expense = require('../models/Expense');
 const Payment = require('../models/Payment');
 
 const DAY = 86_400_000;
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const dayStart = (d) => factoryDay.calendarDay(d) || new Date(NaN);
 
 /** Days the law gives this supplier: what was agreed in writing (≤45), else 15. */

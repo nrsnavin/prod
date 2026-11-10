@@ -20,7 +20,7 @@
 //  so the rest of the import cannot tell how the statement arrived.
 // ══════════════════════════════════════════════════════════════════
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 
 /** Does this text look like MT940? */
 function isMt940(text) {

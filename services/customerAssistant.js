@@ -62,11 +62,8 @@ function keywordIntent(text) {
   return 'other';
 }
 
-function parseJson(text) {
-  const s = String(text || ''); const a = s.indexOf('{'); const b = s.lastIndexOf('}');
-  if (a === -1 || b === -1) return null;
-  try { return JSON.parse(s.slice(a, b + 1)); } catch { return null; }
-}
+// The object in the model's reply, or null (utils/modelJson.js).
+const { parseJson } = require('../utils/modelJson');
 
 /** What the message is. Never throws: the keywords stand when the model is slow, off or unsure. */
 async function classify(text, { refId = null } = {}) {

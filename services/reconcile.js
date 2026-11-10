@@ -23,7 +23,7 @@ const BankAccount = require('../models/BankAccount');
 const BankStatement = require('../models/BankStatement');
 const bankBalances = require('./bankBalances');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const endOf = (d) => factoryDay.calendarDayEnd(d) || new Date(NaN);
 
 /** Mark one book entry cleared on `date` (null clears the mark) — only where it touches `account`. */

@@ -37,7 +37,7 @@ const partyLedger = require('./partyLedger');
 const { getSettings } = require('./booksLock');
 const { buildFingerprint, ACTION_CODES } = require('../utils/fingerprint');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const off = (a, b) => Math.abs(r2(a) - r2(b)) > 0.01;
 const add = (map, key, field, v) => { const k = String(key); const o = map.get(k) || {}; o[field] = r2((o[field] || 0) + (Number(v) || 0)); map.set(k, o); };
 const MAX_ROWS = 25;

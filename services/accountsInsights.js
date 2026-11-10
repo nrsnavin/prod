@@ -39,7 +39,7 @@ const { occurrences } = require('./recurring');
 const { getSettings } = require('./booksLock');
 
 const DAY = 86_400_000;
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const fmt = (n) => (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 const dmy = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 

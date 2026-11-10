@@ -28,7 +28,7 @@ const ErrorHandler = require('../utils/ErrorHandler');
 const journals = require('./journals');
 const { getSettings } = require('./booksLock');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const DAY = 86_400_000;
 const ymd = (d) => new Date(d).toISOString().slice(0, 10);
 

@@ -48,14 +48,8 @@ const PROMPT = [
   '- Null for anything not printed. Not a card or letterhead: {"problem":"not_a_card"}.',
 ].join('\n');
 
-function parseJson(text) {
-  if (!text) return null;
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const body = fenced ? fenced[1] : text;
-  const s = body.indexOf('{'); const e = body.lastIndexOf('}');
-  if (s === -1 || e === -1) return null;
-  try { return JSON.parse(body.slice(s, e + 1)); } catch { return null; }
-}
+// The object in the model's reply, or null (utils/modelJson.js).
+const { parseJson } = require('./modelJson');
 
 const str = (v, n = 160) => (v == null ? '' : String(v).trim().slice(0, n));
 

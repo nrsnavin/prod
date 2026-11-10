@@ -20,7 +20,8 @@ const { promptVersion } = require('../utils/aiPrompts');
 const SURFACE = 'notice-translate';
 const LANGS = { ta: 'Tamil', hi: 'Hindi' };
 
-const parseJson = (s) => { const t = String(s || ''); const a = t.indexOf('{'); const b = t.lastIndexOf('}'); if (a < 0 || b < 0) return null; try { return JSON.parse(t.slice(a, b + 1)); } catch { return null; } };
+// The object in the model's reply, or null (utils/modelJson.js).
+const { parseJson } = require('../utils/modelJson');
 
 /** { ta: {title, body}, hi: {title, body} }, or null when the model is off or unusable. */
 async function translate({ title, body }, { refId = null } = {}) {

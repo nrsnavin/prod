@@ -27,7 +27,7 @@ const Supplier = require('../models/Supplier');
 
 const DAY = 86_400_000;
 const NEAR_DAYS = 15;
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const squash = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const lastNumber = (s) => { const m = String(s || '').match(/(\d+)\D*$/); return m ? Number(m[1]) : null; };
 const day = (d) => (d ? new Date(`${String(d).slice(0, 10)}T00:00:00Z`).getTime() : null);

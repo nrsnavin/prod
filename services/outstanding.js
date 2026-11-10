@@ -23,7 +23,7 @@ const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
 const OpeningBalance = require('../models/OpeningBalance');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const DAY = 86_400_000;
 const BUCKETS = [
   { key: 'current', label: 'Not due', max: 0 },

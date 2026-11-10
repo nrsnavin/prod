@@ -105,11 +105,8 @@ function keywordRead(text, today = new Date()) {
   return { kind, date: date ? iso(date) : null, amount, reference, summary: '', ai: false };
 }
 
-function parseJson(text) {
-  const s = String(text || ''); const a = s.indexOf('{'); const b = s.lastIndexOf('}');
-  if (a === -1 || b === -1) return null;
-  try { return JSON.parse(s.slice(a, b + 1)); } catch { return null; }
-}
+// The object in the model's reply, or null (utils/modelJson.js).
+const { parseJson } = require('../utils/modelJson');
 
 /** What the reply says. Never throws: keywords stand when the model is slow, off or wrong. */
 async function readReply(text, { today = new Date(), refId = null } = {}) {

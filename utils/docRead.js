@@ -14,11 +14,8 @@ const { anthropic, VISION_MODEL } = require('./anthropicClient');
 
 const SUPPORTED = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf']);
 
-function parseJson(text) {
-  const s = String(text || ''); const a = s.indexOf('{'); const b = s.lastIndexOf('}');
-  if (a === -1 || b === -1) return null;
-  try { return JSON.parse(s.slice(a, b + 1)); } catch { return null; }
-}
+// The object in the model's reply, or null (utils/modelJson.js).
+const { parseJson } = require('./modelJson');
 
 async function readJson({ pages, prompt, maxTokens = 1200, maxPages = 3 }) {
   const list = (pages || []).filter((p) => p && p.buffer && p.buffer.length);

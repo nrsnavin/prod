@@ -58,7 +58,7 @@ const Customer = require('../models/Customer');
 const Supplier = require('../models/Supplier');
 const { stateName } = require('./gst');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const IST = 330 * 60_000;
 /** The day in India, as Tally wants it: YYYYMMDD. */
 const tallyDate = (d) => new Date(new Date(d).getTime() + IST).toISOString().slice(0, 10).replace(/-/g, '');

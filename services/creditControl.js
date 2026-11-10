@@ -16,7 +16,7 @@ const Customer = require('../models/Customer');
 const ErrorHandler = require('../utils/ErrorHandler');
 const outstanding = require('./outstanding');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const fmt = (n) => (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 
 async function check(customerId) {

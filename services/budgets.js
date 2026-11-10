@@ -17,7 +17,7 @@ const ExpenseCategory = require('../models/ExpenseCategory');
 const ErrorHandler = require('../utils/ErrorHandler');
 const { isId } = require('./accountsHelpers');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const FY_RE = /^\d{4}-\d{2}$/;
 const MONTHS = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar'];
 const fyStart = (fy) => new Date(Date.UTC(Number(fy.slice(0, 4)), 3, 1));

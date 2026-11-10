@@ -19,7 +19,7 @@ const Customer = require('../models/Customer');
 const BankStatement = require('../models/BankStatement');
 const outstanding = require('./outstanding');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const squash = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const lastNumber = (s) => { const m = String(s || '').match(/(\d+)\D*$/); return m ? Number(m[1]) : null; };

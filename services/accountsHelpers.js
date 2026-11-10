@@ -10,7 +10,7 @@ const { buildFingerprint, actorFromRequest } = require('../utils/fingerprint');
 const MIN_REASON = 8;
 const DAY = 86_400_000;
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v || '')) && /^[0-9a-fA-F]{24}$/.test(String(v || ''));
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 
 const IST = 330 * 60_000;
 

@@ -15,7 +15,7 @@
 const mongoose = require('mongoose');
 const PartyLedgerEntry = require('../models/PartyLedgerEntry');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 
 async function post({ partyType, party, date, docType, doc, docNo, debit = 0, credit = 0, narration = '', source, line }, session) {
   await PartyLedgerEntry.updateOne(

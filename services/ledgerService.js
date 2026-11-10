@@ -13,7 +13,7 @@
 const LedgerEntry = require('../models/LedgerEntry');
 const { ledgerLines } = require('../utils/payslipLines');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 
 // Parse "… (DAY 2026-06-05)" / "… (2026-06-05)" out of a payroll line-item
 // label so shift rows land on the day they were worked, not month-end.

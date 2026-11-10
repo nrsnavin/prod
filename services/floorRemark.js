@@ -57,12 +57,8 @@ function keywordClass(text) {
   return { kind, minutes: minutesIn(t), machineFault: FAULTS.has(kind), summary: '', ai: false };
 }
 
-function parseJson(text) {
-  if (!text) return null;
-  const s = text.indexOf('{'); const e = text.lastIndexOf('}');
-  if (s === -1 || e === -1) return null;
-  try { return JSON.parse(text.slice(s, e + 1)); } catch { return null; }
-}
+// The object in the model's reply, or null (utils/modelJson.js).
+const { parseJson } = require('../utils/modelJson');
 
 const PROMPT = [
   'A supervisor in an elastic weaving factory in Tiruppur left this remark with a loom\'s production for',

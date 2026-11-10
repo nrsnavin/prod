@@ -30,7 +30,7 @@ const SupplierBill = require('../models/SupplierBill');
 const outstanding = require('./outstanding');
 
 const DAY = 86_400_000;
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const fmt = (n) => Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 const dmy = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 const squash = (s) => String(s || '').toUpperCase().replace(/\b(M\/S|MS|THE|PVT|PRIVATE|LTD|LIMITED|LLP|AND|CO|COMPANY)\b/g, '').replace(/[^A-Z0-9]/g, '');

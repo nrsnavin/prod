@@ -25,7 +25,7 @@ const partyLedger = require('./partyLedger');
 const PartyLedgerEntry = require('../models/PartyLedgerEntry');
 const { getSettings } = require('./booksLock');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 
 const DEFAULT_LEDGERS = {
   sales: 'Sales', purchase: 'Purchase', outputCgst: 'Output CGST', outputSgst: 'Output SGST', outputIgst: 'Output IGST',

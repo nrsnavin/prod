@@ -28,7 +28,7 @@ const exportSupply = require('./exportSupply');
 const { getDocumentSettings } = require('./documentSettings');
 const { uqc } = require('./einvoice');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const B2CL_LIMIT = 100000;
 
 function monthRange(month) {

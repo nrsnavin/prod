@@ -17,7 +17,7 @@ const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
 const { stateName } = require('./gst');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 
 /** Taxable value per rate on a document, as "5": 1000. */
 function byRate(lines) {

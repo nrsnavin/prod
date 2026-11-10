@@ -13,7 +13,7 @@ const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
 const AccountNote = require('../models/AccountNote');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 
 function byRate(docs, lineKey = 'lines') {
   const out = new Map();

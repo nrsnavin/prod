@@ -84,4 +84,19 @@ function round2(n) {
   return Math.round(v * 100) / 100;
 }
 
-module.exports = { parseMoney, round2, MAX_RATE, MAX_AMOUNT };
+/**
+ * Rounded to paise, with anything that is not a number counted as 0.
+ *
+ * This is the helper the note above is about, and it is still the right
+ * one for ONE job: adding up a column, where an empty or missing cell
+ * must not turn the whole total into NaN. It was written out in
+ * thirty-five files, each with its own copy; they share this one now.
+ *
+ * It is the wrong one wherever a broken figure must not come out
+ * looking like a real one — a margin, a rate, somebody's pay. There,
+ * use `round2` (null for a number that is not one), or check the input
+ * with `parseMoney` before it gets that far.
+ */
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+module.exports = { parseMoney, round2, r2, MAX_RATE, MAX_AMOUNT };

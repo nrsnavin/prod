@@ -17,7 +17,7 @@
 
 const ErrorHandler = require('../utils/ErrorHandler');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const f = (name) => ({ $ifNull: [`$${name}`, 0] });
 
 // The fields each kind of document is settled through, and what is

@@ -22,7 +22,7 @@ const mongoose = require('mongoose');
 const IST = 'Asia/Kolkata';
 const day = (d) => (d ? new Date(d).toLocaleDateString('en-CA', { timeZone: IST }) : '');
 const month = (d) => day(d).slice(0, 7);
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../../utils/money');
 const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
 const model = (name) => mongoose.models[name] || require(`../../models/${name}`);
 const ids = (list) => [...new Set(list.filter(Boolean).map(String))].filter((x) => mongoose.isValidObjectId(x));

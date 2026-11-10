@@ -89,7 +89,8 @@ function keywordKind(text) {
   return 'other';
 }
 
-const parseJson = (s) => { const a = String(s || '').indexOf('{'); const b = String(s || '').lastIndexOf('}'); if (a < 0 || b < 0) return null; try { return JSON.parse(String(s).slice(a, b + 1)); } catch { return null; } };
+// The object in the model's reply, or null (utils/modelJson.js).
+const { parseJson } = require('../utils/modelJson');
 
 /** What the mail is. Never throws: keywords stand when the model is slow, off or wrong. */
 async function classify({ subject, text, filenames }) {

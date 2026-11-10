@@ -26,7 +26,7 @@ const StatutoryDeposit = require('../models/StatutoryDeposit');
 const journals = require('./journals');
 const { getSettings } = require('./booksLock');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 
 function monthRange(month) {
   const [y, m] = String(month).split('-').map(Number);

@@ -31,7 +31,7 @@ const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 const { promptVersion } = require('../utils/aiPrompts');
 const ledger = require('./aiLedger');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const CHUNK = 40;
 const MIN_CONFIDENCE = 0.5;
 const KINDS = new Set(['customer', 'supplier', 'transfer', 'expense', 'income', 'unknown']);
@@ -64,12 +64,9 @@ function promptFor({ rows, customers, suppliers, openDocs, accounts, thisAccount
   ].join('\n');
 }
 
-function parseJson(text) {
-  const s = text.indexOf('{');
-  const e = text.lastIndexOf('}');
-  if (s < 0 || e < 0) return { rows: [] };
-  try { return JSON.parse(text.slice(s, e + 1)); } catch { return { rows: [] }; }
-}
+// The object in the model's reply (utils/modelJson.js); no rows when there is none.
+const { parseJson: readJson } = require('../utils/modelJson');
+const parseJson = (text) => readJson(text) || { rows: [] };
 
 /**
  * Turn one answer into a suggestion, or null when it does not hold up.

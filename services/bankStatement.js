@@ -30,7 +30,7 @@ const statementAi = require('./statementAi');
 const outstanding = require('./outstanding');
 const mt940 = require('./mt940');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const DAY = 86_400_000;
 
 // ── Parsing ───────────────────────────────────────────────────────

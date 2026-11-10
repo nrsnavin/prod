@@ -21,7 +21,7 @@ const PurchaseOrder = require('../models/PurchaseOrder');
 const MaterialInward = require('../models/MaterialInward');
 const ErrorHandler = require('../utils/ErrorHandler');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
 
 /**

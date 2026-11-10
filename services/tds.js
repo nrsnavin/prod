@@ -28,7 +28,7 @@ const Tds26asEntry = require('../models/Tds26asEntry');
 const { parseCsv, sheetRows, parseDate } = require('./bankStatement');
 const { getSettings } = require('./booksLock');
 
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const DAY = 86_400_000;
 
 function fyRange(fy) {

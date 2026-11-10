@@ -92,7 +92,7 @@ async function importStatement({ account, buffer, mimetype, filename = '', rows:
 }
 
 const DAY = 86_400_000;
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const dayOf = (d) => { const x = new Date(d); return Date.UTC(x.getFullYear(), x.getMonth(), x.getDate()); };
 
 /**

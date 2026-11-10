@@ -56,7 +56,7 @@ const MIN_REASON = 5;
 // count, it is a wish — and the document stops being loadable.
 const MAX_LINES = 2000;
 
-const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const r4 = (v) => Math.round((Number(v) || 0) * 10000) / 10000;
 
 /** The reason threshold for one line, in absolute quantity. */

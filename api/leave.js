@@ -19,6 +19,7 @@ const router       = express.Router();
 const LeaveRequest = require('../models/LeaveRequest');
 const ShiftDetail  = require('../models/ShiftDetail');
 const { markLeaveApproved } = require('../services/attendanceMarks');
+const { monthOf, monthRange } = require('../utils/periods');
 const Employee     = require('../models/Employee');
 const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
@@ -227,8 +228,11 @@ router.get('/employee/:empId', isAuthenticated, selfOrAdmin, async (req, res) =>
     const { year, month } = req.query;
     const filter = { employee: empId };
     if (year && month) {
-      const start = new Date(Number(year), Number(month)-1, 1);
-      const end   = new Date(Number(year), Number(month),   0, 23,59,59,999);
+      // A month that is one: 13 used to roll over into next January and
+      // answer for the wrong month without a word (utils/periods.js).
+      const asked = monthOf({ year, month });
+      if (!asked) return res.status(400).json({ success:false, message:'year and month are not a valid month.' });
+      const { start, end } = monthRange(asked);
       filter.date = { $gte: start, $lte: end };
     }
     const leaves = await LeaveRequest.find(filter)
