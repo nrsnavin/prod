@@ -1,10 +1,55 @@
+const crypto = require("crypto");
 const ErrorHandler = require("../utils/ErrorHandler");
 const { CONFLICT_MESSAGE } = require("../utils/versioning");
 const { reportError } = require("../utils/errorReporter");
 
+// ── A fault of ours is not something to read out ───────────────────
+// Whatever went wrong was sent to the screen in its own words. For a
+// rule a route states on purpose that is right. For a crash it is not:
+// "Cannot read properties of undefined (reading 'gstin')" helps nobody
+// at a loom, and "connect ECONNREFUSED 10.0.1.5:27017" or a driver's
+// complaint about an index tells a stranger how the server is built.
+//
+// An internal fault — a programming error, the database driver, the
+// operating system or the network — is answered with one plain sentence
+// and a reference. The reference is on the log line that holds the real
+// error (utils/errorReporter.js), so "it said ref 4F2A91C0" is enough to
+// find it.
+const PROGRAMMING = [TypeError, ReferenceError, RangeError, SyntaxError, EvalError, URIError];
+const SYSTEM_CODE = /^(E(CONN\w+|TIMEDOUT|NOTFOUND|AI_AGAIN|PIPE|HOSTUNREACH|NETUNREACH|ACCES|NOENT|MFILE|NOSPC|PERM|EXIST|ISDIR|BUSY)|ERR_\w+)$/;
+
+function isInternalFault(err) {
+  if (!err || err instanceof ErrorHandler) return false; // said on purpose
+  if (PROGRAMMING.some((T) => err instanceof T)) return true;
+  const name = String(err.name || "");
+  if (/^Mongo/.test(name)) return true; // the driver, and the ODM's own errors
+  if (typeof err.syscall === "string") return true;
+  return typeof err.code === "string" && SYSTEM_CODE.test(err.code);
+}
+
+/** What an upload refused by its own limits means, in words. */
+function uploadProblem(err) {
+  if (err.code === "LIMIT_FILE_SIZE") return ["That file is too large to upload.", 413];
+  if (err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_UNEXPECTED_FILE") return ["Too many files, or a file where none was expected.", 400];
+  if (err.code === "LIMIT_FIELD_VALUE" || err.code === "LIMIT_FIELD_KEY" || err.code === "LIMIT_FIELD_COUNT" || err.code === "LIMIT_PART_COUNT") {
+    return ["That form is larger than this accepts.", 400];
+  }
+  return ["The upload could not be read. Try again.", 400];
+}
+
 module.exports = (err, req, res, next) => {
   err.statusCode = err.statusCode || 500;
   err.message = err.message || "Internal server Error";
+
+  // An upload refused by its own limits (a file over the route's size, one
+  // file too many) is the caller's to fix, not a crash to report. Routes
+  // that say it in their own words do so before it gets here.
+  if (err.name === "MulterError") {
+    const [message, status] = uploadProblem(err);
+    const code = err.code;
+    err = new ErrorHandler(message, status);
+    err.code = code;
+  }
 
   // Report genuine server faults (5xx) to the error sink BEFORE the
   // status-remapping below rewrites some of them down to 4xx. A stale
@@ -22,7 +67,10 @@ module.exports = (err, req, res, next) => {
     err = new ErrorHandler(message, 400);
   }
 
-  if (err.statusCode >= 500) reportError(err, req);
+  // Kept before any of the branches below swap `err` for a plainer one.
+  const fault = err;
+  const ref = err.statusCode >= 500 ? crypto.randomBytes(4).toString("hex").toUpperCase() : null;
+  if (ref) reportError(err, req, ref);
 
   // Mongoose optimistic-lock failure (doc.increment() + save raced a
   // concurrent write). Same meaning as an expectedVersion mismatch:
@@ -79,6 +127,22 @@ module.exports = (err, req, res, next) => {
     err = new ErrorHandler("Your session has expired. Please login again.", 401);
   }
 
+  // Still a 500 after all of that, and not something a route said on
+  // purpose: our fault. The reference, not the text.
+  // (`publicMessage`: a route that catches its own errors names what it
+  // was doing — utils/routeError.js — and that is said instead.)
+  if (err.statusCode >= 500 && err === fault && (isInternalFault(fault) || fault.publicMessage)) {
+    const said = fault.publicMessage
+      ? `${String(fault.publicMessage).replace(/[.!\s]+$/, "")}.`
+      : "Something went wrong on the server, and it has been logged.";
+    return res.status(500).json({
+      success: false,
+      code: "SERVER_ERROR",
+      ref,
+      message: `${said} Try again — if it keeps happening, give the administrator this reference: ${ref}.`,
+    });
+  }
+
   // Surface diagnostic fields only when the route attached them via
   // a string `code` (Mongo's 11000 is numeric and is already mapped
   // above). Keeps the response shape clean for typical errors.
@@ -89,6 +153,9 @@ module.exports = (err, req, res, next) => {
   if (typeof routeCode === "string") payload.code = routeCode;
   if (routeShortfall) payload.shortfall = routeShortfall;
   if (typeof routeCode === "string" && routeDetails) payload.details = routeDetails;
+  if (ref && err.statusCode >= 500) payload.ref = ref;
 
   res.status(err.statusCode).json(payload);
 };
+
+module.exports.isInternalFault = isInternalFault;

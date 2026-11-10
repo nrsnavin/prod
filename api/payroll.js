@@ -9,6 +9,7 @@
 'use strict';
 
 const express          = require('express');
+const { sendError } = require('../utils/routeError');
 const mongoose         = require('mongoose');
 const PDFDocument      = require('pdfkit');
 const router           = express.Router();
@@ -61,7 +62,7 @@ router.get('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const s = await PayrollSettings.findOne({}).lean() ?? {};
     res.json({ success: true, data: s });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 router.post('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
@@ -74,7 +75,7 @@ router.post('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
     for (const k of allowed) if (req.body[k] !== undefined) update[k] = Number(req.body[k]);
     const s = await PayrollSettings.findOneAndUpdate({}, { $set: update }, { upsert: true, new: true });
     res.json({ success: true, data: s });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 router.get('/employees', isAdmin('admin', 'accounts'), async (req, res) => {
@@ -91,7 +92,7 @@ router.get('/employees', isAdmin('admin', 'accounts'), async (req, res) => {
         nightShiftPay: (e.hourlyRate ?? 0) * 8,
       })),
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 router.post('/employees/:id/rate', isAdmin('admin', 'accounts'), async (req, res) => {
@@ -110,7 +111,7 @@ router.post('/employees/:id/rate', isAdmin('admin', 'accounts'), async (req, res
               hourlyRate: emp.hourlyRate, dayShiftPay: emp.hourlyRate * 12,
               nightShiftPay: emp.hourlyRate * 8 },
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
@@ -199,7 +200,7 @@ router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
       errors: errors.length ? errors : undefined,
     });
   } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+    sendError(req, res, e);
   }
 });
 
@@ -268,7 +269,7 @@ router.get('/dashboard', isAdmin('admin', 'accounts'), async (req, res) => {
         status:          p.status,
       })).sort((a,b) => b.netPay - a.netPay),
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 // Worker-facing — employees view their own payslip.
@@ -343,7 +344,7 @@ router.get('/dashboard-range', isAdmin('admin', 'accounts'), async (req, res) =>
       },
       employees,
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
@@ -354,7 +355,7 @@ router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
       .populate('employee', EMPLOYEE_CARD_FIELDS).lean();
     if (!p) return res.status(404).json({ success: false, message: 'Not generated yet' });
     res.json({ success: true, data: p });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 // Printable payslip PDF for a month. selfOrAdmin — workers get their own.
@@ -395,7 +396,7 @@ router.get('/ledger/:empId', selfOrAdmin, async (req, res) => {
       range: { from, to },
       ...data,
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
@@ -618,7 +619,7 @@ router.get('/history/:empId', selfOrAdmin, async (req, res) => {
         unpaidCount: unpaid.count || 0,
       },
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -657,7 +658,7 @@ router.get('/range/:empId', selfOrAdmin, async (req, res) => {
         amountPaid:      r2(sum('amountPaid')),
       },
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 // draft → finalized. Commits the advance recovery to the advances'
@@ -729,7 +730,7 @@ router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
     });
     return res.status(out.code).json(out.body);
   } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    return sendError(req, res, e);
   } finally {
     await session.endSession();
   }
@@ -857,7 +858,7 @@ router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
     });
     return res.status(out.code).json(out.body);
   } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    return sendError(req, res, e);
   } finally {
     await session.endSession();
   }
@@ -892,7 +893,7 @@ router.get('/advance', isAdmin('admin', 'accounts'), async (req, res) => {
       .limit(limit)
       .lean();
     res.json({ success: true, data: advances });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 // Admin/finance entry — record an advance GIVEN to any employee, born
@@ -939,7 +940,7 @@ router.post('/advance/admin-create', isAdmin('admin', 'accounts'), async (req, r
       });
     } finally { await session.endSession(); }
     res.status(201).json({ success: true, message: `Advance of ₹${adv.amount} recorded for ${emp.name}`, data: adv });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 // Worker-facing — an authenticated employee can request an advance
@@ -960,7 +961,7 @@ router.post('/advance', async (req, res) => {
 
     const adv = await AdvanceRequest.create({ employee: employeeId, amount, reason });
     res.json({ success: true, message: `Advance request submitted for ${emp.name}`, data: adv });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 // The answer when an approve/reject matched nothing: missing, or already
@@ -1004,7 +1005,7 @@ router.put('/advance/:id/approve', isAdmin('admin', 'accounts'), async (req, res
     ).populate('employee', 'name');
     if (!adv) return advanceNotChangeable(req.params.id, 'approved', res);
     res.json({ success: true, message: `Approved ₹${adv.amount} for ${adv.employee?.name}`, data: adv });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 // approved → paid_out. Hands the cash over: this is the moment the
@@ -1032,7 +1033,7 @@ router.put('/advance/:id/pay-out', isAdmin('admin', 'accounts'), async (req, res
     });
     return res.status(out.code).json(out.body);
   } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    return sendError(req, res, e);
   } finally { await session.endSession(); }
 });
 
@@ -1047,7 +1048,7 @@ router.put('/advance/:id/reject', isAdmin('admin', 'accounts'), async (req, res)
     ).populate('employee', 'name');
     if (!adv) return advanceNotChangeable(req.params.id, 'rejected', res);
     res.json({ success: true, data: adv });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 // NOTE: the flat 10%-of-net-pay "yearly bonus" was removed. The
@@ -1118,7 +1119,7 @@ router.get('/analytics', isAdmin('admin', 'accounts'), async (req, res) => {
       summary: { totalEmployees: list.length, totalPayout, avgAttendanceRate: avgAttRate },
       data:    list,
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 router.get('/attendance', isAdmin('admin', 'accounts'), async (req, res) => {
@@ -1165,7 +1166,7 @@ router.get('/attendance', isAdmin('admin', 'accounts'), async (req, res) => {
     };
 
     res.json({ success: true, days, summary });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 
@@ -1320,7 +1321,7 @@ router.post('/auto-generate', isAdmin('admin', 'accounts'), async (req, res) => 
       },
     });
   } catch (e) {
-    return res.status(500).json({ success: false, message: e.message });
+    return sendError(req, res, e);
   }
 });
 
@@ -1332,7 +1333,7 @@ router.post('/auto-generate', isAdmin('admin', 'accounts'), async (req, res) => 
 //  card pointing back at the payroll module so the admin can
 //  re-run / investigate.
 // ══════════════════════════════════════════════════════════════
-router.get('/outstanding-advances', isAdmin('admin', 'accounts'), async (_req, res) => {
+router.get('/outstanding-advances', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const now = new Date();
     const curYear  = now.getFullYear();
@@ -1380,7 +1381,7 @@ router.get('/outstanding-advances', isAdmin('admin', 'accounts'), async (_req, r
       totalAmount,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -1456,7 +1457,7 @@ router.get('/employee-overview/:empId', isAdmin('admin', 'accounts'), async (req
         },
       },
     });
-  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+  } catch (e) { sendError(req, res, e); }
 });
 
 router.computePayroll = computePayroll;

@@ -415,7 +415,7 @@ router.get(
         },
       });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 500));
+      return next(error);
     }
   })
 );
@@ -467,7 +467,7 @@ router.get(
 
       res.status(200).json({ success: true, po, inwardHistory });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 500));
+      return next(error);
     }
   })
 );
@@ -1007,7 +1007,7 @@ router.get(
         .sort({ inwardDate: -1 });
       res.status(200).json({ success: true, records });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 500));
+      return next(error);
     }
   })
 );
@@ -1038,7 +1038,7 @@ router.get(
         pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 500));
+      return next(error);
     }
   })
 );
@@ -1056,7 +1056,7 @@ router.get(
         return next(new ErrorHandler("Supplier not found", 404));
       res.status(200).json({ success: true, supplier });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 500));
+      return next(error);
     }
   })
 );

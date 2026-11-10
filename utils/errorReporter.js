@@ -54,8 +54,10 @@ function _initSentry() {
 }
 
 // Report a server-side failure. `req` is optional — pass it from the
-// Express error handler so the log carries request context.
-function reportError(err, req) {
+// Express error handler so the log carries request context. `ref` is
+// the reference the person was shown, when they were shown one: it is
+// what they will quote, so it is what the line is found by.
+function reportError(err, req, ref) {
   try {
     const line = {
       ts:     new Date().toISOString(),
@@ -64,12 +66,15 @@ function reportError(err, req) {
       name:   (err && err.name) || "Error",
       msg:    (err && err.message) || String(err),
     };
+    if (ref) line.ref = ref;
     if (req) {
       line.method = req.method;
       line.path   = req.originalUrl ? req.originalUrl.split("?")[0] : req.url;
       if (req.user && req.user._id) line.user = req.user._id.toString();
-      const ip = req.headers["x-forwarded-for"] || (req.socket && req.socket.remoteAddress);
-      if (ip) line.ip = String(ip).split(",")[0].trim();
+      // The address the proxy vouches for (app.set("trust proxy")), not
+      // whatever the caller wrote in X-Forwarded-For.
+      const ip = req.ip || (req.socket && req.socket.remoteAddress);
+      if (ip) line.ip = String(ip);
     }
     // The stack is the actionable part — keep it on its own field so the
     // JSON line stays greppable and the trace stays readable.
@@ -88,6 +93,7 @@ function reportError(err, req) {
           scope.setTag("path", req.originalUrl ? req.originalUrl.split("?")[0] : req.url);
           if (req.user && req.user._id) scope.setUser({ id: req.user._id.toString() });
         }
+        if (ref) scope.setTag("ref", ref);
         sentry.captureException(err instanceof Error ? err : new Error(String(err)));
       });
     }

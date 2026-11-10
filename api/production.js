@@ -18,6 +18,7 @@
 
 const factoryDay = require('../utils/factoryDay');
 const express    = require('express');
+const { sendError } = require('../utils/routeError');
 const mongoose   = require('mongoose');
 const router     = express.Router();
 const { rangeProblem } = require('../utils/listLimit');
@@ -133,7 +134,7 @@ router.get('/date-range', async (req, res) => {
     return res.json({ success:true, count:result.length, data:result });
   } catch(err) {
     console.error('[GET /date-range]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -235,7 +236,7 @@ router.get('/shift-detail/:shiftPlanId', async (req, res) => {
     });
   } catch(err) {
     console.error('[GET /shift-detail]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -656,7 +657,7 @@ router.get('/analytics', async (req, res) => {
 
   } catch(err) {
     console.error('[GET /analytics]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -1041,7 +1042,7 @@ router.get('/breakdown', async (req, res) => {
     });
   } catch (err) {
     console.error('[GET /breakdown]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 

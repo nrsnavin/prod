@@ -8,6 +8,7 @@ const mongoose = require('mongoose');
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const { assertVersion } = require('../utils/versioning');
 const ErrorHandler     = require('../utils/ErrorHandler');
+const { sendError } = require('../utils/routeError');
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
 
 const JobOrder    = require('../models/JobOrder');
@@ -1498,7 +1499,7 @@ router.get('/by-number/:jobNo', async (req, res) => {
       },
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -1556,7 +1557,7 @@ router.get('/stale', async (req, res) => {
       count:     stale.length,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -1651,7 +1652,7 @@ router.get('/wastage-outliers', async (req, res) => {
 
     return res.json({ success: true, machines: out, count: out.length });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -2129,7 +2130,7 @@ router.put('/:jobId/outsourcing', isAdmin('admin', 'production', 'accounts'), as
       blockers: outsourcingBlockers(rec),
     }});
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -2176,7 +2177,7 @@ router.patch('/:jobId/production-mode', async (req, res) => {
       outsourceVendor: job.outsourceVendor,
     }});
   } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to update production mode' });
+    return sendError(req, res, err, 'Failed to update production mode');
   }
 });
 
@@ -2319,7 +2320,7 @@ router.get('/:jobId/yarn-lots', async (req, res) => {
     });
   } catch (err) {
     console.error('[GET /jobs/:jobId/yarn-lots]', err);
-    return res.status(500).json({ success: false, message: 'Failed to load yarn lots' });
+    return sendError(req, res, err, 'Failed to load yarn lots');
   }
 });
 
@@ -2332,7 +2333,7 @@ router.get('/:jobId/mrp', async (req, res) => {
     if (!data) return res.status(404).json({ success: false, message: 'Job not found.' });
     return res.json({ success: true, data });
   } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to build MRP' });
+    return sendError(req, res, err, 'Failed to build MRP');
   }
 });
 
@@ -2428,7 +2429,7 @@ router.post('/:jobId/raise-po', async (req, res) => {
     });
   } catch (err) {
     console.error('[POST /jobs/:jobId/raise-po]', err);
-    return res.status(500).json({ success: false, message: 'Failed to raise purchase orders' });
+    return sendError(req, res, err, 'Failed to raise purchase orders');
   }
 });
 
@@ -2450,7 +2451,7 @@ router.get('/:jobId/purchase-orders', async (req, res) => {
     return res.json({ success: true, purchaseOrders: pos });
   } catch (err) {
     console.error('[GET /jobs/:jobId/purchase-orders]', err);
-    return res.status(500).json({ success: false, message: 'Failed to load purchase orders' });
+    return sendError(req, res, err, 'Failed to load purchase orders');
   }
 });
 
@@ -2471,7 +2472,7 @@ router.get('/:jobId/mrp.pdf', async (req, res) => {
     );
     return res.send(pdf);
   } catch (err) {
-    return res.status(500).json({ success: false, message: 'Failed to render MRP PDF' });
+    return sendError(req, res, err, 'Failed to render MRP PDF');
   }
 });
 
@@ -2504,7 +2505,7 @@ router.get('/', async (req, res) => {
     });
   } catch (err) {
     console.error('[GET /jobs]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 module.exports = router;

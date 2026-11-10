@@ -22,7 +22,10 @@ describe("errorReporter.reportError", () => {
       method: "POST",
       originalUrl: "/api/v2/order/approve?force=1",
       user: { _id: "abc123" },
-      headers: { "x-forwarded-for": "10.0.0.5, 172.16.0.1" },
+      // What Express works out from the proxy it trusts (app.set("trust
+      // proxy")) — not the header, which the caller writes themselves.
+      ip: "10.0.0.5",
+      headers: { "x-forwarded-for": "6.6.6.6, 10.0.0.5" },
       socket: { remoteAddress: "172.16.0.1" },
     };
 
@@ -37,8 +40,18 @@ describe("errorReporter.reportError", () => {
     expect(line.method).toBe("POST");
     expect(line.path).toBe("/api/v2/order/approve"); // query stripped
     expect(line.user).toBe("abc123");
-    expect(line.ip).toBe("10.0.0.5"); // first hop from x-forwarded-for
+    expect(line.ip).toBe("10.0.0.5"); // the trusted address, not the header's first entry
     expect(line.stack).toContain("boom");
+  });
+
+  test("carries the reference the person was shown", () => {
+    reportError(Object.assign(new Error("boom"), { statusCode: 500 }), { method: "GET", url: "/x", headers: {} }, "4F2A91C0");
+    expect(JSON.parse(spy.mock.calls[0][0]).ref).toBe("4F2A91C0");
+  });
+
+  test("falls back to the socket's address with no proxy in front", () => {
+    reportError(new Error("boom"), { method: "GET", url: "/x", headers: { "x-forwarded-for": "6.6.6.6" }, socket: { remoteAddress: "172.16.0.1" } });
+    expect(JSON.parse(spy.mock.calls[0][0]).ip).toBe("172.16.0.1");
   });
 
   test("works without a request object", () => {

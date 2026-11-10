@@ -14,6 +14,7 @@
 
 const factoryDay = require('../utils/factoryDay');
 const express    = require('express');
+const { sendError } = require('../utils/routeError');
 const mongoose   = require('mongoose');
 const router     = express.Router();
 const Attendance = require('../models/Attendence.js');
@@ -204,7 +205,7 @@ router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
 
   } catch (err) {
     console.error('[POST /mark]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -283,7 +284,7 @@ router.post('/clock-in', isAdmin('admin', 'accounts'), async (req, res) => {
     return res.json({ success: true, data: fmtRecord(doc) });
   } catch (err) {
     console.error('[POST /clock-in]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -319,7 +320,7 @@ router.post('/clock-out', isAdmin('admin', 'accounts'), async (req, res) => {
     return res.json({ success: true, data: fmtRecord(doc) });
   } catch (err) {
     console.error('[POST /clock-out]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -333,7 +334,7 @@ router.get('/active', isAdmin('admin', 'accounts'), async (req, res) => {
     return res.json({ success: true, data: rows.map(fmtRecord) });
   } catch (err) {
     console.error('[GET /active]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -369,7 +370,7 @@ router.put('/:id', isAdmin('admin', 'accounts'), async (req, res) => {
 
   } catch (err) {
     console.error('[PUT /:id]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -411,7 +412,7 @@ router.get('/date', isAdmin('admin', 'accounts'), async (req, res) => {
 
   } catch (err) {
     console.error('[GET /date]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -477,7 +478,7 @@ router.get('/employee/:empId', selfOrAdmin, async (req, res) => {
 
   } catch (err) {
     console.error('[GET /employee/:empId]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -539,7 +540,7 @@ router.get('/summary', isAdmin('admin', 'accounts'), async (req, res) => {
 
   } catch (err) {
     console.error('[GET /summary]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -614,7 +615,7 @@ router.get('/monthly/:empId', selfOrAdmin, async (req, res) => {
 
   } catch (err) {
     console.error('[GET /monthly/:empId]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -660,7 +661,7 @@ router.get('/recurring-latecomers', isAdmin('admin', 'accounts'), async (req, re
       count:     rows.length,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -735,7 +736,7 @@ router.get('/repeatedly-unmarked', isAdmin('admin', 'accounts'), async (req, res
       count:     out.length,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -756,7 +757,7 @@ router.get('/forecast', isAdmin('admin', 'accounts', 'production'), async (req, 
     res.json({ success: true, ...out });
   } catch (err) {
     console.error('[attendance/forecast]', err);
-    res.status(500).json({ success: false, message: err.message });
+    sendError(req, res, err);
   }
 });
 
@@ -780,7 +781,7 @@ router.get('/forecast/:empId', selfOrAdmin, async (req, res) => {
     res.json({ success: true, ...out });
   } catch (err) {
     console.error('[attendance/forecast/:empId]', err);
-    res.status(500).json({ success: false, message: err.message });
+    sendError(req, res, err);
   }
 });
 

@@ -11,6 +11,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { rangeProblem } = require("../utils/listLimit");
 const ErrorHandler     = require("../utils/ErrorHandler");
 
+const { sendError } = require("../utils/routeError");
 const Employee    = require("../models/Employee");
 const Machine     = require("../models/Machine");
 const Order       = require("../models/Order");
@@ -357,7 +358,7 @@ router.post('/bulk-enter-production', async (req, res) => {
 
   } catch (err) {
     console.error('[POST /shift/bulk-enter-production]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -1086,7 +1087,7 @@ router.post('/create-shift-plan', isAdmin('admin', 'production'), async (req, re
       });
     }
     console.error('[POST /create-shift-plan]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -1117,7 +1118,7 @@ router.post('/confirm-shift-plan', isAdmin('admin', 'production'), async (req, r
 
   } catch (err) {
     console.error('[POST /confirm-shift-plan]', err);
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -1196,7 +1197,7 @@ router.get("/production-anomalies", isAdmin('admin', 'production'), async (req, 
 
     return res.json({ success: true, machines: out, count: out.length });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -1265,7 +1266,7 @@ router.get("/attendance-mismatch", isAdmin('admin', 'production'), async (req, r
       count:     mismatches.length,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 

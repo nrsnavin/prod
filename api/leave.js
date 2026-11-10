@@ -13,6 +13,7 @@
 'use strict';
 const factoryDay = require('../utils/factoryDay');
 const express      = require('express');
+const { sendError } = require('../utils/routeError');
 const mongoose     = require('mongoose');
 const router       = express.Router();
 const LeaveRequest = require('../models/LeaveRequest');
@@ -125,7 +126,7 @@ router.post('/request', isAuthenticated, validate({ body: LEAVE_REQUEST }), asyn
       return res.status(409).json({ success:false,
         message:'A leave request already exists for this date and shift.' });
     console.error('[POST /request]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -199,7 +200,7 @@ router.post('/admin-request', isAuthenticated, isAdmin('admin', 'accounts'), asy
       return res.status(409).json({ success:false,
         message:'A leave request already exists for this date and shift.' });
     console.error('[POST /admin-request]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -214,7 +215,7 @@ router.get('/pending', isAuthenticated, isAdmin('admin', 'accounts'), async (req
     return res.json({ success:true, count:leaves.length, data:leaves.map(fmtLeave) });
   } catch(err) {
     console.error('[GET /pending]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -239,7 +240,7 @@ router.get('/employee/:empId', isAuthenticated, selfOrAdmin, async (req, res) =>
     return res.json({ success:true, count:leaves.length, data:leaves.map(fmtLeave) });
   } catch(err) {
     console.error('[GET /employee]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -309,7 +310,7 @@ router.put('/:id/approve', isAuthenticated, isAdmin('admin', 'accounts'), async 
     return res.json({ success:true, message:'Leave approved.', data:fmtLeave(leave) });
   } catch(err) {
     console.error('[PUT /approve]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -327,7 +328,7 @@ router.put('/:id/reject', isAuthenticated, isAdmin('admin', 'accounts'), async (
     return res.json({ success:true, message:'Leave rejected.', data:fmtLeave(leave) });
   } catch(err) {
     console.error('[PUT /reject]', err);
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -360,7 +361,7 @@ router.delete('/:id', isAuthenticated, async (req, res) => {
       return res.status(400).json({ success:false, message:'Only pending requests can be cancelled.' });
     return res.json({ success:true, message:'Leave request cancelled.' });
   } catch(err) {
-    return res.status(500).json({ success:false, message:err.message });
+    return sendError(req, res, err);
   }
 });
 
@@ -370,7 +371,7 @@ router.delete('/:id', isAuthenticated, async (req, res) => {
 // non-closed shift for the same employee. Powers the AIAdvisor
 // "schedule conflict" card on the admin dashboard.
 // ─────────────────────────────────────────────────────────────
-router.get('/conflicts', isAuthenticated, isAdmin('admin', 'accounts'), async (_req, res) => {
+router.get('/conflicts', isAuthenticated, isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     // We only care about leaves that haven't yet finished — historical
     // overlaps are noise.
@@ -427,7 +428,7 @@ router.get('/conflicts', isAuthenticated, isAdmin('admin', 'accounts'), async (_
       count: conflicts.length,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 

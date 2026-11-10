@@ -873,7 +873,7 @@ app.post("/api/v2/notify/cron/run-digest", async (req, res) => {
     const result = await require("./services/scheduledReports").runOnce("morningDigest", { trigger: "cron" });
     return res.json({ success: true, ...result });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return require("./utils/routeError").sendError(req, res, err);
   }
 });
 
@@ -893,7 +893,7 @@ app.post("/api/v2/notify/cron/run-evening-report", async (req, res) => {
     const result = await require("./services/scheduledReports").runOnce("eveningReport", { trigger: "cron" });
     return res.json({ success: true, ...result });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return require("./utils/routeError").sendError(req, res, err);
   }
 });
 
@@ -907,7 +907,7 @@ app.post("/api/v2/notify/cron/bank-feed", async (req, res) => {
   try {
     return res.json({ success: true, ...(await require("./services/bankFeed").run({ trigger: "cron" })) });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return require("./utils/routeError").sendError(req, res, err);
   }
 });
 
@@ -940,7 +940,7 @@ app.post("/api/v2/notify/cron/run-close-checklist", async (req, res) => {
     if (settings.enabled) for (const to of settings.recipients || []) sent.push(await sendWhatsApp(to, text));
     return res.json({ success: true, month, preview: text, sent: sent.length });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return require("./utils/routeError").sendError(req, res, err);
   }
 });
 

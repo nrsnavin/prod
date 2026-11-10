@@ -11,6 +11,7 @@ const Elastic = require("../models/Elastic.js");
 const { computeMaterialRequirement } = require("../utils/materialRequirement.js");
 const creditControl = require("../services/creditControl");
 const ErrorHandler = require("../utils/ErrorHandler.js");
+const { sendError } = require("../utils/routeError");
 const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 const { buildOrderStatusReport } = require("../services/orderStatusReport.js");
 const PurchaseOrder = require("../models/PurchaseOrder.js");
@@ -415,7 +416,7 @@ router.post(
       })();
     } catch (error) {
       // ErrorHandler already logs; no duplicate console.error.
-      return next(new ErrorHandler(error.message, 500));
+      return next(error);
     }
   })
 );
@@ -1733,7 +1734,7 @@ router.get('/delivery-risk', async (req, res) => {
       count:   at_risk.length,
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return sendError(req, res, err);
   }
 });
 

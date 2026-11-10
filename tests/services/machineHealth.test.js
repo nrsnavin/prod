@@ -234,7 +234,10 @@ describe('what is not worth a fitter\'s morning', () => {
 
     const out = await health.analyse({});
     expect(out.watch).toEqual([]);
-  });
+    // Nearly a thousand shifts are written to set this up. Alone it takes
+    // about a second; beside two other workers it has gone past the
+    // default five, failing a run for no reason of its own.
+  }, 30_000);
 });
 
 // ══════════════════════════════════════════════════════════════════

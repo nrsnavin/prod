@@ -140,7 +140,7 @@ router.post("/sign-up",
       user,
     });
   } catch (error) {
-    return next(new ErrorHandler(error.message, 500));
+    return next(error);
   }
 }))
 
@@ -182,7 +182,7 @@ router.post(
 
       sendSession(req, res, user);
     } catch (error) {
-      return next(new ErrorHandler(error.message, 500));
+      return next(error);
     }
   })
 );
@@ -673,7 +673,7 @@ router.get(
 
       res.status(200).json(body);
     } catch (error) {
-      return next(new ErrorHandler(error.message, 500));
+      return next(error);
     }
   })
 );
@@ -880,7 +880,7 @@ router.get(
         users,
       });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 500));
+      return next(error);
     }
   })
 );
