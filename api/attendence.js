@@ -328,6 +328,13 @@ router.get('/active', isAdmin('admin', 'accounts'), async (req, res) => {
 // The same rules as a row of /mark. This used to $set whatever arrived,
 // unchecked, and left the hours as they were: a shift changed from
 // present to absent still read 12 hours worked.
+//
+// It is also how a forgotten clock-out is put right: minutes given for a
+// shift the timer was used on move the timer's record with them
+// (services/attendanceMarks.js), since that record is what is paid.
+//
+// `payslipFinal` in the answer says the month's payslip was finalised
+// before this correction, so the pay on it does not change.
 router.put('/:id', isAdmin('admin', 'accounts'), validate({ body: marks.EDIT_MARK }), async (req, res) => {
   try {
     const { id } = req.params;
@@ -354,8 +361,9 @@ router.put('/:id', isAdmin('admin', 'accounts'), validate({ body: marks.EDIT_MAR
         doc.set(set);
         if (!(await saveIf(doc, { updatedAt: cur.updatedAt ?? null }))) continue;
       }
+      const payslipFinal = set ? await marks.payslipClosed(doc.employee, doc.date) : false;
       await doc.populate('employee', 'name department skill role');
-      return res.json({ success: true, data: fmtRecord(doc) });
+      return res.json({ success: true, changed: !!set, payslipFinal, data: fmtRecord(doc) });
     }
     throw changedMeanwhile('This attendance record', 'changed');
 

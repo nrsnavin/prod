@@ -27,11 +27,15 @@
 //    leave       a shift is approved leave exactly when it is marked
 //                "on leave" and an approved request covers it, whichever
 //                came first. Marked as worked (or clocked in), it is not.
+//                An approval taken back is taken off the sheet as well;
+//    the timer   minutes put right by hand move the timer's own record,
+//                because that record is what pay is worked out from.
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay   = require('../utils/factoryDay');
 const Attendance   = require('../models/Attendence.js');
 const LeaveRequest = require('../models/LeaveRequest');
+const Payroll      = require('../models/Payroll');
 const { z, fields: { text, objectId } } = require('../middleware/validate');
 
 const { STATUSES, LEAVE_TYPES, minutesBetween, hoursFor } = Attendance;
@@ -90,6 +94,39 @@ function timerMinutes(row) {
   return last + (Number(row.priorMinutes) || 0);
 }
 
+/**
+ * The timer's record of a shift whose minutes were put right by hand.
+ *
+ * Pay is worked out from the clock-in and clock-out before the minutes
+ * kept beside them (services/payrollService.js), so a figure corrected
+ * on its own changed what the sheet showed and nothing about the pay:
+ * somebody who went home without clocking out, clocked out by the office
+ * three days later, stayed at three days whatever was typed over it.
+ *
+ * The record moves to say what the correction says, and only ever back
+ * in time:
+ *   fewer minutes than the timer has — the clock-out came late (the usual
+ *       case: it was forgotten). It moves back; the arrival stays;
+ *   more — the clock-in came late. It moves back; the clock-out stays;
+ *   still running — a figure for the shift means the shift is over. It
+ *       ends that long after it began, or now if that is still to come
+ *       (and then it is the start that moves back).
+ *
+ * @returns {{clockInAt: Date, clockOutAt: Date, priorMinutes: number}|null}
+ *          null for a shift the timer was never used on
+ */
+function stampsFor(row, minutes, now = new Date()) {
+  if (!row?.clockInAt || !(minutes > 0)) return null;
+  // Earlier stints of the same shift count first; the last one is the rest.
+  const prior = Math.min(Math.max(0, Number(row.priorMinutes) || 0), minutes);
+  const lastStint = (minutes - prior) * 60000;
+  const latestEnd = row.clockOutAt ? new Date(row.clockOutAt).getTime() : new Date(now).getTime();
+  let start = new Date(row.clockInAt).getTime();
+  let end = start + lastStint;
+  if (end > latestEnd) { end = latestEnd; start = end - lastStint; }
+  return { clockInAt: new Date(start), clockOutAt: new Date(end), priorMinutes: prior };
+}
+
 // What a field reads as when a stored row does not carry it (rows from
 // before the field existed), so that sending the default back is not
 // taken for a change.
@@ -97,17 +134,19 @@ const UNSET = Object.freeze({
   status: 'present', checkIn: '', checkOut: '', notes: '', leaveType: '',
   workedMinutes: 0, lateMinutes: 0, overtimeMinutes: 0,
   isApprovedLeave: false, leaveRequestId: null, shiftHours: 0, hoursWorked: 0,
+  clockInAt: null, clockOutAt: null, priorMinutes: 0,
 });
 // Worked out from the rest. Putting one right is not somebody marking the row.
 const DERIVED = new Set(['shiftHours', 'hoursWorked']);
-const same = (a, b) => String(a ?? '') === String(b ?? '');
+const asText = (v) => (v instanceof Date ? v.toISOString() : String(v ?? ''));
+const same = (a, b) => asText(a) === asText(b);
 
 /**
  * What a row becomes when it is marked.
  *
  * @param {object|null} cur   the stored row (plain object), or null for a new one
  * @param {object} sent       the request's fields for it, already checked against MARK
- * @param {object} ctx        { shift, leave, markedBy } — `leave` is the approved
+ * @param {object} ctx        { shift, leave, markedBy, now? } — `leave` is the approved
  *                            request covering this employee's shift, if there is one
  * @returns {object|null}     the fields to set; null when nothing would change
  */
@@ -130,13 +169,25 @@ function nextMark(cur, sent, ctx) {
   // Minutes worked. A figure sent is that figure. Otherwise they follow
   // the manual in/out times when those change, and are left alone when
   // they do not — the timer's minutes are not the marking screen's to
-  // reset. Times cleared fall back to what the timer recorded.
+  // reset. Times cleared, or a figure of nothing, fall back to what the
+  // timer recorded.
   const timesChanged = !cur || next.checkIn !== stored('checkIn') || next.checkOut !== stored('checkOut');
   const fromTimes = () => minutesBetween(next.checkIn, next.checkOut);
-  if (has('workedMinutes') && sent.workedMinutes > 0) next.workedMinutes = sent.workedMinutes;
-  else if (has('workedMinutes')) next.workedMinutes = fromTimes() ?? 0;
+  const figureSent = has('workedMinutes') && sent.workedMinutes > 0;
+  if (figureSent) next.workedMinutes = sent.workedMinutes;
+  else if (has('workedMinutes')) next.workedMinutes = fromTimes() ?? timerMinutes(was) ?? 0;
   else if (timesChanged) next.workedMinutes = fromTimes() ?? timerMinutes(was) ?? (was.clockInAt ? stored('workedMinutes') : 0);
   else next.workedMinutes = stored('workedMinutes');
+
+  // On a shift the timer was used for, minutes given by hand are a
+  // correction of the timer, and its record follows (stampsFor above) —
+  // unless it already comes to that, to the minute: the timer keeps
+  // seconds, and a figure sent back as it stands is not a correction.
+  if (was.clockInAt && next.workedMinutes > 0
+      && (figureSent || next.workedMinutes !== stored('workedMinutes'))
+      && next.workedMinutes !== timerMinutes(was)) {
+    Object.assign(next, stampsFor(was, next.workedMinutes, ctx.now));
+  }
 
   // Leave. Marked "on leave" with an approved request for the shift: it
   // is that leave, and its type is the one that was approved. Marked as
@@ -215,6 +266,80 @@ async function markLeaveApproved(leave, { session = null } = {}) {
 }
 
 /**
+ * An approval taken back, taken off the shifts it was written onto.
+ *
+ * What the approval itself put on the sheet goes with it: a row nobody
+ * has marked since is removed and the shift is unmarked again — it is
+ * for whoever marks the day to say whether the person came. A row
+ * somebody marked "on leave" by hand stays as they marked it and stops
+ * being approved, which is an absence when it comes to pay. Where
+ * another approved request still covers the shift (one for the day
+ * beside one for both shifts), the row is that leave from here on.
+ *
+ * Call it inside the transaction that takes the approval back, once the
+ * request itself has stopped being approved.
+ *
+ * @returns {{removed: number, unapproved: number, kept: number}} shifts by what became of them
+ */
+async function unmarkLeaveWithdrawn(leave, { session = null } = {}) {
+  const shifts = leave.shift === 'BOTH' ? ['DAY', 'NIGHT'] : [leave.shift];
+  const employee = leave.employee?._id ?? leave.employee;
+  const date = factoryDay.calendarDay(leave.date);
+  const became = { removed: 0, unapproved: 0, kept: 0 };
+  for (const shift of shifts) {
+    const row = await Attendance.findOne({ employee, date, shift })
+      .select('status markedBy isApprovedLeave leaveRequestId').session(session).lean();
+    if (!row) continue;
+    // This request's row. One from before rows carried the request is
+    // told by the flag: nothing else could have approved it.
+    const ofThisLeave = row.leaveRequestId
+      ? String(row.leaveRequestId) === String(leave._id)
+      : !!row.isApprovedLeave;
+    if (!ofThisLeave) continue;
+
+    const other = row.status === 'on_leave'
+      ? (await approvedLeaveByEmployee({ employeeIds: [employee], date, shift, session })).get(String(employee))
+      : null;
+    if (other) {
+      await Attendance.updateOne(
+        { _id: row._id },
+        { $set: { isApprovedLeave: true, leaveRequestId: other._id, leaveType: other.leaveType } },
+        { session }
+      );
+      became.kept++;
+    } else if (row.status === 'on_leave' && row.markedBy === BY_LEAVE_APPROVAL) {
+      await Attendance.deleteOne({ _id: row._id }, { session });
+      became.removed++;
+    } else {
+      await Attendance.updateOne(
+        { _id: row._id },
+        { $set: { isApprovedLeave: false, leaveRequestId: null } },
+        { session }
+      );
+      if (row.isApprovedLeave) became.unapproved++;
+    }
+  }
+  return became;
+}
+
+/**
+ * Whether the pay for a day is already settled: the payslip for its
+ * month has been finalised (or paid). A payslip is a copy taken when it
+ * is finalised, so a mark changed afterwards changes the sheet and not
+ * the pay — the screens say so rather than leave it to be assumed.
+ */
+async function payslipClosed(employee, date) {
+  const day = new Date(date);
+  if (Number.isNaN(day.getTime())) return false;
+  return !!(await Payroll.exists({
+    employee: employee?._id ?? employee,
+    year: day.getUTCFullYear(),
+    month: day.getUTCMonth() + 1,
+    status: { $ne: 'draft' },
+  }));
+}
+
+/**
  * A shift worked after all. Leave approved ahead of the day puts an
  * "on leave" row there; clocking in, or production verified for that
  * operator, says they came. These are the fields that take the leave
@@ -243,5 +368,7 @@ module.exports = {
   dayKeyOf, workingDayKeys,
   MARK_DAY, EDIT_MARK, CLOCK,
   BY_LEAVE_APPROVAL, WORKED_AFTER_ALL,
-  nextMark, timerMinutes, approvedLeaveByEmployee, markLeaveApproved,
+  nextMark, timerMinutes, stampsFor,
+  approvedLeaveByEmployee, markLeaveApproved, unmarkLeaveWithdrawn,
+  payslipClosed,
 };
