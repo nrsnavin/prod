@@ -384,7 +384,9 @@ router.get(
     const [total, invoices] = await Promise.all([
       Invoice.countDocuments(q),
       Invoice.find(q)
-        .select("invoiceNumber invoiceDate orderNo order customer buyer.name buyer.gstin supplyType totals status einvoice.status einvoice.irn dcs createdAt")
+        // Payment fields too, so the list can say paid, part paid or
+        // overdue as services/outstanding.js reckons it.
+        .select("invoiceNumber invoiceDate dueDate orderNo order customer buyer.name buyer.gstin supplyType totals status einvoice.status einvoice.irn dcs createdAt paidAmount creditedAmount debitedAmount")
         .sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
     ]);
     res.json({ success: true, invoices, total, page, pages: Math.max(1, Math.ceil(total / limit)) });

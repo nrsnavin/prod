@@ -221,7 +221,11 @@ router.get(
         .populate('customer', 'name')
         .populate('machine',  'ID status')
         .populate('createdBy', 'name role')
-        .select('jobOrderNo status date customer machine createdAt createdBy')
+        // The order it serves and its metres (planned, made, packed), so
+        // the list can show how far along each job is and how long its
+        // order has left. Added fields only: older callers read the rest.
+        .populate('order', 'orderNo supplyDate')
+        .select('jobOrderNo status date customer machine createdAt createdBy order elastics.quantity producedElastic.quantity packedElastic.quantity')
         .sort({ createdAt: -1 })
         .skip(skip).limit(limit),
       JobOrder.countDocuments(filter),

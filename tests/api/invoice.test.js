@@ -340,6 +340,9 @@ describe('the lists and the cards', () => {
     expect(list.status).toBe(200);
     expect(list.body.total).toBe(1);
     expect(list.body.invoices[0].invoiceNumber).toBe('INV/2026-27/0002');
+    // What the list needs to say paid, part paid or overdue.
+    expect(list.body.invoices[0]).toEqual(expect.objectContaining({ paidAmount: 0 }));
+    expect(list.body.invoices[0]).toHaveProperty('dueDate');
     expect((await get('/invoice/list?search=Sunrise')).body.total).toBe(2);
     expect((await get(`/invoice/list?search=${dc1.dcNumber}`)).body.total).toBe(1);
     expect((await get('/invoice/list?status=cancelled')).body.total).toBe(1);

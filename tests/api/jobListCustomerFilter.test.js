@@ -152,3 +152,22 @@ describe('GET /job/jobs?customer=', () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe('GET /job/jobs — what the list shows of each job', () => {
+  test('carries its order and its metres planned, made and packed', async () => {
+    const job = await makeJob(alpha._id);
+    await JobOrder.updateOne({ _id: job._id }, {
+      producedElastic: [{ elastic: elastic._id, quantity: 400 }],
+      packedElastic: [{ elastic: elastic._id, quantity: 150 }],
+    });
+    const res = await list();
+    expect(res.status).toBe(200);
+    const row = res.body.jobs.find((j) => String(j._id) === String(job._id));
+    expect(row.order).toEqual(expect.objectContaining({ orderNo: expect.any(Number), supplyDate: expect.any(String) }));
+    expect(row.elastics.map((e) => e.quantity)).toEqual([1000]);
+    expect(row.producedElastic.map((e) => e.quantity)).toEqual([400]);
+    expect(row.packedElastic.map((e) => e.quantity)).toEqual([150]);
+    // Still the slim row: nothing heavy such as shift details came along.
+    expect(row.shiftDetails).toBeUndefined();
+  });
+});
