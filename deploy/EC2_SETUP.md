@@ -367,7 +367,7 @@ points `node` at it:
 
 ```sh
 sudo dnf -y upgrade
-sudo dnf install -y git gcc-c++ make
+sudo dnf install -y git gcc-c++ make nano openssl   # nano and openssl: steps 4 and 6
 sudo dnf install -y nodejs22 nodejs22-npm
 sudo alternatives --set node /usr/bin/node-22
 node -v        # v22.x
