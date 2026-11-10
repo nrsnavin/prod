@@ -1144,6 +1144,85 @@ router.post(
 // ══════════════════════════════════════════════════════════════
 //  10. LOW STOCK  (legacy)
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+//  GET /materials/adjust-history?days=30&category=&search=&page=1&limit=100
+//
+//  Every stock adjustment made by hand, newest first, across all
+//  materials — who wrote what off, and why. The admin app's History
+//  page (behind its stock-adjust screen) has always asked for this
+//  address, and there was nothing here: the page could only say it had
+//  failed to load, and the adjustments could be read one material at a
+//  time in its ledger and nowhere together.
+//
+//  Read off the movements kept on each material, which hold the newest
+//  of them (utils/stockLedger.js): a window of days, not all of history.
+// ══════════════════════════════════════════════════════════════
+const ADJUST_HISTORY = { days: [1, 370, 30], page: [1, 100000, 1], limit: [1, 200, 100] };
+
+router.get(
+  "/adjust-history",
+  catchAsyncErrors(async (req, res, next) => {
+    const one = (v) => (Array.isArray(v) ? v[0] : v);
+    const asked = {};
+    for (const [key, [min, max, fallback]] of Object.entries(ADJUST_HISTORY)) {
+      const raw = one(req.query[key]);
+      const n = raw === undefined || raw === "" ? fallback : Number(raw);
+      if (!Number.isInteger(n) || n < min || n > max) {
+        return next(new ErrorHandler(`${key} must be a whole number from ${min} to ${max}`, 400));
+      }
+      asked[key] = n;
+    }
+    const since = new Date(Date.now() - asked.days * factoryDay.DAY);
+    const adjusted = { type: "STOCK_ADJUST", date: { $gte: since } };
+
+    const materials = { stockMovements: { $elemMatch: adjusted } };
+    const category = one(req.query.category);
+    if (typeof category === "string" && category && category !== "All") materials.category = category;
+    const search = typeof one(req.query.search) === "string" ? one(req.query.search).trim().slice(0, 100) : "";
+    if (search) materials.name = { $regex: escapeRegex(search), $options: "i" };
+
+    const [found] = await RawMaterial.aggregate([
+      { $match: materials },
+      { $project: { name: 1, category: 1, stock: 1, stockMovements: 1 } },
+      { $unwind: "$stockMovements" },
+      { $match: { "stockMovements.type": adjusted.type, "stockMovements.date": adjusted.date } },
+      { $sort: { "stockMovements.date": -1, _id: 1 } },
+      {
+        $facet: {
+          total: [{ $count: "n" }],
+          rows: [
+            { $skip: (asked.page - 1) * asked.limit },
+            { $limit: asked.limit },
+            {
+              $project: {
+                _id: 0,
+                materialId: "$_id",
+                materialName: "$name",
+                category: 1,
+                currentStock: "$stock",
+                date: "$stockMovements.date",
+                // Signed: what stock moved by (a write-off is negative).
+                adjustment: "$stockMovements.quantity",
+                balance: "$stockMovements.balance",
+                reason: { $ifNull: ["$stockMovements.reason", ""] },
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const total = found?.total?.[0]?.n || 0;
+    res.json({
+      success: true,
+      total,
+      page: asked.page,
+      pages: Math.max(1, Math.ceil(total / asked.limit)),
+      adjustments: found?.rows || [],
+    });
+  })
+);
+
 router.get(
   "/get-low-stock-materials",
   catchAsyncErrors(async (req, res, next) => {

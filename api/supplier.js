@@ -127,6 +127,10 @@ router.post(
         ...(["regular", "composition", "unregistered"].includes(gstRegistration) ? { gstRegistration } : {}),
         ...(paymentTermsDays !== undefined && paymentTermsDays !== "" ? { paymentTermsDays: Math.min(365, Math.max(0, Number(paymentTermsDays) || 0)) } : {}),
         ...(req.body?.bank ? { bank: readBank(req.body.bank) } : {}),
+        // On the form for a new supplier as for an old one, and read only
+        // when an old one was saved: a contact person, PAN or MSME status
+        // typed while adding a supplier was dropped without a word.
+        ...whoAndTaxStatus(req.body),
       });
       if (mongoose.Types.ObjectId.isValid(String(req.body?.aiSuggestion || ""))) {
         require("../services/aiLedger").settle(req.body.aiSuggestion, {
@@ -1078,6 +1082,23 @@ const SUPPLIER_FIELDS = [
   // MSME (Udyam) status, for the 45-day rule; PAN for the TDS return.
   "msme", "pan",
 ];
+/** The contact person, PAN and MSME registration of a new supplier, as far as each was given. */
+function whoAndTaxStatus(body) {
+  const out = {};
+  const said = (v) => (typeof v === "string" ? v.trim() : "");
+  if (said(body?.contactPerson)) out.contactPerson = said(body.contactPerson).slice(0, 120);
+  if (said(body?.pan)) out.pan = said(body.pan);
+  const m = body?.msme;
+  if (m && typeof m === "object" && !Array.isArray(m)) {
+    out.msme = {
+      category:   said(m.category),
+      udyam:      said(m.udyam),
+      agreedDays: Number(m.agreedDays) || 0,
+    };
+  }
+  return out;
+}
+
 /** Bank details as given, checked: account digits only, IFSC as the RBI writes it. */
 function readBank(b) {
   const accountNo = String(b?.accountNo || "").replace(/[\s-]/g, "");
@@ -1123,14 +1144,23 @@ router.post(
   })
 );
 
+// Under two addresses. The admin app's supplier form has always saved to
+// /edit-customer (it was written from the customer form), which did not
+// exist here: every supplier edited there failed.
 router.put(
-  "/edit-supplier",
+  ["/edit-supplier", "/edit-customer"],
   catchAsyncErrors(async (req, res, next) => {
     try {
       const update = {};
       for (const f of SUPPLIER_FIELDS) {
         if (req.body[f] !== undefined) update[f] = req.body[f];
       }
+      // A GSTIN left blank is no GSTIN. Both forms send the field as it
+      // stands on screen, so a supplier without one was saved with "" —
+      // and GSTINs are unique: the next supplier without one could not be
+      // saved at all ("duplicate key … gstin"). Nothing is kept for it.
+      const noGstin = update.gstin === null || (typeof update.gstin === "string" && !update.gstin.trim());
+      if (noGstin) delete update.gstin;
       // Bank details: checked, and a change remembered — who, when, from what.
       if (req.body.bank !== undefined) {
         let bank;
@@ -1149,9 +1179,12 @@ router.put(
           update["bank.previousAccountNo"] = before.accountNo;
         }
       }
-      const supplier = await Supplier.findByIdAndUpdate(
-        req.body._id, update, { new: true, runValidators: true }
-      );
+      const change = {};
+      if (Object.keys(update).length) change.$set = update;
+      if (noGstin) change.$unset = { gstin: 1 };
+      const supplier = Object.keys(change).length
+        ? await Supplier.findByIdAndUpdate(req.body._id, change, { new: true, runValidators: true })
+        : await Supplier.findById(req.body._id);
       if (!supplier)
         return next(new ErrorHandler("Supplier not found", 404));
       res.status(200).json({ success: true, supplier });
