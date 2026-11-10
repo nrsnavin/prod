@@ -160,11 +160,8 @@ router.get(
     if (!photo || !(await reachableShift(req, photo.shift))) return next(new ErrorHandler('Photo not found', 404));
     const base64 = String(photo.data).split(',', 2)[1] || '';
     const buffer = Buffer.from(base64, 'base64');
-    res.setHeader('Content-Type', photo.contentType);
-    res.setHeader('Content-Length', buffer.length);
     // A photo never changes once taken; private, since it is behind a login.
-    res.setHeader('Cache-Control', 'private, max-age=86400');
-    res.send(buffer);
+    require('../utils/sendFile').sendStoredFile(res, { buffer, contentType: photo.contentType, fallbackName: 'timer-photo', maxAge: 86400 });
   })
 );
 

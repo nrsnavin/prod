@@ -564,7 +564,7 @@ router.get(
 
     const fileName = `bonus-${record.employee?.name?.replace(/\s+/g, "_") || "employee"}-${year}.pdf`;
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Content-Disposition", require("../utils/sendFile").contentDisposition("attachment", fileName, `bonus-${year}.pdf`));
 
     const doc = new PDFDocument({ size: "A4", margin: 50 });
     doc.pipe(res);

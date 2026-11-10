@@ -1249,11 +1249,9 @@ router.get(
 
     // `inline` so a PDF or photo opens in the browser's viewer rather than
     // dropping into Downloads; the filename is still used if it is saved.
-    const safeName = (bill.filename || `bill-${bill._id}`).replace(/["\\\r\n]/g, "");
-    res.setHeader("Content-Type", bill.contentType);
-    res.setHeader("Content-Length", buffer.length);
-    res.setHeader("Content-Disposition", `inline; filename="${safeName}"`);
-    res.send(buffer);
+    require("../utils/sendFile").sendStoredFile(res, {
+      buffer, contentType: bill.contentType, filename: bill.filename, fallbackName: `bill-${bill._id}`,
+    });
   })
 );
 

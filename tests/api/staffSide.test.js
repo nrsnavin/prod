@@ -209,3 +209,47 @@ describe('the build probe', () => {
     expect((await as(supervisor).get('/api/v2/health/build')).status).toBe(403);
   });
 });
+
+describe('the e-invoice provider\'s address', () => {
+  const save = (baseUrl) => as(admin).put('/api/v2/settings/document', { invoice: { gsp: { provider: 'http-json', baseUrl } } });
+
+  it('is refused unless it is https and outside this server\'s network', async () => {
+    const plain = await save('http://gsp.example/api');
+    expect(plain.status).toBe(400);
+    expect(plain.body.message).toMatch(/E-invoice provider address: The address must start with https/);
+    expect((await save('https://user:pw@gsp.example/api')).status).toBe(400);
+    expect((await save('not a url')).status).toBe(400);
+    expect((await save('https://gsp.example/api')).status).toBe(200);
+  });
+
+  it('one stored before the check is not called either, and says where to fix it', async () => {
+    const DocumentSettings = require('../../models/DocumentSettings');
+    await DocumentSettings.updateOne({ key: 'document' }, { $set: { 'invoice.gsp.provider': 'http-json', 'invoice.gsp.baseUrl': 'http://gsp.example/api' } }, { upsert: true });
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({}) });
+    try {
+      const provider = await require('../../services/einvoiceProvider').getProvider();
+      await expect(provider.register({})).rejects.toMatchObject({ code: 'EINVOICE_NOT_CONFIGURED', message: expect.stringMatching(/Settings → Invoice cannot be used/) });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('a provider that never answers is given up on, with a warning to check before retrying', async () => {
+    const DocumentSettings = require('../../models/DocumentSettings');
+    await DocumentSettings.updateOne({ key: 'document' }, { $set: { 'invoice.gsp.provider': 'http-json', 'invoice.gsp.baseUrl': 'https://gsp.example/api' } }, { upsert: true });
+    const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+    const fetchSpy = jest.spyOn(global, 'fetch').mockRejectedValue(timeout);
+    try {
+      const provider = await require('../../services/einvoiceProvider').getProvider();
+      await expect(provider.register({})).rejects.toMatchObject({ statusCode: 502, message: expect.stringMatching(/did not answer in time.*may have gone through/) });
+      // The call carries a time limit and follows no redirect with the credentials.
+      const [, options] = fetchSpy.mock.calls[0];
+      expect(options.signal).toBeInstanceOf(AbortSignal);
+      expect(options.redirect).toBe('error');
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+

@@ -40,6 +40,8 @@ const Payment = require("../models/Payment");
 const Customer = require("../models/Customer");
 const Supplier = require("../models/Supplier");
 
+const { contentDisposition } = require("../utils/sendFile");
+
 const IRN_RE = /^[0-9a-f]{64}$/i;
 const fileName = (s) => String(s || "document").replace(/[\/\\]/g, "-").replace(/"/g, "");
 const money = (n) => (Number(n) || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -54,7 +56,7 @@ async function loadNote(req, next) {
 
 const pdf = (res, name, buf) => {
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename="${fileName(name)}.pdf"`);
+  res.setHeader("Content-Disposition", contentDisposition("inline", `${fileName(name)}.pdf`, "document.pdf"));
   res.send(buf);
 };
 
@@ -77,7 +79,7 @@ router.get("/notes/:id/einvoice.json", catchAsyncErrors(async (req, res, next) =
   if (!note || !customerOnly(note, next)) return;
   const json = buildEinvoiceJson(await asInvoice(note.toObject()));
   res.setHeader("Content-Type", "application/json");
-  res.setHeader("Content-Disposition", `attachment; filename="${fileName(note.noteNo)}-einvoice.json"`);
+  res.setHeader("Content-Disposition", contentDisposition("attachment", `${fileName(note.noteNo)}-einvoice.json`, "einvoice.json"));
   res.send(JSON.stringify(json, null, 2));
 }));
 
@@ -180,7 +182,7 @@ const ExcelJS = require("exceljs");
 const dd = (d) => { if (!d) return ""; const t = new Date(d); const p = (n) => String(n).padStart(2, "0"); return `${p(t.getDate())}-${p(t.getMonth() + 1)}-${t.getFullYear()}`; };
 async function sendXlsx(res, name, wb) {
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-  res.setHeader("Content-Disposition", `attachment; filename="${fileName(name)}.xlsx"`);
+  res.setHeader("Content-Disposition", contentDisposition("attachment", `${fileName(name)}.xlsx`, "document.xlsx"));
   await wb.xlsx.write(res);
   res.end();
 }

@@ -541,11 +541,9 @@ router.get(
 
     const base64 = String(photo.data).split(',')[1] ?? '';
     const buffer = Buffer.from(base64, 'base64');
-    const safeName = (photo.filename || `sample-photo-${photo._id}`).replace(/["\\\r\n]/g, '');
-    res.setHeader('Content-Type', photo.contentType);
-    res.setHeader('Content-Length', buffer.length);
-    res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
-    res.send(buffer);
+    require('../utils/sendFile').sendStoredFile(res, {
+      buffer, contentType: photo.contentType, filename: photo.filename, fallbackName: `sample-photo-${photo._id}`,
+    });
   })
 );
 

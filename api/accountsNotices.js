@@ -178,9 +178,7 @@ router.get(
     if (!isId(req.params.id) || !isId(req.params.aid)) return next(new ErrorHandler("Not found", 404));
     const f = await attachments.read(StatutoryNotice, req.params.id, req.params.aid);
     if (!f) return next(new ErrorHandler("Not found", 404));
-    res.setHeader("Content-Type", f.contentType);
-    res.setHeader("Content-Disposition", `inline; filename="${String(f.filename || "notice").replace(/[^\w.-]+/g, "_")}"`);
-    res.send(f.buffer);
+    require("../utils/sendFile").sendStoredFile(res, { ...f, fallbackName: "notice" });
   })
 );
 

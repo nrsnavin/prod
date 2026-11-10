@@ -144,9 +144,12 @@ router.get('/:id/photo/:page', catchAsyncErrors(async (req, res, next) => {
   const photo = await SlipPhoto.findOne({ slip: req.params.id, page: Number(req.params.page) || 0 })
     .select('+data contentType').lean();
   if (!photo) return next(new ErrorHandler('Photo not found', 404));
-  res.setHeader('Content-Type', photo.contentType);
-  res.setHeader('Cache-Control', 'private, max-age=3600');
-  res.send(Buffer.from(photo.data, 'base64'));
+  // Whatever arrived over WhatsApp is kept as sent; only an image or a
+  // PDF is shown, anything else is handed over as a download.
+  require('../utils/sendFile').sendStoredFile(res, {
+    buffer: Buffer.from(photo.data, 'base64'), contentType: photo.contentType,
+    fallbackName: `slip-page-${Number(req.params.page) || 0}`, maxAge: 3600,
+  });
 }));
 
 router.post(

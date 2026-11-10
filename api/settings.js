@@ -73,6 +73,12 @@ function readInvoiceSettings(body) {
   if (set["invoice.defaultHsn"] && !/^\d{4,8}$/.test(set["invoice.defaultHsn"])) {
     throw new ErrorHandler("defaultHsn must be 4 to 8 digits", 400);
   }
+  // The provider's address is called with its credentials in the
+  // headers: https only, and not somewhere inside this server's network.
+  if (set["invoice.gsp.baseUrl"]) {
+    const problem = require("../utils/outboundUrl").outboundUrlProblem(set["invoice.gsp.baseUrl"]);
+    if (problem) throw new ErrorHandler(`E-invoice provider address: ${problem}`, 400);
+  }
   return set;
 }
 

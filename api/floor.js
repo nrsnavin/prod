@@ -167,10 +167,7 @@ router.get(
     const photo = await floor.photoOnFloor(req.floor, req.params.photoId);
     if (!photo) return next(new ErrorHandler('Photo not found', 404));
     const buffer = Buffer.from(String(photo.data).split(',', 2)[1] || '', 'base64');
-    res.setHeader('Content-Type', photo.contentType);
-    res.setHeader('Content-Length', buffer.length);
-    res.setHeader('Cache-Control', 'private, max-age=3600');
-    res.send(buffer);
+    require('../utils/sendFile').sendStoredFile(res, { buffer, contentType: photo.contentType, fallbackName: 'timer-photo', maxAge: 3600 });
   })
 );
 

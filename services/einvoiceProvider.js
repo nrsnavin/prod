@@ -28,6 +28,7 @@
 
 const DocumentSettings = require('../models/DocumentSettings');
 const ErrorHandler = require('../utils/ErrorHandler');
+const { outboundUrlProblem } = require('../utils/outboundUrl');
 
 const failure = (message, code, status = 409) => {
   const err = new ErrorHandler(message, status);
@@ -73,24 +74,53 @@ function readRegistration(body) {
   };
 }
 
+// How long the provider is given to answer. fetch has no limit of its
+// own, so a provider that accepted the connection and then said nothing
+// held the request — and the person waiting on it — indefinitely.
+const PROVIDER_TIMEOUT_MS = 30_000;
+
+/**
+ * POST `body` to the provider at `path`, with its credentials.
+ * @returns {{ res: Response, body: object }}
+ */
+async function callProvider(cfg, path, body, { notConfigured = 'EINVOICE_NOT_CONFIGURED', rejected = 'EINVOICE_REJECTED' } = {}) {
+  if (!cfg.baseUrl) throw failure('The GSP has no URL in Settings → Invoice.', notConfigured);
+  // Checked when it is saved too; this covers one stored before that.
+  const problem = outboundUrlProblem(cfg.baseUrl);
+  if (problem) throw failure(`The e-invoice provider's address in Settings → Invoice cannot be used: ${problem}.`, notConfigured);
+  let res;
+  try {
+    res = await fetch(cfg.baseUrl.replace(/\/$/, '') + path, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'client-id': cfg.clientId || '',
+        'client-secret': cfg.clientSecret || '',
+        username: cfg.username || '',
+        password: cfg.password || '',
+        gstin: cfg.gstin || '',
+      },
+      body: JSON.stringify(body),
+      redirect: 'error', // the credentials go to the address in Settings, nowhere it points on to
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const slow = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+    throw failure(
+      slow ? 'The e-invoice provider did not answer in time. Check on the portal before trying again — it may have gone through.'
+           : 'The e-invoice provider could not be reached. Try again in a minute.',
+      rejected, 502
+    );
+  }
+  let reply;
+  try { reply = await res.json(); } catch { reply = {}; }
+  return { res, body: reply };
+}
+
 const PROVIDERS = {
   'http-json': (cfg) => ({
     async register(payload) {
-      if (!cfg.baseUrl) throw failure('The GSP has no URL in Settings → Invoice.', 'EINVOICE_NOT_CONFIGURED');
-      const res = await fetch(cfg.baseUrl.replace(/\/$/, '') + '/generate', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'client-id': cfg.clientId || '',
-          'client-secret': cfg.clientSecret || '',
-          username: cfg.username || '',
-          password: cfg.password || '',
-          gstin: cfg.gstin || '',
-        },
-        body: JSON.stringify(payload),
-      });
-      let body;
-      try { body = await res.json(); } catch { body = {}; }
+      const { res, body } = await callProvider(cfg, '/generate', payload);
       if (!res.ok) {
         throw failure(`The e-invoice provider answered ${res.status}${body?.message ? `: ${body.message}` : ''}.`, 'EINVOICE_REJECTED', 502);
       }
@@ -98,17 +128,7 @@ const PROVIDERS = {
     },
     /** Generate the e-way bill from a registered IRN (the portal's "EWB by IRN"). */
     async ewaybill(payload) {
-      const res = await fetch(cfg.baseUrl.replace(/\/$/, '') + '/ewaybill', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'client-id': cfg.clientId || '', 'client-secret': cfg.clientSecret || '',
-          username: cfg.username || '', password: cfg.password || '', gstin: cfg.gstin || '',
-        },
-        body: JSON.stringify(payload),
-      });
-      let body;
-      try { body = await res.json(); } catch { body = {}; }
+      const { res, body } = await callProvider(cfg, '/ewaybill', payload, { rejected: 'EWB_REJECTED' });
       if (!res.ok) throw failure(`The e-way bill provider answered ${res.status}${body?.message ? `: ${body.message}` : ''}.`, 'EWB_REJECTED', 502);
       const data = pick(body, 'Data', 'data', 'result') && typeof pick(body, 'Data', 'data', 'result') === 'object' ? pick(body, 'Data', 'data', 'result') : body;
       const number = pick(data, 'EwbNo', 'ewbNo', 'ewayBillNo');
@@ -116,17 +136,7 @@ const PROVIDERS = {
       return { number: String(number), generatedAt: readAckDate(pick(data, 'EwbDt', 'ewbDt')), validUpto: pick(data, 'EwbValidTill', 'ewbValidTill', 'validUpto') ? readAckDate(pick(data, 'EwbValidTill', 'ewbValidTill', 'validUpto')) : undefined, raw: data };
     },
     async cancel(irn, { reason }) {
-      const res = await fetch(cfg.baseUrl.replace(/\/$/, '') + '/cancel', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'client-id': cfg.clientId || '', 'client-secret': cfg.clientSecret || '',
-          username: cfg.username || '', password: cfg.password || '', gstin: cfg.gstin || '',
-        },
-        body: JSON.stringify({ Irn: irn, CnlRsn: '1', CnlRem: String(reason || '').slice(0, 100) }),
-      });
-      let body;
-      try { body = await res.json(); } catch { body = {}; }
+      const { res, body } = await callProvider(cfg, '/cancel', { Irn: irn, CnlRsn: '1', CnlRem: String(reason || '').slice(0, 100) });
       if (!res.ok) {
         throw failure(`The e-invoice provider refused the cancellation (${res.status})${body?.message ? `: ${body.message}` : ''}.`, 'EINVOICE_REJECTED', 502);
       }

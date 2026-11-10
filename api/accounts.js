@@ -30,6 +30,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAdmin }      = require("../middleware/auth");
 const { keepRequestContext } = require("../middleware/userContext");
+const { sendStoredFile } = require("../utils/sendFile");
 const { escapeRegex }  = require("../utils/escapeRegex");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { computeInvoice, stateCodeFromGstin, round2 } = require("../services/gst");
@@ -451,9 +452,7 @@ router.get("/:kind(bills|expenses|notes|payments)/:id/attachments/:aid", catchAs
   if (!isId(req.params.id) || !isId(req.params.aid)) return next(new ErrorHandler("Not found", 404));
   const f = await attachments.read(ATTACHABLE[req.params.kind], req.params.id, req.params.aid);
   if (!f) return next(new ErrorHandler("Not found", 404));
-  res.setHeader("Content-Type", f.contentType);
-  res.setHeader("Content-Disposition", `inline; filename="${(f.filename || "attachment").replace(/"/g, "")}"`);
-  res.send(f.buffer);
+  sendStoredFile(res, { ...f, fallbackName: "attachment" });
 }));
 
 // ══════════════════════════════════════════════════════════════════
@@ -1639,12 +1638,7 @@ router.get("/bill-inbox/:id/file", catchAsyncErrors(async (req, res, next) => {
   const x = await InboxBill.findOne({ _id: req.params.id, part: { $gt: 0 } }).select("+data contentType filename").lean();
   if (!x?.data) return next(new ErrorHandler("Not found", 404));
   const buffer = Buffer.from(String(x.data).split(",", 2)[1] || "", "base64");
-  res.setHeader("Content-Type", x.contentType);
-  res.setHeader("Content-Length", buffer.length);
-  res.setHeader("Content-Disposition", `inline; filename="${String(x.filename || "bill").replace(/[^\w.\- ]/g, "_")}"`);
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("Cache-Control", "private, max-age=3600");
-  res.end(buffer);
+  sendStoredFile(res, { buffer, contentType: x.contentType, filename: x.filename, fallbackName: "bill", maxAge: 3600 });
 }));
 router.post("/bill-inbox/:id/dismiss", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));

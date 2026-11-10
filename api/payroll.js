@@ -409,7 +409,8 @@ router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
     const rupee = (n) => `Rs. ${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     const fileName = `payslip-${(p.employee?.name || 'employee').replace(/\s+/g, '_')}-${MONTHS_PDF[month - 1]}-${year}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    // Any name: one written in Tamil used to fail the whole download.
+    res.setHeader('Content-Disposition', require('../utils/sendFile').contentDisposition('attachment', fileName, `payslip-${MONTHS_PDF[month - 1]}-${year}.pdf`));
 
     // ── Printable payslip: A4, uniform margins, ruled tables ───
     const M = 50;                               // uniform page margin (all sides)
