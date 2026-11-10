@@ -121,6 +121,12 @@ describe('the shift clock', () => {
   const clock = (what, employeeId) =>
     post(`/api/v2/attendance/clock-${what}`, { employeeId: String(employeeId), shift: 'DAY', date: '2026-06-02' });
 
+  // The second tap is refused by the unique (employee, date, shift)
+  // index, which is still being built when the server has only just
+  // started: run on its own, this test got there first and passed or
+  // failed by the clock.
+  beforeAll(() => Attendance().init());
+
   it('a second clock-in does not move the start of a running shift', async () => {
     const emp = await Employee().create({ name: 'Clock A', hourlyRate: 100 });
     expect((await clock('in', emp._id)).status).toBe(200);

@@ -12,6 +12,61 @@
 // ══════════════════════════════════════════════════════════════
 'use strict';
 const mongoose = require('mongoose');
+const { shiftHours } = require('../utils/shiftHours');
+
+// The values a mark may carry. The routes check against these too: a
+// bulk write does not run the schema's validators, so a status outside
+// this list used to be stored as sent and paid as a full shift.
+const STATUSES    = Object.freeze(['present', 'late', 'half_day', 'absent', 'on_leave']);
+const LEAVE_TYPES = Object.freeze(['casual', 'sick', 'emergency', 'personal', 'unpaid', '']);
+
+/**
+ * Minutes between manual "HH:mm" in and out times. A night shift runs
+ * past midnight, so an out time at or before the in time is the next
+ * day. null when either is missing or unreadable.
+ */
+function minutesBetween(checkIn, checkOut) {
+  if (!checkIn || !checkOut) return null;
+  const toMin = (t) => {
+    const [h, m] = String(t).split(':').map(Number);
+    return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : NaN;
+  };
+  const inM = toMin(checkIn);
+  let outM = toMin(checkOut);
+  if (!Number.isFinite(inM) || !Number.isFinite(outM)) return null;
+  if (outM <= inM) outM += 24 * 60;
+  return outM - inM;
+}
+
+/**
+ * The scheduled and the worked hours of a mark — the one definition.
+ * The save hook below and the attendance routes each kept their own
+ * copy, and the routes' copy never looked at the timer.
+ *
+ * A recorded worked duration (the live timer, or manual in/out times)
+ * wins for a worked shift: hours follow the time actually worked, up to
+ * the length of the shift.
+ */
+function hoursFor(mark) {
+  const base = shiftHours(mark.shift);
+  let worked = Number(mark.workedMinutes) || 0;
+  if (worked <= 0 && mark.clockInAt && mark.clockOutAt) {
+    worked = Math.max(0, (new Date(mark.clockOutAt) - new Date(mark.clockInAt)) / 60000);
+  }
+  if (worked > 0 && (mark.status === 'present' || mark.status === 'late')) {
+    return { shiftHours: base, hoursWorked: Math.min(worked, base * 60) / 60 };
+  }
+  let hoursWorked;
+  switch (mark.status) {
+    case 'present':  hoursWorked = base; break;
+    case 'late':     hoursWorked = Math.max(0, base - (Number(mark.lateMinutes) || 0) / 60); break;
+    case 'half_day': hoursWorked = base / 2; break;
+    case 'absent':
+    case 'on_leave': hoursWorked = 0; break;
+    default:         hoursWorked = base;
+  }
+  return { shiftHours: base, hoursWorked };
+}
 
 const AttendanceSchema = new mongoose.Schema({
   employee:  { type: mongoose.Types.ObjectId, ref: 'Employee', required: true, index: true },
@@ -21,7 +76,7 @@ const AttendanceSchema = new mongoose.Schema({
   // Status
   status: {
     type: String,
-    enum: ['present', 'late', 'half_day', 'absent', 'on_leave'],
+    enum: STATUSES,
     required: true,
     default: 'present',
   },
@@ -42,7 +97,7 @@ const AttendanceSchema = new mongoose.Schema({
   // clockInAt; this keeps the time before it, so the shift's total is
   // priorMinutes + (clockOutAt − clockInAt) and nothing earlier is lost.
   priorMinutes: { type: Number, default: 0, min: 0 },
-  lateMinutes: { type: Number, default: 0 },
+  lateMinutes: { type: Number, default: 0, min: 0 },
   // Minutes worked BEYOND the shift's scheduled hours. Payroll pays these
   // (past an optional grace window) at PayrollSettings.overtimeMultiplier.
   overtimeMinutes: { type: Number, default: 0, min: 0 },
@@ -52,7 +107,7 @@ const AttendanceSchema = new mongoose.Schema({
   hoursWorked: { type: Number, default: 0 },   // actual hours after late deduction
 
   // Leave linkage
-  leaveType:       { type: String, enum: ['casual','sick','emergency','personal','unpaid',''], default: '' },
+  leaveType:       { type: String, enum: LEAVE_TYPES, default: '' },
   leaveRequestId:  { type: mongoose.Types.ObjectId, ref: 'LeaveRequest', default: null },
   isApprovedLeave: { type: Boolean, default: false },
 
@@ -69,29 +124,15 @@ AttendanceSchema.index({ employee: 1, date: 1, shift: 1 }, { unique: true });
 
 // Auto-compute shiftHours and hoursWorked before save
 AttendanceSchema.pre('save', function(next) {
-  const baseHours = 12; // DAY and NIGHT are both 12-hour shifts
-  this.shiftHours = baseHours;
-
-  // A real worked duration (live timer or manual in/out) wins for a
-  // worked shift — pay follows actual hours, capped at the shift length.
-  let workedMin = this.workedMinutes;
-  if ((!workedMin || workedMin <= 0) && this.clockInAt && this.clockOutAt) {
-    workedMin = Math.max(0, (this.clockOutAt - this.clockInAt) / 60000);
-  }
-  if (workedMin > 0 && (this.status === 'present' || this.status === 'late')) {
-    this.hoursWorked = Math.min(workedMin, baseHours * 60) / 60;
-    return next();
-  }
-
-  switch (this.status) {
-    case 'present':   this.hoursWorked = baseHours; break;
-    case 'late':      this.hoursWorked = Math.max(0, baseHours - this.lateMinutes / 60); break;
-    case 'half_day':  this.hoursWorked = baseHours / 2; break;
-    case 'absent':    this.hoursWorked = 0; break;
-    case 'on_leave':  this.hoursWorked = 0; break;
-    default:          this.hoursWorked = baseHours;
-  }
+  const { shiftHours: scheduled, hoursWorked } = hoursFor(this);
+  this.shiftHours  = scheduled;
+  this.hoursWorked = hoursWorked;
   next();
 });
+
+AttendanceSchema.statics.hoursFor       = hoursFor;
+AttendanceSchema.statics.minutesBetween = minutesBetween;
+AttendanceSchema.statics.STATUSES       = STATUSES;
+AttendanceSchema.statics.LEAVE_TYPES    = LEAVE_TYPES;
 
 module.exports = mongoose.model('Attendance', AttendanceSchema);

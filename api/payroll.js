@@ -30,6 +30,8 @@ const { resolveEmployeeId } = require('../utils/resolveEmployee');
 // that reach it via the payroll router keep working.
 const { computePayroll } = require('../services/payrollService');
 const ledger = require('../services/ledgerService');
+const { isMemoLine, moneyLines } = require('../utils/payslipLines');
+const { workingDayKeys, dayKeyOf } = require('../services/attendanceMarks');
 const LedgerEntry = require('../models/LedgerEntry');
 
 router.use(isAuthenticated);
@@ -499,23 +501,29 @@ router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
 
     tableHeader();
     let secTop = y;
+    let anyMemo = false;
     for (const li of p.lineItems || []) {
       if (y + ROW > BOTTOM) {                   // page break: close + repeat header
         vRules(secTop, y);
         doc.addPage(); y = M; tableHeader(); secTop = y;
       }
       const neg = li.amount < 0;
-      doc.font('Helvetica').fontSize(9).fillColor(INK)
+      // A line that explains is printed in brackets and left out of the
+      // totals: it took nothing off (utils/payslipLines.js).
+      const memo = isMemoLine(li);
+      if (memo) anyMemo = true;
+      doc.font('Helvetica').fontSize(9).fillColor(memo ? MUTE : INK)
          .text(clean(li.label), X1 + 8, y + 5.5, { width: C1 - 16, ellipsis: true, lineBreak: false });
-      doc.fillColor(neg ? NEG : INK)
-         .text(rupee(Math.abs(li.amount)), neg ? X3 + 8 : X2 + 8, y + 5.5,
+      doc.fillColor(memo ? MUTE : neg ? NEG : INK)
+         .text(memo ? `(${rupee(Math.abs(li.amount))})` : rupee(Math.abs(li.amount)), neg ? X3 + 8 : X2 + 8, y + 5.5,
                { width: (neg ? C3 : C2) - 16, align: 'right' });
       y += ROW;
       doc.moveTo(M, y).lineTo(RIGHT, y).lineWidth(0.4).strokeColor(HAIR).stroke();
     }
     // Column totals row
-    const totalEarn = (p.lineItems || []).filter(l => l.amount > 0).reduce((s, l) => s + l.amount, 0);
-    const totalDed  = (p.lineItems || []).filter(l => l.amount < 0).reduce((s, l) => s - l.amount, 0);
+    const counted   = moneyLines(p.lineItems);
+    const totalEarn = counted.filter(l => l.amount > 0).reduce((s, l) => s + l.amount, 0);
+    const totalDed  = counted.filter(l => l.amount < 0).reduce((s, l) => s - l.amount, 0);
     if (y + ROW + 4 > BOTTOM) { vRules(secTop, y); doc.addPage(); y = M; tableHeader(); secTop = y; }
     doc.rect(M, y, CW, ROW + 3).fillAndStroke(HEAD, LINE);
     doc.font('Helvetica-Bold').fontSize(9).fillColor(INK);
@@ -524,6 +532,12 @@ router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
     doc.text(rupee(totalDed),  X3 + 8, y + 6, { width: C3 - 16, align: 'right' });
     y += ROW + 3;
     vRules(secTop, y);
+    if (anyMemo) {
+      doc.font('Helvetica').fontSize(7.5).fillColor(MUTE)
+         .text('Figures in brackets explain pay that was not earned. They are already left out of the lines above them and are not taken off again.',
+               M, y + 5, { width: CW });
+      y += 12;
+    }
     y += 20;
 
     // ── Summary table ──────────────────────────────────────────
@@ -1249,13 +1263,15 @@ router.post('/auto-generate', isAdmin('admin', 'accounts'), async (req, res) => 
     const att = await Attendance.find({
       date: { $gte: periodStart, $lt: periodEnd },
       employee: { $in: empIds },
-    }).select('employee date').lean();
+    }).select('employee date status').lean();
 
-    const dayKey      = (d) => new Date(d).toISOString().slice(0, 10);
-    const workingDays = new Set(att.map((r) => dayKey(r.date)));
+    // The same reading of "a working day" as /repeatedly-unmarked: a date
+    // whose only rows are leave is not one (services/attendanceMarks.js).
+    const workingDays = workingDayKeys(att);
+    const marked      = att.filter((r) => workingDays.has(dayKeyOf(r.date))).length;
     const denom       = empIds.length * workingDays.size;
     const completenessPct = denom > 0
-      ? Math.round((att.length / denom) * 100)
+      ? Math.round((marked / denom) * 100)
       : 0;
 
     if (workingDays.size === 0 || completenessPct < 90) {

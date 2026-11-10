@@ -10,7 +10,7 @@
 
 process.env.JWT_SECRET_KEY = process.env.JWT_SECRET_KEY || 'test-secret';
 
-const GUARDED = ['user', 'me', 'employee'];
+const GUARDED = ['user', 'me', 'employee', 'attendence'];
 
 function writeRoutes(router) {
   return router.stack

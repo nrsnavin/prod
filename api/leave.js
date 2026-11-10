@@ -17,8 +17,8 @@ const { sendError } = require('../utils/routeError');
 const mongoose     = require('mongoose');
 const router       = express.Router();
 const LeaveRequest = require('../models/LeaveRequest');
-const Attendance   = require('../models/Attendence.js');
 const ShiftDetail  = require('../models/ShiftDetail');
+const { markLeaveApproved } = require('../services/attendanceMarks');
 const Employee     = require('../models/Employee');
 const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
 const { resolveEmployeeId } = require('../utils/resolveEmployee');
@@ -168,24 +168,21 @@ router.post('/admin-request', isAuthenticated, isAdmin('admin', 'accounts'), asy
       doc.reviewNotes = 'Created & approved by admin';
     }
 
-    const leave = await LeaveRequest.create(doc);
-
-    // On auto-approve, update any existing Attendance rows to on_leave —
-    // same semantics as PUT /:id/approve (upsert:false).
+    // Approved on the spot: the request and the attendance it marks are
+    // written together, or neither is (as PUT /:id/approve does).
+    let leave;
     if (autoApprove) {
-      const shiftsToUpdate = leave.shift === 'BOTH' ? ['DAY','NIGHT'] : [leave.shift];
-      for (const s of shiftsToUpdate) {
-        await Attendance.findOneAndUpdate(
-          { employee: leave.employee, date: dateObj, shift: s },
-          { $set: {
-            status:          'on_leave',
-            leaveType:       leave.leaveType,
-            leaveRequestId:  leave._id,
-            isApprovedLeave: true,
-          }},
-          { upsert: false }
-        );
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(async () => {
+          [leave] = await LeaveRequest.create([doc], { session });
+          await markLeaveApproved(leave, { session });
+        });
+      } finally {
+        await session.endSession();
       }
+    } else {
+      leave = await LeaveRequest.create(doc);
     }
 
     return res.status(201).json({
@@ -286,21 +283,9 @@ router.put('/:id/approve', isAuthenticated, isAdmin('admin', 'accounts'), async 
         leave = await decidePending(req.params.id, 'approved', req.user?._id, reviewNotes, session);
         if (!leave) return;
 
-        // Auto-update linked Attendance record if it exists
-        const dateObj = factoryDay.calendarDay(leave.date);
-        const shiftsToUpdate = leave.shift === 'BOTH' ? ['DAY','NIGHT'] : [leave.shift];
-        for (const s of shiftsToUpdate) {
-          await Attendance.findOneAndUpdate(
-            { employee: leave.employee._id, date: dateObj, shift: s },
-            { $set: {
-              status:          'on_leave',
-              leaveType:       leave.leaveType,
-              leaveRequestId:  leave._id,
-              isApprovedLeave: true,
-            }},
-            { upsert: false, session }
-          );
-        }
+        // The shifts it covers are marked as this leave — whether or not
+        // the day has been marked yet (services/attendanceMarks.js).
+        await markLeaveApproved(leave, { session });
       });
     } finally {
       await session.endSession();

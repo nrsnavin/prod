@@ -19,6 +19,7 @@ const ShiftDetail = require("../models/ShiftDetail");
 const ShiftPlan   = require("../models/ShiftPlan");
 const JobOrder    = require("../models/JobOrder");
 const Attendance  = require("../models/Attendence.js");
+const { BY_LEAVE_APPROVAL, WORKED_AFTER_ALL } = require("../services/attendanceMarks");
 const { ACTION_CODES } = require("../utils/fingerprint");
 const { requireReason } = require("../utils/auditReason");
 const { assertShiftProductionOpen } = require("../utils/productionLock");
@@ -646,6 +647,14 @@ async function verifyShiftProduction({ shiftId, productionMeters, timer, feedbac
             markedBy: 'auto_shift_verify',
           });
           await att.save({ session });
+          attendanceAutoMarked = true;
+        } else if (existing.status === 'on_leave' && existing.markedBy === BY_LEAVE_APPROVAL) {
+          // Leave approved ahead of the day put this row here, and nobody
+          // has marked the shift since. Production verified for this
+          // operator says they worked it: it is still a gap to fill, not
+          // a manual mark to respect.
+          existing.set({ status: 'present', ...WORKED_AFTER_ALL, markedBy: 'auto_shift_verify' });
+          await existing.save({ session });
           attendanceAutoMarked = true;
         }
       }

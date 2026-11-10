@@ -100,12 +100,21 @@ async function getWhatsAppBotToken() {
     // Random password — the account is never used for interactive
     // login. JWT auth alone is sufficient.
     const rand = crypto.randomBytes(24).toString("hex");
-    bot = await User.create({
-      name:     BOT_NAME,
-      email:    BOT_EMAIL,
-      password: rand,
-      role:     "admin",
-    });
+    try {
+      bot = await User.create({
+        name:     BOT_NAME,
+        email:    BOT_EMAIL,
+        password: rand,
+        role:     "admin",
+      });
+    } catch (err) {
+      // Two server processes handling their first approval at the same
+      // moment both find no bot; the email is unique, so one of them
+      // loses here and uses the account the other just made.
+      if (err?.code !== 11000) throw err;
+      bot = await User.findOne({ email: BOT_EMAIL });
+      if (!bot) throw err;
+    }
   }
   // An ordinary 24-hour session (utils/session.js), so it carries the
   // account's session generation like every other token: ending the
@@ -116,11 +125,22 @@ async function getWhatsAppBotToken() {
   return _cachedBotToken;
 }
 
+/**
+ * Forget the cached token. It is kept for a day in each process, and can
+ * stop being good before that: the bot's sessions ended from the Users
+ * screen, its password changed. The caller that was refused asks again.
+ */
+function resetWhatsAppBotToken() {
+  _cachedBotToken = null;
+  _cachedBotTokenExpiresAt = 0;
+}
+
 module.exports = {
   verifyTwilioSignature,
   parseCommand,
   twimlReply,
   getWhatsAppBotToken,
+  resetWhatsAppBotToken,
   BOT_EMAIL,
   BOT_NAME,
 };

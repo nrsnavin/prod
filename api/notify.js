@@ -21,7 +21,7 @@ const { isConfigured, PROVIDER } = require("../utils/whatsapp.js");
 const { buildDigestData, formatDigest } = require("../utils/digest.js");
 const Notification = require("../models/Notification.js");
 const {
-  verifyTwilioSignature, parseCommand, twimlReply, getWhatsAppBotToken,
+  verifyTwilioSignature, parseCommand, twimlReply, getWhatsAppBotToken, resetWhatsAppBotToken,
 } = require("../utils/whatsappInbound.js");
 const NotifSettings = NotificationSettings;
 const axios         = require("axios");
@@ -418,12 +418,20 @@ async function handleIncoming(req) {
       // the request body for the route to optionally surface.
       whatsappActor: { from: senderE164 },
     };
-    const res = await axios.post(internalUrl, payload, {
-      headers: { Cookie: `token=${botToken}` },
+    const call = (token) => axios.post(internalUrl, payload, {
+      headers: { Cookie: `token=${token}` },
       timeout: 30_000,
       // Don't throw on 4xx — we want to read the body and surface it.
       validateStatus: () => true,
     });
+    let res = await call(botToken);
+    if (res.status === 401) {
+      // The token this process kept is no longer good (the bot's
+      // sessions were ended, or the signing key changed under a
+      // long-running process). One fresh one, once.
+      resetWhatsAppBotToken();
+      res = await call(await getWhatsAppBotToken());
+    }
     if (res.status === 200 && res.data?.success) {
       return {
         status: 200,

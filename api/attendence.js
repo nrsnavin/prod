@@ -15,16 +15,18 @@
 const factoryDay = require('../utils/factoryDay');
 const express    = require('express');
 const { sendError } = require('../utils/routeError');
+const ErrorHandler = require('../utils/ErrorHandler');
 const mongoose   = require('mongoose');
 const router     = express.Router();
 const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
 const { employedFrom } = require('../utils/employeeStatus');
-const ShiftDetail= require('../models/ShiftDetail');
 const { isAuthenticated, isAdmin, selfOrAdmin } = require('../middleware/auth');
+const { validate } = require('../middleware/validate');
 const { maybeFireAttendanceCrashed } = require('../utils/attendanceAlerts');
-const { saveIf } = require('../utils/conditionalSave');
+const { saveIf, changedMeanwhile } = require('../utils/conditionalSave');
 const attendanceForecast = require('../services/attendanceForecast');
+const marks = require('../services/attendanceMarks');
 
 router.use(isAuthenticated);
 
@@ -46,55 +48,32 @@ router.use(require('../middleware/ownRecords').ownRecordsOr({
 function toISODate(d) {
   return new Date(d).toISOString().split('T')[0];
 }
+// Read in UTC, like toISODate above: these are calendar dates kept at
+// UTC midnight, and the server's own zone has no say in what day that is.
 function toDateLabel(d) {
   return new Date(d).toLocaleDateString('en-IN',
-    { day: '2-digit', month: 'short', year: 'numeric' });
+    { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
 }
 function toDayOfWeek(d) {
-  return new Date(d).toLocaleDateString('en-IN', { weekday: 'short' });
+  return new Date(d).toLocaleDateString('en-IN', { weekday: 'short', timeZone: 'UTC' });
 }
-function parseDateParam(s, h, m, sec, ms) {
-  const d = new Date(s);
-  if (isNaN(d.getTime())) throw new Error(`Invalid date: "${s}"`);
-  d.setHours(h, m, sec, ms);
+// A shift's date is a calendar date, kept at that day's UTC midnight —
+// the key every other reader of this collection uses (utils/factoryDay).
+// These used to be cut with setHours(), which is the server's own zone:
+// right only while the server keeps UTC, and "today" was the server's
+// day, which is yesterday in the factory until 05:30.
+function startOfDay(s) {
+  const d = factoryDay.calendarDay(s);
+  if (!d) throw new ErrorHandler('date is not a valid date.', 400);
   return d;
 }
-function startOfDay(s)  { return parseDateParam(s,  0,  0,  0,   0); }
-function endOfDay(s)    { return parseDateParam(s, 23, 59, 59, 999); }
-
-// Minutes worked from manual "HH:mm" in/out times. Night shifts wrap past
-// midnight (out ≤ in ⇒ +24h). Returns null when either time is missing/bad.
-function minutesFromTimes(checkIn, checkOut) {
-  if (!checkIn || !checkOut) return null;
-  const toMin = (t) => {
-    const [h, m] = String(t).split(':').map(Number);
-    return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : NaN;
-  };
-  let inM = toMin(checkIn), outM = toMin(checkOut);
-  if (!Number.isFinite(inM) || !Number.isFinite(outM)) return null;
-  if (outM <= inM) outM += 24 * 60;
-  return outM - inM;
+function endOfDay(s) {
+  const d = factoryDay.calendarDayEnd(s);
+  if (!d) throw new ErrorHandler('date is not a valid date.', 400);
+  return d;
 }
-
-function computeHours(shiftType, status, lateMinutes, workedMinutes) {
-  const baseHours = 12; // DAY and NIGHT are both 12-hour shifts
-  let hoursWorked;
-  // A recorded worked duration (manual in/out or live timer) wins for a
-  // worked shift — hours follow actual time, capped at the shift length.
-  if (workedMinutes > 0 && (status === 'present' || status === 'late')) {
-    hoursWorked = Math.min(workedMinutes, baseHours * 60) / 60;
-    return { shiftHours: baseHours, hoursWorked };
-  }
-  switch (status) {
-    case 'present':  hoursWorked = baseHours; break;
-    case 'late':     hoursWorked = Math.max(0, baseHours - (lateMinutes || 0) / 60); break;
-    case 'half_day': hoursWorked = baseHours / 2; break;
-    case 'absent':
-    case 'on_leave': hoursWorked = 0; break;
-    default:         hoursWorked = baseHours;
-  }
-  return { shiftHours: baseHours, hoursWorked };
-}
+/** The day asked for, or the factory's today. */
+const dayOrToday = (s) => (s == null || s === '' ? factoryDay.calendarDay() : startOfDay(s));
 
 function fmtRecord(a) {
   return {
@@ -125,82 +104,87 @@ function fmtRecord(a) {
   };
 }
 
-router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
+// POST /mark { date, shift, records: [{ employeeId, status, … }] }
+//
+// What each row becomes is services/attendanceMarks.js: only the fields
+// a row carries are changed, and a row sent back as it already stands is
+// not touched. The stored rows are read inside the transaction that
+// writes them, so a clock-out landing meanwhile is retried against, not
+// written over.
+router.post('/mark', isAdmin('admin', 'accounts'), validate({ body: marks.MARK_DAY }), async (req, res) => {
   try {
-    const { date, shift, records = [] } = req.body;
+    const { date, shift, records } = req.body;
     // Who marked it is whoever is signed in — it used to be read from
     // the request ("admin" unless the caller said otherwise).
     const markedBy = req.user?.name || 'admin';
 
-    if (!date || !shift)
+    if (date == null || date === '' || !shift)
       return res.status(400).json({ success: false, message: 'date and shift required.' });
-    if (!['DAY','NIGHT'].includes(shift.toUpperCase()))
-      return res.status(400).json({ success: false, message: 'shift must be DAY or NIGHT.' });
     if (!Array.isArray(records) || records.length === 0)
       return res.status(400).json({ success: false, message: 'records array must not be empty.' });
-    if (records.length > 1000)
-      return res.status(400).json({ success: false, message: 'records exceeds the 1000-item limit per request.' });
 
-    const dateObj  = startOfDay(date);
-    const shiftUp  = shift.toUpperCase();
+    const dateObj = startOfDay(date);
+    const ids = records.map((r) => r.employeeId.toLowerCase());
+    const twice = ids.find((id, i) => ids.indexOf(id) !== i);
+    if (twice)
+      return res.status(400).json({ success: false, message: 'The same employee is in records more than once.' });
 
-    const ops = records.map(r => {
-      const status     = r.status || 'present';
-      const lateMinutes = r.lateMinutes || 0;
-      const overtimeMinutes = Math.max(0, Number(r.overtimeMinutes) || 0);
-      // Actual worked minutes from manual in/out times (or an explicit
-      // workedMinutes value) — feeds actual-hours pay.
-      const workedMinutes = Math.max(0,
-        Number(r.workedMinutes) || minutesFromTimes(r.checkIn, r.checkOut) || 0);
-      const { shiftHours, hoursWorked } = computeHours(shiftUp, status, lateMinutes, workedMinutes);
-
-      return {
-        updateOne: {
-          filter: { employee: r.employeeId, date: dateObj, shift: shiftUp },
-          update: {
-            $set: {
-              status,
-              checkIn:     r.checkIn   || '',
-              checkOut:    r.checkOut  || '',
-              workedMinutes,
-              lateMinutes,
-              overtimeMinutes,
-              leaveType:   r.leaveType || '',
-              notes:       r.notes     || '',
-              markedBy,
-              shiftHours,
-              hoursWorked,
-            },
-          },
-          upsert: true,
-        },
-      };
-    });
-
-    // Atomic upsert: every row lands or none does. ordered:false
-    // lets Mongo continue past benign per-row failures (duplicate
-    // key etc.) so a single bad record doesn't poison the whole
-    // batch — but everything still rolls back if the transaction
-    // itself aborts.
     const session = await mongoose.startSession();
-    let result;
+    let result = { upsertedCount: 0, modifiedCount: 0 };
+    let unknown = null;
     try {
       await session.withTransaction(async () => {
-        result = await Attendance.bulkWrite(ops, { session, ordered: false });
+        result = { upsertedCount: 0, modifiedCount: 0 };
+        unknown = null;
+        // One after the other: a transaction does not take two
+        // operations at once (tests/architecture/noParallelSessionOps).
+        const stored = await Attendance.find({ employee: { $in: ids }, date: dateObj, shift }).session(session).lean();
+        const leaves = await marks.approvedLeaveByEmployee({ employeeIds: ids, date: dateObj, shift, session });
+        const byEmployee = new Map(stored.map((a) => [String(a.employee), a]));
+
+        // A row for somebody who is not an employee was stored as sent.
+        const fresh = ids.filter((id) => !byEmployee.has(id));
+        if (fresh.length) {
+          const known = new Set((await Employee.find({ _id: { $in: fresh } }).select('_id').session(session).lean())
+            .map((e) => String(e._id)));
+          unknown = fresh.find((id) => !known.has(id)) || null;
+          if (unknown) return;
+        }
+
+        const ops = [];
+        records.forEach((r, i) => {
+          const cur = byEmployee.get(ids[i]) || null;
+          const set = marks.nextMark(cur, r, { shift, leave: leaves.get(ids[i]) || null, markedBy });
+          if (!set) return;
+          ops.push({
+            updateOne: cur
+              ? { filter: { _id: cur._id }, update: { $set: set } }
+              : { filter: { employee: ids[i], date: dateObj, shift }, update: { $set: set }, upsert: true },
+          });
+        });
+        if (ops.length) result = await Attendance.bulkWrite(ops, { session, ordered: false });
       });
     } finally {
       await session.endSession();
     }
+    if (unknown) {
+      return res.status(400).json({
+        success: false,
+        message: `records.${ids.indexOf(unknown)}.employeeId: no such employee.`,
+      });
+    }
 
+    const written = (result.upsertedCount || 0) + (result.modifiedCount || 0);
     res.json({
       success:  true,
       message:  `Marked ${records.length} attendance record(s).`,
-      upserted: result.upsertedCount,
-      modified: result.modifiedCount,
+      upserted: result.upsertedCount || 0,
+      modified: result.modifiedCount || 0,
+      unchanged: records.length - written,
     });
 
     // Fire-and-forget — never blocks the marking response.
-    maybeFireAttendanceCrashed({ date: dateObj, shift: shiftUp });
+    maybeFireAttendanceCrashed({ date: dateObj, shift });
     return;
 
   } catch (err) {
@@ -216,22 +200,17 @@ router.post('/mark', isAdmin('admin', 'accounts'), async (req, res) => {
 // (capped at the 12h shift) with the remainder becoming overtime.
 // ─────────────────────────────────────────────────────────────
 function requireEmpAndShift(req, res) {
+  // Checked and upper-cased by the schema (marks.CLOCK) before this runs.
   const { employeeId, shift } = req.body;
   if (!employeeId || !shift) {
     res.status(400).json({ success: false, message: 'employeeId and shift required.' });
     return null;
   }
-  const shiftUp = String(shift).toUpperCase();
-  if (!['DAY', 'NIGHT'].includes(shiftUp)) {
-    res.status(400).json({ success: false, message: 'shift must be DAY or NIGHT.' });
-    return null;
-  }
-  const dateObj = startOfDay(req.body.date || new Date());
-  return { employeeId, shiftUp, dateObj };
+  return { employeeId, shiftUp: shift, dateObj: dayOrToday(req.body.date) };
 }
 
 // POST /clock-in { employeeId, shift, date? } → stamps clockInAt = now.
-router.post('/clock-in', isAdmin('admin', 'accounts'), async (req, res) => {
+router.post('/clock-in', isAdmin('admin', 'accounts'), validate({ body: marks.CLOCK }), async (req, res) => {
   try {
     const ctx = requireEmpAndShift(req, res);
     if (!ctx) return;
@@ -264,8 +243,12 @@ router.post('/clock-in', isAdmin('admin', 'accounts'), async (req, res) => {
               employee: employeeId, date: dateObj, shift: shiftUp,
               $or: [{ clockInAt: null }, { clockOutAt: { $ne: null } }],
             },
+        // They came in: a row put there by leave approved ahead of the
+        // day stops being leave, or payroll would pay the leave over the
+        // hours on the clock (and nothing at all, for unpaid leave).
         { $set: {
             status: 'present',
+            ...marks.WORKED_AFTER_ALL,
             clockInAt: new Date(),
             clockOutAt: null,
             workedMinutes: carried,
@@ -289,7 +272,7 @@ router.post('/clock-in', isAdmin('admin', 'accounts'), async (req, res) => {
 });
 
 // POST /clock-out { employeeId, shift, date? } → stamps clockOutAt + workedMinutes.
-router.post('/clock-out', isAdmin('admin', 'accounts'), async (req, res) => {
+router.post('/clock-out', isAdmin('admin', 'accounts'), validate({ body: marks.CLOCK }), async (req, res) => {
   try {
     const ctx = requireEmpAndShift(req, res);
     if (!ctx) return;
@@ -327,7 +310,7 @@ router.post('/clock-out', isAdmin('admin', 'accounts'), async (req, res) => {
 // GET /active?date=YYYY-MM-DD → shifts currently clocked in (running timers).
 router.get('/active', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const dateObj = startOfDay(req.query.date || new Date());
+    const dateObj = dayOrToday(req.query.date);
     const rows = await Attendance.find({
       date: dateObj, clockInAt: { $ne: null }, clockOutAt: null,
     }).populate('employee', 'name department skill role').lean();
@@ -338,35 +321,42 @@ router.get('/active', isAdmin('admin', 'accounts'), async (req, res) => {
   }
 });
 
-router.put('/:id', isAdmin('admin', 'accounts'), async (req, res) => {
+// PUT /:id { status?, checkIn?, checkOut?, workedMinutes?, lateMinutes?,
+//            overtimeMinutes?, leaveType?, notes? }
+//
+// The same rules as a row of /mark. This used to $set whatever arrived,
+// unchecked, and left the hours as they were: a shift changed from
+// present to absent still read 12 hours worked.
+router.put('/:id', isAdmin('admin', 'accounts'), validate({ body: marks.EDIT_MARK }), async (req, res) => {
   try {
     const { id } = req.params;
-    const allowed = ['status','checkIn','checkOut','workedMinutes','lateMinutes','overtimeMinutes','leaveType','notes'];
-    const update  = {};
-    for (const k of allowed) {
-      if (req.body[k] !== undefined) update[k] = req.body[k];
-    }
-    // The last person to correct it, from the session — not the request.
-    if (Object.keys(update).length) update.markedBy = req.user?.name || 'admin';
-
-    // If in/out times are edited without an explicit workedMinutes, recompute
-    // the worked duration so pay stays in step with the corrected times.
-    if (update.workedMinutes === undefined && (update.checkIn !== undefined || update.checkOut !== undefined)) {
-      const existing = await Attendance.findById(id).select('checkIn checkOut').lean();
-      const ci = update.checkIn ?? existing?.checkIn;
-      const co = update.checkOut ?? existing?.checkOut;
-      const mins = minutesFromTimes(ci, co);
-      if (mins != null) update.workedMinutes = mins;
-    }
-
-    const doc = await Attendance.findByIdAndUpdate(id,
-      { $set: update }, { new: true })
-      .populate('employee', 'name department skill role');
-
-    if (!doc)
+    if (!mongoose.Types.ObjectId.isValid(id))
       return res.status(404).json({ success: false, message: 'Record not found.' });
+    const markedBy = req.user?.name || 'admin'; // the last to correct it, from the session
 
-    return res.json({ success: true, data: fmtRecord(doc) });
+    // Read, work out what changes, save only if the row is still as it
+    // was read. A clock-out between the two would otherwise have its
+    // minutes put back; one more go covers that happening once.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const doc = await Attendance.findById(id);
+      if (!doc)
+        return res.status(404).json({ success: false, message: 'Record not found.' });
+
+      const cur = doc.toObject();
+      const leaves = await marks.approvedLeaveByEmployee({
+        employeeIds: [doc.employee], date: doc.date, shift: doc.shift,
+      });
+      const set = marks.nextMark(cur, req.body, {
+        shift: doc.shift, leave: leaves.get(String(doc.employee)) || null, markedBy,
+      });
+      if (set) {
+        doc.set(set);
+        if (!(await saveIf(doc, { updatedAt: cur.updatedAt ?? null }))) continue;
+      }
+      await doc.populate('employee', 'name department skill role');
+      return res.json({ success: true, data: fmtRecord(doc) });
+    }
+    throw changedMeanwhile('This attendance record', 'changed');
 
   } catch (err) {
     console.error('[PUT /:id]', err);
@@ -381,7 +371,7 @@ router.get('/date', isAdmin('admin', 'accounts'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'date required.' });
 
     const filter = { date: { $gte: startOfDay(date), $lte: endOfDay(date) } };
-    if (shift !== 'all') filter.shift = shift.toUpperCase();
+    if (shift !== 'all') filter.shift = String(shift).toUpperCase();
 
     const records = await Attendance.find(filter)
       .populate('employee', 'name department skill role')
@@ -429,7 +419,7 @@ router.get('/employee/:empId', selfOrAdmin, async (req, res) => {
       employee: empId,
       date: { $gte: startOfDay(startDate), $lte: endOfDay(endDate) },
     };
-    if (shift !== 'all') filter.shift = shift.toUpperCase();
+    if (shift !== 'all') filter.shift = String(shift).toUpperCase();
 
     const [records, employee] = await Promise.all([
       Attendance.find(filter).sort({ date: 1, shift: 1 }).lean(),
@@ -489,7 +479,7 @@ router.get('/summary', isAdmin('admin', 'accounts'), async (req, res) => {
       return res.status(400).json({ success: false, message: 'startDate and endDate required.' });
 
     const filter = { date: { $gte: startOfDay(startDate), $lte: endOfDay(endDate) } };
-    if (shift !== 'all') filter.shift = shift.toUpperCase();
+    if (shift !== 'all') filter.shift = String(shift).toUpperCase();
 
     const records = await Attendance.find(filter)
       .populate('employee', 'name department skill role')
@@ -547,11 +537,16 @@ router.get('/summary', isAdmin('admin', 'accounts'), async (req, res) => {
 router.get('/monthly/:empId', selfOrAdmin, async (req, res) => {
   try {
     const { empId } = req.params;
-    const year  = parseInt(req.query.year,  10) || new Date().getFullYear();
-    const month = parseInt(req.query.month, 10) || new Date().getMonth() + 1;
+    // With nothing asked for: the factory's month, not the server's.
+    const [thisYear, thisMonth] = factoryDay.ymd().split('-').map(Number);
+    const year  = parseInt(req.query.year,  10) || thisYear;
+    const month = parseInt(req.query.month, 10) || thisMonth;
+    if (month < 1 || month > 12 || year < 2000 || year > 2100)
+      return res.status(400).json({ success:false, message:'year and month are not a valid month.' });
 
-    const start = new Date(year, month-1, 1);
-    const end   = new Date(year, month,   0, 23, 59, 59, 999);
+    // The month as calendar dates (UTC midnights), whatever the server's zone.
+    const start = new Date(Date.UTC(year, month-1, 1));
+    const end   = new Date(Date.UTC(year, month,   0, 23, 59, 59, 999));
 
     const [records, employee] = await Promise.all([
       Attendance.find({ employee:empId, date:{ $gte:start, $lte:end } })
@@ -563,12 +558,12 @@ router.get('/monthly/:empId', selfOrAdmin, async (req, res) => {
       return res.status(404).json({ success:false, message:'Employee not found.' });
 
     const dayMap = {};
-    const daysInMonth = new Date(year, month, 0).getDate();
+    const daysInMonth = end.getUTCDate();
     for (let d = 1; d <= daysInMonth; d++) {
       const key = `${year}-${String(month).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
       dayMap[key] = {
         date: key, day: d,
-        dayOfWeek: new Date(year, month-1, d).toLocaleDateString('en-IN',{weekday:'short'}),
+        dayOfWeek: toDayOfWeek(Date.UTC(year, month-1, d)),
         dayShift: null, nightShift: null, summary: 'untracked',
       };
     }
@@ -683,14 +678,16 @@ router.get('/repeatedly-unmarked', isAdmin('admin', 'accounts'), async (req, res
 
     // 1. Pull every attendance row in the window, only the fields we
     // need. One round-trip; the dataset for a single week is tiny.
-    const Employee = require('../models/Employee');
-    const rows = await Attendance.find({ date: { $gte: since } })
-      .select('employee date')
+    // Up to today: leave approved ahead of its day puts a row on a date
+    // that has not happened yet.
+    const rows = await Attendance.find({ date: { $gte: since, $lte: factoryDay.calendarDayEnd() } })
+      .select('employee date status')
       .lean();
 
-    // 2. Working-day set: distinct dates that had any attendance row.
-    const dayKey = (d) => new Date(d).toISOString().slice(0, 10);
-    const workingDays = new Set(rows.map((r) => dayKey(r.date)));
+    // 2. Working-day set: the dates somebody was marked on, other than
+    // as on leave (services/attendanceMarks.js).
+    const dayKey = marks.dayKeyOf;
+    const workingDays = marks.workingDayKeys(rows);
     if (workingDays.size === 0) {
       return res.json({
         success: true, windowDays: days, threshold,

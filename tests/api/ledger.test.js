@@ -63,7 +63,11 @@ describe('ledger postings', () => {
     // dated on the worked day, parsed out of the line-item label
     expect(new Date(shift.date).getDate()).toBe(2);
 
-    expect(rows.some(r => r.kind === 'absence' && r.amount < 0)).toBe(true);
+    // The absence is on the slip to explain the month, not in the ledger:
+    // that shift was never credited, so there is nothing to take off.
+    expect(slip.lineItems.some(l => /^Absent — pay lost/.test(l.label) && l.memo === true)).toBe(true);
+    expect(rows.some(r => r.kind === 'absence')).toBe(false);
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBe(slip.netPay);
     // re-finalize is blocked, so no chance of duplicates; but re-posting the
     // same source must be idempotent anyway
     const before = rows.length;
@@ -74,6 +78,46 @@ describe('ledger postings', () => {
     });
     await session.endSession();
     expect(await LedgerEntry.countDocuments({ employee: emp._id, kind: { $ne: 'payment' } })).toBe(before);
+  });
+
+  test('a month with an absence and a late shift, paid in full, leaves nothing owed either way', async () => {
+    // Every payslip line used to be posted, including the two that only
+    // explain: "Absent — pay lost" for a shift that was never credited,
+    // and "Late deduction" beside a shift line that is already less.
+    // Paid in full, the ledger then said the worker owed that money.
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await att(emp._id, 3, { status: 'absent' });
+    await att(emp._id, 4, { status: 'late', lateMinutes: 40 }); // 30 min past the grace: ₹50
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id });
+    expect(slip.netPay).toBe(2350);                 // 1200 + 1150, nothing for the absence
+    expect(slip.lineItems.filter(l => l.memo).map(l => l.amount)).toEqual([-1200, -50]);
+
+    const pay = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({});
+    expect(pay.status).toBe(200);
+    expect(pay.body.data.status).toBe('paid');
+
+    const res = await request(app)
+      .get(`/api/v2/payroll/ledger/${emp._id}?from=${YEAR}-01-01&to=${YEAR + 1}-12-31`)
+      .set('Cookie', adminCookie());
+    expect(res.body.totals.earnings).toBe(2350);
+    expect(res.body.totals.penalties).toBe(0);
+    expect(res.body.totals.payments).toBe(-2350);
+    expect(res.body.closingBalance).toBe(0);
+  });
+
+  test('the printed payslip still carries the explaining lines', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await att(emp._id, 3, { status: 'absent' });
+    await gen();
+    const res = await request(app)
+      .get(`/api/v2/payroll/slip/${emp._id}/pdf?year=${YEAR}&month=${MONTH}`)
+      .set('Cookie', adminCookie());
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/application\/pdf/);
+    expect(Number(res.headers['content-length'] || res.body.length)).toBeGreaterThan(1000);
   });
 
   test('an approved advance is booked as owed, and paying posts a payment row', async () => {

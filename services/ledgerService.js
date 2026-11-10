@@ -11,6 +11,7 @@
 // re-generating replaces that document's rows rather than duplicating them.
 
 const LedgerEntry = require('../models/LedgerEntry');
+const { moneyLines } = require('../utils/payslipLines');
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -60,7 +61,10 @@ async function postPayroll(p, session, { postedBy = '' } = {}) {
   );
 
   const monthEnd = new Date(p.year, p.month, 0);
-  const rows = (p.lineItems || [])
+  // Money only. A line that explains (an absence that was never
+  // credited, a late cut the shift line already carries) took nothing
+  // off, so posting it took it off twice.
+  const rows = moneyLines(p.lineItems)
     .filter((li) => Number(li.amount) !== 0)
     .filter((li) => !String(li.label || '').startsWith(PAYMENT_RECOVERY_PREFIX))
     .map((li) => ({

@@ -14,6 +14,10 @@ const LineItemSchema = new mongoose.Schema({
   label:  { type: String, required: true },
   amount: { type: Number, required: true },  // + = earning/bonus, − = deduction
   type:   { type: String, enum: ['earning', 'deduction', 'bonus'], default: 'earning' },
+  // An explanation, not money: pay lost to an absence that was never
+  // credited, a late cut the shift line already carries. Shown on the
+  // slip, left out of its totals and of the ledger (utils/payslipLines.js).
+  memo:   { type: Boolean },
 }, { _id: false });
 
 const PayrollSchema = new mongoose.Schema(

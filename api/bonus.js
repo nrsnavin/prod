@@ -126,7 +126,7 @@ async function computeEmployeeBonus(emp, cfg, win) {
   // score 100% and take a full-tier bonus.
   const marks = await Attendance.find({
     employee: emp._id, date: { $gte: win.start, $lte: win.end },
-  }).select("date status isApprovedLeave").lean();
+  }).select("date shift status isApprovedLeave leaveType").lean();
 
   const dayKey = (d) => { const x = new Date(d); return `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`; };
   let attendanceDays, attendanceSource;
@@ -153,9 +153,12 @@ async function computeEmployeeBonus(emp, cfg, win) {
   // beside it kept counting scheduled shifts, so the very employee that
   // fix was written for still got a full-year earnings base whenever no
   // payroll existed for the window. Same evidence, same source.
+  // Leave approved as unpaid earned nothing (services/payrollService.js),
+  // so it adds nothing to an estimate of what was earned.
   const attendedShifts = marks.length > 0
     ? marks.filter((m) =>
-        ['present', 'late', 'half_day'].includes(m.status) || m.isApprovedLeave === true)
+        ['present', 'late', 'half_day'].includes(m.status)
+        || (m.isApprovedLeave === true && m.leaveType !== 'unpaid'))
     : shifts;                       // legacy windows with no register at all
   const hoursWorked = attendedShifts.reduce(
     (sum, s) => sum + shiftHours(s.shift), 0

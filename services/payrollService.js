@@ -56,18 +56,8 @@ function resolveWorkedMinutes(rec) {
     if (mins > 0) return mins;
   }
   if (Number.isFinite(rec.workedMinutes) && rec.workedMinutes > 0) return rec.workedMinutes;
-  if (rec.checkIn && rec.checkOut) {
-    const toMin = (t) => {
-      const [h, m] = String(t).split(':').map(Number);
-      return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : NaN;
-    };
-    let inM = toMin(rec.checkIn), outM = toMin(rec.checkOut);
-    if (Number.isFinite(inM) && Number.isFinite(outM)) {
-      if (outM <= inM) outM += 24 * 60; // crossed midnight (night shift)
-      return outM - inM;
-    }
-  }
-  return null;
+  // The same reading of "HH:mm" the attendance routes use (models/Attendence.js).
+  return Attendance.minutesBetween(rec.checkIn, rec.checkOut);
 }
 
 async function computePayroll(empId, year, month) {
@@ -124,6 +114,17 @@ async function computePayroll(empId, year, month) {
 
     if (rec.isApprovedLeave === true) {
       approvedLeaveShifts++;
+      // Leave approved as unpaid is what it says: nothing is paid for the
+      // shift, and nothing is charged for it either — it is not an
+      // absence. It used to be paid in full, like any approved leave.
+      if (rec.leaveType === 'unpaid') {
+        lineItems.push({
+          label:  `Approved leave — unpaid (${rec.shift} ${dateStr})`,
+          amount: 0,
+          type:   'earning',
+        });
+        continue;
+      }
       const pay = fullPay;
       if (rec.shift === 'DAY')   { dayShiftsWorked++;   dayShiftEarnings   += pay; }
       if (rec.shift === 'NIGHT') { nightShiftsWorked++; nightShiftEarnings += pay; }
@@ -141,6 +142,7 @@ async function computePayroll(empId, year, month) {
         label:  `Absent — pay lost (${rec.shift} ${dateStr})`,
         amount: -fullPay,
         type:   'deduction',
+        memo:   true, // the shift was never credited, so this takes nothing off
       });
       continue;
     }
@@ -192,6 +194,7 @@ async function computePayroll(empId, year, month) {
           label:  `Late deduction ${billableMins}m (${rec.shift} ${dateStr})`,
           amount: -ded,
           type:   'deduction',
+          memo:   true, // the shift line below is already this much less
         });
       }
       otSourceMinutes = rec.overtimeMinutes ?? 0;
@@ -268,6 +271,7 @@ async function computePayroll(empId, year, month) {
       label:  `Absent — no attendance for scheduled ${sd.shift} (${ymd(sd.date)})`,
       amount: -fullPay,
       type:   'deduction',
+      memo:   true,
     });
   }
 
