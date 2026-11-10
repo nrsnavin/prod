@@ -45,6 +45,12 @@ exports.isCustomerAuthenticated = catchAsyncErrors(async (req, _res, next) => {
   if (!user || user.status !== "active") {
     return next(new ErrorHandler("Portal account not active — contact support", 401));
   }
+  // Opened before the password was changed: a token is good for a week,
+  // and a new password is given because the old one got out. (A token
+  // from before tokens carried this counts as the first version.)
+  if ((decoded.v ?? 0) !== (user.tokenVersion ?? 0)) {
+    return next(new ErrorHandler("Portal session has ended — please log in again", 401));
+  }
 
   req.customerUser = user;
   req.customerId   = user.customer;

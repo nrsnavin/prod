@@ -61,6 +61,9 @@ const CustomerUserSchema = new mongoose.Schema(
       sms:   { type: Boolean, default: false },
     },
     lastLoginAt: { type: Date },
+    // Counted up when the password is changed or the login is switched
+    // off: a session opened before then is refused (middleware/portalAuth.js).
+    tokenVersion: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
@@ -82,6 +85,7 @@ CustomerUserSchema.methods.getJwtToken = function () {
       customer: this.customer,
       name:     this.name,
       email:    this.email,
+      v:        this.tokenVersion ?? 0,
     },
     process.env.PORTAL_JWT_SECRET_KEY || process.env.JWT_SECRET_KEY,
     {

@@ -458,10 +458,31 @@ function stampRegistration(inv, reg, provider, req) {
   }));
 }
 
+// ── One step at a time with the tax portal ─────────────────────
+// Registering an IRN, cancelling, an e-way bill: each read the invoice,
+// called out to the provider — which takes seconds — and then wrote what
+// came back. Nothing held the invoice in between. A second click read
+// "not registered" as well and registered the invoice at the portal
+// again; a cancel landing in the gap cancelled an invoice whose IRN then
+// arrived, live, on a cancelled document.
+//
+// The lease is per invoice (utils/onceAtATime.js), so the second request
+// runs after the first and is answered by what the first one did:
+// "Already registered — IRN …", or a cancellation that takes the IRN
+// with it. Held a little longer than the provider is given to answer.
+const PORTAL_LEASE_MS = 75_000;
+const portalStep = (handler) => catchAsyncErrors((req, res, next) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) return handler(req, res, next);
+  return onceAtATime(`invoice-portal:${req.params.id}`, () => handler(req, res, next), {
+    what: "This invoice's registration",
+    ttlMs: PORTAL_LEASE_MS,
+  });
+});
+
 // ── POST /:id/register-irn ─────────────────────────────────────
 router.post(
   "/:id/register-irn",
-  catchAsyncErrors(async (req, res, next) => {
+  portalStep(async (req, res, next) => {
     const inv = await loadInvoice(req.params.id, next);
     if (!inv) return;
     if (inv.status === "cancelled") return next(new ErrorHandler("A cancelled invoice cannot be registered", 409));
@@ -513,7 +534,7 @@ const ewaybill = require("../services/ewaybill");
 // Generate from the IRN through the connected provider.
 router.post(
   "/:id/ewaybill",
-  catchAsyncErrors(async (req, res, next) => {
+  portalStep(async (req, res, next) => {
     const inv = await loadInvoice(req.params.id, next);
     if (!inv) return;
     if (inv.status === "cancelled") return next(new ErrorHandler("A cancelled invoice moves no goods", 409));
@@ -561,7 +582,7 @@ router.get(
 // ── POST /:id/irn  (pasted from the portal) ────────────────────
 router.post(
   "/:id/irn",
-  catchAsyncErrors(async (req, res, next) => {
+  portalStep(async (req, res, next) => {
     const inv = await loadInvoice(req.params.id, next);
     if (!inv) return;
     if (inv.status === "cancelled") return next(new ErrorHandler("A cancelled invoice cannot be registered", 409));
@@ -587,7 +608,7 @@ router.post(
 // ── POST /:id/cancel ───────────────────────────────────────────
 router.post(
   "/:id/cancel",
-  catchAsyncErrors(async (req, res, next) => {
+  portalStep(async (req, res, next) => {
     const inv = await loadInvoice(req.params.id, next);
     if (!inv) return;
     if (inv.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));

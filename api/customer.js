@@ -323,8 +323,7 @@ router.post(
     if (weak) return next(new ErrorHandler(weak, 400));
     // Constrain the portal role to the known set rather than trusting
     // the raw body value (defence-in-depth; the schema enum also guards).
-    const PORTAL_ROLES = ["buyer", "viewer", "accountant"];
-    const portalRole = PORTAL_ROLES.includes(role) ? role : "buyer";
+    const portalRole = ["buyer", "viewer", "accountant"].includes(role) ? role : "buyer";
     const dupe = await CustomerUser.findOne({ email });
     if (dupe) return next(new ErrorHandler("Email already registered", 409));
 
@@ -361,6 +360,88 @@ router.get(
       .select("name email phone role status lastLoginAt createdAt")
       .lean();
     return res.json({ success: true, users });
+  })
+);
+
+// ─────────────────────────────────────────────────────────────────
+// A portal login, after it has been made.
+//
+// One could be created and listed and nothing else: a login given to a
+// buyer who has since left the customer could not be switched off, a
+// password that had got out could not be changed, and a login made by
+// mistake could not be removed — short of editing the database.
+//
+// PATCH  /api/v2/customer/:id/portal-users/:userId
+//        { status?: "active"|"disabled", password?, name?, phone?, role? }
+// DELETE /api/v2/customer/:id/portal-users/:userId
+//
+// Switched off, or given a new password, the sessions it already has
+// open end with it (models/CustomerUser.js tokenVersion). The login must
+// be this customer's: an id from another customer is not found here.
+// ─────────────────────────────────────────────────────────────────
+const PORTAL_ROLES = ["buyer", "viewer", "accountant"];
+const PORTAL_STATUSES = ["active", "disabled"];
+const portalUserOut = (u) => ({
+  _id: u._id, name: u.name, email: u.email, phone: u.phone, role: u.role,
+  status: u.status, lastLoginAt: u.lastLoginAt || null,
+});
+
+async function loadPortalUser(req, next) {
+  const { id, userId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id) || !mongoose.Types.ObjectId.isValid(userId)) {
+    next(new ErrorHandler("Portal login not found", 404));
+    return null;
+  }
+  const user = await CustomerUser.findOne({ _id: userId, customer: id });
+  if (!user) next(new ErrorHandler("Portal login not found", 404));
+  return user;
+}
+
+router.patch(
+  "/:id/portal-users/:userId",
+  catchAsyncErrors(async (req, res, next) => {
+    const user = await loadPortalUser(req, next);
+    if (!user) return;
+    const b = req.body || {};
+    let endSessions = false;
+
+    if (b.status !== undefined) {
+      if (!PORTAL_STATUSES.includes(b.status)) return next(new ErrorHandler("status must be active or disabled", 400));
+      if (b.status === "disabled" && user.status !== "disabled") endSessions = true;
+      user.status = b.status;
+    }
+    if (b.role !== undefined) {
+      if (!PORTAL_ROLES.includes(b.role)) return next(new ErrorHandler("role must be buyer, viewer or accountant", 400));
+      user.role = b.role;
+    }
+    if (b.name !== undefined) {
+      const name = typeof b.name === "string" ? b.name.trim().slice(0, 100) : "";
+      if (name.length < 2) return next(new ErrorHandler("name is required", 400));
+      user.name = name;
+    }
+    if (b.phone !== undefined) user.phone = typeof b.phone === "string" ? b.phone.trim().slice(0, 30) : "";
+    if (b.password !== undefined) {
+      if (typeof b.password !== "string") return next(new ErrorHandler("password must be text", 400));
+      // The rule a new login is held to (utils/passwordPolicy.js).
+      const weak = require("../utils/passwordPolicy").passwordProblem(b.password, { email: user.email, name: user.name });
+      if (weak) return next(new ErrorHandler(weak, 400));
+      user.password = b.password; // hashed on save
+      endSessions = true;
+    }
+    if (endSessions) user.tokenVersion = (user.tokenVersion ?? 0) + 1;
+
+    await user.save();
+    return res.json({ success: true, sessionsEnded: endSessions, user: portalUserOut(user) });
+  })
+);
+
+router.delete(
+  "/:id/portal-users/:userId",
+  catchAsyncErrors(async (req, res, next) => {
+    const user = await loadPortalUser(req, next);
+    if (!user) return;
+    await CustomerUser.deleteOne({ _id: user._id, customer: user.customer });
+    return res.json({ success: true, removed: portalUserOut(user) });
   })
 );
 

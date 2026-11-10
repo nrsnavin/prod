@@ -451,3 +451,76 @@ describe('raised once, whole or not at all', () => {
     expect(row).toMatchObject({ docNo: again.body.invoice.invoiceNumber, debit: again.body.invoice.totals.grand });
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  One step at a time with the tax portal.
+//
+//  Registering reads the invoice, calls the provider (seconds), then
+//  writes. Nothing held the invoice in between: a second click read "not
+//  registered" too and registered it at the portal again, and a cancel
+//  landing in the gap cancelled an invoice whose IRN then arrived live.
+// ══════════════════════════════════════════════════════════════════
+describe('two requests for one invoice at the portal', () => {
+  const IRN = 'b'.repeat(64);
+  let calls;
+  const connect = async () => {
+    const { PROVIDERS } = require('../../services/einvoiceProvider');
+    calls = { register: 0, cancel: [] };
+    PROVIDERS.slow = () => ({
+      async register() {
+        calls.register++;
+        await new Promise((r) => setTimeout(r, 250)); // the portal takes its time
+        return { irn: IRN, ackNo: '112010099', ackDate: new Date('2026-07-12T10:30:00Z'), signedQr: 'signed.qr' };
+      },
+      async cancel(irn) { calls.cancel.push(irn); },
+    });
+    await put('/settings/document', { invoice: { gsp: { provider: 'slow', baseUrl: 'https://t', clientId: 'x', clientSecret: 'y' } } });
+  };
+  afterEach(() => { delete require('../../services/einvoiceProvider').PROVIDERS.slow; });
+
+  const anInvoice = async () => {
+    const { order, dc1 } = await scene();
+    await connect();
+    return (await post('/invoice/create', { orderId: order._id, dcIds: [dc1._id] })).body.invoice;
+  };
+
+  it('a second click on Register does not register it at the portal again', async () => {
+    const inv = await anInvoice();
+    const both = await Promise.all([
+      post(`/invoice/${inv._id}/register-irn`, {}),
+      post(`/invoice/${inv._id}/register-irn`, {}),
+    ]);
+    expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(both.find((r) => r.status === 409).body.message).toBe(`Already registered — IRN ${IRN}`);
+    expect(calls.register).toBe(1);
+    const stored = await Invoice.findById(inv._id).lean();
+    expect(stored.einvoice).toMatchObject({ status: 'registered', irn: IRN });
+    expect(stored.fingerprints.filter((f) => f.code === 'INVOICE_IRN_REGISTERED')).toHaveLength(1);
+  });
+
+  it('a cancel sent while it is being registered waits, and takes the IRN with it', async () => {
+    const inv = await anInvoice();
+    const registering = post(`/invoice/${inv._id}/register-irn`, {}).then((r) => r);
+    await new Promise((r) => setTimeout(r, 60)); // the registration is at the portal now
+    const cancelled = await post(`/invoice/${inv._id}/cancel`, { reason: 'raised against the wrong challan' });
+    expect((await registering).status).toBe(200);
+    expect(cancelled.status).toBe(200);
+
+    // Cancelled at the portal as well — not left there with a live IRN.
+    expect(calls.cancel).toEqual([IRN]);
+    const stored = await Invoice.findById(inv._id).lean();
+    expect(stored.status).toBe('cancelled');
+    expect(stored.einvoice).toMatchObject({ status: 'cancelled', irn: IRN });
+  });
+
+  it('CONTROL: one request is answered as it always was, and leaves no lease behind', async () => {
+    const inv = await anInvoice();
+    const res = await post(`/invoice/${inv._id}/register-irn`, {});
+    expect(res.status).toBe(200);
+    expect(res.body.invoice.einvoice).toMatchObject({ status: 'registered', irn: IRN, provider: 'slow' });
+    expect(await mongoose.connection.collection('leases').countDocuments({})).toBe(0);
+    // An id that is nobody's is still simply not found.
+    expect((await post(`/invoice/${new mongoose.Types.ObjectId()}/register-irn`, {})).status).toBe(404);
+    expect((await post('/invoice/not-an-id/register-irn', {})).status).toBeGreaterThanOrEqual(400);
+  });
+});
