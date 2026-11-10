@@ -4,9 +4,10 @@
 //  Mount: app.use('/api/v2/dashboard', require('./api/dashboard'));
 //
 //  Endpoints:
-//    GET /kpis  — single roll-up call for the admin home screen
-//                 returns: open jobs, pending leaves, today's
-//                 attendance breakdown, low-stock count
+//    GET /kpis      — single roll-up call for the admin home screen
+//                     returns: open jobs, pending leaves, today's
+//                     attendance breakdown, low-stock count
+//    GET /overview  — the home screen by role: attention, money, floor
 // ══════════════════════════════════════════════════════════════
 "use strict";
 
@@ -66,6 +67,32 @@ router.get(
 );
 
 const KPI_TTL_MS = 5_000;
+
+// ─────────────────────────────────────────────────────────────
+// GET /overview
+//   The home screen by role: what needs a decision (with orders at
+//   risk taken from the delivery forecast), the money and the floor.
+//   services/dashboardOverview.js. Shared per database and role for
+//   thirty seconds: the forecast walks every order in flight.
+// ─────────────────────────────────────────────────────────────
+const OVERVIEW_TTL_MS = 30_000;
+router.get(
+  "/overview",
+  isAuthenticated, isAdmin('admin', 'production', 'accounts'),
+  (req, res, next) =>
+    isSelfServiceOnly(req.user)
+      ? next(new ErrorHandler("The plant dashboard is not available to an employee login", 403))
+      : next(),
+  catchAsyncErrors(async (req, res) => {
+    const role = req.user?.role;
+    const data = await sharedResult(
+      `dashboard:overview:${currentDb() || "primary"}:${role}`,
+      OVERVIEW_TTL_MS,
+      () => require("../services/dashboardOverview").overview(role)
+    );
+    res.json({ success: true, data });
+  })
+);
 
 // Not yet delivered in full and not abandoned. "Deleted" is a soft delete.
 const LIVE_ORDER_STATUSES = ["Open", "Approved", "InProgress"];
