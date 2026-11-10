@@ -9,8 +9,9 @@
 //  with it: the rupee sign spelt "Rs.", a long dash as a hyphen, and
 //  whatever is left that the font does not have, dropped.
 //
-//  (A name wholly in another script comes out empty; the caller prints
-//  its own stand-in. Printing it properly needs a font that has it.)
+//  (Tamil and Hindi are not dropped any more where a name is printed:
+//  utils/pdfScripts.js draws them in fonts that have them, and uses this
+//  for the Latin around them.)
 // ══════════════════════════════════════════════════════════════════
 
 function latin1(s) {

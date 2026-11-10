@@ -45,7 +45,7 @@ const DAY_MINUTES = 24 * 60;
 const BY_LEAVE_APPROVAL = 'leave_approval';
 
 const oneOf = (values, what) =>
-  z.enum(values, { errorMap: () => ({ message: `must be ${what}` }) });
+  z.enum(values, { error: () => `must be ${what}` });
 
 /** "08:30", or empty for none. */
 const clockTime = z.string().max(5).regex(/^$|^([01]?\d|2[0-3]):[0-5]\d$/, 'must be a time like 08:30');

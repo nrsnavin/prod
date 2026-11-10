@@ -26,7 +26,7 @@ const EMPLOYEE_FIELDS = {
   department: text(50).optional(),
   aadhar: textish(30).nullable().optional(),
   hourlyRate: numberish.nullable().optional(),
-  skillProfile: z.record(z.unknown()).nullable().optional(),
+  skillProfile: z.record(z.string(), z.unknown()).nullable().optional(),
 };
 const { recordAccess } = require("../utils/accessLog");
 const { ACTION_CODES } = require("../utils/fingerprint");

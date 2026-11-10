@@ -518,7 +518,10 @@ describe('two requests for one invoice at the portal', () => {
     const res = await post(`/invoice/${inv._id}/register-irn`, {});
     expect(res.status).toBe(200);
     expect(res.body.invoice.einvoice).toMatchObject({ status: 'registered', irn: IRN, provider: 'slow' });
-    expect(await mongoose.connection.collection('leases').countDocuments({})).toBe(0);
+    // The lease is let go just after the answer is sent, so it is given a moment.
+    const leases = () => mongoose.connection.collection('leases').countDocuments({});
+    for (let i = 0; i < 100 && (await leases()) > 0; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(await leases()).toBe(0);
     // An id that is nobody's is still simply not found.
     expect((await post(`/invoice/${new mongoose.Types.ObjectId()}/register-irn`, {})).status).toBe(404);
     expect((await post('/invoice/not-an-id/register-irn', {})).status).toBeGreaterThanOrEqual(400);

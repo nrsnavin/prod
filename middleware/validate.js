@@ -32,14 +32,30 @@ const ErrorHandler = require('../utils/ErrorHandler');
 
 const KIND = { string: 'text', number: 'a number', boolean: 'yes or no', array: 'a list', object: 'a set of fields' };
 
-function describe(issue) {
+/** What was sent at an issue's path; undefined when nothing was. */
+function sentAt(input, path) {
+  let at = input;
+  for (const key of path) {
+    if (at === null || at === undefined) return undefined;
+    at = at[key];
+  }
+  return at;
+}
+
+// An issue in the reader's words. The library's own differ between its
+// versions ("Required" became "Invalid input: expected string, received
+// undefined"), and an issue no longer says what it received — so whether
+// a field is missing is read off what was sent.
+function describe(issue, input) {
   const field = issue.path.length ? issue.path.join('.') : 'request';
   if (issue.code === 'invalid_type') {
-    if (issue.received === 'undefined') return `${field} is required`;
+    if (sentAt(input, issue.path) === undefined) return `${field} is required`;
     return `${field} must be ${KIND[issue.expected] || issue.expected}`;
   }
-  if (issue.code === 'too_big' && issue.type === 'string') return `${field} is too long (at most ${issue.maximum} characters)`;
-  if (issue.code === 'too_big' && issue.type === 'array') return `${field} has too many entries (at most ${issue.maximum})`;
+  // `origin` says what kind of value was too big (it was `type` before zod 4).
+  const kind = issue.origin ?? issue.type;
+  if (issue.code === 'too_big' && kind === 'string') return `${field} is too long (at most ${issue.maximum} characters)`;
+  if (issue.code === 'too_big' && kind === 'array') return `${field} has too many entries (at most ${issue.maximum})`;
   return `${field}: ${issue.message}`;
 }
 
@@ -49,9 +65,10 @@ function validate(schemas) {
     for (const part of ['params', 'query', 'body']) {
       const schema = schemas[part];
       if (!schema) continue;
-      const result = schema.safeParse(req[part] ?? {});
+      const sent = req[part] ?? {};
+      const result = schema.safeParse(sent);
       if (!result.success) {
-        const issues = result.error.issues.slice(0, 10).map((i) => ({ field: i.path.join('.'), message: describe(i) }));
+        const issues = result.error.issues.slice(0, 10).map((i) => ({ field: i.path.join('.'), message: describe(i, sent) }));
         const err = new ErrorHandler(issues[0].message, 400);
         err.code = 'INVALID_INPUT';
         err.details = { issues };

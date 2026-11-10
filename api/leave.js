@@ -39,9 +39,9 @@ const LEAVE_REQUEST = z.object({
   startDate: text(40).optional(),
   endDate: text(40).optional(),
   shift: z.string().max(10).transform((v) => v.toUpperCase())
-    .pipe(z.enum(['DAY', 'NIGHT', 'BOTH'], { errorMap: () => ({ message: 'must be DAY, NIGHT or BOTH' }) }))
+    .pipe(z.enum(['DAY', 'NIGHT', 'BOTH'], { error: () => 'must be DAY, NIGHT or BOTH' }))
     .optional(),
-  leaveType: z.enum(['casual', 'sick', 'unpaid'], { errorMap: () => ({ message: 'must be casual, sick or unpaid' }) }).optional(),
+  leaveType: z.enum(['casual', 'sick', 'unpaid'], { error: () => 'must be casual, sick or unpaid' }).optional(),
   reason: text(500).optional(),
   documentUrl: text(500).optional(),
   employeeId: objectId.optional(), // admins only; resolveEmployeeId ignores it for anyone else
