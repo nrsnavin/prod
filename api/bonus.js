@@ -28,6 +28,7 @@ const BonusConfig      = require("../models/BonusConfig");
 const BonusRecord      = require("../models/BonusRecord");
 const Employee         = require("../models/Employee");
 const { employedFrom } = require("../utils/employeeStatus");
+const factoryDay       = require("../utils/factoryDay");
 const ShiftDetail      = require("../models/ShiftDetail");
 const Attendance       = require("../models/Attendence.js");
 const Payroll          = require("../models/Payroll");
@@ -54,9 +55,23 @@ router.use(require("../middleware/ownRecords").ownRecordsOr({
   alsoRead: ['/payroll', '/employees'],
 }));
 
+// The factory's year and month, not the server's: until 05:30 on the 1st
+// the server is still in the month before.
+const factoryNow = () => {
+  const [y, m] = factoryDay.ymd().split('-').map(Number);
+  return { year: y, month: m };
+};
 function currentYear() {
-  return new Date().getFullYear();
+  return factoryNow().year;
 }
+
+/** The year asked for, the current one when none is, or null when it is not a year. */
+function yearOf(raw) {
+  if (raw === undefined || raw === null || raw === '') return currentYear();
+  const y = Number(raw);
+  return Number.isInteger(y) && y >= 2000 && y <= 2100 ? y : null;
+}
+const NOT_A_YEAR = "year is not a valid year";
 
 function attendanceTier(rate) {
   if (rate >= 90) return { tier: "S", multiplier: 1.00 };
@@ -70,10 +85,27 @@ function shiftHours(shiftType) {
   return 12;
 }
 
+// The year's settings, made if there are none — for the routes that
+// change them. One write, so two requests for a year nobody has opened
+// yet (the Bonus page asks for its settings and its preview together)
+// do not both try to create it: one of them used to fail on the
+// duplicate year.
 async function getOrCreateConfig(year) {
-  let cfg = await BonusConfig.findOne({ year });
-  if (!cfg) cfg = await BonusConfig.create({ year });
-  return cfg;
+  try {
+    return await BonusConfig.findOneAndUpdate(
+      { year }, { $setOnInsert: { year } }, { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+  } catch (err) {
+    if (err?.code !== 11000) throw err;
+    return BonusConfig.findOne({ year }); // made by the other request
+  }
+}
+
+// The year's settings for a READ: as stored, or the defaults, unsaved.
+// Looking at a year is not a reason to write one — every read used to
+// create the year it was asked about, a worker's own bonus page included.
+async function configFor(year) {
+  return (await BonusConfig.findOne({ year })) || new BonusConfig({ year });
 }
 
 // The Diwali-bonus salary window: the 12 months ENDING with the configured
@@ -99,8 +131,8 @@ function diwaliWindow(cfg, year) {
 
 function isDiwaliMonth(cfg) {
   if (!cfg?.bonusDate) return false;
-  const d = new Date(cfg.bonusDate), now = new Date();
-  return now.getFullYear() === d.getFullYear() && now.getMonth() === d.getMonth();
+  const d = new Date(cfg.bonusDate), now = factoryNow();
+  return now.year === d.getFullYear() && now.month === d.getMonth() + 1;
 }
 
 // Compute one employee's Diwali bonus:
@@ -112,8 +144,14 @@ async function computeEmployeeBonus(emp, cfg, win) {
   const payrolls = await Payroll.find({
     employee: emp._id,
     $or: win.months.map(w => ({ year: w.y, month: w.m })),
-  }).select("netPay").lean();
-  const salaryReceived = payrolls.reduce((s, p) => s + (p.netPay || 0), 0);
+  }).select("netPay totalAdvanceDeduction advanceRecoveredAtPayment").lean();
+  // What the month paid — with an advance recovered through the payslip
+  // put back. An advance is salary handed over early: net pay is that
+  // much less in the month it comes back, and summing net pay alone gave
+  // a smaller bonus to whoever had taken one. (An advance recovered at
+  // payment never reduced net pay, so there is nothing to put back.)
+  const salaryReceived = payrolls.reduce((s, p) => s + (p.netPay || 0)
+    + Math.max(0, (p.totalAdvanceDeduction || 0) - (p.advanceRecoveredAtPayment || 0)), 0);
 
   const shifts = await ShiftDetail.find({
     employee: emp._id, date: { $gte: win.start, $lte: win.end },
@@ -205,9 +243,10 @@ async function computeEmployeeBonus(emp, cfg, win) {
 router.get(
   "/config",
   isAdmin('admin', 'accounts'),
-  catchAsyncErrors(async (req, res) => {
-    const year = parseInt(req.query.year) || currentYear();
-    const config = await getOrCreateConfig(year);
+  catchAsyncErrors(async (req, res, next) => {
+    const year = yearOf(req.query.year);
+    if (year == null) return next(new ErrorHandler(NOT_A_YEAR, 400));
+    const config = await configFor(year);
 
     const totalRecords  = await BonusRecord.countDocuments({ year });
     const paidRecords   = await BonusRecord.countDocuments({ year, status: "paid" });
@@ -233,7 +272,8 @@ router.put(
   "/config",
   isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
-    const year = parseInt(req.body.year) || currentYear();
+    const year = yearOf(req.body.year);
+    if (year == null) return next(new ErrorHandler(NOT_A_YEAR, 400));
     const cfg  = await getOrCreateConfig(year);
 
     // The working-days denominator produced every generated amount, so it is
@@ -283,7 +323,8 @@ router.post(
   "/trigger",
   isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
-    const year = parseInt(req.body.year) || currentYear();
+    const year = yearOf(req.body.year);
+    if (year == null) return next(new ErrorHandler(NOT_A_YEAR, 400));
     const cfg  = await getOrCreateConfig(year);
 
     if (cfg.status === "completed") {
@@ -408,9 +449,10 @@ router.post(
 router.get(
   "/preview",
   isAdmin('admin', 'accounts'),
-  catchAsyncErrors(async (req, res) => {
-    const year = parseInt(req.query.year) || currentYear();
-    const cfg  = await getOrCreateConfig(year);
+  catchAsyncErrors(async (req, res, next) => {
+    const year = yearOf(req.query.year);
+    if (year == null) return next(new ErrorHandler(NOT_A_YEAR, 400));
+    const cfg  = await configFor(year);
     const win  = diwaliWindow(cfg, year);
 
     // Everyone who worked any of the bonus year, a leaver included.
@@ -451,8 +493,9 @@ router.get(
 router.get(
   "/records",
   isAdmin('admin', 'accounts'),
-  catchAsyncErrors(async (req, res) => {
-    const year    = parseInt(req.query.year) || currentYear();
+  catchAsyncErrors(async (req, res, next) => {
+    const year    = yearOf(req.query.year);
+    if (year == null) return next(new ErrorHandler(NOT_A_YEAR, 400));
     const status  = req.query.status || "all";
 
     const filter = { year };
@@ -485,7 +528,8 @@ router.get(
   "/employee/:id",
   selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
-    const year = parseInt(req.query.year) || currentYear();
+    const year = yearOf(req.query.year);
+    if (year == null) return next(new ErrorHandler(NOT_A_YEAR, 400));
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return next(new ErrorHandler("Invalid employee id", 400));
@@ -517,7 +561,8 @@ router.get(
   "/employee/:id/prediction",
   selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
-    const year = parseInt(req.query.year) || currentYear();
+    const year = yearOf(req.query.year);
+    if (year == null) return next(new ErrorHandler(NOT_A_YEAR, 400));
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return next(new ErrorHandler("Invalid employee id", 400));
@@ -526,7 +571,7 @@ router.get(
     const emp = await Employee.findById(id).select("name department hourlyRate bonusPercent");
     if (!emp) return next(new ErrorHandler("Employee not found", 404));
 
-    const cfg = await getOrCreateConfig(year);
+    const cfg = await configFor(year);
     const win = diwaliWindow(cfg, year);
     const prediction = await computeEmployeeBonus(emp, cfg, win);
     const record = await BonusRecord.findOne({ employee: id, year }).lean();
@@ -550,8 +595,12 @@ router.get(
   "/employee/:id/pdf",
   selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
-    const year = parseInt(req.query.year) || currentYear();
+    const year = yearOf(req.query.year);
+    if (year == null) return next(new ErrorHandler(NOT_A_YEAR, 400));
     const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return next(new ErrorHandler("Invalid employee id", 400));
+    }
 
     const [record, config] = await Promise.all([
       BonusRecord.findOne({ employee: id, year })
@@ -683,8 +732,8 @@ router.delete(
   "/year/:year/reset",
   isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
-    const year = parseInt(req.params.year);
-    if (isNaN(year)) return next(new ErrorHandler("Invalid year", 400));
+    const year = yearOf(req.params.year);
+    if (year == null) return next(new ErrorHandler("Invalid year", 400));
 
     // Deleting the records must also retract their ledger rows, or each
     // employee's ledger keeps showing a Diwali bonus that no longer exists
@@ -703,10 +752,16 @@ router.delete(
 
         const cfg = await BonusConfig.findOne({ year }).session(session);
         if (cfg) {
-          // Stay 'completed' if paid records remain — resetting drafts must
-          // not reopen a year that was already fully paid out.
+          // A year that was fully paid out stays completed: nothing was
+          // cleared, and resetting must not reopen it. A year that was
+          // only part paid goes back to "not generated" for the rest —
+          // it used to be marked completed too, and then could not be
+          // generated again: the people whose unpaid records had just
+          // been cleared were left with no bonus and no way to get one.
+          // (Generating never touches a record already paid.)
           const paidLeft = await BonusRecord.countDocuments({ year, status: "paid" }).session(session);
-          cfg.status      = paidLeft > 0 ? "completed" : "pending";
+          const fullyPaid = paidLeft > 0 && deleted.deletedCount === 0;
+          cfg.status      = fullyPaid ? "completed" : "pending";
           cfg.triggeredAt = paidLeft > 0 ? cfg.triggeredAt : null;
           await cfg.save({ session });
         }

@@ -40,6 +40,7 @@ const { readBill } = require("../utils/billOcr");
 const aiLedger = require("../services/aiLedger");
 const { promptVersion } = require("../utils/aiPrompts");
 const { suggestCategory } = require("../services/accountsInsights");
+const { onceAtATime } = require("../utils/onceAtATime");
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 } });
 const PUBLIC = "expenseNo date dueDate categoryName description payeeName totals.grand status approval.byName approval.note approval.at paidAmount paidAt attachments.filename attachments._id attachments.contentType attachments.size createdAt";
@@ -139,6 +140,13 @@ router.post("/", catchAsyncErrors(async (req, res, next) => {
   let date;
   try { date = readDate(b.date, "date", new Date()); await assertOpen(date, req); } catch (err) { return next(err); }
   if (date > new Date(Date.now() + DAY)) return next(new ErrorHandler("The date is in the future", 400));
+  // One claim at a time for a person: the day's cap below is added up
+  // and then the claim is made, so two sent together each found room
+  // under the cap and both went in.
+  return onceAtATime(`claim:${req.user._id}`, () => fileClaim(req, res, next, { b, category, description, amount, date }), { what: "Your claim" });
+}));
+
+async function fileClaim(req, res, next, { b, category, description, amount, date }) {
   // A head may cap what one person claims in a day.
   if (category.claimDailyLimit > 0) {
     const dayStart = factoryDay.calendarDay(date);
@@ -184,7 +192,7 @@ router.post("/", catchAsyncErrors(async (req, res, next) => {
     }).catch(() => {});
   }
   res.status(201).json({ success: true, claim: await Expense.findById(_id).select(PUBLIC).lean() });
-}));
+}
 
 router.post("/:id/photo", keepRequestContext(upload.single("file")), catchAsyncErrors(async (req, res, next) => {
   const claim = await mine(req, next);

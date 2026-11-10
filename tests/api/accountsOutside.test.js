@@ -218,6 +218,19 @@ describe('collections remember', () => {
 });
 
 describe('expense claims', () => {
+  it('two claims sent together do not both slip under the day\'s cap', async () => {
+    // The day's total was added up and then the claim made, so two
+    // arriving together each found room and both went in.
+    await get('/accounts/categories');
+    const fuel = await M.ExpenseCategory.findOne({ name: /Fuel|Diesel|Vehicle/i }) || await M.ExpenseCategory.findOne({});
+    await M.ExpenseCategory.updateOne({ _id: fuel._id }, { claimDailyLimit: 1000, approvalAbove: 100000 });
+    const claim = (description) => post('/claims', { category: fuel._id, description, amount: 600, date: '2026-07-11' }, worker);
+    const both = await Promise.all([claim('Diesel, morning'), claim('Diesel, evening')]);
+    expect(both.map((r) => r.status).sort()).toEqual([201, 400]);
+    expect(both.find((r) => r.status === 400).body.message).toMatch(/capped at ₹1000 a day per person — ₹600 is already claimed/);
+    expect(await M.Expense.countDocuments({ source: 'claim' })).toBe(1);
+  });
+
   it('anyone files a claim; it waits for approval, is paid back by name, and a head can cap a day', async () => {
     await get('/accounts/categories');
     const fuel = await M.ExpenseCategory.findOne({ name: /Fuel|Diesel|Vehicle/i }) || await M.ExpenseCategory.findOne({});

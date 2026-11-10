@@ -376,3 +376,119 @@ describe('two things happening to one bonus at once', () => {
     expect(await LedgerEntry.countDocuments({ sourceId: rec._id, kind: 'payment' })).toBe(1);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  FOUND READING THE BONUS ROUTES LINE BY LINE
+// ══════════════════════════════════════════════════════════════════
+describe('what the bonus is worked out on', () => {
+  const preview = async () => (await request(app).get(`/api/v2/bonus/preview?year=${curYear}`).set('Cookie', cookie())).body.rows;
+
+  test('somebody who took an advance is not given a smaller bonus for it', async () => {
+    // The base was the sum of net pay. An advance recovered through the
+    // payslip makes that month's net pay that much less — though the
+    // advance was salary too, only handed over early.
+    const plain = await makeEmp('Plain');
+    const advanced = await makeEmp('Advanced');
+    await paidMonth(plain, 10000);
+    await Payroll.create({
+      employee: advanced._id, year: curYear, month: curMonth, status: 'paid',
+      netPay: 7000, totalAdvanceDeduction: 3000,              // 10,000 earned, 3,000 of it an advance coming back
+    });
+    await marked(plain, [3, 4], 'present');
+    await marked(advanced, [3, 4], 'present');
+    await makeCfg();
+
+    const rows = Object.fromEntries((await preview()).map((r) => [r.name, r]));
+    expect(rows.Plain.bonusAmount).toBe(1000);
+    expect(rows.Advanced.bonusAmount).toBe(1000);
+    expect(rows.Advanced.salaryReceived).toBe(10000);
+  });
+
+  test('CONTROL: an advance recovered at payment never reduced net pay, so nothing is added back', async () => {
+    const emp = await makeEmp();
+    await Payroll.create({
+      employee: emp._id, year: curYear, month: curMonth, status: 'paid',
+      netPay: 10000, totalAdvanceDeduction: 3000, advanceRecoveredAtPayment: 3000,
+    });
+    await marked(emp, [3, 4], 'present');
+    await makeCfg();
+    expect((await preview())[0]).toMatchObject({ salaryReceived: 10000, bonusAmount: 1000 });
+  });
+});
+
+describe('looking at a year', () => {
+  const get = (url) => request(app).get(`/api/v2/bonus${url}`).set('Cookie', cookie());
+
+  test('does not create it — and two looks at once both answer', async () => {
+    // Every read used to make the year's settings if there were none, and
+    // two arriving together (the page asks for its settings and its
+    // preview) both tried: one failed on the duplicate year.
+    const emp = await makeEmp();
+    const [cfg, prev, mine] = await Promise.all([
+      get(`/config?year=${curYear}`), get(`/preview?year=${curYear}`), get(`/employee/${emp._id}/prediction?year=${curYear}`),
+    ]);
+    expect([cfg.status, prev.status, mine.status]).toEqual([200, 200, 200]);
+    expect(cfg.body.config).toMatchObject({ year: curYear, yearlyWorkingDays: 300 });   // the defaults, shown
+    expect(await BonusConfig.countDocuments({})).toBe(0);                                 // …and not stored
+  });
+
+  test('saving its settings, twice at once, makes it once', async () => {
+    const save = () => request(app).put('/api/v2/bonus/config').set('Cookie', cookie()).send({ year: curYear, bonusLabel: 'Diwali' });
+    const [a, b] = await Promise.all([save(), save()]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(await BonusConfig.countDocuments({ year: curYear })).toBe(1);
+  });
+
+  test('a year that is not a year is refused', async () => {
+    for (const y of ['abc', '1', '99999', '2026.5']) {
+      expect((await get(`/config?year=${y}`)).status).toBe(400);
+      expect((await get(`/preview?year=${y}`)).status).toBe(400);
+    }
+    expect((await request(app).post('/api/v2/bonus/trigger').set('Cookie', cookie()).send({ year: 'next' })).status).toBe(400);
+    expect(await BonusConfig.countDocuments({})).toBe(0);
+  });
+});
+
+describe('resetting a year that is part paid', () => {
+  test('the rest can be generated again; what was paid is left as it was', async () => {
+    // It was marked completed whenever a paid record remained, and a
+    // completed year refuses to generate: the people whose unpaid records
+    // the reset had just cleared were left with no bonus and no way to
+    // get one.
+    const paid = await makeEmp('Paid');
+    const waiting = await makeEmp('Waiting');
+    for (const e of [paid, waiting]) { await paidMonth(e); await marked(e, [3, 4], 'present'); }
+    await makeCfg();
+    const trigger = () => request(app).post('/api/v2/bonus/trigger').set('Cookie', cookie()).send({ year: curYear });
+    expect((await trigger()).status).toBe(200);
+    const rec = await BonusRecord.findOne({ employee: paid._id });
+    expect((await request(app).put(`/api/v2/bonus/records/${rec._id}/pay`).set('Cookie', cookie())).status).toBe(200);
+
+    const rst = await request(app).delete(`/api/v2/bonus/year/${curYear}/reset`).set('Cookie', cookie());
+    expect(rst.body.deletedCount).toBe(1);
+    expect((await BonusConfig.findOne({ year: curYear })).status).toBe('pending');
+    expect(await BonusRecord.countDocuments({ employee: waiting._id })).toBe(0);
+
+    const again = await trigger();
+    expect(again.status).toBe(200);
+    expect(await BonusRecord.findOne({ employee: waiting._id }).lean()).toMatchObject({ status: 'pending', bonusAmount: 1000 });
+    const kept = await BonusRecord.findById(rec._id).lean();
+    expect(kept).toMatchObject({ status: 'paid', bonusAmount: rec.bonusAmount });
+    // One payment on the ledger for the paid one, still.
+    expect(await LedgerEntry.countDocuments({ employee: paid._id, kind: 'payment' })).toBe(1);
+  });
+
+  test('CONTROL: a year paid out in full stays completed, and is not generated again', async () => {
+    const emp = await makeEmp();
+    await paidMonth(emp); await marked(emp, [3, 4], 'present');
+    await makeCfg();
+    await request(app).post('/api/v2/bonus/trigger').set('Cookie', cookie()).send({ year: curYear });
+    const rec = await BonusRecord.findOne({ employee: emp._id });
+    await request(app).put(`/api/v2/bonus/records/${rec._id}/pay`).set('Cookie', cookie());
+    await request(app).delete(`/api/v2/bonus/year/${curYear}/reset`).set('Cookie', cookie());
+    expect((await BonusConfig.findOne({ year: curYear })).status).toBe('completed');
+    const res = await request(app).post('/api/v2/bonus/trigger').set('Cookie', cookie()).send({ year: curYear });
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/already completed/);
+  });
+});
