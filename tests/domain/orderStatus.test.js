@@ -148,17 +148,18 @@ describe('the job router does not set an order status by hand', () => {
   const path = require('path');
 
   test('every order status change there goes through applyOrderStatus', () => {
-    const src = fs.readFileSync(
-      path.join(__dirname, '..', '..', 'api', 'job.js'),
-      'utf8'
-    );
-    const direct = src
+    // The job router is api/job.js and the files it mounts (jobPlanning.js,
+    // jobProgress.js, …), so all of them are read.
+    const api = path.join(__dirname, '..', '..', 'api');
+    const files = fs.readdirSync(api).filter((f) => /^job([A-Z]\w*)?\.js$/.test(f));
+    expect(files.length).toBeGreaterThan(1);
+    const direct = files.flatMap((f) => fs.readFileSync(path.join(api, f), 'utf8')
       .split('\n')
-      .map((line, i) => ({ line: line.trim(), no: i + 1 }))
+      .map((line, i) => ({ line: line.trim(), at: `${f}:${i + 1}` }))
       // `=` but not `==`: a comparison is exactly what these writes
       // should have been doing, so it must not be flagged as one.
-      .filter(({ line }) => /^order\.status\s*=(?!=)/.test(line));
+      .filter(({ line }) => /^order\.status\s*=(?!=)/.test(line)));
 
-    expect(direct.map((d) => `${d.no}: ${d.line}`)).toEqual([]);
+    expect(direct.map((d) => `${d.at}: ${d.line}`)).toEqual([]);
   });
 });

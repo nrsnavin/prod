@@ -93,10 +93,21 @@ describe('every upload in api/ is wrapped', () => {
 
     const bare = [];
     let seen = 0;
+    const multerNames = (src) => [...src.matchAll(/(?:const|let|var)\s+(\w+)\s*=\s*multer\(/g)].map((m) => m[1]);
     for (const file of files) {
       const src = fs.readFileSync(file, 'utf8');
       // Every name bound to a multer instance in this file…
-      const names = [...src.matchAll(/(?:const|let|var)\s+(\w+)\s*=\s*multer\(/g)].map((m) => m[1]);
+      const names = multerNames(src);
+      // …or imported from a sibling that binds it: an upload several
+      // route files share is defined once (api/accountsCommon.js).
+      for (const m of src.matchAll(/const\s*\{([^}]*)\}\s*=\s*require\(\s*["'](\.\/[\w.]+?)(?:\.js)?["']\s*\)/g)) {
+        const sibling = path.join(path.dirname(file), `${m[2]}.js`);
+        if (!fs.existsSync(sibling)) continue;
+        const bound = multerNames(fs.readFileSync(sibling, 'utf8'));
+        for (const n of m[1].split(',').map((s) => s.trim().split(/\s*:\s*/).pop())) {
+          if (bound.includes(n) && !names.includes(n)) names.push(n);
+        }
+      }
       for (const name of names) {
         // …and every place it is turned into middleware.
         const uses = [...src.matchAll(new RegExp(`(keepRequestContext\\(\\s*)?\\b${name}\\.(single|array|fields|any|none)\\(`, 'g'))];
