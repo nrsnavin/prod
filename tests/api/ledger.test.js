@@ -181,6 +181,8 @@ describe('recovering an advance during payment', () => {
     const adv = await AdvanceRequest.create({
       employee: emp._id, amount: 600, status: 'paid_out', deductMonth: 12, deductYear: YEAR + 1,
     });
+    // As the advance routes post it when the cash is handed over.
+    await LedgerEntry.create({ employee: emp._id, date: new Date(YEAR, MONTH - 1, 1), kind: 'advance_issued', amount: -600, source: 'advance', sourceId: adv._id });
     await gen();
     const slip = await Payroll.findOne({ employee: emp._id });
     expect(slip.netPay).toBe(2000);
@@ -207,8 +209,103 @@ describe('recovering an advance during payment', () => {
     expect(fresh.payouts[0].total).toBe(2000);
     expect(fresh.payouts[0].advances[0].amount).toBe(600);
 
-    const rec = await LedgerEntry.findOne({ employee: emp._id, kind: 'advance_recovered' });
-    expect(rec.amount).toBe(600);   // +ve: cancels the advance_issued debt
+    // On the ledger: the advance as it was handed over, the month's pay,
+    // the cash. The recovery is why the cash is 600 less, not a row of
+    // its own — one used to be added, and a settled month then read as
+    // the factory still owing the worker the advance.
+    expect(await LedgerEntry.countDocuments({ employee: emp._id, kind: 'advance_recovered' })).toBe(0);
+    const rows = await LedgerEntry.find({ employee: emp._id }).lean();
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBe(0);
+  });
+
+  test('an advance recovered through the payslip: the month settles to nothing owed', async () => {
+    // Deducted in this month's pay. Its recovery line was posted beside
+    // the advance itself, so the worker was left owing it a second time.
+    const emp = await makeEmp();
+    await att(emp._id, 2);  // 1200 + 800 of bonuses
+    const adv = await request(app).post('/api/v2/payroll/advance/admin-create').set('Cookie', adminCookie())
+      .send({ employee: emp._id, amount: 600, deductMonth: MONTH, deductYear: YEAR, reason: 'medical' });
+    expect(adv.status).toBe(201);
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id });
+    expect(slip.netPay).toBe(1400);
+    expect(slip.lineItems.map((l) => l.label)).toContain('Advance Salary Recovery ₹600'); // still on the slip
+
+    const pay = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({});
+    expect(pay.body.data.status).toBe('paid');
+    expect(pay.body.cashPaid).toBe(1400);
+
+    const rows = await LedgerEntry.find({ employee: emp._id }).lean();
+    expect(rows.map((r) => r.kind).sort()).toEqual(['advance_issued', 'bonus', 'bonus', 'payment', 'shift_salary']);
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBe(0);
+    expect((await AdvanceRequest.findOne({ employee: emp._id })).remainingBalance).toBe(0);
+  });
+
+  test('an advance approved in the admin app, which has no pay-out step, is on the ledger from the pay that recovers it', async () => {
+    // Paying an advance out is a step only the web has. One approved in
+    // the admin app stops at "approved", and payroll recovers it all the
+    // same — out of pay, without it ever having been on the ledger as
+    // given. Recovering it is the system saying the cash was handed over.
+    const emp = await makeEmp();
+    await att(emp._id, 2);  // 1200 + 800 of bonuses
+    const asked = await request(app).post('/api/v2/payroll/advance').set('Cookie', adminCookie())
+      .send({ employeeId: emp._id, amount: 600, reason: 'medical' });
+    const id = asked.body.data._id;
+    const ok = await request(app).put(`/api/v2/payroll/advance/${id}/approve`).set('Cookie', adminCookie())
+      .send({ deductMonth: MONTH, deductYear: YEAR });
+    expect(ok.status).toBe(200);
+    expect(await LedgerEntry.countDocuments({ employee: emp._id })).toBe(0); // approved: nothing booked yet
+
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id });
+    expect(slip.netPay).toBe(1400);
+    const pay = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie()).send({});
+    expect(pay.body.data.status).toBe('paid');
+
+    const adv = await AdvanceRequest.findById(id).lean();
+    expect(adv).toMatchObject({ status: 'recovered', remainingBalance: 0, paidOutBy: 'Owner' });
+    expect(adv.paidOutAt).toBeTruthy();
+    const rows = await LedgerEntry.find({ employee: emp._id }).lean();
+    expect(rows.filter((r) => r.kind === 'advance_issued').map((r) => r.amount)).toEqual([-600]);
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBe(0);
+  });
+
+  test('the same for one recovered at payment; and one already paid out is not booked twice', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);  // net 2000
+    const approved = await AdvanceRequest.create({
+      employee: emp._id, amount: 400, status: 'approved', deductMonth: 12, deductYear: YEAR + 1, approvedAt: new Date(YEAR, MONTH - 1, 1),
+    });
+    const paidOut = await request(app).post('/api/v2/payroll/advance/admin-create').set('Cookie', adminCookie())
+      .send({ employee: emp._id, amount: 300, deductMonth: 12, deductYear: YEAR + 1, reason: 'festival' });
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id });
+    const res = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie())
+      .send({ recoverAdvances: [{ advance: approved._id }, { advance: paidOut.body.data._id }] });
+    expect(res.body).toMatchObject({ cashPaid: 1300, advanceRecovered: 700 });
+
+    const rows = await LedgerEntry.find({ employee: emp._id }).lean();
+    expect(rows.filter((r) => r.kind === 'advance_issued').map((r) => r.amount).sort((a, b) => a - b)).toEqual([-400, -300]);
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBe(0);
+    expect((await AdvanceRequest.findById(approved._id).lean()).status).toBe('recovered');
+  });
+
+  test('an advance only partly recovered leaves the rest owed, and nothing else', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2);  // net 2000
+    const adv = await AdvanceRequest.create({
+      employee: emp._id, amount: 900, status: 'paid_out', deductMonth: 12, deductYear: YEAR + 1,
+    });
+    await LedgerEntry.create({ employee: emp._id, date: new Date(YEAR, MONTH - 1, 1), kind: 'advance_issued', amount: -900, source: 'advance', sourceId: adv._id });
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id });
+    const res = await request(app).put(`/api/v2/payroll/${slip._id}/pay`).set('Cookie', adminCookie())
+      .send({ amount: 1700, recoverAdvances: [{ advance: adv._id, amount: 300 }] });
+    expect(res.body.data.status).toBe('paid');
+    const rows = await LedgerEntry.find({ employee: emp._id }).lean();
+    // 900 handed over, 300 of it recovered: 600 still owed back.
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBe(-600);
+    expect((await AdvanceRequest.findById(adv._id)).remainingBalance).toBe(600);
   });
 
   test('recovery is capped at the advance balance and the slip remaining', async () => {

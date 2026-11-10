@@ -31,8 +31,10 @@ const { resolveEmployeeId } = require('../utils/resolveEmployee');
 const { computePayroll } = require('../services/payrollService');
 const ledger = require('../services/ledgerService');
 const { isMemoLine, moneyLines } = require('../utils/payslipLines');
+const { shiftHours } = require('../utils/shiftHours');
+const factoryDay = require('../utils/factoryDay');
+const { onceAtATime } = require('../utils/onceAtATime');
 const { workingDayKeys, dayKeyOf } = require('../services/attendanceMarks');
-const LedgerEntry = require('../models/LedgerEntry');
 
 router.use(isAuthenticated);
 // Per-user feature gate. The worker self-service advance request
@@ -59,6 +61,27 @@ router.use(ownRecordsOr({
 
 const r2 = (n) => Math.round(n * 100) / 100;
 
+// What a full shift pays at a rate — at the hours payroll pays it for
+// (utils/shiftHours.js). The night figure was worked out at 8 hours here
+// while payroll has always paid 12, so the rate list showed a night
+// shift as a third less than the payslip then paid.
+const shiftPay = (rate) => ({
+  dayShiftPay:   (Number(rate) || 0) * shiftHours('DAY'),
+  nightShiftPay: (Number(rate) || 0) * shiftHours('NIGHT'),
+});
+
+// The month asked for, or the factory's current one: [year, month], or
+// null when what was asked for is not a month. The default used to be
+// the server's month, which is last month until 05:30 on the 1st.
+function monthOf(q) {
+  const [thisYear, thisMonth] = factoryDay.ymd().split('-').map(Number);
+  const year  = q?.year  === undefined || q?.year  === '' ? thisYear  : Number(q.year);
+  const month = q?.month === undefined || q?.month === '' ? thisMonth : Number(q.month);
+  const ok = Number.isInteger(year) && year >= 2000 && year <= 2100 && Number.isInteger(month) && month >= 1 && month <= 12;
+  return ok ? [year, month] : null;
+}
+const NOT_A_MONTH = { success: false, message: 'year and month are not a valid month.' };
+
 
 router.get('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
@@ -67,14 +90,39 @@ router.get('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
   } catch (e) { sendError(req, res, e); }
 });
 
+// What each setting may be. Every one of these goes straight into the
+// pay arithmetic, and they were stored as sent: one "abc" (NaN) in the
+// overtime multiplier made every payslip of the month fail to generate,
+// and a negative penalty paid people for being absent.
+const SETTING_LIMITS = Object.freeze({
+  casualLeavesPerMonth:       [0, 31],
+  sickLeavesPerMonth:         [0, 31],
+  lateGracePeriodMinutes:     [0, 720],
+  penaltyPerExcessAbsent:     [0, 1_000_000],
+  noLeaveBonus:               [0, 1_000_000],
+  perfectAttendanceBonus:     [0, 1_000_000],
+  streakBonusPer7Shifts:      [0, 1_000_000],
+  overtimeMultiplier:         [0, 10],
+  overtimeGraceMinutes:       [0, 720],
+  maxOvertimeMinutesPerShift: [0, 720],
+  pfPercent:                  [0, 100],
+  pfWageCeiling:              [0, 100_000_000],
+  esiPercent:                 [0, 100],
+  esiWageCeiling:             [0, 100_000_000],
+});
+
 router.post('/settings', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const allowed = ['casualLeavesPerMonth','sickLeavesPerMonth','lateGracePeriodMinutes',
-                     'penaltyPerExcessAbsent','noLeaveBonus','perfectAttendanceBonus','streakBonusPer7Shifts',
-                     'overtimeMultiplier','overtimeGraceMinutes',
-                     'pfPercent','pfWageCeiling','esiPercent','esiWageCeiling'];
     const update = {};
-    for (const k of allowed) if (req.body[k] !== undefined) update[k] = Number(req.body[k]);
+    for (const [k, [min, max]] of Object.entries(SETTING_LIMITS)) {
+      const sent = req.body?.[k];
+      if (sent === undefined) continue;
+      const n = typeof sent === 'string' && sent.trim() === '' ? NaN : Number(sent);
+      if (typeof sent === 'boolean' || sent === null || !Number.isFinite(n) || n < min || n > max) {
+        return res.status(400).json({ success: false, message: `${k} must be a number from ${min} to ${max}.` });
+      }
+      update[k] = n;
+    }
     const s = await PayrollSettings.findOneAndUpdate({}, { $set: update }, { upsert: true, new: true });
     res.json({ success: true, data: s });
   } catch (e) { sendError(req, res, e); }
@@ -90,8 +138,7 @@ router.get('/employees', isAdmin('admin', 'accounts'), async (req, res) => {
         id: e._id, name: e.name, department: e.department,
         role: e.role ?? '', skill: e.skill ?? 0,
         hourlyRate: e.hourlyRate ?? 0,
-        dayShiftPay:   (e.hourlyRate ?? 0) * 12,
-        nightShiftPay: (e.hourlyRate ?? 0) * 8,
+        ...shiftPay(e.hourlyRate),
       })),
     });
   } catch (e) { sendError(req, res, e); }
@@ -110,17 +157,22 @@ router.post('/employees/:id/rate', isAdmin('admin', 'accounts'), async (req, res
       success: true,
       message: `Rate updated for ${emp.name}`,
       data: { id: emp._id, name: emp.name, department: emp.department,
-              hourlyRate: emp.hourlyRate, dayShiftPay: emp.hourlyRate * 12,
-              nightShiftPay: emp.hourlyRate * 8 },
+              hourlyRate: emp.hourlyRate, ...shiftPay(emp.hourlyRate) },
     });
   } catch (e) { sendError(req, res, e); }
 });
 
 router.post('/generate', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const { year, month, employeeId } = req.body;
-    if (!year || !month)
+    const { employeeId } = req.body;
+    if (!req.body.year || !req.body.month)
       return res.status(400).json({ success: false, message: 'year and month required' });
+    const asked = monthOf(req.body);
+    if (!asked) return res.status(400).json(NOT_A_MONTH);
+    const [year, month] = asked;
+    if (employeeId !== undefined && employeeId !== null && employeeId !== ''
+        && !mongoose.Types.ObjectId.isValid(String(employeeId)))
+      return res.status(400).json({ success: false, message: 'employeeId is not a valid id.' });
 
     let empIds, skipped = [];
     if (employeeId) {
@@ -212,14 +264,15 @@ router.get('/check', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     res.json({ success: true, data: await require('../services/payrollCheck').check({ year: req.query.year, month: req.query.month }) });
   } catch (err) {
-    res.status(err.statusCode || 500).json({ success: false, message: err.message });
+    sendError(req, res, err);
   }
 });
 
 router.get('/dashboard', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const year  = +(req.query.year  || new Date().getFullYear());
-    const month = +(req.query.month || new Date().getMonth() + 1);
+    const asked = monthOf(req.query);
+    if (!asked) return res.status(400).json(NOT_A_MONTH);
+    const [year, month] = asked;
     const payrolls = await Payroll.find({ year, month })
       .populate('employee', 'name department hourlyRate').lean();
 
@@ -280,9 +333,9 @@ router.get('/dashboard', isAdmin('admin', 'accounts'), async (req, res) => {
 // simple numeric range regardless of year boundaries.
 const monthKey = (y, m) => y * 12 + (m - 1);
 function parseRange(req) {
-  const now = new Date();
-  const toYear   = +(req.query.toYear   || now.getFullYear());
-  const toMonth  = +(req.query.toMonth  || now.getMonth() + 1);
+  const [thisYear, thisMonth] = factoryDay.ymd().split('-').map(Number); // the factory's month
+  const toYear   = +(req.query.toYear   || thisYear);
+  const toMonth  = +(req.query.toMonth  || thisMonth);
   // Default window: the trailing 6 months ending at `to`.
   const def = new Date(toYear, toMonth - 1 - 5, 1);
   const fromYear  = +(req.query.fromYear  || def.getFullYear());
@@ -351,8 +404,9 @@ router.get('/dashboard-range', isAdmin('admin', 'accounts'), async (req, res) =>
 
 router.get('/slip/:empId', selfOrAdmin, async (req, res) => {
   try {
-    const year  = +(req.query.year  || new Date().getFullYear());
-    const month = +(req.query.month || new Date().getMonth() + 1);
+    const asked = monthOf(req.query);
+    if (!asked) return res.status(400).json(NOT_A_MONTH);
+    const [year, month] = asked;
     const p = await Payroll.findOne({ employee: req.params.empId, year, month })
       .populate('employee', EMPLOYEE_CARD_FIELDS).lean();
     if (!p) return res.status(404).json({ success: false, message: 'Not generated yet' });
@@ -376,17 +430,16 @@ router.get('/ledger/:empId', selfOrAdmin, async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(empId))
       return res.status(400).json({ success: false, message: 'Invalid employee id' });
 
-    const parseDay = (s, endOfDay) => {
-      if (!s) return null;
-      const d = new Date(s);
-      if (isNaN(d.getTime())) return null;
-      d.setHours(endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0, endOfDay ? 999 : 0);
-      return d;
-    };
+    // Days in India, as moments. The rows are of two kinds — a shift's
+    // calendar date (kept at UTC midnight) and the moment a payment was
+    // made — and both fall inside their own day in India. These were cut
+    // with setHours(), the server's zone: a salary paid at 1 am on the
+    // 5th was listed under the 4th.
+    const dayOf = (v, bound) => (v ? bound(v) : null);
     // Default window: the last 3 months.
-    const to   = parseDay(req.query.to, true) || parseDay(new Date(), true);
+    const to   = dayOf(req.query.to, factoryDay.dayEnd) || factoryDay.dayEnd();
     const dflt = new Date(to); dflt.setMonth(dflt.getMonth() - 3);
-    const from = parseDay(req.query.from, false) || parseDay(dflt, false);
+    const from = dayOf(req.query.from, factoryDay.dayStart) || factoryDay.dayStart(dflt);
     if (from > to)
       return res.status(400).json({ success: false, message: '`from` is after `to`' });
 
@@ -403,8 +456,9 @@ router.get('/ledger/:empId', selfOrAdmin, async (req, res) => {
 
 router.get('/slip/:empId/pdf', selfOrAdmin, async (req, res, next) => {
   try {
-    const year  = +(req.query.year  || new Date().getFullYear());
-    const month = +(req.query.month || new Date().getMonth() + 1);
+    const asked = monthOf(req.query);
+    if (!asked) return res.status(400).json(NOT_A_MONTH);
+    const [year, month] = asked;
     const p = await Payroll.findOne({ employee: req.params.empId, year, month })
       .populate('employee', EMPLOYEE_CARD_FIELDS).lean();
     if (!p) return res.status(404).json({ success: false, message: 'Payroll not generated for that month' });
@@ -681,7 +735,28 @@ router.get('/range/:empId', selfOrAdmin, async (req, res) => {
 // Commit a draft's advance recoveries (capped at each advance's remaining
 // balance) and mark it finalized. Refunds any over-planned recovery so the
 // slip never short-pays. Mutates `p` in place; caller saves within `session`.
-async function finalizeDraft(p, session) {
+/**
+ * An advance recovered from pay is an advance that was handed over.
+ *
+ * The cash goes on the ledger when it is paid out (PUT /advance/:id/pay-out).
+ * That step exists only on the web: the admin app approves an advance and
+ * stops there, and payroll recovers it all the same. Such an advance was
+ * taken back out of pay without ever having been on the ledger as given,
+ * so the ledger said the factory had short-paid the worker by it.
+ *
+ * Recovering it is the system saying the cash was given, so that is when
+ * it is put on the ledger as given — once, and only if it is not there.
+ * Mutates `adv`; the caller saves it within `session`.
+ */
+async function countAsPaidOut(adv, session, by) {
+  if (adv.paidOutAt || adv.status !== 'approved') return;
+  adv.status    = 'paid_out';
+  adv.paidOutAt = adv.approvedAt || adv.createdAt || new Date();
+  adv.paidOutBy = by || 'payroll';
+  await ledger.postAdvanceIssued(adv, session, { postedBy: adv.paidOutBy });
+}
+
+async function finalizeDraft(p, session, by) {
   let shortfall = 0;
   for (const rec of p.advanceRecoveries || []) {
     const adv = await AdvanceRequest.findById(rec.advance).session(session);
@@ -690,6 +765,7 @@ async function finalizeDraft(p, session) {
     const take = Math.min(rec.amount, current);
     shortfall = r2(shortfall + (rec.amount - take));
     rec.amount = take;                                  // record what was actually taken
+    if (take > 0) await countAsPaidOut(adv, session, by);
     adv.remainingBalance = r2(current - take);
     if (adv.remainingBalance <= 0) {
       adv.deductedInPayroll = true;
@@ -736,7 +812,7 @@ router.put('/:id/finalize', isAdmin('admin', 'accounts'), async (req, res) => {
         out = { code: 400, body: { success: false, message: `Only a draft payroll can be finalized (this one is ${p.status})` } };
         return;
       }
-      await finalizeDraft(p, session);
+      await finalizeDraft(p, session, req.user?.name || 'admin');
       await p.save({ session });
       await postPayrollToLedger(p, session, req.user?.name || 'admin');
       await p.populate('employee', 'name');
@@ -766,7 +842,7 @@ router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
 
       // One-step pay: finalize the draft (commits advances) before disbursing.
       const wasDraft = p.status === 'draft';
-      if (wasDraft) await finalizeDraft(p, session);
+      if (wasDraft) await finalizeDraft(p, session, req.user?.name || 'admin');
 
       const alreadyPaid = r2(p.amountPaid || 0);
       const remaining   = r2(Math.max(0, (p.netPay || 0) - alreadyPaid));
@@ -794,6 +870,7 @@ router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
         const ask  = Number(w?.amount);
         const take = r2(Math.min(Number.isFinite(ask) && ask > 0 ? ask : bal, bal, budget));
         if (take <= 0) continue;
+        await countAsPaidOut(adv, session, req.user?.name || 'admin');
         adv.remainingBalance = r2(bal - take);
         if (adv.remainingBalance <= 0) {
           adv.deductedInPayroll = true;
@@ -855,17 +932,12 @@ router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
       // A slip paid straight from draft was only just finalized, so its
       // earnings/deductions still need posting.
       if (wasDraft) await postPayrollToLedger(p, session, who);
+      // The cash handed over. An advance recovered out of this payment
+      // needs no row of its own: it has been on the ledger (as owed back)
+      // since it was paid out, and holding it back here is why the cash
+      // is less. A row for it used to be added as well, which left the
+      // ledger saying the factory still owed the worker the advance.
       await ledger.postPayment(p, { cash: pay, recovered, at: p.paidAt, postedBy: who }, session);
-      // Advance recovered at payment time reduces what the worker owes.
-      for (const rr of recoveredRows) {
-        await LedgerEntry.create([{
-          employee: p.employee, date: p.paidAt, kind: 'advance_recovered',
-          amount: rr.amount, // +ve: cancels the negative advance_issued row
-          label: `Advance recovered from ${MONTHS_PDF[(p.month || 1) - 1]} ${p.year} pay`,
-          year: p.year, month: p.month,
-          source: 'advance', sourceId: rr.advance, postedBy: who,
-        }], { session });
-      }
 
       await p.populate('employee', 'name');
       out = { code: 200, body: { success: true, data: p, cashPaid: pay, advanceRecovered: recovered } };
@@ -891,6 +963,8 @@ function advanceAmount(raw) {
 }
 const ADVANCE_AMOUNT_MESSAGE = `The amount must be between ₹1 and ₹${MAX_ADVANCE.toLocaleString('en-IN')}`;
 const advanceReason = (raw) => (typeof raw === 'string' ? raw.trim().slice(0, 500) : '');
+// The same amount asked for again inside this is the same request.
+const SAME_REQUEST_WITHIN_MS = 2 * 60 * 1000;
 
 router.get('/advance', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
@@ -973,7 +1047,16 @@ router.post('/advance', async (req, res) => {
     const emp = await Employee.findById(employeeId, 'name').lean();
     if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
 
-    const adv = await AdvanceRequest.create({ employee: employeeId, amount, reason });
+    // Asked for twice — a second tap, or the app sending it again after a
+    // slow answer — is one request. Each used to become a request of its
+    // own, and two approved are two advances handed over.
+    const adv = await onceAtATime(`advance-request:${employeeId}`, async () => {
+      const justAsked = await AdvanceRequest.findOne({
+        employee: employeeId, amount, status: { $in: ['requested', 'pending'] },
+        createdAt: { $gte: new Date(Date.now() - SAME_REQUEST_WITHIN_MS) },
+      });
+      return justAsked || AdvanceRequest.create({ employee: employeeId, amount, reason });
+    }, { what: 'Your advance request' });
     res.json({ success: true, message: `Advance request submitted for ${emp.name}`, data: adv });
   } catch (e) { sendError(req, res, e); }
 });
@@ -1082,7 +1165,9 @@ router.get('/analytics', isAdmin('admin', 'accounts'), async (req, res) => {
 
     const empStats = {};
     for (const p of payrolls) {
-      const id  = (p.employee?._id ?? p.employee).toString();
+      // A payslip whose employee record is gone still counts in the
+      // totals; reading its id off nothing used to fail the whole page.
+      const id  = String(p.employee?._id ?? p.employee ?? 'gone');
       const name = p.employee?.name ?? '–';
       const dept = p.employee?.department ?? '–';
       if (!empStats[id]) {
@@ -1212,22 +1297,30 @@ router.post('/auto-generate', isAdmin('admin', 'accounts'), async (req, res) => 
     // the month" trigger does the right thing without the client
     // having to subtract.
     let year, month;
-    const period = (req.query.period || req.body?.period || '').trim();
+    const period = String(req.query.period || req.body?.period || '').trim();
     if (period) {
-      const m = period.match(/^(\d{4})-(\d{2})$/);
+      const m = period.match(/^(\d{4})-(0[1-9]|1[0-2])$/);
       if (!m) return res.status(400).json({
         success: false, message: 'period must be YYYY-MM',
       });
       year = +m[1]; month = +m[2];
     } else {
-      const now  = new Date();
-      const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      year  = prev.getFullYear();
-      month = prev.getMonth() + 1;
+      // The month before the factory's current one (the server's own
+      // month is still last month until 05:30 on the 1st).
+      const [thisYear, thisMonth] = factoryDay.ymd().split('-').map(Number);
+      year  = thisMonth === 1 ? thisYear - 1 : thisYear;
+      month = thisMonth === 1 ? 12 : thisMonth - 1;
     }
 
+    // Everyone who worked any of the month, a leaver included — the
+    // people /generate pays. This used to be everyone with a rate, ever:
+    // each person who had left still counted as somebody whose
+    // attendance was missing, so once enough had gone the month never
+    // read as complete and nothing was generated — and when it did, a
+    // payslip was made for every one of them.
+    const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
     const empIds = (await Employee
-      .find({ hourlyRate: { $gt: 0 } }, '_id')
+      .find({ ...employedFrom(monthStart), hourlyRate: { $gt: 0 } }, '_id')
       .lean()).map((e) => e._id.toString());
 
     if (empIds.length === 0) {
@@ -1351,13 +1444,15 @@ router.post('/auto-generate', isAdmin('admin', 'accounts'), async (req, res) => 
 // ══════════════════════════════════════════════════════════════
 router.get('/outstanding-advances', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const now = new Date();
-    const curYear  = now.getFullYear();
-    const curMonth = now.getMonth() + 1;
+    const [curYear, curMonth] = factoryDay.ymd().split('-').map(Number); // the factory's month
 
     const advances = await AdvanceRequest.find({
-      status: 'approved',
-      deductedInPayroll: false,
+      // Every advance payroll recovers against — one paid out as well as
+      // one only approved. This looked for 'approved' alone, which is an
+      // advance no cash has moved on yet: the ones actually handed over
+      // and never recovered were the ones it could not see.
+      status: { $in: AdvanceRequest.RECOVERABLE_STATUSES },
+      deductedInPayroll: { $ne: true },
       // deductYear/deductMonth strictly earlier than current period.
       // Note: an advance approved for current month is not "overdue"
       // until next month — current-period skips might be a payroll
@@ -1382,13 +1477,17 @@ router.get('/outstanding-advances', isAdmin('admin', 'accounts'), async (req, re
           name:         a.employee?.name ?? '—',
           department:   a.employee?.department ?? '',
           amount:       a.amount,
+          // What is still to come back: part of it may have been recovered.
+          remaining:    a.remainingBalance != null ? a.remainingBalance : a.amount,
+          status:       a.status,
           deductMonth:  a.deductMonth,
           deductYear:   a.deductYear,
           monthsOverdue,
         };
-      });
+      })
+      .filter((a) => a.remaining > 0);
 
-    const totalAmount = out.reduce((s, a) => s + (a.amount || 0), 0);
+    const totalAmount = out.reduce((s, a) => s + (a.remaining || 0), 0);
 
     return res.json({
       success:     true,

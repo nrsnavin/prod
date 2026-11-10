@@ -11,7 +11,7 @@
 // re-generating replaces that document's rows rather than duplicating them.
 
 const LedgerEntry = require('../models/LedgerEntry');
-const { moneyLines } = require('../utils/payslipLines');
+const { ledgerLines } = require('../utils/payslipLines');
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -39,9 +39,8 @@ function kindForLineItem(li) {
 }
 
 // Payslip line items with this prefix describe an advance recovered at
-// PAYMENT time. The pay route books those to the ledger itself (against the
-// advance, so the row cancels the original advance_issued debt), so
-// postPayroll must skip them or the recovery lands twice.
+// PAYMENT time (the pay route writes them). Like every advance set-off
+// they stay on the slip and out of the ledger — utils/payslipLines.js.
 const PAYMENT_RECOVERY_PREFIX = 'Advance recovered at payment';
 
 /** Remove every row a source document previously posted (same txn). */
@@ -61,12 +60,14 @@ async function postPayroll(p, session, { postedBy = '' } = {}) {
   );
 
   const monthEnd = new Date(p.year, p.month, 0);
-  // Money only. A line that explains (an absence that was never
-  // credited, a late cut the shift line already carries) took nothing
-  // off, so posting it took it off twice.
-  const rows = moneyLines(p.lineItems)
+  // What changes the balance between the factory and the worker, and
+  // nothing else (utils/payslipLines.js). A line that explains (an
+  // absence that was never credited, a late cut the shift line already
+  // carries) took nothing off, so posting it took it off twice. An
+  // advance set off against pay is already here from the day the cash
+  // was handed over; posting its recovery counted the advance again.
+  const rows = ledgerLines(p.lineItems)
     .filter((li) => Number(li.amount) !== 0)
-    .filter((li) => !String(li.label || '').startsWith(PAYMENT_RECOVERY_PREFIX))
     .map((li) => ({
       employee: p.employee,
       date:     dateFromLabel(li.label, monthEnd),
@@ -94,8 +95,9 @@ async function postPayment(p, { cash, recovered = 0, at = new Date(), postedBy =
       year: p.year, month: p.month, source: 'payroll', sourceId: p._id, postedBy,
     });
   }
-  // Advance recovered at payment time is booked against the advance source
-  // by the advance helper; here we only record the cash movement.
+  // The cash that changed hands, and only that. An advance recovered out
+  // of this payment is not a second movement: it is why the cash is less
+  // (the advance has been on the ledger since it was handed over).
   if (rows.length) await LedgerEntry.insertMany(rows, { session, ordered: true });
   return rows.length;
 }

@@ -21,6 +21,23 @@
 
 const MEMO_LABEL = /^(Absent —|Late deduction )/;
 
+//  A third kind is money, but not money that moves between the factory
+//  and the worker:
+//
+//    "Advance Salary Recovery ₹600"                     −600
+//    "Advance recovered at payment Rs.600"              −600
+//    "Advance recovery capped — ₹200 carried to next month"  +200
+//
+//  An advance is on the ledger from the day the cash was handed over
+//  (−600: the worker owes it). Recovering it is not a second event — it
+//  is why the salary then paid in cash is 600 less. The ledger posted
+//  the recovery as well, and in opposite directions on its two paths:
+//  recovered through the payslip, a settled month left the worker owing
+//  the advance a second time; recovered at payment, it left the factory
+//  owing it back. These lines stay on the slip (they are why net pay is
+//  what it is) and out of the ledger.
+const SET_OFF_LABEL = /^(Advance Salary Recovery|Advance recovered at payment|Advance recovery capped)/;
+
 /** True for a line that explains the figures without being one. */
 function isMemoLine(line) {
   if (!line) return false;
@@ -30,4 +47,14 @@ function isMemoLine(line) {
 /** The lines that are money: what was earned, added and taken off. */
 const moneyLines = (lines) => (lines || []).filter((l) => !isMemoLine(l));
 
-module.exports = { isMemoLine, moneyLines, MEMO_LABEL };
+/** True for an advance set off against pay: money, but none changing hands. */
+const isSetOffLine = (line) => !!line && SET_OFF_LABEL.test(String(line.label || ''));
+
+/**
+ * The lines that change what the factory owes the worker — what the
+ * employee ledger posts. Not the explanations, and not an advance being
+ * set off, which the ledger already carries from the day it was paid out.
+ */
+const ledgerLines = (lines) => moneyLines(lines).filter((l) => !isSetOffLine(l));
+
+module.exports = { isMemoLine, isSetOffLine, moneyLines, ledgerLines, MEMO_LABEL, SET_OFF_LABEL };
