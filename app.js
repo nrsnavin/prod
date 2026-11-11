@@ -115,6 +115,8 @@ const _allowedOrigins = new Set(
 );
 const _devOrigins = [
   "http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000",
+  // The customer portal's dev server (prod_web: npm run dev:portal).
+  "http://localhost:5174",
 ];
 if (process.env.NODE_ENV !== "PRODUCTION") {
   _devOrigins.forEach((o) => _allowedOrigins.add(o));

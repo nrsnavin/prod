@@ -409,7 +409,8 @@ router.get('/statement', MONEY, catchAsyncErrors(async (req, res) => {
     totals: s.totals,
     rows: (s.rows || []).map((r) => ({
       date: r.date,
-      particulars: r.memo ? r.particulars : [r.toBy, r.particulars].filter(Boolean).join(' '),
+      // A voucher whose ledger has no name of its own reads by its type: "By Receipt".
+      particulars: r.memo ? (r.particulars || r.vchType || '') : [r.toBy, r.particulars || r.vchType].filter(Boolean).join(' '),
       type: r.vchType || '',
       number: r.docNo || '',
       reference: r.partyRef || '',
