@@ -62,3 +62,24 @@ erp.baluelastics.com {
 	try_files {path} /index.html
 	file_server
 }
+
+# ── Customer portal (prod_web: npm run build:portal) ───────────────
+# A separate small app where customers see their own orders,
+# dispatches, certificates, invoices and statement. It calls
+# https://api.baluelastics.com/api/v3/portal, so CORS_ORIGINS must
+# include https://portal.baluelastics.com as well.
+#
+# Deploy: put the contents of prod_web's dist-portal/ into /var/www/portal.
+portal.baluelastics.com {
+	encode gzip
+	root * /var/www/portal
+
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	header /index.html Cache-Control "no-cache"
+	# Customers' pages are nobody's search result.
+	header X-Robots-Tag "noindex"
+
+	try_files {path} /index.html
+	file_server
+}

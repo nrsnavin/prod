@@ -156,7 +156,7 @@ than starting from blank. What to fill in:
 | `JWT_SECRET_KEY` | **On a move: copy the old value.** A new one signs everyone out, phone apps included. New install: `openssl rand -base64 48` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | the mailbox that sends sign-in codes. Email codes are how people sign in, so without these nobody can (`EMAIL_SETUP.md`) |
 | `WEB_URL` | `https://erp.baluelastics.com` (password-reset links) |
-| `CORS_ORIGINS` | `https://erp.baluelastics.com` (the browser blocks the web app without it) |
+| `CORS_ORIGINS` | `https://erp.baluelastics.com,https://portal.baluelastics.com` (the browser blocks the web app and the customer portal without them) |
 
 **Copy exactly if the old server had them**
 
@@ -221,14 +221,21 @@ curl -s http://127.0.0.1:2701/api/v2/health/ready    # and it has the database
 ```sh
 cd ~/prod_web
 npm ci
-npm run build                     # writes dist/
+npm run build                     # the staff app: writes dist/
 sudo mkdir -p /var/www/erp
 sudo cp -r dist/* /var/www/erp/
+
+npm run build:portal              # the customer portal: writes dist-portal/
+sudo mkdir -p /var/www/portal
+sudo cp -r dist-portal/* /var/www/portal/
 ```
 
 No environment file is needed: production builds call
-`https://api.baluelastics.com/api/v2`. Set `VITE_API_BASE_URL` at build
-time only to point the web app at a different API.
+`https://api.baluelastics.com/api/v2` (and `/api/v3/portal` for the
+portal). Set `VITE_API_BASE_URL` (staff app) or `VITE_PORTAL_API_BASE`
+(portal) at build time only to point them at a different API. The staff
+app's customer page shows the portal's address from `VITE_PORTAL_URL`,
+`https://portal.baluelastics.com` unless set.
 
 ## 10. Point DNS at the new box
 
@@ -238,6 +245,7 @@ Hostinger → baluelastics.com → DNS records. Set both A records to `NEW_IP`:
 |---|---|---|
 | A | `api` | `NEW_IP` |
 | A | `erp` | `NEW_IP` |
+| A | `portal` | `NEW_IP` |
 
 On a move, lower the records' TTL to 300 a day before, so the switch
 takes minutes. Check from your own computer:
@@ -245,6 +253,7 @@ takes minutes. Check from your own computer:
 ```sh
 dig +short api.baluelastics.com    # NEW_IP
 dig +short erp.baluelastics.com    # NEW_IP
+dig +short portal.baluelastics.com # NEW_IP
 ```
 
 ## 11. HTTPS (Caddy)
@@ -261,8 +270,8 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
   | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt update && sudo apt install -y caddy
 
-sudo cp ~/prod/deploy/Caddyfile /etc/caddy/Caddyfile   # both sites, already named
-sudo chown -R caddy:caddy /var/www/erp
+sudo cp ~/prod/deploy/Caddyfile /etc/caddy/Caddyfile   # all three sites, already named
+sudo chown -R caddy:caddy /var/www/erp /var/www/portal
 sudo systemctl restart caddy
 journalctl -u caddy --since "5 min ago" | grep -i certificate
 ```
@@ -274,6 +283,7 @@ journalctl -u caddy --since "5 min ago" | grep -i certificate
 ```sh
 curl -I https://api.baluelastics.com/api/v2/health     # 200, valid certificate
 curl -I https://erp.baluelastics.com/                  # 200
+curl -I https://portal.baluelastics.com/               # 200
 ```
 
 Then in a browser:
@@ -287,6 +297,10 @@ Then in a browser:
 3. `…/api/v2/health/mailer?test=you@example.com` sends a test email.
 4. Open the phone apps. They call `api.baluelastics.com`, so they follow
    the DNS change with no new build.
+5. On a customer's page in the staff app, add a portal login (Portal
+   logins → Add login), then sign in with it at
+   `https://portal.baluelastics.com`. If the sign-in answers that the
+   origin is not allowed, `CORS_ORIGINS` is missing the portal.
 
 ## 13. Finish a move
 
@@ -332,9 +346,10 @@ Web:
 
 ```sh
 cd ~/prod_web && git pull origin main
-npm ci && npm run build
+npm ci && npm run build && npm run build:portal
 sudo rm -rf /var/www/erp/* && sudo cp -r dist/* /var/www/erp/
-sudo chown -R caddy:caddy /var/www/erp
+sudo rm -rf /var/www/portal/* && sudo cp -r dist-portal/* /var/www/portal/
+sudo chown -R caddy:caddy /var/www/erp /var/www/portal
 ```
 
 ## Not on this box
@@ -454,7 +469,7 @@ EOF
 
 sudo mkdir -p /etc/caddy
 sudo cp ~/prod/deploy/Caddyfile /etc/caddy/Caddyfile
-sudo chown -R caddy:caddy /var/www/erp
+sudo chown -R caddy:caddy /var/www/erp /var/www/portal
 sudo systemctl daemon-reload
 sudo systemctl enable --now caddy
 journalctl -u caddy --since "5 min ago" | grep -i certificate
