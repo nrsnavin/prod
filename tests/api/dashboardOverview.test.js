@@ -72,8 +72,13 @@ beforeAll(async () => {
   });
   // Metres: 14 past working days, the last 12 at 1,200 and the two
   // before at 600; a Sunday with nothing; today's partial shift.
+  // "Today" is the floor's shift day, as the dashboard reads it: until the
+  // day shift starts at 08:00 in India the night shift keeps yesterday's
+  // date. Counting from the UTC date instead failed this test every
+  // morning from 05:30 to 08:00 there.
   const plans = [];
-  const day = (n) => new Date(new Date(new Date().toISOString().slice(0, 10)).getTime() - n * DAY);
+  const today = require('../../utils/factoryDay').shiftDay().getTime();
+  const day = (n) => new Date(today - n * DAY);
   for (let n = 1; n <= 14; n++) plans.push({ date: day(n), shift: 'DAY', totalProduction: n <= 12 ? 1200 : 600 });
   plans.push({ date: day(15), shift: 'DAY', totalProduction: 0 });
   plans.push({ date: day(0), shift: 'DAY', totalProduction: 90 });
