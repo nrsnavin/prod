@@ -66,21 +66,61 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 ## 3. Get the code
 
-The repositories are private, so give the box its own read-only key:
-
-```sh
-ssh-keygen -t ed25519 -C "jarvis-ec2" -f ~/.ssh/id_ed25519 -N ""
-cat ~/.ssh/id_ed25519.pub
-```
-
-Add that public key on GitHub to **each** repository: Settings → Deploy
-keys → Add deploy key (leave "Allow write access" off). Then:
+**While the repositories are public**, clone them over HTTPS. The box
+needs no key, and `git pull` works the same way later:
 
 ```sh
 cd ~
-git clone git@github.com:nrsnavin/prod.git
-git clone git@github.com:nrsnavin/prod_web.git
+git clone https://github.com/nrsnavin/prod.git
+git clone https://github.com/nrsnavin/prod_web.git
 ```
+
+**If the repositories are private**, the box needs a read-only deploy
+key for each one. GitHub takes a deploy key on one repository only:
+adding the same key to the second says "Key is already in use". So make
+two keys, and tell SSH which one to use for which repository:
+
+```sh
+ssh-keygen -t ed25519 -C "jarvis-ec2 prod" -f ~/.ssh/prod_deploy -N ""
+ssh-keygen -t ed25519 -C "jarvis-ec2 prod_web" -f ~/.ssh/prod_web_deploy -N ""
+cat >> ~/.ssh/config <<'EOF'
+Host github-prod
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/prod_deploy
+  IdentitiesOnly yes
+
+Host github-prod-web
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/prod_web_deploy
+  IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config
+cat ~/.ssh/prod_deploy.pub       # goes on prod
+cat ~/.ssh/prod_web_deploy.pub   # goes on prod_web
+```
+
+Add each public key to its own repository: Settings → Deploy keys → Add
+deploy key, with "Allow write access" left off. Then:
+
+```sh
+cd ~
+git clone git@github-prod:nrsnavin/prod.git
+git clone git@github-prod-web:nrsnavin/prod_web.git
+```
+
+A box that cloned over HTTPS while the repositories were public stops
+pulling once they are made private. Set up the keys as above, then:
+
+```sh
+git -C ~/prod remote set-url origin git@github-prod:nrsnavin/prod.git
+git -C ~/prod_web remote set-url origin git@github-prod-web:nrsnavin/prod_web.git
+```
+
+Either way, the published database password and token secret in
+`SECRETS_ROTATION.md` are readable by anyone. Do not carry them over to
+this box (step 6).
 
 ## 4. The database
 
@@ -151,9 +191,9 @@ than starting from blank. What to fill in:
 
 | Variable | Value |
 |---|---|
-| `MONGO_URL` | the connection string from step 4 |
+| `MONGO_URL` | the connection string from step 4. If its password is the published one in `SECRETS_ROTATION.md`, change the password in Atlas first (that file, step 1) and use the new string |
 | `PORT` | `2701` (what the proxy configs expect) |
-| `JWT_SECRET_KEY` | **On a move: copy the old value.** A new one signs everyone out, phone apps included. New install: `openssl rand -base64 48` |
+| `JWT_SECRET_KEY` | **On a move: copy the old value**, unless it is the published one in `SECRETS_ROTATION.md`. Then make a new one with `openssl rand -base64 48`. A new one signs everyone out once, phone apps included. New install: `openssl rand -base64 48` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | the mailbox that sends sign-in codes. Email codes are how people sign in, so without these nobody can (`EMAIL_SETUP.md`) |
 | `WEB_URL` | `https://erp.baluelastics.com` (password-reset links) |
 | `CORS_ORIGINS` | `https://erp.baluelastics.com,https://portal.baluelastics.com` (the browser blocks the web app and the customer portal without them) |
