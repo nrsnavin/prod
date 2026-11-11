@@ -1,6 +1,5 @@
 const factoryDay = require("../utils/factoryDay");
 const express  = require("express");
-const { renderPdf } = require("../utils/renderPdf");
 const router   = express.Router();
 const mongoose = require("mongoose");
 
@@ -23,11 +22,8 @@ const Elastic           = require("../models/Elastic");
 const { enqueue }       = require("../utils/outbox");
 const { nextNumber }    = require("../utils/sequence");
 const { currentFinancialYear } = require("../utils/financialYear");
-const PdfTemplate       = require("../models/PdfTemplate");
-const { starterTemplate }   = require("../services/pdf/docTypes");
-const { getPdfBranding }     = require("../services/documentSettings");
 const { mergePdfs }          = require("../utils/mergePdfs");
-const { dcToContext }        = require("../services/pdf/dcContext");
+const { dcPdf }              = require("../services/pdf/dcPdf");
 
 // The whole router is already behind `gate('accounts')` where it is
 // mounted in app.js — i.e. isAuthenticated + isAdmin('admin',
@@ -1198,15 +1194,6 @@ async function changeDcStatus(id, status, req) {
 }
 
 /** A challan as its PDF, from the saved template (or the starter one). */
-async function dcPdf(dc) {
-  const [branding, saved] = await Promise.all([
-    getPdfBranding(),
-    PdfTemplate.findOne({ docType: "delivery-challan" }).lean(),
-  ]);
-  const template = saved && saved.enabled ? saved : starterTemplate("delivery-challan");
-  return renderPdf('template', template, dcToContext(dc, branding));
-}
-
 router.patch(
   "/update-status",
   catchAsyncErrors(async (req, res, next) => {

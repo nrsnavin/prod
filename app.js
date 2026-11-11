@@ -976,6 +976,10 @@ app.use("/api/v2/notify",      ADMIN_GATE,
 app.use("/api/v3", apiLimiter);
 app.use("/api/v3/portal/auth/login", loginAddressLimiter, loginAccountLimiter);
 app.use("/api/v3/portal/auth", portalAuth);
+// What a signed-in customer can see: their orders, dispatches, invoices,
+// statement and test certificates. Read only; every route needs the
+// portal cookie (api/portal/data.js).
+app.use("/api/v3/portal", require("./api/portal/data.js"));
 
 
 app.use(ErrorHandler);
