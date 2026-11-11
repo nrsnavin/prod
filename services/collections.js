@@ -94,12 +94,30 @@ async function historyOf(customer, limit = 30) {
   return CollectionNote.find({ customer }).sort({ createdAt: -1 }).limit(limit).lean();
 }
 
-function template(entry, company) {
+/**
+ * The reminder when no model writes it, in the tone asked for. It was
+ * the gentle one whatever the tone: past three weeks the ladder asks
+ * for a firm reminder, and the office was handed "a gentle reminder".
+ */
+function template(entry, company, tone = 'gentle') {
   const lines = entry.docs.map((d) => `• ${d.docNo} dated ${day(d.date)} — ₹${money(d.outstanding)} (${d.overdueDays} days past due)`);
+  const one = entry.docs.length === 1;
+  if (tone === 'firm') {
+    return [
+      `Dear ${entry.contact.name || entry.partyName},`,
+      '',
+      `Our records show the following invoice${one ? ' from' : 's from'} ${company} ${one ? 'is' : 'are'} still unpaid and past due —`,
+      ...lines,
+      '',
+      `Total overdue: ₹${money(entry.overdue)}. Please arrange payment now, or reply with the date it will be made. If it has already been paid, please send the payment reference so we can update our records.`,
+      '',
+      'Regards,', company,
+    ].join('\n');
+  }
   return [
     `Dear ${entry.contact.name || entry.partyName},`,
     '',
-    `A gentle reminder from ${company}: the following invoice${entry.docs.length === 1 ? ' is' : 's are'} past due —`,
+    `A gentle reminder from ${company}: the following invoice${one ? ' is' : 's are'} past due —`,
     ...lines,
     '',
     `Total overdue: ₹${money(entry.overdue)}. We would be grateful for payment at the earliest. If it has already been made, please share the reference so we can update our records.`,
@@ -110,7 +128,7 @@ function template(entry, company) {
 
 /** A reminder for one customer; `tone` is "gentle" (default) or "firm". */
 async function draft(entry, { company = 'Balu Elastics', tone = 'gentle' } = {}) {
-  const fallback = template(entry, company);
+  const fallback = template(entry, company, tone);
   const claude = anthropic();
   if (!claude) return { message: fallback, byModel: false };
   const startedAt = Date.now();

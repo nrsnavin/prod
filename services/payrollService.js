@@ -316,7 +316,13 @@ async function computePayroll(empId, year, month) {
   let longestStreak         = 0;
   let perfectAttendance     = false;
 
-  if (approvedLeaveShifts === 0 && unapprovedAbsents === 0 && settings.noLeaveBonus > 0) {
+  // The no-leave bonus rewards a month WORKED without leave, so it needs
+  // a shift actually worked — as perfect attendance below does. A month
+  // with no attendance at all (not entered yet, or someone who has left)
+  // has no leave in it either, and paid ₹300 for nothing: the payroll
+  // check flagged every such slip as "pays with no shift worked".
+  const workedShifts = presentShifts + halfDayShifts;
+  if (workedShifts > 0 && approvedLeaveShifts === 0 && unapprovedAbsents === 0 && settings.noLeaveBonus > 0) {
     noLeaveBonusAmt = settings.noLeaveBonus;
     lineItems.push({ label: '🌟 No-Leave Bonus', amount: noLeaveBonusAmt, type: 'bonus' });
   }

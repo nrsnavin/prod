@@ -30,7 +30,7 @@ const PayrollSettingsSchema = new mongoose.Schema(
 
     // ── Rewards ───────────────────────────────────────────────
     // Flat ₹ bonus added to net pay if earned.
-    noLeaveBonus:             { type: Number, default: 300 },   // zero leaves all month
+    noLeaveBonus:             { type: Number, default: 300 },   // no leave all month, and a shift worked
     perfectAttendanceBonus:   { type: Number, default: 500 },   // zero absents all month
     streakBonusPer7Shifts:    { type: Number, default: 100 },   // per 7-shift streak
 

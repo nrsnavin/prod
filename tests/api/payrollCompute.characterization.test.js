@@ -188,6 +188,25 @@ describe('computePayroll — bonuses', () => {
     expect(p.noLeaveBonus).toBe(0);
     expect(p.perfectAttendance).toBe(false);
   });
+
+  // No attendance at all is no leave taken only in name: nobody worked.
+  // The no-leave bonus paid ₹300 on such a month.
+  test('a month with no attendance earns no bonus and pays nothing', async () => {
+    const emp = await makeEmp();
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.noLeaveBonus).toBe(0);
+    expect(p.totalBonuses).toBe(0);
+    expect(p.netPay).toBe(0);
+    expect(p.lineItems.some((l) => /No-Leave Bonus/.test(l.label))).toBe(false);
+  });
+
+  test('one half day worked and nothing missed still earns the no-leave bonus', async () => {
+    const emp = await makeEmp();
+    await att(emp._id, 2, { status: 'half_day' });
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.noLeaveBonus).toBe(300);
+    expect(p.netPay).toBe(600 + 300 + 500); // half of ₹1,200, no-leave, perfect attendance
+  });
 });
 
 describe('computePayroll — advance recovery + netPay', () => {
