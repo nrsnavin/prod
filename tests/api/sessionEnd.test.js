@@ -93,6 +93,43 @@ describe('signing out', () => {
     expect(kept).toEqual(expect.arrayContaining(['still-live', jwt.decode(token).sid]));
   });
 
+  it('ends an app session whichever of its renewed tokens the phone holds', async () => {
+    // The app is handed a renewed token every time it opens. Each renewal
+    // used to be a new session, so signing out with the newest left every
+    // earlier token good for its full ninety days.
+    const login = await request(app).post('/api/v2/user/login-user').set('X-Client', 'mobile').send({ email: 'floor@t.co', password: 'pass1234' });
+    expect(login.status).toBe(201);
+    const renew = async (t) => {
+      const res = await request(app).get('/api/v2/user/getuser').set('X-Client', 'mobile').set('Cookie', [`token=${t}`]);
+      expect(res.status).toBe(200);
+      return res.body.token;
+    };
+    const first = login.body.token;
+    const second = await renew(first);
+    const third = await renew(second);
+    // One session, however often the app was opened…
+    expect(jwt.decode(second).sid).toBe(jwt.decode(first).sid);
+    expect(jwt.decode(third).sid).toBe(jwt.decode(first).sid);
+    // …ended by signing out with the newest token.
+    expect((await request(app).post('/api/v2/user/logout').set('Cookie', [`token=${third}`])).status).toBe(200);
+    for (const t of [first, second, third]) expect((await me(t)).status).toBe(401);
+  });
+
+  it('remembers an app sign-out for as long as a renewal of it could last', async () => {
+    const session = require('../../utils/session');
+    const u = await User.findOne({ email: 'floor@t.co' });
+    const now = Math.floor(Date.now() / 1000);
+    // Signed out with an old token of the session, a minute from expiry,
+    // while a renewal of it may have ninety days left.
+    await session.end(u, { id: String(u._id), sid: 'app-session', iat: now - 90 * 86400 + 60, exp: now + 60 });
+    // A browser's session is never renewed: forgotten with its token.
+    await session.end(u, { id: String(u._id), sid: 'desk-session', iat: now - 3600, exp: now + 60 });
+    const kept = (await User.findById(u._id).select('+revokedSessions').lean()).revokedSessions;
+    const at = (sid) => new Date(kept.find((s) => s.sid === sid).exp).getTime();
+    expect(at('app-session')).toBeGreaterThan(Date.now() + 89 * 86400_000);
+    expect(at('desk-session')).toBeLessThan(Date.now() + 2 * 60_000);
+  });
+
   it('CONTROL: a token from before sessions had ids is still honoured', async () => {
     // A deploy must not sign the mill out: older tokens carry no `sid`
     // (and the oldest no `v`), and run until they expire.

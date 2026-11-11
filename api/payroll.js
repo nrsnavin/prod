@@ -788,7 +788,15 @@ router.get('/advance', isAdmin('admin', 'accounts'), async (req, res) => {
       if (!mongoose.isValidObjectId(req.query.employeeId)) return res.json({ success: true, data: [] });
       filter.employee = req.query.employeeId;
     }
-    if (typeof req.query.status === 'string' && req.query.status) filter.status = req.query.status;
+    if (typeof req.query.status === 'string' && req.query.status) {
+      // "pending" is what the admin app's Advance tab asks for first, but a
+      // request is stored as "requested" (older ones as "pending"), so the
+      // tab never listed a new one. Both are waiting for approval, as the
+      // approve route below already treats them.
+      filter.status = req.query.status === 'pending'
+        ? { $in: ['requested', 'pending'] }
+        : req.query.status;
+    }
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500);
     const advances = await AdvanceRequest.find(filter)
       .populate('employee', 'name department')

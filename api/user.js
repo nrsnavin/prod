@@ -663,7 +663,11 @@ router.get(
       if (session.wantsLongSession(req)) {
         // (Someone who has left never reaches here: their session no
         // longer stands, so there is nothing to renew.)
-        const fresh = session.issue(user, { longLived: true });
+        // The same session, renewed: it keeps its id, so signing out ends
+        // it whichever of its tokens the phone holds by then. A new id on
+        // every opening left each earlier token good for its full ninety
+        // days after the phone had signed out.
+        const fresh = session.issue(user, { longLived: true, sid: req.auth?.claims?.sid });
         res.cookie(session.COOKIE, fresh, session.cookieOptions({ longLived: true }));
         // The app stores the token itself and sends it as a header —
         // it does not keep a cookie jar — so the cookie above is not

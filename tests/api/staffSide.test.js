@@ -162,6 +162,17 @@ describe('a salary advance', () => {
     }
     expect((await as(books).get('/api/v2/payroll/advance?employeeId=nope')).body.data).toEqual([]);
   });
+
+  it('"pending" on the list means waiting for approval, which is what the admin app asks for', async () => {
+    await M.Advance.create({ employee: ravi._id, amount: 4000 });                      // stored as requested
+    await M.Advance.create({ employee: ravi._id, amount: 3000, status: 'pending' });   // an older request
+    await M.Advance.create({ employee: ravi._id, amount: 2000, status: 'approved', deductMonth: 11, deductYear: 2026 });
+    const res = await as(books).get('/api/v2/payroll/advance?status=pending');
+    expect(res.status).toBe(200);
+    expect(res.body.data.map((a) => a.amount).sort((a, b) => a - b)).toEqual([3000, 4000]);
+    expect((await as(books).get('/api/v2/payroll/advance?status=requested')).body.data.map((a) => a.amount)).toEqual([4000]);
+    expect((await as(books).get('/api/v2/payroll/advance?status=approved')).body.data.map((a) => a.amount)).toEqual([2000]);
+  });
 });
 
 describe('attendance', () => {

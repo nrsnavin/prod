@@ -76,8 +76,12 @@ function wantsLongSession(req) {
   return String(req.get('X-Client') || '').toLowerCase() === 'mobile';
 }
 
-/** A new session token for `user`. */
-function issue(user, { longLived = false } = {}) {
+/**
+ * A session token for `user`. A renewal passes the session's own `sid`,
+ * so one sign-in stays one session however often the app is opened, and
+ * signing out ends every token it was renewed into.
+ */
+function issue(user, { longLived = false, sid } = {}) {
   return jwt.sign(
     {
       id: user._id,
@@ -86,7 +90,7 @@ function issue(user, { longLived = false } = {}) {
       // The generation of the account's sessions; see read().
       v: user.tokenVersion ?? 0,
       // This session's own id, so it can be ended on its own.
-      sid: crypto.randomBytes(12).toString('hex'),
+      sid: typeof sid === 'string' && sid ? sid : crypto.randomBytes(12).toString('hex'),
     },
     process.env.JWT_SECRET_KEY,
     { expiresIn: longLived ? APP_SESSION : WEB_SESSION, algorithm: ALGORITHMS[0] }
@@ -160,7 +164,12 @@ async function read(token) {
 async function end(user, claims) {
   if (!user?._id || !claims?.sid) return false; // an older token: nothing to remember it by
   const User = require('../models/User');
-  const exp = claims.exp ? new Date(claims.exp * 1000) : new Date(Date.now() + APP_MAX_AGE);
+  // An app session is renewed in place (the same sid, a fresh ninety days)
+  // each time the app opens, so the token signed out with may not be its
+  // newest: remember the sign-out for as long as a renewal could last. A
+  // browser's session is never renewed and is forgotten with its token.
+  const longLived = claims.exp && claims.iat && (claims.exp - claims.iat) * 1000 > WEB_MAX_AGE;
+  const exp = claims.exp && !longLived ? new Date(claims.exp * 1000) : new Date(Date.now() + APP_MAX_AGE);
   // Forget the ones whose tokens have expired on their own, then remember this one.
   await User.updateOne({ _id: user._id }, { $pull: { revokedSessions: { exp: { $lt: new Date() } } } });
   await User.updateOne(
