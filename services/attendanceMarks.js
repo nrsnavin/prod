@@ -236,7 +236,7 @@ async function approvedLeaveByEmployee({ employeeIds, date, shift, session = nul
  *
  * A shift the person clocked in for is left as it is: the clock is
  * evidence they worked, and a leave day written over it would replace
- * the hours they are owed (with nothing at all, for unpaid leave).
+ * the hours they are owed with nothing (approved leave is unpaid).
  *
  * Call it inside the transaction that approves the request.
  */

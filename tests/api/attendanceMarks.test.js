@@ -240,7 +240,7 @@ describe('leave approved ahead of the day', () => {
     employeeId: emp._id, date: dstr(day), shift: 'DAY', leaveType: 'casual', reason: 'family function', ...over,
   });
 
-  it('is on the day\'s sheet as leave from the moment it is approved, and is paid as leave', async () => {
+  it('is on the day\'s sheet as leave from the moment it is approved: unpaid, and not an absence', async () => {
     const emp = await makeEmp();
     const asked = await ask(emp, 5);
     expect(asked.status).toBe(201);
@@ -260,8 +260,9 @@ describe('leave approved ahead of the day', () => {
     const pay = await computePayroll(emp._id, YEAR, MONTH);
     expect(pay.approvedLeaveShifts).toBe(1);
     expect(pay.absentShifts).toBe(0);
-    expect(lines(pay, /Approved Leave — paid/)).toHaveLength(1);
-    expect(pay.grossEarnings).toBe(1200);
+    // Approved leave is unpaid (the owner's decision): no pay, no penalty.
+    expect(lines(pay, /Approved casual leave — unpaid/)).toEqual([expect.objectContaining({ amount: 0 })]);
+    expect(pay.grossEarnings).toBe(0);
   });
 
   it('comes to the same pay whichever came first, the approval or the mark', async () => {
@@ -278,10 +279,11 @@ describe('leave approved ahead of the day', () => {
     await put(`/leave/${b.body.data.id}/approve`, {});
 
     const [p1, p2] = [await computePayroll(first._id, YEAR, MONTH), await computePayroll(second._id, YEAR, MONTH)];
-    expect(p1.grossEarnings).toBe(1200);
+    // Both are approved leave: unpaid, and neither is an absence.
+    expect([p1.approvedLeaveShifts, p2.approvedLeaveShifts]).toEqual([1, 1]);
+    expect(p1.absentShifts + p2.absentShifts).toBe(0);
     expect(p2.grossEarnings).toBe(p1.grossEarnings);
     expect(p2.netPay).toBe(p1.netPay);
-    expect(p1.absentShifts + p2.absentShifts).toBe(0);
   });
 
   it('a request approved before this was so is picked up when the day is marked on leave', async () => {
@@ -339,12 +341,15 @@ describe('leave approved as unpaid', () => {
     expect(lines(pay, /Approved Leave — paid/)).toHaveLength(0);
   });
 
-  it('leave approved as casual is paid', async () => {
+  it('leave approved as casual is unpaid too, and not an absence', async () => {
     const emp = await makeEmp();
     await post('/leave/admin-request', {
       employeeId: emp._id, date: dstr(5), shift: 'DAY', leaveType: 'casual', reason: 'x', autoApprove: true,
     });
-    expect((await computePayroll(emp._id, YEAR, MONTH)).grossEarnings).toBe(1200);
+    const pay = await computePayroll(emp._id, YEAR, MONTH);
+    expect(pay.grossEarnings).toBe(0);
+    expect(pay.absentShifts).toBe(0);
+    expect(lines(pay, /Approved casual leave — unpaid/)).toEqual([expect.objectContaining({ amount: 0 })]);
   });
 });
 

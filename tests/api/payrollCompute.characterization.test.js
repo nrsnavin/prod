@@ -113,12 +113,50 @@ describe('computePayroll — absences + penalties', () => {
     expect(p.totalDeductions).toBeGreaterThanOrEqual(200);
   });
 
-  test('approved leave is PAID', async () => {
+  // The owner's decision: approved leave is unpaid. The approval only
+  // keeps the shift from being an absence, so there is no penalty for it.
+  test('approved leave is UNPAID, and not charged as an absence', async () => {
     const emp = await makeEmp();
-    await att(emp._id, 2, { status: 'absent', isApprovedLeave: true });
+    await att(emp._id, 2, { status: 'absent', isApprovedLeave: true, leaveType: 'casual' });
     const p = await computePayroll(emp._id, YEAR, MONTH);
     expect(p.approvedLeaveShifts).toBe(1);
-    expect(p.grossEarnings).toBe(1200); // paid like a worked shift
+    expect(p.grossEarnings).toBe(0);
+    expect(p.absentShifts).toBe(0);
+    expect(p.excessAbsents).toBe(0);
+    expect(p.lineItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: expect.stringMatching(/^Approved casual leave — unpaid/), amount: 0 }),
+    ]));
+  });
+});
+
+// The owner's decision: when deductions come to more than the month's
+// pay, net pay stops at ₹0 and the rest is written off, in a line of its
+// own, so the slip's lines still come to its net pay.
+describe('computePayroll — deductions beyond the month\'s pay', () => {
+  const { moneyLines } = require('../../utils/payslipLines');
+  const writeOffs = (p) => p.lineItems.filter((l) => /^Deductions beyond this month's pay, written off/.test(l.label));
+
+  test('are written off in a line of their own, and net pay is ₹0', async () => {
+    await PayrollSettings.create({ casualLeavesPerMonth: 0, sickLeavesPerMonth: 0, penaltyPerExcessAbsent: 2000 });
+    const emp = await makeEmp();
+    await att(emp._id, 2);                          // ₹1200 earned
+    await att(emp._id, 3, { status: 'absent' });    // no quota: a ₹2000 penalty
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.grossEarnings).toBe(1200);
+    expect(p.totalDeductions).toBe(2000);
+    expect(p.netPay).toBe(0);
+    expect(writeOffs(p)).toEqual([expect.objectContaining({ amount: 800, type: 'earning' })]);
+    expect(moneyLines(p.lineItems).reduce((s, l) => s + l.amount, 0)).toBe(0);
+  });
+
+  test('CONTROL: a month whose pay covers its deductions has no such line', async () => {
+    await PayrollSettings.create({ casualLeavesPerMonth: 0, sickLeavesPerMonth: 0, penaltyPerExcessAbsent: 500 });
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await att(emp._id, 3, { status: 'absent' });
+    const p = await computePayroll(emp._id, YEAR, MONTH);
+    expect(p.netPay).toBe(700);
+    expect(writeOffs(p)).toEqual([]);
   });
 });
 

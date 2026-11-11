@@ -179,12 +179,11 @@ async function computeEmployeeBonus(emp, cfg, win) {
   // beside it kept counting scheduled shifts, so the very employee that
   // fix was written for still got a full-year earnings base whenever no
   // payroll existed for the window. Same evidence, same source.
-  // Leave approved as unpaid earned nothing (services/payrollService.js),
-  // so it adds nothing to an estimate of what was earned.
+  // Approved leave earns nothing (services/payrollService.js: approved
+  // leave of every type is unpaid), so it adds nothing to an estimate of
+  // what was earned.
   const attendedShifts = marks.length > 0
-    ? marks.filter((m) =>
-        ['present', 'late', 'half_day'].includes(m.status)
-        || (m.isApprovedLeave === true && m.leaveType !== 'unpaid'))
+    ? marks.filter((m) => ['present', 'late', 'half_day'].includes(m.status))
     : shifts;                       // legacy windows with no register at all
   const hoursWorked = attendedShifts.reduce(
     (sum, s) => sum + shiftHours(s.shift), 0

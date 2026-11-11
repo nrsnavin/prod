@@ -38,6 +38,18 @@ const MEMO_LABEL = /^(Absent —|Late deduction )/;
 //  what it is) and out of the ledger.
 const SET_OFF_LABEL = /^(Advance Salary Recovery|Advance recovered at payment|Advance recovery capped)/;
 
+//  And one line is money the factory gives up. When a month's
+//  deductions come to more than its pay, net pay stops at ₹0 and the
+//  rest is written off (the owner's decision): nothing is carried into
+//  next month, and the worker is not left owing it. The slip says so in
+//  a line of its own, so its lines still come to its net pay, and the
+//  employee ledger, which posts them, does not carry the excess.
+const WRITE_OFF_LABEL = 'Deductions beyond this month\'s pay, written off';
+const WRITE_OFF = /^Deductions beyond this month's pay, written off/;
+
+/** True for the line that writes off deductions beyond the month's pay. */
+const isWriteOffLine = (line) => !!line && WRITE_OFF.test(String(line.label || ''));
+
 /** True for a line that explains the figures without being one. */
 function isMemoLine(line) {
   if (!line) return false;
@@ -57,4 +69,7 @@ const isSetOffLine = (line) => !!line && SET_OFF_LABEL.test(String(line.label ||
  */
 const ledgerLines = (lines) => moneyLines(lines).filter((l) => !isSetOffLine(l));
 
-module.exports = { isMemoLine, isSetOffLine, moneyLines, ledgerLines, MEMO_LABEL, SET_OFF_LABEL };
+module.exports = {
+  isMemoLine, isSetOffLine, isWriteOffLine, moneyLines, ledgerLines,
+  MEMO_LABEL, SET_OFF_LABEL, WRITE_OFF, WRITE_OFF_LABEL,
+};

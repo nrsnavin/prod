@@ -11,7 +11,7 @@
 // re-generating replaces that document's rows rather than duplicating them.
 
 const LedgerEntry = require('../models/LedgerEntry');
-const { ledgerLines } = require('../utils/payslipLines');
+const { ledgerLines, isWriteOffLine, WRITE_OFF_LABEL } = require('../utils/payslipLines');
 
 const { r2 } = require('../utils/money');
 
@@ -26,6 +26,7 @@ function dateFromLabel(label, fallback) {
 
 // Classify a payroll line item into a ledger kind.
 function kindForLineItem(li) {
+  if (isWriteOffLine(li)) return 'write_off';
   const l = String(li.label || '').toLowerCase();
   if (l.includes('overtime'))            return 'overtime';
   if (l.includes('advance'))             return 'advance_recovered';
@@ -80,6 +81,20 @@ async function postPayroll(p, session, { postedBy = '' } = {}) {
       sourceId: p._id,
       postedBy,
     }));
+
+  // Deductions beyond the month's pay are written off: the slip stops at
+  // ₹0 and the worker is not left owing the rest. A slip worked out
+  // before it carried a line for that is written off here all the same,
+  // so the ledger always comes to what the slip pays.
+  const beyond = r2((p.totalDeductions || 0) - (p.grossEarnings || 0) - (p.totalBonuses || 0));
+  const onSlip = r2(rows.filter((r) => r.kind === 'write_off').reduce((s, r) => s + r.amount, 0));
+  if (beyond > 0 && r2(beyond - onSlip) > 0) {
+    rows.push({
+      employee: p.employee, date: monthEnd, kind: 'write_off', amount: r2(beyond - onSlip),
+      label: WRITE_OFF_LABEL, year: p.year, month: p.month,
+      source: 'payroll', sourceId: p._id, postedBy,
+    });
+  }
 
   if (rows.length) await LedgerEntry.insertMany(rows, { session, ordered: true });
   return rows.length;
@@ -191,6 +206,7 @@ async function getLedger(empId, { from, to } = {}) {
       statutory: sumOf('statutory'),
       advances:  sumOf('advance_issued', 'advance_recovered'),
       payments:  sumOf('payment'),
+      writtenOff: sumOf('write_off'),
     },
   };
 }

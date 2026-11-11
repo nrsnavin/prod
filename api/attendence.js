@@ -245,8 +245,8 @@ router.post('/clock-in', isAdmin('admin', 'accounts'), validate({ body: marks.CL
               $or: [{ clockInAt: null }, { clockOutAt: { $ne: null } }],
             },
         // They came in: a row put there by leave approved ahead of the
-        // day stops being leave, or payroll would pay the leave over the
-        // hours on the clock (and nothing at all, for unpaid leave).
+        // day stops being leave, or payroll would count the shift as
+        // approved leave, which pays nothing, over the hours on the clock.
         { $set: {
             status: 'present',
             ...marks.WORKED_AFTER_ALL,

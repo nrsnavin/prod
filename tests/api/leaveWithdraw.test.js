@@ -88,7 +88,9 @@ describe('an approval taken back', () => {
     await mark(2, [{ employeeId: emp._id, status: 'present' }]);
     const id = await approved(emp, 5);
     expect(await rowOf(emp, 5)).toMatchObject({ status: 'on_leave', isApprovedLeave: true });
-    expect((await computePayroll(emp._id, YEAR, MONTH)).grossEarnings).toBe(2400);
+    const before = await computePayroll(emp._id, YEAR, MONTH);
+    expect(before.approvedLeaveShifts).toBe(1);
+    expect(before.grossEarnings).toBe(1200); // the shift worked; approved leave is unpaid
 
     const res = await withdraw(id, { note: 'coming in after all' });
     expect(res.status).toBe(200);

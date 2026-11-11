@@ -107,6 +107,45 @@ describe('ledger postings', () => {
     expect(res.body.closingBalance).toBe(0);
   });
 
+  // The owner's decision: deductions beyond the month's pay are written
+  // off. The ledger used to post them all, so the worker went on owing
+  // the excess there though payroll paid ₹0 and would never recover it.
+  test('deductions beyond the month\'s pay are written off: the slip pays ₹0 and the ledger shows nothing owed', async () => {
+    await PayrollSettings.create({ casualLeavesPerMonth: 0, sickLeavesPerMonth: 0, penaltyPerExcessAbsent: 2000 });
+    const emp = await makeEmp();
+    await att(emp._id, 2);                          // ₹1200
+    await att(emp._id, 3, { status: 'absent' });    // a ₹2000 penalty
+    await gen();
+    const slip = await Payroll.findOne({ employee: emp._id });
+    expect(slip.netPay).toBe(0);
+    await request(app).put(`/api/v2/payroll/${slip._id}/finalize`).set('Cookie', adminCookie()).send({});
+
+    const res = await request(app)
+      .get(`/api/v2/payroll/ledger/${emp._id}?from=${YEAR}-01-01&to=${YEAR + 1}-12-31`)
+      .set('Cookie', adminCookie());
+    expect(res.body.totals.penalties).toBe(-2000);
+    expect(res.body.totals.writtenOff).toBe(800);
+    expect(res.body.closingBalance).toBe(0);
+    expect(await LedgerEntry.countDocuments({ employee: emp._id, kind: 'write_off' })).toBe(1);
+  });
+
+  test('a slip worked out before the write-off line existed is written off when it is finalised', async () => {
+    await PayrollSettings.create({ casualLeavesPerMonth: 0, sickLeavesPerMonth: 0, penaltyPerExcessAbsent: 2000 });
+    const emp = await makeEmp();
+    await att(emp._id, 2);
+    await att(emp._id, 3, { status: 'absent' });
+    await gen();
+    // As a draft generated before this was so: no line for the excess.
+    await Payroll.updateOne({ employee: emp._id }, { $pull: { lineItems: { label: /^Deductions beyond/ } } });
+    const slip = await Payroll.findOne({ employee: emp._id });
+    expect(slip.lineItems.some((l) => /^Deductions beyond/.test(l.label))).toBe(false);
+
+    await request(app).put(`/api/v2/payroll/${slip._id}/finalize`).set('Cookie', adminCookie()).send({});
+    const rows = await LedgerEntry.find({ employee: emp._id }).lean();
+    expect(rows.filter((r) => r.kind === 'write_off').map((r) => r.amount)).toEqual([800]);
+    expect(rows.reduce((s, r) => s + r.amount, 0)).toBe(0);
+  });
+
   test('the printed payslip still carries the explaining lines', async () => {
     const emp = await makeEmp();
     await att(emp._id, 2);

@@ -33,6 +33,7 @@ const KINDS = [
   'advance_recovered', // advance taken back out of pay
   'payment',           // salary actually handed over
   'adjustment',        // manual correction
+  'write_off',         // deductions beyond a month's pay, given up (net pay stops at 0)
 ];
 
 const LedgerEntrySchema = new mongoose.Schema(

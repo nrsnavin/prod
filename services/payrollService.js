@@ -18,6 +18,7 @@ const ShiftDetail     = require('../models/ShiftDetail');
 // Shared with the order P&L, which charges a job's labour against the
 // same scheduled length payroll pays it at — see utils/shiftHours.js.
 const { shiftHours } = require('../utils/shiftHours');
+const { WRITE_OFF_LABEL } = require('../utils/payslipLines');
 
 const r2 = (n) => Math.round(n * 100) / 100;
 
@@ -114,23 +115,14 @@ async function computePayroll(empId, year, month) {
 
     if (rec.isApprovedLeave === true) {
       approvedLeaveShifts++;
-      // Leave approved as unpaid is what it says: nothing is paid for the
-      // shift, and nothing is charged for it either — it is not an
-      // absence. It used to be paid in full, like any approved leave.
-      if (rec.leaveType === 'unpaid') {
-        lineItems.push({
-          label:  `Approved leave — unpaid (${rec.shift} ${dateStr})`,
-          amount: 0,
-          type:   'earning',
-        });
-        continue;
-      }
-      const pay = fullPay;
-      if (rec.shift === 'DAY')   { dayShiftsWorked++;   dayShiftEarnings   += pay; }
-      if (rec.shift === 'NIGHT') { nightShiftsWorked++; nightShiftEarnings += pay; }
+      // Approved leave of every type is unpaid. The approval keeps the
+      // shift from counting as an absence, so it brings no absence
+      // penalty, but nothing is paid for it. The owner's decision: casual
+      // and sick leave used to be paid in full, with no monthly limit.
+      const kind = rec.leaveType && rec.leaveType !== 'unpaid' ? `${rec.leaveType} ` : '';
       lineItems.push({
-        label:  `✅ Approved Leave — paid (${rec.shift} ${dateStr})`,
-        amount: pay,
+        label:  `Approved ${kind}leave — unpaid (${rec.shift} ${dateStr})`,
+        amount: 0,
         type:   'earning',
       });
       continue;
@@ -403,6 +395,13 @@ async function computePayroll(empId, year, month) {
   }
 
   const netPay = r2(Math.max(0, grossEarnings - totalDeductions + bonusBeforeAdvance));
+  // Deductions beyond the month's pay are written off, not carried: net
+  // pay stops at ₹0 and a line says how much was given up, so the slip's
+  // lines come to its net pay (utils/payslipLines.js).
+  const writtenOff = r2(totalDeductions - grossEarnings - bonusBeforeAdvance);
+  if (writtenOff > 0) {
+    lineItems.push({ label: WRITE_OFF_LABEL, amount: writtenOff, type: 'earning' });
+  }
 
   return {
     employee: empId, year, month, hourlyRate,

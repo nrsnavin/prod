@@ -18,7 +18,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const PDFDocument = require('pdfkit');
-const { isMemoLine, moneyLines } = require('../utils/payslipLines');
+const { isMemoLine, moneyLines, isWriteOffLine } = require('../utils/payslipLines');
 const { latin1 } = require('../utils/pdfLatin');
 const { drawLine, hasOtherScript } = require('../utils/pdfScripts');
 
@@ -165,6 +165,9 @@ function writePayslip(p, { year, month }, out) {
     ['Total deductions', rupee(p.totalDeductions)],
   ];
   if (p.totalAdvanceDeduction) sum.push(['   incl. advance recovery', rupee(p.totalAdvanceDeduction)]);
+  // Deductions beyond the month's pay, given up: the summary comes to net pay.
+  const writtenOff = (p.lineItems || []).filter(isWriteOffLine).reduce((s, l) => s + l.amount, 0);
+  if (writtenOff > 0)          sum.push(['Written off', rupee(writtenOff)]);
   if (p.amountPaid)            sum.push(['Amount already paid', rupee(p.amountPaid)]);
 
   const sW = 260, sX = RIGHT - sW, sRow = 19;
