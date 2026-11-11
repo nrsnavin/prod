@@ -153,6 +153,23 @@ describe('a salary advance', () => {
     expect((await as(worker).put(`/api/v2/payroll/advance/${adv._id}/approve`, { deductMonth: 11, deductYear: 2026 })).status).toBe(403);
   });
 
+  it('a worker lists their own requests — only their own', async () => {
+    // The employee app's Payroll screen shows them beside the payslip.
+    await M.Advance.deleteMany({});
+    const other = await M.Employee.create({ name: 'Selvi', phoneNumber: '9100000077', department: 'weaving' });
+    await M.Advance.create({ employee: ravi._id, amount: 4000 });
+    await M.Advance.create({ employee: other._id, amount: 1500 });
+    const own = await as(worker).get(`/api/v2/payroll/advance?employeeId=${ravi._id}`);
+    expect(own.status).toBe(200);
+    expect(own.body.data.map((a) => a.amount)).toEqual([4000]);
+    // Someone else's, or everyone's, is still the office's.
+    expect((await as(worker).get(`/api/v2/payroll/advance?employeeId=${other._id}`)).status).toBe(403);
+    expect((await as(worker).get('/api/v2/payroll/advance')).status).toBe(403);
+    expect((await as(worker).get(`/api/v2/payroll/advance?employeeId=${ravi._id}&employeeId=${other._id}`)).status).toBe(403);
+    // A supervisor with no employee record of their own gets nothing new.
+    expect((await as(supervisor).get(`/api/v2/payroll/advance?employeeId=${ravi._id}`)).status).toBe(403);
+  });
+
   it('the list takes a sane limit', async () => {
     await M.Advance.create({ employee: ravi._id, amount: 4000 });
     for (const limit of ['abc', '-5', '999999999']) {

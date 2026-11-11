@@ -659,7 +659,11 @@ router.get(
       // Only for callers that asked for a long session. A browser
       // gets nothing extra here and keeps its 24 hours, because its
       // cookie is httpOnly and it has no use for a token in the body.
-      const body = { success: true, user };
+      // `selfService`: whether this is a worker's own login, by the
+      // server's rule — the app opens a worker on the employee screens,
+      // and re-checks here each time it opens, so a login given office
+      // access since is not kept on them (nor the other way round).
+      const body = { success: true, user, selfService: isSelfServiceOnly(user) };
       if (session.wantsLongSession(req)) {
         // (Someone who has left never reaches here: their session no
         // longer stands, so there is nothing to renew.)

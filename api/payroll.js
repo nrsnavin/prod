@@ -50,11 +50,22 @@ router.use(isAuthenticated);
 // or Employees, whose page shows a person's pay beside their record.
 // These paths used to pass for whoever asked, so a finance login with
 // Payroll unticked could still read every employee's pay.
+// A worker's OWN advance requests (GET /advance?employeeId=<their own>):
+// the employee app's Payroll screen lists them beside the payslip — the
+// status of what they asked for. Nothing else let a worker see that, and
+// the screen read it through the office list, which refused every worker
+// login and took the payslip down with it. Scoped by identity, as the
+// payslip is: only the login's own employee id passes.
+const ownAdvanceList = (req) =>
+  req.method === 'GET' && req.path === '/advance' &&
+  typeof req.query.employeeId === 'string' && !!req.user?.employee &&
+  String(req.user.employee) === req.query.employeeId;
+
 router.use(ownRecordsOr({
   features: ['/payroll'],
   ownPrefixes: ['/slip/', '/ledger/', '/history/', '/range/'],
   alsoRead: ['/employees'],
-  open: (req) => req.method === 'POST' && req.path === '/advance',
+  open: (req) => (req.method === 'POST' && req.path === '/advance') || ownAdvanceList(req),
   // The Employees detail page shows a pay summary card, so /employees
   // may read that ONE rollup — not the payroll module at large.
   readPaths: { '/employee-overview': ['/employees'] },
@@ -781,7 +792,7 @@ const advanceReason = (raw) => (typeof raw === 'string' ? raw.trim().slice(0, 50
 // The same amount asked for again inside this is the same request.
 const SAME_REQUEST_WITHIN_MS = 2 * 60 * 1000;
 
-router.get('/advance', isAdmin('admin', 'accounts'), async (req, res) => {
+router.get('/advance', (req, res, next) => (ownAdvanceList(req) ? next() : isAdmin('admin', 'accounts')(req, res, next)), async (req, res) => {
   try {
     const filter = {};
     if (typeof req.query.employeeId === 'string' && req.query.employeeId) {

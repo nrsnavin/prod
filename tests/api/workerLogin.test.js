@@ -160,6 +160,23 @@ describe('signing in with phone and PIN', () => {
     expect(me.body.profile.name).toBe('Ravi');
   });
 
+  it('tells the app on every opening whether the login is a worker\'s', async () => {
+    // The admin app opens a worker on the employee screens, and checks
+    // again each time it opens (GET /user/getuser) in case the login
+    // has been given office access since — or taken off it.
+    const worker = await signIn('9100000001', '4826', { 'X-Client': 'mobile' });
+    const opened = await request(app).get('/api/v2/user/getuser')
+      .set('Cookie', `token=${worker.body.token}`).set('X-Client', 'mobile');
+    expect(opened.status).toBe(200);
+    expect(opened.body.selfService).toBe(true);
+    expect(String(opened.body.user.employee)).toBe(String(ravi._id));
+    // A supervisor linked to an employee record is office staff.
+    const staff = await as(supervisor).get('/api/v2/user/getuser');
+    expect(staff.status).toBe(200);
+    expect(staff.body.selfService).toBe(false);
+    expect(String(staff.body.user.employee)).toBe(String(sup._id));
+  });
+
   it.each(['+91 91000 00001', '091000-00001', '91000 00001'])('understands the number typed as %s', async (phone) => {
     expect((await signIn(phone, '4826')).status).toBe(201);
   });
