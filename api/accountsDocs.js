@@ -131,7 +131,11 @@ router.post("/notes/:id/irn", catchAsyncErrors(async (req, res, next) => {
   const clash = await AccountNote.findOne({ "einvoice.irn": irn, _id: { $ne: note._id } }).select("noteNo").lean();
   if (clash) return next(new ErrorHandler(`That IRN is already on ${clash.noteNo}`, 409));
   stamp(note, { irn, ackNo: String(req.body?.ackNo || "").trim().slice(0, 40), ackDate, signedQr: String(req.body?.signedQr || "").trim().slice(0, 4000) }, "manual", req);
-  await note.save();
+  try { await note.save(); } catch (err) {
+    // Two requests saving the same IRN on two notes: the index lets one in.
+    if (err?.code === 11000) return next(new ErrorHandler("That IRN is already on another note", 409));
+    throw err;
+  }
   res.json({ success: true, note: note.toObject() });
 }));
 

@@ -285,3 +285,122 @@ describe('the books lock', () => {
     expect((await post('/accounts/lock', { lockDate: null, reason: 'Auditor asked for a June correction' })).status).toBe(200);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  THE LOCK IS ASKED BY EVERY POSTING, AND KEEPS ITS OWN HISTORY
+//
+//  Payroll, depreciation and stock journals once went round the lock
+//  (the services that post them never asked it), and so did an asset
+//  disposal dated in a closed year. The reason an admin typed to
+//  override it was thrown away, and so was the reason for opening the
+//  books again.
+// ══════════════════════════════════════════════════════════════════
+describe('the lock is asked by every posting', () => {
+  const Journal = () => require('../../models/Journal');
+  const asset = () => post('/accounts/fixed-assets', { name: 'Needle loom 12', block: 'plant', purchaseDate: '2025-05-01', putToUse: '2025-05-10', cost: 1000000 });
+
+  it('depreciation, closing stock and an asset disposal are refused inside a closed year', async () => {
+    const a = await asset();
+    expect(a.status).toBe(201);
+    expect((await post('/accounts/lock', { lockDate: '2026-03-31' })).status).toBe(200);
+
+    // The year's depreciation is dated 31 March of the closed year.
+    const byClerk = await post('/accounts/fixed-assets/depreciation', { fy: '2025-26' }, clerk);
+    expect(byClerk.status).toBe(409);
+    expect(byClerk.body.message).toMatch(/books are closed up to 31 Mar 2026/);
+    expect(await Journal().countDocuments({})).toBe(0);
+    // An admin without a reason is refused the same way.
+    expect((await post('/accounts/fixed-assets/depreciation', { fy: '2025-26' })).status).toBe(409);
+
+    // A disposal dated inside the closed year changes that year's depreciation.
+    const sold = await post(`/accounts/fixed-assets/${a.body.asset._id}/dispose`, { how: 'sold', date: '2026-02-10', amount: 500000, reason: 'Sold to Kumar Looms' }, clerk);
+    expect(sold.status).toBe(409);
+    // After the closed period it goes through.
+    expect((await post(`/accounts/fixed-assets/${a.body.asset._id}/dispose`, { how: 'sold', date: '2026-04-10', amount: 500000, reason: 'Sold to Kumar Looms' }, clerk)).status).toBe(200);
+  });
+
+  it('an admin posts it with a reason, and the reason is on the journal and in the history', async () => {
+    await asset();
+    await post('/accounts/lock', { lockDate: '2026-03-31' });
+    const res = await post('/accounts/fixed-assets/depreciation', { fy: '2025-26', lockOverride: 'Auditor asked for the depreciation entry' });
+    expect(res.status).toBe(201);
+    const j = await Journal().findOne({ source: 'depreciation', sourceRef: '2025-26', status: 'posted' }).lean();
+    expect(j.fingerprints[0].meta).toMatchObject({ lockOverride: 'Auditor asked for the depreciation entry' });
+
+    // Re-posting cancels the first and posts another: both inside the closed year, both need the reason.
+    expect((await post('/accounts/fixed-assets/depreciation', { fy: '2025-26' }, clerk)).status).toBe(409);
+    expect(await Journal().countDocuments({ source: 'depreciation', status: 'posted' })).toBe(1);
+
+    const h = (await get('/accounts/lock/history')).body.events;
+    expect(h.map((e) => e.kind)).toEqual(['override', 'closed']);
+    expect(h[0]).toMatchObject({ kind: 'override', reason: 'Auditor asked for the depreciation entry', byName: 'Owner', entry: { cancelling: false, method: 'POST', path: '/api/v2/accounts/fixed-assets/depreciation' } });
+    expect(new Date(h[0].entry.date).toISOString().slice(0, 10)).toBe('2026-03-31');
+  });
+});
+
+describe('the lock keeps its history', () => {
+  it('records closing, moving, an override and opening again: who, when and why', async () => {
+    const c = await customer();
+    const acct = await cashBox();
+    const inv = await invoice(c, 10500);
+    expect((await post('/accounts/lock', { lockDate: '2026-06-30' })).body.changed).toBe(true);
+    // The same date again changes nothing and writes nothing.
+    expect((await post('/accounts/lock', { lockDate: '2026-06-30' })).body.changed).toBe(false);
+    await post('/accounts/lock', { lockDate: '2026-07-31' });
+
+    // An override: the reason goes on the voucher's fingerprint and into the history.
+    const v = await receipt(c, acct, 200, [{ docType: 'Invoice', doc: inv._id, amount: 200 }], { date: '2026-06-20', lockOverride: 'Missed bank entry for June' });
+    expect(v.status).toBe(201);
+    const stored = await M.Payment.findById(v.body.payment._id).lean();
+    expect(stored.fingerprints[0].meta).toMatchObject({ lockOverride: 'Missed bank entry for June' });
+    // A clerk sending the same words is still refused, and nothing is recorded for it.
+    expect((await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: c._id, amount: 100, mode: 'cash', account: acct._id, date: '2026-06-20', lockOverride: 'Missed bank entry for June' }, clerk)).status).toBe(409);
+    // Cancelling it is inside the closed period too.
+    expect((await post(`/accounts/payments/${v.body.payment._id}/cancel`, { reason: 'Entered against the wrong month' })).status).toBe(409);
+    expect((await post(`/accounts/payments/${v.body.payment._id}/cancel`, { reason: 'Entered against the wrong month', lockOverride: 'Auditor asked for it to come out' })).status).toBe(200);
+
+    // Moving the date earlier is opening the books: it needs a reason.
+    expect((await post('/accounts/lock', { lockDate: '2026-06-30' })).status).toBe(400);
+    const open = await post('/accounts/lock', { lockDate: null, reason: 'Auditor asked for a June correction' });
+    expect(open.status).toBe(200);
+    expect(open.body.settings.lockDate).toBeNull();
+    // What the screens are sent: the connector's key hash never leaves the server.
+    expect(open.body.settings.connector).toEqual({ configured: false, lastSeenAt: null });
+    expect(JSON.stringify(open.body)).not.toMatch(/keyHash/);
+
+    const h = (await get('/accounts/lock/history')).body.events;
+    expect(h.map((e) => e.kind)).toEqual(['reopened', 'override', 'override', 'moved', 'closed']);
+    expect(h[0]).toMatchObject({ kind: 'reopened', reason: 'Auditor asked for a June correction', byName: 'Owner', lockDate: null });
+    expect(new Date(h[0].previousLockDate).toISOString().slice(0, 10)).toBe('2026-07-31');
+    expect(h[1]).toMatchObject({ kind: 'override', reason: 'Auditor asked for it to come out', entry: { cancelling: true } });
+    expect(h[2]).toMatchObject({ kind: 'override', reason: 'Missed bank entry for June', entry: { cancelling: false, method: 'POST', path: '/api/v2/accounts/payments' } });
+    expect(h[3]).toMatchObject({ kind: 'moved', via: 'settings' });
+    expect(h[4]).toMatchObject({ kind: 'closed', byName: 'Owner' });
+  });
+
+  it('the health check finds an entry made inside a closed period, also after the lock has moved on', async () => {
+    const Journal = require('../../models/Journal');
+    const lines = [{ kind: 'ledger', ledger: 'Depreciation', debit: 100, credit: 0 }, { kind: 'ledger', ledger: 'Accumulated Depreciation', debit: 0, credit: 100 }];
+    const { buildFingerprint, ACTION_CODES } = require('../../utils/fingerprint');
+    const journal = (no, date, meta) => {
+      const _id = new mongoose.Types.ObjectId();
+      return Journal.create({ _id, journalNo: no, financialYear: '2026-27', sequence: Number(no.slice(-1)), date: new Date(`${date}T00:00:00Z`), purpose: 'other', reason: 'Written straight to the database', lines, total: 100, fingerprints: [buildFingerprint(ACTION_CODES.JOURNAL_POSTED, { entityId: _id, meta: meta || { journalNo: no } })] });
+    };
+    const lockRows = async () => (await get('/accounts/health')).body.checks.find((x) => x.key === 'lock');
+
+    await journal('JV/T/1', '2026-06-15');                       // before the books were closed: fine
+    await post('/accounts/lock', { lockDate: '2026-06-30' });
+    await new Promise((r) => setTimeout(r, 15));
+    await journal('JV/T/2', '2026-06-20');                       // inside the closed month, after it closed
+    await journal('JV/T/3', '2026-06-21', { lockOverride: 'Auditor asked for this entry' }); // let through, with its reason
+    await journal('JV/T/4', '2026-07-05');                       // after the closed period: fine
+    let c = await lockRows();
+    expect(c.ok).toBe(false);
+    expect(c.rows.map((r) => r.docNo)).toEqual(['JV/T/2']);
+
+    // The next month is closed: the June finding is still there.
+    await post('/accounts/lock', { lockDate: '2026-07-31' });
+    c = await lockRows();
+    expect(c.rows.map((r) => r.docNo)).toEqual(['JV/T/2']);
+  });
+});

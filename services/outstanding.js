@@ -11,8 +11,14 @@
 //  vouchers and notes keep up to date — so an outstanding figure never
 //  disagrees with the document it is about.
 //
-//  Ageing buckets by days past the due date (invoice date + the
-//  customer's payment terms; bill date + 30 when the bill has none).
+//  Ageing buckets by days past the due date. Every document is given
+//  its due date when it is entered, from the party's credit days. One
+//  without (an old record) falls due FALLBACK_DAYS after its own date,
+//  the same on both sides, so the two ageing reports can be compared.
+//
+//  Only documents with something still outstanding are read: the
+//  database works the balance out, so years of settled invoices are
+//  never loaded to be thrown away here.
 //
 //  `taxableRatio` on a row is its value net of GST over its total: the
 //  share of a payment TDS is deducted on.
@@ -25,6 +31,12 @@ const OpeningBalance = require('../models/OpeningBalance');
 
 const { r2 } = require('../utils/money');
 const DAY = 86_400_000;
+const FALLBACK_DAYS = 30;
+/** The day a document falls due: its own due date, else its date + FALLBACK_DAYS. */
+const dueOf = (dueDate, date) => (dueDate ? new Date(dueDate) : new Date(new Date(date).getTime() + FALLBACK_DAYS * DAY));
+const n0 = (field) => ({ $ifNull: [field, 0] });
+/** `$expr`: plus-fields less minus-fields is more than half a paisa. */
+const stillOpen = (plus, minus) => ({ $gt: [{ $subtract: [{ $add: plus.map(n0) }, { $add: minus.map(n0) }] }, 0.005] });
 const BUCKETS = [
   { key: 'current', label: 'Not due', max: 0 },
   { key: 'd30', label: '1–30 days', max: 30 },
@@ -52,7 +64,7 @@ function emptyAgeing() {
 
 /** Open invoices with their outstanding, optionally for one customer. */
 async function receivables({ customer, asOf = new Date() } = {}) {
-  const q = { status: 'issued' };
+  const q = { status: 'issued', $expr: stillOpen(['$totals.grand', '$debitedAmount'], ['$paidAmount', '$creditedAmount']) };
   if (customer) q.customer = customer;
   const invoices = await Invoice.find(q)
     .select('invoiceNumber invoiceDate dueDate customer buyer.name orderNo totals paidAmount creditedAmount debitedAmount')
@@ -62,7 +74,7 @@ async function receivables({ customer, asOf = new Date() } = {}) {
   for (const inv of invoices) {
     const outstanding = r2((inv.totals?.grand || 0) + (inv.debitedAmount || 0) - (inv.paidAmount || 0) - (inv.creditedAmount || 0));
     if (outstanding <= 0.005) continue;
-    const due = inv.dueDate ? new Date(inv.dueDate) : new Date(inv.invoiceDate);
+    const due = dueOf(inv.dueDate, inv.invoiceDate);
     const overdueDays = Math.floor((asOf - due) / DAY);
     rows.push({
       docType: 'Invoice', id: inv._id, docNo: inv.invoiceNumber, date: inv.invoiceDate, dueDate: due,
@@ -77,14 +89,14 @@ async function receivables({ customer, asOf = new Date() } = {}) {
 
 /** Opening balances still due, as rows like any other document's. */
 async function openingDues(partyType, party, asOf) {
-  const q = { partyType, kind: 'due', status: 'posted' };
+  const q = { partyType, kind: 'due', status: 'posted', $expr: stillOpen(['$amount'], ['$settledAmount']) };
   if (party) q[partyType] = party;
   const obs = await OpeningBalance.find(q).sort({ date: 1 }).lean();
   const out = [];
   for (const o of obs) {
     const outstanding = r2(o.amount - (o.settledAmount || 0));
     if (outstanding <= 0.005) continue;
-    const due = o.dueDate ? new Date(o.dueDate) : new Date(o.date);
+    const due = dueOf(o.dueDate, o.date);
     const overdueDays = Math.floor((asOf - due) / DAY);
     out.push({
       docType: 'OpeningBalance', id: o._id, docNo: o.docNo, refNo: o.refNo || '', date: o.date, dueDate: due,
@@ -113,7 +125,7 @@ async function payables({ supplier, asOf = new Date() } = {}) {
   for (const b of bills) {
     const outstanding = r2((b.totals?.grand || 0) - (b.paidAmount || 0) - (b.tdsAmount || 0) - (b.debitedAmount || 0));
     if (outstanding <= 0.005) continue;
-    const due = b.dueDate ? new Date(b.dueDate) : new Date(new Date(b.billDate).getTime() + 30 * DAY);
+    const due = dueOf(b.dueDate, b.billDate);
     const overdueDays = Math.floor((asOf - due) / DAY);
     rows.push({
       docType: 'SupplierBill', id: b._id, docNo: b.billNo, refNo: b.supplierBillNo, date: b.billDate, dueDate: due,
@@ -126,7 +138,7 @@ async function payables({ supplier, asOf = new Date() } = {}) {
   for (const e of expenses) {
     const outstanding = r2((e.totals?.grand || 0) - (e.paidAmount || 0));
     if (outstanding <= 0.005) continue;
-    const due = e.dueDate ? new Date(e.dueDate) : new Date(new Date(e.date).getTime() + 30 * DAY);
+    const due = dueOf(e.dueDate, e.date);
     const overdueDays = Math.floor((asOf - due) / DAY);
     rows.push({
       docType: 'Expense', id: e._id, docNo: e.expenseNo, refNo: '', date: e.date, dueDate: due,

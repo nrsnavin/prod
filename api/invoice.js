@@ -37,12 +37,12 @@ const { financialYearLong } = require("../utils/financialYear");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { getDocumentSettings, getPdfBranding } = require("../services/documentSettings");
 const { computeInvoice, amountInWords, stateCodeFromGstin } = require("../services/gst");
-const { readDate, withTxn } = require("../services/accountsHelpers");
+const { readDate, withTxn, creditDays } = require("../services/accountsHelpers");
 const { onceAtATime } = require("../utils/onceAtATime");
 const { buildEinvoiceJson, readiness } = require("../services/einvoice");
 const { getProvider } = require("../services/einvoiceProvider");
 const partyLedger = require("../services/partyLedger");
-const { assertOpen } = require("../services/booksLock");
+const { assertOpen, overrideMeta } = require("../services/booksLock");
 const creditControl = require("../services/creditControl");
 const exportSupply = require("../services/exportSupply");
 const { getSettings: getBooksSettings } = require("../services/booksLock");
@@ -182,7 +182,8 @@ function readOverrides(raw) {
 }
 
 const populateOrder = (q) => q
-  .populate("customer", "name email gstin contactName phoneNumber address city pincode stateCode country sez currency")
+  // paymentTerms: the customer's credit days, which decide the due date.
+  .populate("customer", "name email gstin contactName phoneNumber address city pincode stateCode country sez currency paymentTerms")
   .populate("elasticOrdered.elastic", "name hsn gstPercent");
 
 function nextInvoiceSeq(fy) {
@@ -317,7 +318,7 @@ router.post(
         ...(creditOverride ? { creditOverride } : {}),
         order: order._id, orderNo: order.orderNo, customer: order.customer._id, customerPo: order.po || "",
         // The customer's payment terms ("30" days) decide when it falls due.
-        dueDate: new Date(when.getTime() + (Math.max(0, parseInt(order.customer.paymentTerms, 10) || 0)) * 86_400_000),
+        dueDate: new Date(when.getTime() + creditDays(order.customer) * 86_400_000),
         seller, buyer,
         shipTo: String(req.body.shipTo ?? "").trim().slice(0, 300) || shipToFor(chosen, buyer),
         supplyType: priced.supplyType, placeOfSupply: priced.placeOfSupply,
@@ -334,7 +335,7 @@ router.post(
         createdBy: req.user?._id,
         fingerprints: [buildFingerprint(ACTION_CODES.INVOICE_CREATED, {
           entityId: _id, actor,
-          meta: { invoiceNumber: number, orderNo: order.orderNo, dcs: chosen.map((d) => d.dcNumber), grand: priced.totals.grand, ...(exp ? { export: exp.kind } : {}) },
+          meta: { invoiceNumber: number, orderNo: order.orderNo, dcs: chosen.map((d) => d.dcNumber), grand: priced.totals.grand, ...(exp ? { export: exp.kind } : {}), ...overrideMeta(req) },
         })],
       };
       // The invoice and its row on the customer's account, together: it
@@ -516,6 +517,7 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const inv = await loadInvoice(req.params.id, next);
     if (!inv) return;
+    if (inv.status === "cancelled") return next(new ErrorHandler("A cancelled invoice takes no shipping bill", 409));
     if (inv.supplyType !== "export") return next(new ErrorHandler("Only an export invoice carries a shipping bill", 409));
     const b = req.body || {};
     const number = String(b.shippingBill?.number ?? b.shippingBillNo ?? "").trim().slice(0, 20);
@@ -602,7 +604,11 @@ router.post(
       irn, ackNo: String(req.body?.ackNo || "").trim().slice(0, 40), ackDate,
       signedQr: String(req.body?.signedQr || "").trim().slice(0, 4000),
     }, "manual", req);
-    await inv.save();
+    try { await inv.save(); } catch (err) {
+      // Two requests saving the same IRN on two invoices: the index lets one in.
+      if (err?.code === 11000) return next(new ErrorHandler("That IRN is already on another invoice", 409));
+      throw err;
+    }
     res.json({ success: true, invoice: publicInvoice(inv) });
   })
 );
@@ -649,7 +655,7 @@ router.post(
     const einvoiceSet = inv.einvoice.status === "registered" ? { "einvoice.status": "cancelled", "einvoice.cancelledAt": new Date() } : {};
     const mark = buildFingerprint(ACTION_CODES.INVOICE_CANCELLED, {
       entityId: inv._id, actor: actorFromRequest(req),
-      meta: { invoiceNumber: inv.invoiceNumber, reason, irn: inv.einvoice.irn || "" },
+      meta: { invoiceNumber: inv.invoiceNumber, reason, irn: inv.einvoice.irn || "", ...overrideMeta(req) },
     });
     // One conditional write, so a receipt landing between the check
     // above and here cannot settle a cancelled invoice: the write is

@@ -31,6 +31,7 @@ const ExpenseCategory = require('../models/ExpenseCategory');
 const settle = require('./settle');
 const partyLedger = require('./partyLedger');
 const { allocate } = require('./docNumbers');
+const { assertOpen } = require('./booksLock');
 const { isId, r2, withTxn, fp } = require('./accountsHelpers');
 const { ACTION_CODES } = require('../utils/fingerprint');
 
@@ -129,6 +130,9 @@ async function post({ date, purpose, narration, reason, lines, total, requestId,
     const dup = await Journal.findOne({ requestId: String(requestId) }).lean();
     if (dup) return { journal: dup, replay: true };
   }
+  // The books lock is asked here, not by each caller: the journals that
+  // payroll, depreciation and stock post come through this one door too.
+  await assertOpen(date, req);
   const { financialYear, sequence, number } = await allocate(Journal, 'JV', { at: date });
   const _id = new mongoose.Types.ObjectId();
   const data = {
@@ -159,6 +163,7 @@ async function post({ date, purpose, narration, reason, lines, total, requestId,
 }
 
 async function cancel(j, reason, req) {
+  await assertOpen(j.date, req, { cancelling: true });
   await withTxn(async (session) => {
     const res = await Journal.updateOne({ _id: j._id, status: 'posted' }, {
       $set: { status: 'cancelled', cancel: { reason, at: new Date(), by: req?.user?._id } },

@@ -532,3 +532,57 @@ describe('two requests for one invoice at the portal', () => {
     expect((await post('/invoice/not-an-id/register-irn', {})).status).toBeGreaterThanOrEqual(400);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  WHEN AN INVOICE FALLS DUE
+//
+//  Its date plus the customer's credit days. The customer's payment
+//  terms were once left out of the query that loads the customer, so
+//  every invoice fell due on its own date and was "overdue" the next
+//  morning. Walked here from the customer's terms to the ageing.
+// ══════════════════════════════════════════════════════════════════
+describe('when an invoice falls due', () => {
+  const DAY = 86_400_000;
+  const raise = async (customerOver, invoiceDate) => {
+    const { order, dc1 } = await scene(customerOver);
+    const res = await post('/invoice/create', { orderId: order._id, dcIds: [dc1._id], ...(invoiceDate ? { invoiceDate } : {}) });
+    expect(res.status).toBe(201);
+    return res.body.invoice;
+  };
+
+  it('is its date plus the customer\'s credit days', async () => {
+    const inv = await raise({ paymentTerms: '45' }, '2026-07-12');
+    expect(inv.invoiceDate.slice(0, 10)).toBe('2026-07-12');
+    expect(inv.dueDate.slice(0, 10)).toBe('2026-08-26');
+    // The default terms are 30 days.
+    const plain = await raise({});
+    expect(Math.round((new Date(plain.dueDate) - new Date(plain.invoiceDate)) / DAY)).toBe(30);
+  });
+
+  it('a customer with no credit days, or terms that are not a number, falls due on the invoice date', async () => {
+    const cash = await raise({ paymentTerms: '0' });
+    expect(cash.dueDate).toBe(cash.invoiceDate);
+    const words = await raise({ paymentTerms: 'Advance' });
+    expect(words.dueDate).toBe(words.invoiceDate);
+    const mixed = await raise({ paymentTerms: '60 days' });
+    expect(Math.round((new Date(mixed.dueDate) - new Date(mixed.invoiceDate)) / DAY)).toBe(60);
+  });
+
+  it('the ageing counts from the due date: an invoice raised today on 45 days is not overdue', async () => {
+    const inv = await raise({ paymentTerms: '45' });
+    const res = await get(`/accounts/outstanding?type=receivable&party=${inv.customer}`);
+    expect(res.status).toBe(200);
+    expect(res.body.rows).toHaveLength(1);
+    expect(res.body.rows[0]).toMatchObject({ docNo: inv.invoiceNumber, overdueDays: 0, bucket: 'current' });
+    expect(res.body.rows[0].dueDate).toBe(inv.dueDate);
+  });
+
+  it('and one raised 50 days ago on 45 days is 5 days overdue, not 50', async () => {
+    const then = new Date(Date.now() - 50 * DAY).toISOString().slice(0, 10);
+    const inv = await raise({ paymentTerms: '45' }, then);
+    const res = await get(`/accounts/outstanding?type=receivable&party=${inv.customer}`);
+    expect(res.body.rows[0].overdueDays).toBeGreaterThanOrEqual(4);
+    expect(res.body.rows[0].overdueDays).toBeLessThanOrEqual(5);
+    expect(res.body.rows[0].bucket).toBe('d30');
+  });
+});

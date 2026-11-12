@@ -23,7 +23,7 @@ const { escapeRegex }  = require("../utils/escapeRegex");
 const { ACTION_CODES } = require("../utils/fingerprint");
 const { allocate }     = require("../services/docNumbers");
 const partyLedger      = require("../services/partyLedger");
-const { assertOpen, getSettings } = require("../services/booksLock");
+const { assertOpen, getSettings, setLock, history: lockHistory } = require("../services/booksLock");
 const { isId, r2, readDate, reasonFrom, fp, withTxn, paging, DAY } = require("../services/accountsHelpers");
 const aiLedger = require("../services/aiLedger");
 const { promptVersion } = require("../utils/aiPrompts");
@@ -491,24 +491,27 @@ router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
     }
   }
   await getSettings();
-  const settings = await AccountsSettings.findOneAndUpdate({ key: "accounts" }, { $set: set }, { new: true }).lean();
-  res.json({ success: true, settings: publicSettings(settings) });
+  await AccountsSettings.updateOne({ key: "accounts" }, { $set: set });
+  // Read back through getSettings: every part filled in, as the screens expect.
+  res.json({ success: true, settings: publicSettings(await getSettings()) });
 }));
 
-/** Close the books up to a date (or reopen: lockDate null). Admin only. */
+/**
+ * Close the books up to a date, move the date, or open them again
+ * (lockDate null). Admin only. Opening them again needs a reason; every
+ * change goes into the lock's history (services/booksLock.js).
+ */
 router.post("/lock", isAdmin("admin"), catchAsyncErrors(async (req, res, next) => {
   let lockDate = null;
   try { lockDate = readDate(req.body?.lockDate, "lockDate", null); } catch (err) { return next(err); }
-  const current = (await getSettings()).lockDate;
-  if (current && (!lockDate || lockDate < current) && String(req.body?.reason || "").trim().length < 8) {
-    return next(new ErrorHandler("Opening closed books again needs a reason (at least 8 characters)", 400));
-  }
-  const settings = await AccountsSettings.findOneAndUpdate(
-    { key: "accounts" },
-    { $set: { lockDate, lockedBy: req.user?.name || "", lockedAt: new Date() } },
-    { new: true }
-  ).lean();
-  res.json({ success: true, settings });
+  let out;
+  try { out = await setLock(lockDate, req, { reason: req.body?.reason, via: "settings" }); } catch (err) { if (err instanceof ErrorHandler) return next(err); throw err; }
+  res.json({ success: true, settings: publicSettings(out.settings), changed: !!out.event });
+}));
+
+/** The lock's history: closed, moved, opened again, and each override, newest first. */
+router.get("/lock/history", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, events: await lockHistory({ limit: req.query.limit }) });
 }));
 
 // Bank reconciliation and the Tally export.

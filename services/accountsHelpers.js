@@ -45,7 +45,13 @@ function reasonFrom(req) {
   return reason;
 }
 
-const fp = (code, doc, req, meta) => buildFingerprint(code, { entityId: doc._id, actor: actorFromRequest(req), meta });
+// A request an admin was let through the books lock on carries the reason
+// (services/booksLock.js): it goes on the fingerprint of whatever the
+// request then posts or cancels, so the entry itself says why it is there.
+const fp = (code, doc, req, meta) => buildFingerprint(code, {
+  entityId: doc._id, actor: actorFromRequest(req),
+  meta: req?.lockOverrideUsed ? { ...(meta || {}), lockOverride: req.lockOverrideUsed } : meta,
+});
 
 // withTransaction RETRIES the callback on a transient error, so every
 // callback is written to run twice safely: documents are created
@@ -72,4 +78,14 @@ function paging(req) {
   return { page, limit, skip: (page - 1) * limit, range: from || to ? range : null };
 }
 
-module.exports = { MIN_REASON, DAY, isId, r2, readDate, businessDay, reasonFrom, fp, withTxn, paging };
+/**
+ * A party's credit days: a customer's paymentTerms ("30"), a supplier's
+ * paymentTermsDays. One reading for both sides, so an invoice and a
+ * bill fall due by the same rule. Nothing usable on file → 0 days.
+ */
+function creditDays(party) {
+  const n = parseInt(party?.paymentTermsDays ?? party?.paymentTerms, 10);
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 3650) : 0;
+}
+
+module.exports = { MIN_REASON, DAY, isId, r2, readDate, businessDay, reasonFrom, fp, withTxn, paging, creditDays };

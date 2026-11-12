@@ -38,7 +38,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
 const { isAdmin } = require("../middleware/auth");
 const { isId, readDate, DAY, r2, withTxn } = require("../services/accountsHelpers");
-const { getSettings } = require("../services/booksLock");
+const { getSettings, setLock } = require("../services/booksLock");
 const { getDocumentSettings } = require("../services/documentSettings");
 const tally = require("../services/tallyExport");
 const { envelope, MODELS } = require("../services/tallyQueue");
@@ -145,9 +145,10 @@ router.post("/tally/export", catchAsyncErrors(async (req, res, next) => {
     throw err;
   }
   if (lock) {
+    // Only ever forward: a batch for an earlier period does not open later months again.
     const current = (await getSettings()).lockDate;
     if (!current || new Date(current) < p.to) {
-      await AccountsSettings.updateOne({ key: "accounts" }, { $set: { lockDate: factoryDay.calendarDay(p.to.toISOString().slice(0, 10)), lockedBy: req.user?.name || "", lockedAt: new Date() } });
+      await setLock(factoryDay.calendarDay(p.to.toISOString().slice(0, 10)), req, { via: "tally-export", reason: `Sent to Tally in batch ${batchNo}` });
     }
   }
   const out = await TallyBatch.findById(_id).lean();

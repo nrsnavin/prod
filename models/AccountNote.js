@@ -105,5 +105,7 @@ AccountNoteSchema.index({ kind: 1, financialYear: 1, sequence: 1 });
 AccountNoteSchema.index({ "against.doc": 1 });
 AccountNoteSchema.index({ customer: 1, date: -1 });
 AccountNoteSchema.index({ supplier: 1, date: -1 });
+// One IRN, one note (only where an IRN is held).
+AccountNoteSchema.index({ "einvoice.irn": 1 }, { unique: true, partialFilterExpression: { "einvoice.irn": { $gt: "" } } });
 
 module.exports = mongoose.model("AccountNote", AccountNoteSchema);

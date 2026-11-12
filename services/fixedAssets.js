@@ -32,7 +32,7 @@ const Supplier = require('../models/Supplier');
 const Machine = require('../models/Machine');
 const journals = require('./journals');
 const { allocate } = require('./docNumbers');
-const { getSettings } = require('./booksLock');
+const { getSettings, assertOpen } = require('./booksLock');
 const { isId, r2, fp } = require('./accountsHelpers');
 const { ACTION_CODES } = require('../utils/fingerprint');
 
@@ -257,6 +257,8 @@ async function dispose(id, b, req) {
   const date = b.date ? new Date(b.date) : null;
   if (!date || Number.isNaN(date.getTime())) throw new ErrorHandler('date is required', 400);
   if (date < new Date(a.putToUse)) throw new ErrorHandler('Disposed before it was put to use', 400);
+  // A disposal changes that year's depreciation: not inside a closed period.
+  await assertOpen(date, req);
   const amount = how === 'sold' ? r2(b.amount) : 0;
   if (how === 'sold' && !(amount >= 0)) throw new ErrorHandler('amount must be 0 or more', 400);
   const reason = String(b.reason || '').trim().slice(0, 200);

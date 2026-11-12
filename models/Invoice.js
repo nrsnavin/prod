@@ -194,5 +194,9 @@ InvoiceSchema.index({ order: 1, createdAt: -1 });
 InvoiceSchema.index({ customer: 1, createdAt: -1 });
 InvoiceSchema.index({ status: 1, createdAt: -1 });
 InvoiceSchema.index({ "dcs.dc": 1 });
+// One IRN, one invoice: the portal issues it for one document, and the
+// check made before a pasted IRN is saved cannot see a second request
+// saving the same one beside it. (Only where an IRN is held.)
+InvoiceSchema.index({ "einvoice.irn": 1 }, { unique: true, partialFilterExpression: { "einvoice.irn": { $gt: "" } } });
 
 module.exports = mongoose.model("Invoice", InvoiceSchema);

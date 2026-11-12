@@ -34,7 +34,7 @@ const BankStatement = require('../models/BankStatement');
 const outstanding = require('./outstanding');
 const credits = require('./credits');
 const partyLedger = require('./partyLedger');
-const { getSettings } = require('./booksLock');
+const { timeline: lockTimeline } = require('./booksLock');
 const { buildFingerprint, ACTION_CODES } = require('../utils/fingerprint');
 
 const { r2 } = require('../utils/money');
@@ -247,12 +247,27 @@ async function totalsVsLines() {
 
 /** Posted inside the closed period after it was closed. */
 async function postedAfterLock() {
-  const s = await getSettings();
-  if (!s.lockDate || !s.lockedAt) return [];
+  // The lock as it stood over time (services/booksLock.js): an entry is
+  // inside a closed period when the lock in force on the day it was
+  // made already covered its date. Reading the history, not just the
+  // lock as it stands, keeps last month's finding when this month is
+  // closed. An entry an admin was let through on, with the reason on
+  // its fingerprint, is accounted for and not listed.
+  const stretches = await lockTimeline();
   const rows = [];
-  for (const [docType, Model, no, dateField] of TYPES) {
-    const docs = await Model.find({ [dateField]: { $lte: s.lockDate }, createdAt: { $gt: s.lockedAt } }).select(`${no} ${dateField} createdAt`).limit(100).lean();
-    for (const d of docs) rows.push({ docType, doc: d._id, docNo: d[no], date: d[dateField], createdAt: d.createdAt });
+  const seen = new Set();
+  for (const st of stretches) {
+    const made = st.to ? { $gt: st.from, $lte: st.to } : { $gt: st.from };
+    for (const [docType, Model, no, dateField] of TYPES) {
+      if (rows.length >= 200) break;
+      const docs = await Model.find({ [dateField]: { $lte: st.lockDate }, createdAt: made, 'fingerprints.meta.lockOverride': { $exists: false } })
+        .select(`${no} ${dateField} createdAt`).limit(100).lean();
+      for (const d of docs) {
+        if (seen.has(String(d._id))) continue;
+        seen.add(String(d._id));
+        rows.push({ docType, doc: d._id, docNo: d[no], date: d[dateField], createdAt: d.createdAt, lockDate: st.lockDate });
+      }
+    }
   }
   return rows;
 }
