@@ -204,29 +204,29 @@ function accountFor(accounts, { from, subject, text, filenames }) {
 }
 
 /**
- * Lines the matcher is sure of, posted as vouchers: a document named in
- * the narration and its allocations exactly the amount.
+ * Lines the matcher is sure of, posted as vouchers: documents named in
+ * the narration that themselves add up to the amount (`exact`). Each
+ * goes through the same door as a line a person posts
+ * (services/statementPosting.js), so a line is posted once whoever
+ * reaches it first.
  */
 async function autoPost(statement, account, via = 'email') {
-  const { createVoucher } = require('../api/accounts');
+  const { postRow } = require('./statementPosting');
   const req = { user: { _id: null, name: `Bank statement (${via === 'sftp' ? 'SFTP' : 'email'})`, role: 'accounts' }, body: {} };
   let posted = 0;
   const doc = await BankStatement.findById(statement._id).lean();
   for (const l of doc.lines) {
     const s = l.suggestion;
-    if (l.status !== 'matched' || !s || s.confidence < 0.95 || s.partyType === 'other' || !s.party) continue;
+    if (l.status !== 'matched' || !s || !s.exact || s.confidence < 0.95 || s.partyType === 'other' || !s.party) continue;
     const allocated = Math.round((s.allocations || []).reduce((t, a) => t + (a.amount || 0), 0) * 100) / 100;
     if (!s.allocations?.length || Math.abs(allocated - l.amount) > 0.005) continue;
     try {
-      const { voucher } = await createVoucher({
-        kind: l.direction === 'in' ? 'receipt' : 'payment', date: l.date, partyType: s.partyType, [s.partyType]: s.party,
-        amount: l.amount, mode: 'bank', account: account._id, reference: l.ref || '',
-        allocations: s.allocations.map((a) => ({ docType: a.docType, doc: a.doc, amount: a.amount })),
-        narration: l.narration, source: 'statement', statementLine: `${l.narration}`.slice(0, 200), clearedOn: l.date,
-        requestId: `feed:${doc._id}:${l.index}`,
-      }, req);
-      await BankStatement.updateOne({ _id: doc._id, 'lines.index': l.index }, { $set: { 'lines.$.status': 'posted', 'lines.$.voucherType': 'Payment', 'lines.$.voucher': voucher._id, 'lines.$.voucherNo': voucher.voucherNo, 'lines.$.note': via === 'sftp' ? 'Posted from the bank\'s SFTP statement' : 'Posted from the emailed statement' } });
-      posted += 1;
+      const out = await postRow({
+        accountId: account._id, statement: doc, req,
+        row: { index: l.index, partyType: s.partyType, party: s.party, mode: 'bank', allocations: s.allocations.map((a) => ({ docType: a.docType, doc: a.doc, amount: a.amount })) },
+        note: via === 'sftp' ? 'Posted from the bank\'s SFTP statement' : 'Posted from the emailed statement',
+      });
+      if (out.ok && !out.replay) posted += 1;
     } catch (err) {
       await BankStatement.updateOne({ _id: doc._id, 'lines.index': l.index }, { $set: { 'lines.$.note': `Not posted automatically: ${err.message}`.slice(0, 200) } });
     }

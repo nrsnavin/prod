@@ -7,8 +7,14 @@
 //  same questions twice. A line is:
 //    recorded   a voucher or contra already in the books matched it
 //    posted     a voucher was posted from it
+//    matched    still to be placed; the matcher has a suggestion
 //    unmatched  still to be placed
 //    ignored    set aside by a person, with a reason
+//
+//  A bank line has one identity across statements: the account, its
+//  key and which of the same-key lines it is. The voucher that answers
+//  it carries that identity (services/bankLines.js), so the same line
+//  on an overlapping statement is the same line, not a second one.
 // ══════════════════════════════════════════════════════════════════
 
 const mongoose = require("mongoose");
@@ -24,6 +30,10 @@ const LineSchema = new mongoose.Schema(
     balance:   { type: Number, default: null },
     // Same date, amount, direction, narration and reference: the same line.
     key:       { type: String, required: true },
+    // Which of the lines with that key it is, in the bank's own order
+    // (two charges of 5.90 on one day are 1 and 2): key and occurrence
+    // together are the line's identity across statements.
+    occurrence: { type: Number, default: 1 },
     status:    { type: String, enum: ["recorded", "posted", "unmatched", "matched", "ignored"], default: "unmatched" },
     voucherType: { type: String, enum: ["Payment", "Contra", null], default: null },
     voucher:   { type: mongoose.Types.ObjectId, default: null },

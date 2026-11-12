@@ -6,6 +6,13 @@
 //    GET  /bank/statements/:id             one, with its lines
 //    POST /bank/statements/:id/lines/:index/ignore   set a line aside (reason)
 //    POST /bank/statements/:id/lines/:index/link     it is this voucher / contra
+//    POST /bank/statements/:id/lines/:index/unlink   a wrong match undone
+//
+//  A bank line is answered by one entry in the books, and an entry
+//  answers one line (services/bankLines.js). A line already in the books
+//  cannot be linked or set aside again; an entry that answers another
+//  line cannot be linked to this one. Every write to a line is made only
+//  if the line is still as the person saw it.
 //    POST /bank/clear                      tick a book entry cleared (or not)
 //    GET  /bank/reconciliation?account=&asOf=&bankBalance=
 //    GET  /bank/feed                       the statements mailbox: set up?
@@ -24,6 +31,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
 const { isId, readDate, reasonFrom } = require("../services/accountsHelpers");
 const reconcile = require("../services/reconcile");
+const bankLines = require("../services/bankLines");
 const BankStatement = require("../models/BankStatement");
 const Payment = require("../models/Payment");
 const Contra = require("../models/Contra");
@@ -56,19 +64,25 @@ async function lineOf(req, next) {
   return { st, line };
 }
 
+const MOVED = "That line was placed by someone else meanwhile — reload the statement";
+const inBooks = (line) => `That line is already in the books${line.voucherNo ? ` as ${line.voucherNo}` : ""}`;
+
 router.post("/bank/statements/:id/lines/:index/ignore", catchAsyncErrors(async (req, res, next) => {
   const hit = await lineOf(req, next);
   if (!hit) return;
-  if (["recorded", "posted"].includes(hit.line.status)) return next(new ErrorHandler("That line is already in the books", 409));
+  if (bankLines.PLACED.includes(hit.line.status)) return next(new ErrorHandler(inBooks(hit.line), 409));
   let reason;
   try { reason = reasonFrom(req); } catch (err) { return next(err); }
-  await BankStatement.updateOne({ _id: hit.st._id, "lines.index": hit.line.index }, { $set: { "lines.$.status": "ignored", "lines.$.note": reason } });
+  // Only while it is still to be placed (or already set aside: the reason is replaced).
+  const done = await bankLines.place(hit.st._id, hit.line.index, { status: "ignored", note: reason }, { from: [...bankLines.UNPLACED, "ignored"] });
+  if (!done) return next(new ErrorHandler(MOVED, 409));
   res.json({ success: true });
 }));
 
 router.post("/bank/statements/:id/lines/:index/link", catchAsyncErrors(async (req, res, next) => {
   const hit = await lineOf(req, next);
   if (!hit) return;
+  if (bankLines.PLACED.includes(hit.line.status)) return next(new ErrorHandler(inBooks(hit.line), 409));
   const type = req.body?.voucherType === "Contra" ? "Contra" : "Payment";
   if (!isId(req.body?.voucher)) return next(new ErrorHandler("voucher is required", 400));
   const v = type === "Contra" ? await Contra.findById(req.body.voucher).lean() : await Payment.findById(req.body.voucher).lean();
@@ -81,8 +95,40 @@ router.post("/bank/statements/:id/lines/:index/link", catchAsyncErrors(async (re
   if (hit.line.direction && direction !== hit.line.direction) return next(new ErrorHandler(`The line is money ${hit.line.direction}, the voucher money ${direction}`, 400));
   const amount = v.amount;
   if (Math.abs(amount - hit.line.amount) > 0.005) return next(new ErrorHandler(`The voucher is for ₹${amount.toFixed(2)}, the line for ₹${hit.line.amount.toFixed(2)}`, 400));
+  const no = type === "Contra" ? v.contraNo : v.voucherNo;
+  // The voucher takes this line for itself: refused when it already
+  // answers another line, or another voucher answers this one.
+  const id = bankLines.idOf(hit.st, hit.line);
+  const got = await bankLines.claim(type, v._id, hit.st.account, id);
+  if (got === "taken") return next(new ErrorHandler(`${no} already answers another line on the bank statement — one entry in the books is one line at the bank`, 409));
+  if (got === "line-taken") return next(new ErrorHandler("Another voucher already answers this line", 409));
+  if (got === "missing") return next(new ErrorHandler("Voucher not found", 404));
+  const done = await bankLines.place(hit.st._id, hit.line.index, { status: "recorded", voucherType: type, voucher: v._id, voucherNo: no }, { from: [...bankLines.UNPLACED, "ignored"] });
+  if (!done) {
+    if (got === "claimed") await bankLines.release(type, v._id, hit.st.account, id);
+    return next(new ErrorHandler(MOVED, 409));
+  }
   await reconcile.markCleared(type, v._id, hit.st.account, hit.line.date, { overwrite: true });
-  await BankStatement.updateOne({ _id: hit.st._id, "lines.index": hit.line.index }, { $set: { "lines.$.status": "recorded", "lines.$.voucherType": type, "lines.$.voucher": v._id, "lines.$.voucherNo": type === "Contra" ? v.contraNo : v.voucherNo } });
+  res.json({ success: true });
+}));
+
+/**
+ * A wrong match undone: the line goes back to be placed, and the entry
+ * it was matched to is free to answer its own line. Only for a line
+ * matched to an entry that was already in the books; a voucher posted
+ * from the line is undone by cancelling the voucher, which frees the
+ * line by itself.
+ */
+router.post("/bank/statements/:id/lines/:index/unlink", catchAsyncErrors(async (req, res, next) => {
+  const hit = await lineOf(req, next);
+  if (!hit) return;
+  if (hit.line.status === "posted") return next(new ErrorHandler(`${hit.line.voucherNo || "The voucher"} was posted from this line — cancel the voucher, and the line comes back to be placed`, 409));
+  if (hit.line.status !== "recorded" || !hit.line.voucher) return next(new ErrorHandler("That line is not matched to an entry in the books", 409));
+  const type = hit.line.voucherType === "Contra" ? "Contra" : "Payment";
+  const done = await bankLines.place(hit.st._id, hit.line.index, { status: "unmatched", voucherType: null, voucher: null, voucherNo: "", suggestion: null, note: `Was matched to ${hit.line.voucherNo || "an entry"}; unmatched by ${req.user?.name || "someone"}` }, { from: ["recorded"] });
+  if (!done) return next(new ErrorHandler(MOVED, 409));
+  await bankLines.release(type, hit.line.voucher, hit.st.account, bankLines.idOf(hit.st, hit.line));
+  await reconcile.unclear(type, hit.line.voucher, hit.st.account);
   res.json({ success: true });
 }));
 
@@ -118,19 +164,31 @@ router.post("/bank/statements/:id/rematch", catchAsyncErrors(async (req, res, ne
   if (!isId(req.params.id)) return next(new ErrorHandler("Statement not found", 404));
   const st = await BankStatement.findById(req.params.id).lean();
   if (!st) return next(new ErrorHandler("Statement not found", 404));
+  const nth = bankLines.occurrenceMap(st);
   const rows = st.lines.filter((l) => UNPLACED.includes(l.status))
-    .map((l) => ({ index: l.index, date: new Date(l.date), narration: l.narration, ref: l.ref, amount: l.amount, direction: l.direction, balance: l.balance }));
+    .map((l) => ({ index: l.index, date: new Date(l.date), narration: l.narration, ref: l.ref, amount: l.amount, direction: l.direction, balance: l.balance, lineId: bankLines.lineId(st.account, l.key, nth.get(l.index)) }));
   let changed = 0;
   if (rows.length) {
-    const out = await bankStatement.match(rows, st.account, { useModel: req.body?.useModel !== false });
+    // A line a live voucher answers by now (posted from another
+    // statement that carries the same line) is in the books.
+    const held = await bankLines.vouchersFor(rows.map((r) => r.lineId));
+    const fresh = rows.filter((r) => !held.has(r.lineId));
+    const out = [
+      ...rows.filter((r) => held.has(r.lineId)).map((r) => ({ ...r, status: "recorded", suggestion: null, recorded: held.get(r.lineId) })),
+      ...(fresh.length ? await bankStatement.match(fresh, st.account, { useModel: req.body?.useModel !== false }) : []),
+    ];
     for (const r of out) {
-      const set = {
-        "lines.$.status": r.status, "lines.$.voucherType": r.recorded?.voucherType || null, "lines.$.voucher": r.recorded?._id || null, "lines.$.voucherNo": r.recorded?.voucherNo || "",
-        "lines.$.suggestion": r.status === "matched" ? r.suggestion || null : null, "lines.$.candidates": r.candidates?.length ? r.candidates : null,
-      };
-      const w = await BankStatement.updateOne({ _id: st._id, lines: { $elemMatch: { index: r.index, status: { $in: UNPLACED } } } }, { $set: set });
-      if (w.modifiedCount) changed += 1;
-      if (r.status === "recorded" && r.recorded) await reconcile.markCleared(r.recorded.voucherType, r.recorded._id, st.account, r.date);
+      // An entry the matcher found in the books takes this line for itself, or the line stays to be placed.
+      if (r.status === "recorded" && r.recorded && !held.has(r.lineId)) {
+        const got = await bankLines.claim(r.recorded.voucherType, r.recorded._id, st.account, r.lineId);
+        if (got !== "claimed" && got !== "same") { r.status = "unmatched"; r.recorded = null; r.suggestion = null; }
+      }
+      const done = await bankLines.place(st._id, r.index, {
+        status: r.status, voucherType: r.recorded?.voucherType || null, voucher: r.recorded?._id || null, voucherNo: r.recorded?.voucherNo || "",
+        suggestion: r.status === "matched" ? r.suggestion || null : null, candidates: r.candidates?.length ? r.candidates : null,
+      }, { from: UNPLACED });
+      if (done) changed += 1;
+      if (done && r.status === "recorded" && r.recorded) await reconcile.markCleared(r.recorded.voucherType, r.recorded._id, st.account, r.date);
     }
   }
   res.json({ success: true, changed, statement: await BankStatement.findById(st._id).lean() });

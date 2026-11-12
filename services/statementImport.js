@@ -14,12 +14,19 @@
 //  brought in earlier are left out (the bank's daily statements
 //  overlap), and a statement with nothing new is not kept at all.
 //
+//  A bank line is one line however many statements carry it: each has
+//  an identity (services/bankLines.js), and a line a live voucher
+//  already answers comes in as "in the books" with that voucher. So an
+//  overlapping upload does not put last week's placed lines back on
+//  the list to be posted a second time.
+//
 //  An MT940 file names its account; one put into a different account
 //  is refused rather than booked to the wrong bank.
 // ══════════════════════════════════════════════════════════════════
 
 const BankStatement = require('../models/BankStatement');
 const bankStatement = require('./bankStatement');
+const bankLines = require('./bankLines');
 const reconcile = require('./reconcile');
 
 /**
@@ -45,23 +52,46 @@ async function importStatement({ account, buffer, mimetype, filename = '', rows:
     e.status = 400; e.code = 'STATEMENT_ACCOUNT';
     throw e;
   }
+  // Every line's identity, numbered on the whole file as the bank sent
+  // it: the account, the line's key, and which of the same-key lines it
+  // is (services/bankLines.js).
+  const allKeys = parsed.map((r) => bankStatement.lineKey(r));
+  const occ = bankLines.occurrences(allKeys);
+  parsed.forEach((r, i) => { r.key = allKeys[i]; r.occurrence = occ[i]; r.lineId = bankLines.lineId(account._id, allKeys[i], occ[i]); });
+  const earlier = await BankStatement.find({ account: account._id, 'lines.key': { $in: [...new Set(allKeys)] } })
+    .select('lines.index lines.key lines.occurrence lines.status lines.note').lean();
   let rows = parsed;
-  const allKeys = rows.map((r) => bankStatement.lineKey(r));
   if (source !== 'upload') {
-    // Overlapping daily statements: only lines this account has not seen.
-    const seen = new Set();
-    for (const st of await BankStatement.find({ account: account._id, 'lines.key': { $in: allKeys } }).select('lines.key').lean()) for (const l of st.lines) seen.add(l.key);
-    rows = rows.filter((_, i) => !seen.has(allKeys[i]));
+    // A line the bank sent before is not a new line. Per key: as many as
+    // any one earlier statement already holds, so the second of two
+    // equal charges is new when only the first was seen.
+    const seen = new Map();
+    for (const st of earlier) { const nth = bankLines.occurrenceMap(st); for (const l of st.lines) seen.set(l.key, Math.max(seen.get(l.key) || 0, nth.get(l.index))); }
+    rows = rows.filter((r) => r.occurrence > (seen.get(r.key) || 0));
     if (!rows.length) return { statement: null, rows: [], counts: {}, closingBalance: bankStatement.closingOf(parsed), newLines: 0, total: parsed.length };
   }
-  const matched = await bankStatement.match(rows, account._id, { useModel });
-  // A line set aside in an earlier statement stays set aside.
-  const keys = matched.map((r) => bankStatement.lineKey(r));
-  const earlier = await BankStatement.find({ account: account._id, 'lines.key': { $in: keys } }).select('lines.key lines.status lines.note').lean();
+  // A line a live voucher already answers (posted from it, or matched to
+  // it, on an earlier statement) is in the books: nothing to ask again.
+  const held = await bankLines.vouchersFor(rows.map((r) => r.lineId));
+  const fresh = rows.filter((r) => !held.has(r.lineId));
+  const placed = fresh.length ? await bankStatement.match(fresh, account._id, { useModel }) : [];
+  // A line the matcher found in the books takes that entry for itself.
+  // If another line took it in the same moment, this one is left to be
+  // placed by a person.
+  for (const r of placed) {
+    if (r.status !== 'recorded' || !r.recorded) continue;
+    const got = await bankLines.claim(r.recorded.voucherType, r.recorded._id, account._id, r.lineId);
+    if (got !== 'claimed' && got !== 'same') { r.status = 'unmatched'; r.recorded = null; r.suggestion = null; }
+  }
+  const byIndex = new Map(placed.map((r) => [r.index, r]));
+  const matched = rows.map((r) => byIndex.get(r.index) || { ...r, status: 'recorded', suggestion: null, recorded: held.get(r.lineId) });
+  const keys = matched.map((r) => r.key);
+  // A line a person set aside before stays set aside: that line, not
+  // another of the same amount and words.
   const ignored = new Map();
-  for (const st of earlier) for (const l of st.lines) if (l.status === 'ignored' && keys.includes(l.key)) ignored.set(l.key, l.note);
-  for (const [i, r] of matched.entries()) {
-    if (r.status !== 'recorded' && ignored.has(keys[i])) { r.status = 'ignored'; r.note = ignored.get(keys[i]); r.suggestion = null; }
+  for (const st of earlier) { const nth = bankLines.occurrenceMap(st); for (const l of st.lines) if (l.status === 'ignored') ignored.set(bankLines.lineId(account._id, l.key, nth.get(l.index)), l.note); }
+  for (const r of matched) {
+    if (r.status !== 'recorded' && ignored.has(r.lineId)) { r.status = 'ignored'; r.note = ignored.get(r.lineId); r.suggestion = null; }
   }
   const dates = rows.map((r) => r.date.getTime());
   const from = new Date(Math.min(...dates));
@@ -79,7 +109,7 @@ async function importStatement({ account, buffer, mimetype, filename = '', rows:
     from, to, openingBalance, closingBalance: bankStatement.closingOf(parsed),
     uploadedBy: by, uploadedByName: byName, source, messageId,
     lines: matched.map((r, i) => ({
-      index: r.index, date: r.date, narration: r.narration, ref: r.ref, amount: r.amount, direction: r.direction, balance: r.balance ?? null, key: keys[i],
+      index: r.index, date: r.date, narration: r.narration, ref: r.ref, amount: r.amount, direction: r.direction, balance: r.balance ?? null, key: keys[i], occurrence: r.occurrence,
       status: r.status, voucherType: r.recorded?.voucherType || null, voucher: r.recorded?._id || null, voucherNo: r.recorded?.voucherNo || '', note: r.note || '',
       suggestion: r.status === 'matched' ? r.suggestion || null : null, candidates: r.candidates?.length ? r.candidates : null,
     })),

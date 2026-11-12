@@ -48,6 +48,27 @@ async function markCleared(voucherType, id, account, date, { overwrite = false }
   return res.matchedCount > 0 || !!(await Payment.exists({ _id: id, account }));
 }
 
+/**
+ * Take back what markCleared did for one entry: a wrong match undone.
+ * The cleared date comes off; a cheque the match marked cleared goes
+ * back to where it was — deposited when it had gone to the bank on a
+ * slip or on an earlier day, in hand otherwise.
+ */
+async function unclear(voucherType, id, account) {
+  if (voucherType === 'Contra') return markCleared('Contra', id, account, null, { overwrite: true });
+  const p = await Payment.findOne({ _id: id, account }).select('mode cheque').lean();
+  if (!p) return false;
+  await Payment.updateOne({ _id: id, account }, { $unset: { clearedOn: 1 } });
+  if (p.mode === 'cheque' && p.cheque?.status === 'cleared') {
+    const sameDay = p.cheque.depositedOn && p.cheque.clearedOn && new Date(p.cheque.depositedOn).getTime() === new Date(p.cheque.clearedOn).getTime();
+    const wasHeld = sameDay && !p.cheque.slipNo;
+    await Payment.updateOne({ _id: id, 'cheque.status': 'cleared' }, wasHeld
+      ? { $set: { 'cheque.status': 'held' }, $unset: { 'cheque.depositedOn': 1, 'cheque.clearedOn': 1 } }
+      : { $set: { 'cheque.status': 'deposited' }, $unset: { 'cheque.clearedOn': 1 } });
+  }
+  return true;
+}
+
 const notCleared = (field, asOf) => ({ $or: [{ [field]: { $exists: false } }, { [field]: null }, { [field]: { $gt: asOf } }] });
 
 /**
@@ -107,4 +128,4 @@ async function statementAsOf(account, asOf, bankBalance) {
   };
 }
 
-module.exports = { markCleared, statementAsOf };
+module.exports = { markCleared, unclear, statementAsOf };

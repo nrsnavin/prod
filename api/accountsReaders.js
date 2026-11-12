@@ -26,24 +26,19 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express  = require("express");
-const mongoose = require("mongoose");
 const multer   = require("multer");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { keepRequestContext } = require("../middleware/userContext");
 const { sendStoredFile } = require("../utils/sendFile");
-const { ACTION_CODES } = require("../utils/fingerprint");
-const { allocate } = require("../services/docNumbers");
 const { readBill }  = require("../utils/billOcr");
 const { importStatement } = require("../services/statementImport");
 const aiLedger      = require("../services/aiLedger");
 const { promptVersion } = require("../utils/aiPrompts");
 const BankAccount     = require("../models/BankAccount");
-const Contra          = require("../models/Contra");
 const BankStatement   = require("../models/BankStatement");
-const BankAlias       = require("../models/BankAlias");
-const { isId, r2, readDate, fp } = require("../services/accountsHelpers");
-const { assertOpen } = require("../services/booksLock");
+const { isId } = require("../services/accountsHelpers");
+const { postRow } = require("../services/statementPosting");
 // ══════════════════════════════════════════════════════════════════
 //  BILLS THAT CAME BY MAIL (services/billMailbox.js)
 // ══════════════════════════════════════════════════════════════════
@@ -265,76 +260,11 @@ router.post("/bank/statement", keepRequestContext(upload.single("file")), catchA
 }));
 
 /**
- * A statement line that is money between this account and another of
- * ours, posted as a contra: out of this account to the other, or into
- * it from the other, on the line's day, and cleared here that day.
- * A replayed requestId returns the contra it made before.
+ * The lines the person confirmed, each into the books once
+ * (services/statementPosting.js). A row that names a stored line is
+ * posted from that line: its amount, date and direction are the bank's,
+ * and a line already in the books is answered with its voucher.
  */
-async function contraFromLine(r, accountId, req) {
-  if (r.requestId) {
-    const dup = await Contra.findOne({ requestId: String(r.requestId) }).lean();
-    if (dup) return { contra: dup, replay: true };
-  }
-  const otherId = r.contra?.account ?? r.contra;
-  if (!isId(otherId)) throw new ErrorHandler("contra.account is required", 400);
-  if (String(otherId) === String(accountId)) throw new ErrorHandler("A transfer needs another account", 400);
-  const [here, other] = await Promise.all([BankAccount.findById(accountId).lean(), BankAccount.findById(otherId).lean()]);
-  if (!here || here.active === false || !other || other.active === false) throw new ErrorHandler("Account not found", 404);
-  const amount = r2(r.amount);
-  if (!(amount > 0)) throw new ErrorHandler("amount must be more than 0", 400);
-  const date = readDate(r.date, "date", new Date());
-  await assertOpen(date, req);
-  const out = r.direction !== "in";
-  const [from, to] = out ? [here, other] : [other, here];
-  const { financialYear, sequence, number } = await allocate(Contra, "CTR", { at: date });
-  const _id = new mongoose.Types.ObjectId();
-  try {
-    await Contra.create({
-      _id, contraNo: number, financialYear, sequence, requestId: r.requestId ? String(r.requestId) : undefined, date,
-      from: from._id, fromName: from.name, to: to._id, toName: to.name, amount,
-      mode: from.kind === "cash" || to.kind === "cash" ? "cash" : "bank",
-      reference: String(r.ref || "").trim().slice(0, 60), narration: String(r.narration || "").trim().slice(0, 300),
-      ...(out ? { fromClearedOn: date } : { toClearedOn: date }),
-      createdBy: req.user?._id,
-      fingerprints: [fp(ACTION_CODES.CONTRA_POSTED, { _id }, req, { contraNo: number, from: from.name, to: to.name, amount, source: "statement" })],
-    });
-  } catch (err) {
-    if (err?.code === 11000 && r.requestId) {
-      const dup = await Contra.findOne({ requestId: String(r.requestId) }).lean();
-      if (dup) return { contra: dup, replay: true };
-    }
-    throw err;
-  }
-  return { contra: await Contra.findById(_id).lean(), replay: false };
-}
-
-/**
- * Keep a payer or payee for the next statement: the text must be in the
- * line's own narration (so nothing else can be planted), and a later
- * correction of the same text replaces the party. Never throws: the
- * voucher is posted either way.
- */
-async function rememberPayer(r, partyType, voucher, req) {
-  try {
-    const text = String(r.remember?.text ?? r.remember ?? "").toUpperCase().replace(/\s+/g, " ").trim();
-    const narration = String(r.narration || "").toUpperCase().replace(/\s+/g, " ");
-    if (text.length < 4 || text.length > 80 || !narration.includes(text)) return false;
-    const direction = r.direction === "in" ? "in" : "out";
-    const party = partyType === "other" ? null : (partyType === "customer" ? voucher.customer : voucher.supplier) || null;
-    if (partyType !== "other" && !party) return false;
-    const partyName = String(voucher.partyName || r.partyName || "").trim().slice(0, 120);
-    if (!partyName) return false;
-    await BankAlias.updateOne(
-      { text, direction },
-      { $set: { partyType, party, partyName, head: voucher.head || null, headName: voucher.headName || "", incomeLedger: voucher.incomeLedger || "", createdBy: req.user?._id, createdByName: req.user?.name || "" }, $setOnInsert: { text, direction } },
-      { upsert: true }
-    );
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.body?.account)) return next(new ErrorHandler("account is required", 400));
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
@@ -342,43 +272,16 @@ router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
   if (rows.length > 500) return next(new ErrorHandler("At most 500 lines at a time", 400));
   // The statement the lines came from, when it is this account's: a line
   // of one account's statement is never marked posted off another's.
-  let statementId = null;
+  let statement = null;
   if (isId(req.body?.statement)) {
-    const st = await BankStatement.findById(req.body.statement).select("account").lean();
-    if (!st) return next(new ErrorHandler("Statement not found", 404));
-    if (String(st.account) !== String(req.body.account)) return next(new ErrorHandler("That statement is on another account", 400));
-    statementId = st._id;
+    statement = await BankStatement.findById(req.body.statement).select("account lines.index lines.key lines.occurrence lines.date lines.narration lines.ref lines.amount lines.direction lines.status lines.voucher lines.voucherType lines.voucherNo").lean();
+    if (!statement) return next(new ErrorHandler("Statement not found", 404));
+    if (String(statement.account) !== String(req.body.account)) return next(new ErrorHandler("That statement is on another account", 400));
   }
   const results = [];
   for (const [i, r] of rows.entries()) {
     try {
-      // Money between our own accounts: a contra, not a receipt or payment.
-      if (r.contra) {
-        const c = await contraFromLine(r, req.body.account, req);
-        if (statementId && Number.isInteger(r.index)) {
-          await BankStatement.updateOne({ _id: statementId, "lines.index": r.index }, { $set: { "lines.$.status": "posted", "lines.$.voucherType": "Contra", "lines.$.voucher": c.contra._id, "lines.$.voucherNo": c.contra.contraNo } });
-        }
-        results.push({ index: i, ok: true, voucherNo: c.contra.contraNo, _id: c.contra._id, contra: true, replay: c.replay });
-        continue;
-      }
-      const kind = r.direction === "in" ? "receipt" : "payment";
-      const partyType = r.partyType === "customer" || r.partyType === "supplier" ? r.partyType : "other";
-      const { voucher, replay } = await createVoucher({
-        ...(partyType === "other" ? { head: r.head || undefined, incomeLedger: r.incomeLedger || undefined } : {}),
-        kind, date: r.date, partyType,
-        ...(partyType === "customer" ? { customer: r.party } : partyType === "supplier" ? { supplier: r.party } : { partyName: r.partyName || r.narration || "Bank" }),
-        amount: r.amount, mode: r.mode || "bank", account: req.body.account, reference: r.ref || "",
-        allocations: Array.isArray(r.allocations) ? r.allocations.map((a) => ({ docType: a.docType, doc: a.doc, amount: a.amount })) : [],
-        adjustments: Array.isArray(r.adjustments) ? r.adjustments : [],
-        narration: r.narration || "", source: "statement", statementLine: `${r.date || ""} ${r.narration || ""}`.trim().slice(0, 200),
-        clearedOn: r.date, requestId: r.requestId,
-      }, req);
-      if (statementId && Number.isInteger(r.index)) {
-        await BankStatement.updateOne({ _id: statementId, "lines.index": r.index }, { $set: { "lines.$.status": "posted", "lines.$.voucherType": "Payment", "lines.$.voucher": voucher._id, "lines.$.voucherNo": voucher.voucherNo } });
-      }
-      // "Remember": the next statement's lines carrying this text are this party.
-      const remembered = r.remember ? await rememberPayer(r, partyType, voucher, req) : false;
-      results.push({ index: i, ok: true, voucherNo: voucher.voucherNo, _id: voucher._id, replay: !!replay, ...(r.remember ? { remembered } : {}) });
+      results.push({ index: i, ...(await postRow({ accountId: req.body.account, statement, row: r || {}, req })) });
     } catch (err) {
       results.push({ index: i, ok: false, error: err.message });
     }

@@ -91,10 +91,21 @@ const REFUND_SOURCES = { Payment, AccountNote, OpeningBalance: require("../model
  *
  * Settled on the documents = money + TDS + adjustments. TDS on a
  * payment is deducted on each document's value net of GST.
+ *
+ * `opts.bankLine`: the bank line this voucher answers, when it is posted
+ * from a statement line (services/bankLines.js). It comes from the
+ * server's own reading of the stored line, never from the request body.
+ * A line that a live voucher already answers gets that voucher back
+ * (replay), whatever request id it was first posted under.
  */
-async function createVoucher(b, req) {
+async function createVoucher(b, req, opts = {}) {
   const kind = b.kind === "receipt" ? "receipt" : b.kind === "payment" ? "payment" : null;
   if (!kind) throw new ErrorHandler("kind must be receipt or payment", 400);
+  const bankLine = opts.bankLine ? String(opts.bankLine) : null;
+  if (bankLine) {
+    const held = await Payment.findOne({ bankLine, status: "posted" }).select("-attachments.data").lean();
+    if (held) return { voucher: held, replay: true };
+  }
   if (b.requestId) {
     const dup = await Payment.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
     if (dup) return { voucher: dup, replay: true };
@@ -306,6 +317,7 @@ async function createVoucher(b, req) {
     ...(refundLines.length ? { refunds: refundLines.map(({ field, ...x }) => x) } : {}),
     source: b.source === "statement" ? "statement" : "manual", statementLine: String(b.statementLine || "").slice(0, 200),
     clearedOn: b.clearedOn ? readDate(b.clearedOn, "clearedOn") : undefined,
+    ...(bankLine ? { bankLine } : {}),
     createdBy: req.user?._id,
     ...(risk ? { risk } : {}),
   };
@@ -345,6 +357,12 @@ async function createVoucher(b, req) {
     if (err?.code === 11000 && b.requestId) {
       const dup = await Payment.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
       if (dup) return { voucher: dup, replay: true };
+    }
+    // The same bank line posted by two requests together: the index let
+    // one in, and this one is handed the voucher that won.
+    if (err?.code === 11000 && bankLine) {
+      const held = await Payment.findOne({ bankLine, status: "posted" }).select("-attachments.data").lean();
+      if (held) return { voucher: held, replay: true };
     }
     throw err;
   }

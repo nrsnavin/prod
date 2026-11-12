@@ -28,6 +28,7 @@ const BankStatement = require('../models/BankStatement');
 const ExpenseCategory = require('../models/ExpenseCategory');
 const statementAi = require('./statementAi');
 const outstanding = require('./outstanding');
+const bankLines = require('./bankLines');
 const mt940 = require('./mt940');
 
 const { r2 } = require('../utils/money');
@@ -228,6 +229,11 @@ async function parseTable(buffer, isSheet, given = null) {
 
 /** A line's identity: the same line in two uploads has the same key. */
 function lineKey(row) {
+  // A statement date is the server's local midnight of that day
+  // (parseDate), so it is read back the same way: the key names the
+  // right day whatever the server's clock is set to. Not to be changed:
+  // the keys of every stored line were made this way, and a line's key
+  // is its identity (services/bankLines.js).
   const d = new Date(row.date);
   const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   return [day, row.direction, r2(row.amount).toFixed(2), String(row.narration || '').toUpperCase().replace(/\s+/g, ' ').trim(), String(row.ref || '').toUpperCase().trim()].join('|');
@@ -316,6 +322,67 @@ function transferOf(row, otherAccounts, cashAccount) {
   return null;
 }
 
+/** `number` stands in `text` as a whole: not inside a longer run of letters or digits. */
+function standsAlone(text, number) {
+  const n = String(number || '').toUpperCase().trim();
+  if (!n) return false;
+  for (let from = 0; ;) {
+    const i = text.indexOf(n, from);
+    if (i < 0) return false;
+    const before = i > 0 ? text[i - 1] : ' ';
+    const after = i + n.length < text.length ? text[i + n.length] : ' ';
+    if (!/[A-Z0-9]/.test(before) && !/[A-Z0-9]/.test(after)) return true;
+    from = i + 1;
+  }
+}
+
+/**
+ * The open documents a narration names, all of one party.
+ *
+ * Our own number (INV/2026-27/0012) counts wherever it stands as a
+ * whole. The party's own number for it (a supplier's bill no., an
+ * opening balance's reference) is often short and all digits: four
+ * digits sit inside most sixteen-digit bank references. So it counts
+ * only standing alone, and then only when it is six characters or
+ * more, or the party's name is in the narration too.
+ * @returns { docs, via: 'number' | 'their-number', text } or null
+ */
+function namedIn(text, narration, openDocs) {
+  const hits = [];
+  for (const d of openDocs) {
+    if (standsAlone(text, d.docNo)) { hits.push({ d, via: 'number', text: d.docNo }); continue; }
+    const ref = String(d.refNo || '').trim();
+    if (ref.length >= 4 && standsAlone(text, ref) && (ref.length >= 6 || nameScore(narration, d.partyName) >= 0.5)) hits.push({ d, via: 'their-number', text: ref });
+  }
+  if (!hits.length) return null;
+  const first = hits[0];
+  const same = hits.filter((h) => String(h.d.party) === String(first.d.party));
+  return { docs: same.map((h) => h.d), via: first.via, text: same.map((h) => (h.via === 'number' ? h.d.docNo : `${h.text} (${h.d.docNo})`)).join(' + ') };
+}
+
+/**
+ * What a line that names documents settles. Sure (0.95, `exact`) only
+ * when the named documents themselves add up to the amount. Anything
+ * else is a guess about the rest and says so, at a confidence that is
+ * never posted without a person.
+ */
+function suggestNamed(named, groups, amount) {
+  const first = named.docs[0];
+  const group = groups.find((g) => String(g.party) === String(first.party));
+  const docs = group?.docs || named.docs;
+  const base = { party: first.party, partyName: first.partyName };
+  const what = `${named.via === 'number' ? '' : 'their no. '}${named.text} named in the narration`;
+  const total = r2(named.docs.reduce((t, d) => t + d.outstanding, 0));
+  if (Math.abs(total - amount) < 1) return { ...base, allocations: alloc(named.docs.map((doc) => ({ doc }))), confidence: 0.95, exact: true, reason: what };
+  const isNamed = (d) => named.docs.some((n) => String(n.id) === String(d.id));
+  const subset = subsetFor(docs, amount);
+  if (subset && subset.some(isNamed)) return { ...base, allocations: alloc(subset.map((doc) => ({ doc }))), confidence: 0.9, reason: `${what}; amount matches ${subset.map((d) => d.docNo).join(' + ')}` };
+  if (amount < total - 0.005) return { ...base, allocations: alloc(fifo(named.docs, amount)), confidence: 0.85, reason: `${what}, part paid` };
+  // More than the named documents: those first, the rest oldest first.
+  const rest = fifo(docs.filter((d) => !isNamed(d)), r2(amount - total));
+  return { ...base, allocations: alloc([...named.docs.map((doc) => ({ doc })), ...rest]), confidence: 0.8, reason: `${what}; the rest allocated oldest first` };
+}
+
 /** How people placed this account's lines before, and what is remembered: the model's best guide. */
 async function placedBefore(accountId, aliases) {
   const out = aliases.slice(0, 20).map((a) => `${a.text} → ${a.partyName}${a.headName ? ` (${a.headName})` : a.incomeLedger === 'interest' ? ' (interest)' : ''}`);
@@ -349,28 +416,57 @@ async function match(rows, accountId, { useModel = true } = {}) {
   const payByParty = outstanding.byParty(pay);
   const dates = rows.map((r) => r.date.getTime());
   const window = rows.length ? { $gte: new Date(Math.min(...dates) - 7 * DAY), $lte: new Date(Math.max(...dates) + 7 * DAY) } : null;
+  // Entries already in the books that could answer a line: only the ones
+  // that answer no bank line yet. One that an earlier line was posted
+  // from, or matched to, carries that line (services/bankLines.js) and
+  // is left out: a second charge of the same amount a few days later is
+  // a second charge, not the first one again.
   const [vouchers, contras] = rows.length ? await Promise.all([
-    Payment.find({ status: 'posted', account: accountId, date: window }).select('kind date amount reference voucherNo partyName').lean(),
-    Contra.find({ status: 'posted', $or: [{ from: accountId }, { to: accountId }], date: window }).select('from to date amount reference contraNo fromName toName').lean(),
+    Payment.find({ status: 'posted', account: accountId, date: window, ...bankLines.free('bankLine') }).select('kind date amount reference voucherNo partyName').lean(),
+    Contra.find({ status: 'posted', $or: [{ from: accountId }, { to: accountId }], date: window }).select('from to date amount reference contraNo fromName toName bankLineFrom bankLineTo').lean(),
   ]) : [[], []];
   // A contra is money in on the account it went to and out on the one it left.
   const recorded = [
     ...vouchers.map((v) => ({ ...v, voucherType: 'Payment' })),
-    ...contras.map((c) => {
+    ...contras.filter((c) => !(String(c.to) === String(accountId) ? c.bankLineTo : c.bankLineFrom)).map((c) => {
       const incoming = String(c.to) === String(accountId);
       return { _id: c._id, voucherType: 'Contra', kind: incoming ? 'receipt' : 'payment', date: c.date, amount: c.amount, reference: c.reference || '', voucherNo: c.contraNo, partyName: incoming ? `From ${c.fromName}` : `To ${c.toName}` };
     }),
   ];
-  // One book entry answers one statement line.
+  // One book entry answers one statement line. Which one: the sure ones
+  // are paired first (the references agree, or the dates are a day
+  // apart at most: the bank's date and the book's often differ by one),
+  // then what is left, nearest date first, so an entry made by hand a
+  // few days from the bank's date still answers its line. A line never
+  // takes an entry that sits on another line's own day.
   const used = new Set();
+  const answer = new Map();
+  const refsOf = (v, row) => {
+    const a = String(row.ref || '').toUpperCase().trim(); const b = String(v.reference || '').toUpperCase().trim();
+    return a && b ? (a.includes(b) || b.includes(a) ? 'agree' : 'differ') : 'none';
+  };
+  const pick = (row, sure) => {
+    const kind = row.direction === 'in' ? 'receipt' : 'payment';
+    let best = null;
+    for (const v of recorded) {
+      if (used.has(String(v._id)) || v.kind !== kind || Math.abs(v.amount - row.amount) >= 0.01) continue;
+      const days = Math.abs(new Date(v.date) - row.date) / DAY;
+      const refs = refsOf(v, row);
+      if (refs === 'differ' || days > 5) continue;
+      if (sure && !(refs === 'agree' || days <= 1)) continue;
+      if (!best || days < best.days) best = { v, days };
+    }
+    if (!best) return;
+    used.add(String(best.v._id));
+    answer.set(row, best.v);
+  };
+  for (const row of rows) pick(row, true);
+  for (const row of rows) if (!answer.has(row)) pick(row, false);
 
   const out = rows.map((row) => {
-    const kind = row.direction === 'in' ? 'receipt' : 'payment';
     // Already in the books?
-    const dup = recorded.find((v) => !used.has(String(v._id)) && v.kind === kind && Math.abs(v.amount - row.amount) < 0.01 && Math.abs(new Date(v.date) - row.date) <= 5 * DAY
-      && (!row.ref || !v.reference || v.reference.toUpperCase().includes(row.ref.toUpperCase()) || row.ref.toUpperCase().includes(v.reference.toUpperCase())));
+    const dup = answer.get(row);
     if (dup) {
-      used.add(String(dup._id));
       return { ...row, status: 'recorded', suggestion: null, recorded: { _id: dup._id, voucherType: dup.voucherType, voucherNo: dup.voucherNo, partyName: dup.partyName } };
     }
 
@@ -380,12 +476,8 @@ async function match(rows, accountId, { useModel = true } = {}) {
     const text = row.narration.toUpperCase();
 
     // 1. A document number in the narration.
-    const byDoc = openDocs.find((d) => text.includes(d.docNo.toUpperCase()) || (d.refNo && d.refNo.length >= 4 && text.includes(String(d.refNo).toUpperCase())));
-    if (byDoc) {
-      const group = groups.find((g) => String(g.party) === String(byDoc.party));
-      const pairs = subsetFor(group?.docs || [byDoc], row.amount) || fifo(group?.docs || [byDoc], row.amount);
-      return { ...row, status: 'matched', suggestion: { partyType, party: byDoc.party, partyName: byDoc.partyName, allocations: alloc(pairs.map((p) => (p.doc ? p : { doc: p }))), confidence: 0.95, reason: `${byDoc.docNo} named in the narration` } };
-    }
+    const named = namedIn(text, row.narration, openDocs);
+    if (named) return { ...row, status: 'matched', suggestion: { partyType, ...suggestNamed(named, groups, row.amount) } };
     // 2. A payer or payee remembered from an earlier statement: the
     //    narration carries text a person once said is this party.
     const known = aliases.filter((a) => a.direction === row.direction && text.includes(a.text)).sort((a, b) => b.text.length - a.text.length)[0];
@@ -448,4 +540,4 @@ async function match(rows, accountId, { useModel = true } = {}) {
   return out;
 }
 
-module.exports = { transferOf, sniff, htmlRows, openingOf, parse, parseDetailed, parseCsv, parseDate, columnsOf, sheetRows, match, nameScore, subsetFor, fifo, lineKey, closingOf };
+module.exports = { transferOf, sniff, htmlRows, openingOf, parse, parseDetailed, parseCsv, parseDate, columnsOf, sheetRows, match, nameScore, subsetFor, fifo, lineKey, closingOf, standsAlone, namedIn, suggestNamed };

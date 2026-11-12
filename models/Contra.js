@@ -32,6 +32,10 @@ const ContraSchema = new mongoose.Schema(
     // Bank reconciliation: when each side showed on its statement.
     fromClearedOn: { type: Date },
     toClearedOn:   { type: Date },
+    // The bank line each side answers, on that account's statement
+    // (services/bankLines.js): one line, one contra side.
+    bankLineFrom: { type: String },
+    bankLineTo:   { type: String },
 
     status: { type: String, enum: ["posted", "cancelled"], default: "posted" },
     cancel: { reason: { type: String, default: "" }, at: { type: Date }, by: { type: mongoose.Types.ObjectId, ref: "User" } },
@@ -46,5 +50,7 @@ const ContraSchema = new mongoose.Schema(
 ContraSchema.index({ financialYear: 1, sequence: 1 });
 ContraSchema.index({ from: 1, date: -1 });
 ContraSchema.index({ to: 1, date: -1 });
+ContraSchema.index({ bankLineFrom: 1 }, { unique: true, partialFilterExpression: { bankLineFrom: { $gt: "" } } });
+ContraSchema.index({ bankLineTo: 1 }, { unique: true, partialFilterExpression: { bankLineTo: { $gt: "" } } });
 
 module.exports = mongoose.model("Contra", ContraSchema);

@@ -133,6 +133,12 @@ const PaymentSchema = new mongoose.Schema(
 
     // Bank reconciliation: the day the bank's statement showed it.
     clearedOn: { type: Date },
+    // The one bank line this voucher answers ("<account>|<line key>#<n>",
+    // services/bankLines.js): set when it is posted from a statement line
+    // or a line is matched to it, taken off when it is cancelled. The
+    // index below is what stops one bank line becoming two vouchers, and
+    // one voucher answering two lines.
+    bankLine: { type: String },
 
     status: { type: String, enum: ["posted", "cancelled"], default: "posted" },
     tally:  { batch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, at: { type: Date }, cancelBatch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" }, cancelAt: { type: Date } },
@@ -165,5 +171,6 @@ PaymentSchema.index({ status: 1, date: -1 });
 PaymentSchema.index({ "allocations.doc": 1 });
 PaymentSchema.index({ "refunds.source": 1 }, { sparse: true });
 PaymentSchema.index({ "cheque.status": 1, "cheque.date": 1 });
+PaymentSchema.index({ bankLine: 1 }, { unique: true, partialFilterExpression: { bankLine: { $gt: "" } } });
 
 module.exports = mongoose.model("Payment", PaymentSchema);

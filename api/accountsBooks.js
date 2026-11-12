@@ -25,6 +25,7 @@ const { allocate }     = require("../services/docNumbers");
 const partyLedger      = require("../services/partyLedger");
 const { assertOpen, getSettings, setLock, history: lockHistory } = require("../services/booksLock");
 const { isId, r2, readDate, reasonFrom, fp, withTxn, paging, DAY } = require("../services/accountsHelpers");
+const bankLines = require("../services/bankLines");
 const aiLedger = require("../services/aiLedger");
 const { promptVersion } = require("../utils/aiPrompts");
 const TEXT_MODEL_NAME = () => require("../utils/anthropicClient").TEXT_MODEL;
@@ -177,10 +178,20 @@ router.post("/contras/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   if (c.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
   let reason;
   try { reason = reasonFrom(req); await assertOpen(c.date, req, { cancelling: true }); } catch (err) { return next(err); }
-  await Contra.updateOne({ _id: c._id, status: "posted" }, {
-    $set: { status: "cancelled", cancel: { reason, at: new Date(), by: req.user?._id } },
-    $push: { fingerprints: fp(ACTION_CODES.CONTRA_CANCELLED, c, req, { contraNo: c.contraNo, reason }) },
-  });
+  try {
+    await withTxn(async (session) => {
+      // Cancelled once; and a cancelled contra answers no bank line: the
+      // statement lines that pointed at it go back to be placed.
+      const r = await Contra.updateOne({ _id: c._id, status: "posted" }, {
+        $set: { status: "cancelled", cancel: { reason, at: new Date(), by: req.user?._id } },
+        // (and, posted from a bank line, the request id it was posted under: the line can be posted afresh)
+        $unset: { bankLineFrom: "", bankLineTo: "", ...(c.bankLineFrom || c.bankLineTo ? { requestId: "" } : {}) },
+        $push: { fingerprints: fp(ACTION_CODES.CONTRA_CANCELLED, c, req, { contraNo: c.contraNo, reason }) },
+      }, { session });
+      if (!r.modifiedCount) throw new ErrorHandler("Already cancelled", 409);
+      await bankLines.freeLinesOf(c._id, c.contraNo, session);
+    });
+  } catch (err) { if (err instanceof ErrorHandler) return next(err); throw err; }
   res.json({ success: true, contra: await Contra.findById(c._id).lean() });
 }));
 
