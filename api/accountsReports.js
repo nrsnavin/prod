@@ -12,6 +12,8 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express  = require("express");
+const cal = require("../utils/bizDates");
+const tdsBooks = require("../services/tds");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const BankAccount     = require("../models/BankAccount");
@@ -31,8 +33,9 @@ const router = express.Router();
 //  REPORTS
 // ══════════════════════════════════════════════════════════════════
 function rangeOf(req) {
-  const from = readDate(req.query.from, "from") || new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-  let to = readDate(req.query.to, "to") || new Date();
+  // From the first of this month to today, by the books' calendar, unless asked otherwise.
+  const from = readDate(req.query.from, "from") || cal.monthRange(cal.monthKey()).from;
+  let to = readDate(req.query.to, "to") || cal.today();
   to = new Date(to.getTime() + DAY - 1);
   return { from, to };
 }
@@ -51,15 +54,18 @@ router.get("/reports/tds", catchAsyncErrors(async (req, res, next) => {
   const vouchers = await Payment.find({ status: "posted", kind: "payment", "tds.amount": { $gt: 0 }, date: { $gte: r.from, $lte: r.to } })
     .select("voucherNo date supplier partyName amount tds allocations").sort({ date: 1 }).lean();
   const byDeductee = new Map();
+  // Section by section: a voucher that paid bills under two sections is in both (services/tds.js sectionsOf).
   for (const v of vouchers) {
-    const key = `${v.supplier || v.partyName}|${v.tds.section}`;
-    const g = byDeductee.get(key) || { supplier: v.supplier, partyName: v.partyName, section: v.tds.section, rate: v.tds.rate, gross: 0, base: 0, tds: 0, vouchers: [] };
-    const gross = r2(v.amount + v.tds.amount);
-    // What it was deducted on: the bills' value net of GST (older vouchers: the gross).
-    const base = r2(v.tds.base || gross);
-    g.gross = r2(g.gross + gross); g.base = r2(g.base + base); g.tds = r2(g.tds + v.tds.amount);
-    g.vouchers.push({ _id: v._id, voucherNo: v.voucherNo, date: v.date, gross, base, tds: v.tds.amount, docs: v.allocations.map((a) => a.docNo) });
-    byDeductee.set(key, g);
+    const parts = tdsBooks.sectionsOf(v);
+    for (const part of parts) {
+      const key = `${v.supplier || v.partyName}|${part.section}|${part.rate}`;
+      const g = byDeductee.get(key) || { supplier: v.supplier, partyName: v.partyName, section: part.section, rate: part.rate, gross: 0, base: 0, tds: 0, vouchers: [] };
+      // What was paid with this part's tax: the whole voucher when it has one section, else this part's documents.
+      const gross = parts.length === 1 ? r2(v.amount + v.tds.amount) : r2((v.allocations || []).filter((a) => a.tds > 0 && (a.section || "") === part.section && (a.rate || 0) === part.rate).reduce((t, a) => t + a.amount, 0));
+      g.gross = r2(g.gross + gross); g.base = r2(g.base + part.base); g.tds = r2(g.tds + part.tds);
+      g.vouchers.push({ _id: v._id, voucherNo: v.voucherNo, date: v.date, gross, base: part.base, tds: part.tds, docs: part.docs });
+      byDeductee.set(key, g);
+    }
   }
   const rows = [...byDeductee.values()];
   res.json({ success: true, from: r.from, to: r.to, rows, total: { gross: r2(rows.reduce((s, g) => s + g.gross, 0)), base: r2(rows.reduce((s, g) => s + g.base, 0)), tds: r2(rows.reduce((s, g) => s + g.tds, 0)) } });
@@ -121,7 +127,7 @@ router.get("/reports/cashbook", catchAsyncErrors(async (req, res, next) => {
 router.get("/reports/daybook", catchAsyncErrors(async (req, res, next) => {
   let day;
   try { day = readDate(req.query.date, "date", new Date()); } catch (err) { return next(err); }
-  const from = new Date(day.getFullYear(), day.getMonth(), day.getDate());
+  const from = day;   // a document date is its day's UTC midnight
   const to = new Date(from.getTime() + DAY - 1);
   const range = { $gte: from, $lte: to };
   const [invoices, bills, expenses, notes, payments] = await Promise.all([

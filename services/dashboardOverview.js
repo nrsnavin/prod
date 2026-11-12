@@ -36,7 +36,7 @@ const outstanding = require('./outstanding');
 
 const DAY = 86_400_000;
 const LIVE = ['Open', 'Approved', 'InProgress'];
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const fmt = (d) => (d ? new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'Asia/Kolkata' }) : '');
 
 /** Which sections a role sees. Anything else sees nothing. */

@@ -13,7 +13,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const { nextNumber } = require('../utils/sequence');
-const { financialYearLong } = require('../utils/financialYear');
+const cal = require('../utils/bizDates');
 
 /**
  * @param Model   the collection the series lives in (has financialYear + sequence)
@@ -22,7 +22,10 @@ const { financialYearLong } = require('../utils/financialYear');
  * @param at      the document's date, which decides the financial year
  */
 async function allocate(Model, prefix, { extra = {}, at = new Date() } = {}) {
-  const fy = financialYearLong(at);
+  // The financial year of the document's own day in India ("2026-27"),
+  // whatever clock the server keeps: a voucher dated 1 April is the new
+  // year's, and one numbered at 1 a.m. on 1 April is too.
+  const fy = cal.fyOf(at);
   const key = `${prefix.toLowerCase()}:${fy}`;
   const sequence = await nextNumber(key, async () => {
     const last = await Model.findOne({ financialYear: fy, ...extra }).sort({ sequence: -1 }).select('sequence').lean();

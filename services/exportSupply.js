@@ -18,6 +18,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const ErrorHandler = require('../utils/ErrorHandler');
+const { r2 } = require('../utils/money');
 
 const KINDS = {
   EXPWP:  { label: 'Export, with IGST (refund claimed)',      supply: 'export', zeroRated: false, lut: false, gstr1: 'WPAY',  declaration: 'SUPPLY MEANT FOR EXPORT ON PAYMENT OF INTEGRATED TAX' },
@@ -94,7 +95,7 @@ const isExport = (doc) => doc?.supplyType === 'export' || doc?.supplyType === 's
 /** Value in the invoice's foreign currency, from the rupee total and the rate. */
 function fxValue(exp, grand) {
   if (!exp?.exchangeRate || !(exp.exchangeRate > 0)) return null;
-  return Math.round(((Number(grand) || 0) / exp.exchangeRate) * 100) / 100;
+  return r2((Number(grand) || 0) / exp.exchangeRate);
 }
 
 module.exports = { KINDS, OTHER_COUNTRY, options, suggestFor, lutCovers, read, pricing, declaration, isZeroRated, gstr1Type, isExport, fxValue };

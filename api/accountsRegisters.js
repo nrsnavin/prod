@@ -27,6 +27,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
+const { r2 } = require("../utils/money");
 const ExcelJS = require("exceljs");
 const router = express.Router();
 
@@ -116,6 +117,17 @@ router.get("/fixed-assets/:id", catchAsyncErrors(async (req, res, next) => {
     const n = Number(fy.slice(0, 4)) + 1; fy = `${n}-${String(n + 1).slice(2)}`;
   }
   res.json({ success: true, asset: a, years });
+}));
+
+// The journal that takes a disposed asset off the books, as a draft for
+// the journal form (nothing is posted from here).
+router.get("/fixed-assets/:id/disposal-journal", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.params.id)) return next(new ErrorHandler("Asset not found", 404));
+  const a = await FixedAsset.findById(req.params.id).select("-attachments.data").lean();
+  if (!a) return next(new ErrorHandler("Asset not found", 404));
+  const journal = await fixedAssets.disposalJournal(a);
+  if (!journal) return next(new ErrorHandler(`${a.assetNo} is still in use`, 409));
+  res.json({ success: true, journal });
 }));
 
 router.post("/fixed-assets/:id/dispose", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {
@@ -240,7 +252,7 @@ router.post("/payments/:id/cheque", isAdmin("admin", "accounts"), catchAsyncErro
   if (action === "bounced") {
     const reason = String(b.reason || "").trim().slice(0, 200);
     if (reason.length < 3) return next(new ErrorHandler("Say why the cheque was returned", 400));
-    const charges = Math.max(0, Math.round((Number(b.charges) || 0) * 100) / 100);
+    const charges = Math.max(0, r2(b.charges));
     try {
       const payment = await cancelVoucher(v, `Cheque ${v.cheque.number || ""} returned: ${reason}`.trim(), req, {
         extra: { "cheque.status": "bounced", "cheque.bouncedOn": on, "cheque.bounceReason": reason, "cheque.charges": charges },

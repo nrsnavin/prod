@@ -149,6 +149,84 @@ describe('interest on overdue receivables', () => {
     await M.Customer.updateOne({ _id: customer._id }, { $set: { interestGraceDays: 60 } });
     expect((await get('/accounts/interest?asOf=2026-12-10')).body.groups).toEqual([]);
   });
+
+  it('the days a note says it covers are checked on the server, not taken from the browser', async () => {
+    const { customer, inv } = await customerWithInvoice();   // due 4 Nov
+    const other = await customerWithInvoice();
+    await put('/accounts/settings', { receivables: { interestRate: 18, graceDays: 0 } });
+    const d = (await get(`/accounts/interest/draft?customer=${customer._id}&asOf=2026-12-04`)).body;
+    expect((await post('/accounts/notes', d.body)).status).toBe(201);
+
+    // The same note sent again charges the same days: refused. (Nothing stopped it.)
+    const again = await post('/accounts/notes', d.body);
+    expect(again.status).toBe(409);
+    expect(again.body.message).toMatch(new RegExp(`Interest on ${inv.invoiceNumber} was already charged from 05-11-2026 to 04-12-2026 by DN/`));
+    // A day of overlap is refused; from the day after is the next note.
+    const next = (from, to, extra = {}) => ({ ...d.body, date: to, reason: 'Interest on overdue invoices', lines: [{ description: `Interest on ${inv.invoiceNumber}`, quantity: 1, rate: 300, gstPercent: 5 }], interest: [{ invoice: inv._id, docNo: inv.invoiceNumber, from, to, rate: 18, amount: 300 }], ...extra });
+    expect((await post('/accounts/notes', next('2026-12-04', '2026-12-10'))).status).toBe(409);
+    const ok = await post('/accounts/notes', next('2026-12-05', '2026-12-10'));
+    expect(ok.status).toBe(201);
+    expect(ok.body.note.interest[0].days).toBe(6);   // counted from the dates, whatever was sent
+
+    // Another customer's invoice; days before it fell due; days after the note's own date.
+    const theirs = await post('/accounts/notes', next('2026-12-11', '2026-12-20', { interest: [{ invoice: other.inv._id, from: '2026-12-11', to: '2026-12-20', amount: 300 }] }));
+    expect(theirs.status).toBe(400);
+    expect(theirs.body.message).toMatch(/belongs to another customer/);
+    const early = await post('/accounts/notes', next('2026-11-01', '2026-11-03'));
+    expect(early.status).toBe(400);
+    expect(early.body.message).toMatch(/fell due on 04-11-2026 — interest runs from the day after/);
+    const late = await post('/accounts/notes', next('2026-12-11', '2026-12-25', { date: '2026-12-20' }));
+    expect(late.status).toBe(400);
+    expect(late.body.message).toMatch(/after the note's own date/);
+    // Two notes for the same days sent together: one.
+    const both = await Promise.all([post('/accounts/notes', next('2026-12-11', '2026-12-31')), post('/accounts/notes', next('2026-12-11', '2026-12-31'))]);
+    expect(both.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(await M.AccountNote.countDocuments({ 'interest.0': { $exists: true }, status: 'issued' })).toBe(3);
+    // A cancelled note's days can be charged again.
+    expect((await post(`/accounts/notes/${ok.body.note._id}/cancel`, { reason: 'Charged at the wrong rate' })).status).toBe(200);
+    expect((await post('/accounts/notes', next('2026-12-05', '2026-12-10'))).status).toBe(201);
+  });
+
+  it('worked from each payment\'s date when the books say so: an invoice paid late is charged for its lateness', async () => {
+    const { customer, inv } = await customerWithInvoice({ invoiceDate: new Date('2026-06-05'), dueDate: new Date('2026-07-05') });   // ₹1,05,000 due 5 Jul
+    const acct = await bank();
+    const pay = (amount, date) => post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: customer._id, amount, mode: 'bank', account: acct._id, date, allocations: [{ docType: 'Invoice', doc: inv._id, amount }] });
+    expect((await pay(50000, '2026-08-04')).status).toBe(201);   // 30 days late
+    expect((await pay(55000, '2026-09-05')).status).toBe(201);   // 62 days late
+    expect((await put('/accounts/settings', { receivables: { interestRate: 18, graceDays: 0 } })).status).toBe(200);
+
+    // On today's balance — how it is worked unless the books say otherwise — a paid invoice bears nothing.
+    const onBalance = (await get('/accounts/interest?asOf=2026-09-30')).body;
+    expect(onBalance.settings.basis).toBe('balance');
+    expect(onBalance.groups).toEqual([]);
+
+    expect((await put('/accounts/settings', { receivables: { interestBasis: 'sometimes' } })).status).toBe(400);
+    expect((await put('/accounts/settings', { receivables: { interestBasis: 'payments' } })).body.settings.receivables.interestBasis).toBe('payments');
+    const i = (await get('/accounts/interest?asOf=2026-09-30')).body;
+    expect(i.settings.basis).toBe('payments');
+    const row = i.groups[0].rows[0];
+    expect(row).toMatchObject({ docNo: inv.invoiceNumber, outstanding: 0, rate: 18 });
+    expect(row.parts.map((p) => [p.amount, p.days])).toEqual([[50000, 30], [55000, 62]]);
+    // 50,000 × 18% × 30/365 + 55,000 × 18% × 62/365
+    expect(row.interest).toBe(2421.37);
+
+    // Grace: a part paid within the grace days bears nothing; one paid after bears from the due date.
+    await M.Customer.updateOne({ _id: customer._id }, { $set: { interestGraceDays: 45 } });
+    const g = (await get('/accounts/interest?asOf=2026-09-30')).body.groups[0].rows[0];
+    expect(g.parts.map((p) => [p.amount, p.days])).toEqual([[55000, 62]]);
+    expect(g.interest).toBe(1681.64);
+    await M.Customer.updateOne({ _id: customer._id }, { $unset: { interestGraceDays: '' } });
+
+    // The note it drafts says what was charged, and its days are not charged again.
+    const d = (await get(`/accounts/interest/draft?customer=${customer._id}&asOf=2026-09-30`)).body;
+    expect(d.body.lines[0].description).toMatch(/₹50000\.00 × 30 days, ₹55000\.00 × 62 days/);
+    expect(d.body.lines[0].rate).toBe(2421.37);
+    const note = await post('/accounts/notes', d.body);
+    expect(note.status).toBe(201);
+    const later = (await get('/accounts/interest?asOf=2026-10-10')).body.groups[0].rows[0];
+    // Only the note's own amount, unpaid for ten days since it was raised.
+    expect(later.parts).toEqual([expect.objectContaining({ amount: note.body.note.totals.grand, days: 10 })]);
+  });
 });
 
 describe('balance confirmations', () => {

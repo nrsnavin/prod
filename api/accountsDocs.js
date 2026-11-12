@@ -19,6 +19,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require("../utils/factoryDay");
+const cal = require("../utils/bizDates");
 const express = require("express");
 const router = express.Router();
 
@@ -191,7 +192,7 @@ router.get("/statement/pdf", catchAsyncErrors(async (req, res, next) => {
 
 // ── Excel ──────────────────────────────────────────────────────────
 const ExcelJS = require("exceljs");
-const dd = (d) => { if (!d) return ""; const t = new Date(d); const p = (n) => String(n).padStart(2, "0"); return `${p(t.getDate())}-${p(t.getMonth() + 1)}-${t.getFullYear()}`; };
+const dd = (d) => cal.dmy(d);   // the day in India, whatever clock the server keeps
 async function sendXlsx(res, name, wb) {
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", contentDisposition("attachment", `${fileName(name)}.xlsx`, "document.xlsx"));

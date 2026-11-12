@@ -16,6 +16,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express  = require("express");
+const { noted } = require("../utils/noted");
 const mongoose = require("mongoose");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
@@ -207,7 +208,7 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
     aiLedger.settle(data.aiSuggestion, {
       accepted: { supplierGstin: payeeGstin, billNo: data.refNo, billDate: date.toISOString().slice(0, 10), lines: data.lines.map((l) => ({ description: l.description, quantity: l.quantity, rate: l.rate, gstPercent: l.gstPercent })), totals: { taxable: data.totals.taxable, grand: data.totals.grand } },
       decidedBy: req.user?._id, expectSurface: "bill-ocr", ignoreMissing: true,
-    }).catch(() => {});
+    }).catch(noted(`scoring the bill scan against ${expense.expenseNo}`));
     await require("../services/billImages").link(data.aiSuggestion, { docType: "Expense", docId: expense._id, docNo: expense.expenseNo, partyName: expense.payeeName || expense.categoryName, amount: expense.totals?.grand, date: expense.date });
   }
   res.status(201).json({ success: true, expense, voucher: voucher ? { _id: voucher._id, voucherNo: voucher.voucherNo } : null });

@@ -32,6 +32,8 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
+const { r2 } = require("../utils/money");
+const cal = require("../utils/bizDates");
 const multer = require("multer");
 const ExcelJS = require("exceljs");
 const router = express.Router();
@@ -59,10 +61,10 @@ const serviceErr = (err, next) => (err.status ? next(new ErrorHandler(err.messag
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 1 } });
 const MONTH = /^\d{4}-\d{2}$/;
-const lastMonth = () => { const d = new Date(); const p = new Date(d.getFullYear(), d.getMonth() - 1, 1); return `${p.getFullYear()}-${String(p.getMonth() + 1).padStart(2, "0")}`; };
+const lastMonth = () => cal.shiftMonth(cal.monthKey(), -1);   // by the books' calendar
 const monthOf = (q) => (MONTH.test(String(q || "")) ? q : lastMonth());
-const fyOf = (q) => { if (/^\d{4}-\d{2}$/.test(String(q || ""))) return q; const d = new Date(); const y = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1; return `${y}-${String(y + 1).slice(2)}`; };
-const dd = (d) => { if (!d) return ""; const t = new Date(d); const p = (n) => String(n).padStart(2, "0"); return `${p(t.getDate())}-${p(t.getMonth() + 1)}-${t.getFullYear()}`; };
+const fyOf = (q) => (/^\d{4}-\d{2}$/.test(String(q || "")) ? q : cal.fyOf());
+const dd = (d) => cal.dmy(d);
 async function sendXlsx(res, name, wb) {
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", `attachment; filename="${name.replace(/[^\w.-]+/g, "_")}.xlsx"`);
@@ -252,7 +254,7 @@ router.post("/tds/certificates", isAdmin("admin", "accounts"), catchAsyncErrors(
   if (!(amount >= 0)) return next(new ErrorHandler("amount must be 0 or more", 400));
   let on;
   try { on = readDate(b.on, "on", new Date()); } catch (err) { return next(err); }
-  const data = { kind: b.kind, partyType, party: party._id, partyName: party.name, fy: fyOf(b.fy), quarter: b.quarter, certNo: String(b.certNo || "").trim().slice(0, 20), section: String(b.section || "").trim().toUpperCase(), amount: Math.round(amount * 100) / 100, on, note: String(b.note || "").trim().slice(0, 200), createdBy: req.user?._id };
+  const data = { kind: b.kind, partyType, party: party._id, partyName: party.name, fy: fyOf(b.fy), quarter: b.quarter, certNo: String(b.certNo || "").trim().slice(0, 20), section: String(b.section || "").trim().toUpperCase(), amount: r2(amount), on, note: String(b.note || "").trim().slice(0, 200), createdBy: req.user?._id };
   // Recorded once: the same request sent twice is answered by the first
   // one's row, and a certificate number is entered once for a party,
   // quarter and section.

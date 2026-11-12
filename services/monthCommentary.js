@@ -23,7 +23,7 @@ const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 
 const IST = '+05:30';
 const r0 = (n) => Math.round(n || 0);
-const r2 = (n) => Math.round((n || 0) * 100) / 100;
+const { r2 } = require('../utils/money');
 const pct = (a, b) => (b ? Math.round(((a - b) / b) * 1000) / 10 : null);
 const inr = (n) => `₹${r0(n).toLocaleString('en-IN')}`;
 

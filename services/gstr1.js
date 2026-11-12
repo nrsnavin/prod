@@ -21,6 +21,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Invoice = require('../models/Invoice');
+const cal = require('../utils/bizDates');
 const AccountNote = require('../models/AccountNote');
 const Customer = require('../models/Customer');
 const { getSettings } = require('./booksLock');
@@ -31,11 +32,12 @@ const { uqc } = require('./einvoice');
 const { r2 } = require('../utils/money');
 const B2CL_LIMIT = 100000;
 
+// The month's window and the portal's filing period ("102026"), on the books' calendar.
 function monthRange(month) {
-  const [y, m] = String(month).split('-').map(Number);
-  return { from: new Date(y, m - 1, 1), to: new Date(y, m, 0, 23, 59, 59, 999), fp: `${String(m).padStart(2, '0')}${y}` };
+  const { y, m, from, to } = cal.monthRange(month);
+  return { from, to, fp: `${String(m).padStart(2, '0')}${y}` };
 }
-const dmy = (d) => { const x = new Date(d); return `${String(x.getDate()).padStart(2, '0')}-${String(x.getMonth() + 1).padStart(2, '0')}-${x.getFullYear()}`; };
+const dmy = (d) => cal.dmy(d);
 
 /** Rate-wise items of a document, as the return wants them. */
 function items(lines) {

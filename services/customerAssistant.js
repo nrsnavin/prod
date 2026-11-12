@@ -23,6 +23,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
+const { r2 } = require('../utils/money');
 const { promptVersion } = require('../utils/aiPrompts');
 const ledger = require('./aiLedger');
 
@@ -159,7 +160,7 @@ async function invoiceInfo(customer, { invoice } = {}) {
   }
   if (!inv && !invoice) inv = await Invoice.findOne({ customer: customer._id, status: 'issued' }).sort({ invoiceDate: -1 }).lean();
   if (!inv) return { text: `We could not find invoice ${invoice} for ${customer.name} — our accounts team will check and send it.`, invoiceNo: null };
-  const left = Math.round(((inv.totals?.grand || 0) + (inv.debitedAmount || 0) - (inv.paidAmount || 0) - (inv.creditedAmount || 0)) * 100) / 100;
+  const left = r2((inv.totals?.grand || 0) + (inv.debitedAmount || 0) - (inv.paidAmount || 0) - (inv.creditedAmount || 0));
   return {
     text: `Invoice ${inv.invoiceNumber} dated ${dmy(inv.invoiceDate)} for ₹${money(inv.totals?.grand)}${left > 0.005 ? ` — ₹${money(left)} still due${inv.dueDate ? ` (due ${dmy(inv.dueDate)})` : ''}` : ' — fully paid, thank you'}. Our accounts team will send you a copy.`,
     invoiceNo: inv.invoiceNumber,

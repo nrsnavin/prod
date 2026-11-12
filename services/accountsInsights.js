@@ -16,6 +16,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require('../utils/factoryDay');
+const cal = require('../utils/bizDates');
 const mongoose = require('mongoose');
 const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
@@ -45,9 +46,8 @@ const dmy = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', mon
 
 /** The last day ITC on an invoice of this date can be claimed: 30 Nov after its financial year. */
 function itcDeadline(date) {
-  const d = new Date(date);
-  const fyEndYear = d.getMonth() >= 3 ? d.getFullYear() + 1 : d.getFullYear();
-  return new Date(fyEndYear, 10, 30, 23, 59, 59);
+  // 30 November of the year the invoice's financial year ends in, to that day's end.
+  return cal.endOf(cal.at(cal.fyRange(cal.fyOf(date)).y1 + 1, 11, 30));
 }
 
 /**
@@ -297,7 +297,7 @@ const monthName = (y, m) => new Date(y, m, 1).toLocaleDateString('en-IN', { mont
  */
 async function salaryDay(now) {
   const rows = await Payroll.find({ paidAt: { $gte: new Date(now.getTime() - 190 * DAY) } }).select('paidAt').lean();
-  const days = rows.map((r) => new Date(r.paidAt).getDate()).sort((a, b) => a - b);
+  const days = rows.map((r) => cal.parts(r.paidAt).d).sort((a, b) => a - b);   // the day of the month in India
   return days.length ? days[Math.floor(days.length / 2)] : 7;
 }
 
@@ -307,8 +307,9 @@ async function salaryDay(now) {
  */
 async function statutoryAndPayroll(today, end) {
   const items = [];
-  const y = today.getFullYear(); const m = today.getMonth();
-  const at = (yy, mm, d) => new Date(yy, mm, Math.min(d, new Date(yy, mm + 1, 0).getDate()));
+  // Month windows and due days on the books' calendar (utils/bizDates.js); mm is 0-based here, and may run past December.
+  const thisMonth = cal.monthKey(today);
+  const at = (yy, mm, d) => cal.dayOfMonth(yy, mm + 1, d);
   const when = (d) => (d < today ? today : d);
 
   // Salaries. Slips not yet fully paid, then the latest month's total for
@@ -350,22 +351,20 @@ async function statutoryAndPayroll(today, end) {
 
   // TDS deducted last month and this month.
   for (const back of [1, 0]) {
-    const from = new Date(y, m - back, 1);
-    const to = new Date(y, m - back + 1, 0, 23, 59, 59, 999);
-    const due = from.getMonth() === 2 ? at(from.getFullYear(), 3, 30) : at(from.getFullYear(), from.getMonth() + 1, 7);
+    const { y, m, from, to } = cal.monthRange(cal.shiftMonth(thisMonth, -back));
+    const due = m === 3 ? at(y, 3, 30) : at(y, m, 7);   // 30 April for March, else the 7th of the next month
     if (due < today || due > end) continue;
     const [t] = await Payment.aggregate([{ $match: { status: 'posted', kind: 'payment', date: { $gte: from, $lte: to }, 'tds.amount': { $gt: 0 } } }, { $group: { _id: null, amount: { $sum: '$tds.amount' } } }]);
-    if (t?.amount > 0.005) items.push({ direction: 'out', date: due, amount: r2(t.amount), party: 'Income tax (TDS)', docNo: `TDS ${monthName(from.getFullYear(), from.getMonth())}`, basis: back ? 'deducted, to deposit' : 'deducted so far this month' });
+    if (t?.amount > 0.005) items.push({ direction: 'out', date: due, amount: r2(t.amount), party: 'Income tax (TDS)', docNo: `TDS ${monthName(y, m - 1)}`, basis: back ? 'deducted, to deposit' : 'deducted so far this month' });
   }
 
   // GST: last month's return by the 20th, and this month's so far.
   for (const back of [1, 0]) {
-    const from = new Date(y, m - back, 1);
-    const to = new Date(y, m - back + 1, 0, 23, 59, 59, 999);
-    const due = at(from.getFullYear(), from.getMonth() + 1, 20);
+    const { y, m, from, to } = cal.monthRange(cal.shiftMonth(thisMonth, -back));
+    const due = at(y, m, 20);   // the 20th of the next month
     if (due < today || due > end) continue;
     const cash = gstSummary.cashDue(await gstSummary.summary({ from, to }));
-    if (cash > 0.005) items.push({ direction: 'out', date: due, amount: cash, party: 'GST', docNo: `GST ${monthName(from.getFullYear(), from.getMonth())}`, basis: back ? 'net of input credit' : 'net of input credit, so far this month' });
+    if (cash > 0.005) items.push({ direction: 'out', date: due, amount: cash, party: 'GST', docNo: `GST ${monthName(y, m - 1)}`, basis: back ? 'net of input credit' : 'net of input credit, so far this month' });
   }
   return items;
 }
@@ -474,9 +473,9 @@ async function forecast({ weeks = 6, now = new Date() } = {}) {
  * @returns { month, from, to, items: [{ key, label, detail, count, amount, ok, link }] }
  */
 async function closeChecklist(month) {
-  const [y, m] = String(month || '').match(/^(\d{4})-(\d{2})$/) ? month.split('-').map(Number) : [new Date().getFullYear(), new Date().getMonth()];
-  const from = new Date(y, m - 1, 1);
-  const to = new Date(y, m, 0, 23, 59, 59, 999);
+  // The month asked for; last month (by the books' calendar) when none is.
+  const key = /^\d{4}-\d{2}$/.test(String(month || '')) ? month : cal.shiftMonth(cal.monthKey(), -1);
+  const { y, m, from, to } = cal.monthRange(key);
   const range = { $gte: from, $lte: to };
   const fresh = { $or: [{ 'tally.batch': { $exists: false } }, { 'tally.batch': null }] };
   const [
@@ -487,7 +486,12 @@ async function closeChecklist(month) {
     Contra.countDocuments({ status: 'posted', mode: { $ne: 'cash' }, date: { $lte: new Date(to.getTime() - 15 * DAY) }, $and: [{ $or: [{ fromClearedOn: { $exists: false } }, { fromClearedOn: null }] }, { $or: [{ toClearedOn: { $exists: false } }, { toClearedOn: null }] }] }),
     SupplierBill.countDocuments({ status: { $ne: 'cancelled' }, billDate: range, 'attachments.0': { $exists: false } }),
     Expense.find({ status: 'pending', date: { $lte: new Date(Date.now() - 7 * DAY) } }).select('totals.grand').lean(),
-    Payment.aggregate([{ $match: { status: 'posted', kind: 'payment', date: range, 'tds.amount': { $gt: 0 } } }, { $group: { _id: '$tds.section', amount: { $sum: '$tds.amount' } } }]),
+    // By section, as each allocation was deducted (one voucher can carry two sections).
+    Payment.find({ status: 'posted', kind: 'payment', date: range, 'tds.amount': { $gt: 0 } }).select('amount tds allocations').lean().then((list) => {
+      const by = new Map();
+      for (const v of list) for (const part of require('./tds').sectionsOf(v)) by.set(part.section, r2((by.get(part.section) || 0) + part.tds));
+      return [...by].map(([_id, amount]) => ({ _id, amount }));
+    }),
     Promise.all(['Invoice', 'SupplierBill', 'Expense', 'AccountNote', 'Payment', 'Contra', 'Journal'].map(async (t) => {
       const Model = { Invoice, SupplierBill, Expense, AccountNote, Payment, Contra, Journal }[t];
       const dateField = { Invoice: 'invoiceDate', SupplierBill: 'billDate', Expense: 'date', AccountNote: 'date', Payment: 'date', Contra: 'date', Journal: 'date' }[t];
@@ -501,11 +505,12 @@ async function closeChecklist(month) {
     SupplierBill.countDocuments({ status: { $ne: 'cancelled' }, billDate: range }),
     AccountNote.countDocuments({ status: 'issued', unapplied: { $gt: 0.005 } }),
   ]);
-  const monthKey = `${y}-${String(m).padStart(2, '0')}`;
-  const [msmeDues, twoB, rule37] = await Promise.all([
+  const monthKey = key;
+  const [msmeDues, twoB, rule37, onCredit] = await Promise.all([
     require('./msme').dues({ asOf: to }),
     require('./gstr2b').summary(monthKey),
     require('./itcReversal').due(monthKey),
+    require('./tds').notDeducted({ asOf: to }),
   ]);
   const msmeOver = msmeDues.rows.filter((r) => r.dueDate <= to && r.state === 'overdue');
   const seen = new Map();
@@ -516,16 +521,18 @@ async function closeChecklist(month) {
   }
   const unplaced = [...seen.values()].filter((x) => !x.done);
   const tdsTotal = r2(tds.reduce((s, x) => s + x.amount, 0));
-  const tdsDue = new Date(y, m, 7);
+  const tdsDue = cal.dayOfMonth(y, m + 1, 7);
   const unsentTotal = unsent.reduce((s, x) => s + x, 0);
-  const locked = settings.lockDate && new Date(settings.lockDate) >= new Date(y, m - 1, new Date(y, m, 0).getDate());
-  const gstDue = new Date(y, m, 20);
+  const locked = settings.lockDate && cal.dayOf(settings.lockDate) >= cal.at(y, m + 1, 0);   // locked up to the month's last day
+  const gstDue = cal.dayOfMonth(y, m + 1, 20);
   const items = [
     { key: 'bank', label: 'Bank lines placed', ok: unplaced.length === 0 && statements.length > 0, count: unplaced.length, amount: r2(unplaced.reduce((s, x) => s + x.amount, 0)), detail: statements.length === 0 ? 'No statement uploaded for this month yet' : unplaced.length ? `${unplaced.length} statement line${unplaced.length === 1 ? '' : 's'} not in the books` : 'Every line is in the books', link: '/accounts/bank' },
     { key: 'cleared', label: 'Cheques and transfers cleared', ok: uncleared + unclearedContra === 0, count: uncleared + unclearedContra, detail: uncleared + unclearedContra ? `${uncleared + unclearedContra} entr${uncleared + unclearedContra === 1 ? 'y' : 'ies'} older than 15 days the bank has not shown` : 'Nothing old is waiting to clear', link: '/accounts/bank' },
     { key: 'photos', label: 'Bills have their copy attached', ok: noPhoto === 0, count: noPhoto, detail: noPhoto ? `${noPhoto} of ${rcmAndBills} bills this month have no photo or PDF` : 'Every bill has its copy', link: '/accounts/bills' },
     { key: 'approvals', label: 'Expenses decided', ok: pending.length === 0, count: pending.length, amount: r2(pending.reduce((s, e) => s + (e.totals?.grand || 0), 0)), detail: pending.length ? `${pending.length} waiting for approval more than a week` : 'Nothing waiting more than a week', link: '/accounts/expenses' },
     { key: 'tds', label: `TDS to deposit by ${dmy(tdsDue)}`, ok: tdsTotal === 0, count: tds.length, amount: tdsTotal, detail: tdsTotal ? `₹${fmt(tdsTotal)} deducted (${tds.map((x) => `${x._id || '—'} ₹${fmt(x.amount)}`).join(', ')}) — deposit by the 7th` : 'No TDS deducted this month', link: '/accounts/reports' },
+    // Booked, carrying a TDS section, and unpaid at the month's end: the tax was due when the bill was credited (services/tds.js notDeducted).
+    { key: 'tdsOnCredit', label: 'TDS on bills booked and not yet paid', ok: onCredit.rows.length === 0, count: onCredit.rows.length, amount: onCredit.total, detail: onCredit.rows.length ? `${onCredit.rows.length} bill${onCredit.rows.length === 1 ? '' : 's'} with a TDS section unpaid at the month's end: ₹${fmt(onCredit.total)} of tax is deducted only when they are paid. The law asks for it when the bill is credited — agree the treatment with your accountant` : 'Every bill with a TDS section is paid', link: '/accounts/statutory' },
     { key: 'gst', label: `GST return by ${dmy(gstDue)}`, ok: true, count: rcmAndBills, detail: 'Check the GST report against the purchase register before filing', link: '/accounts/reports' },
     { key: 'msme', label: 'MSME suppliers paid in time', ok: msmeOver.length === 0, count: msmeOver.length, amount: r2(msmeOver.reduce((s, r) => s + r.outstanding, 0)), detail: msmeOver.length ? `${msmeOver.length} bill${msmeOver.length === 1 ? '' : 's'} to micro / small suppliers past the 45-day limit — disallowed at year end if still unpaid (s.43B(h))` : msmeDues.suppliers ? 'Every MSME bill is within its limit' : 'No supplier is marked micro or small', link: '/accounts/statutory' },
     { key: 'gstr2b', label: 'GSTR-2B matched', ok: twoB.uploaded && twoB.counts.missing === 0 && twoB.counts.mismatch === 0, count: twoB.uploaded ? twoB.counts.missing + twoB.counts.mismatch : 0, amount: twoB.uploaded ? r2(twoB.itc.missing + twoB.itc.mismatch) : 0, detail: !twoB.uploaded ? 'Upload the month\'s GSTR-2B from the portal before claiming input credit' : twoB.counts.missing + twoB.counts.mismatch ? `${twoB.counts.missing} bill${twoB.counts.missing === 1 ? '' : 's'} not in 2B (₹${fmt(twoB.itc.missing)} ITC on hold), ${twoB.counts.mismatch} with a different tax` : 'Every bill with credit is in GSTR-2B', link: '/accounts/statutory' },
@@ -534,7 +541,7 @@ async function closeChecklist(month) {
     { key: 'tally', label: 'Sent to Tally', ok: unsentTotal === 0, count: unsentTotal, detail: unsentTotal ? `${unsentTotal} document${unsentTotal === 1 ? '' : 's'} not yet sent` : 'Everything has gone', link: '/accounts/tally' },
     { key: 'lock', label: 'Books locked', ok: !!locked, count: 0, detail: locked ? `Locked up to ${dmy(settings.lockDate)}` : 'Lock the month once it has gone to Tally', link: '/accounts/settings' },
   ];
-  return { month: `${y}-${String(m).padStart(2, '0')}`, from, to, items, done: items.filter((i) => i.ok).length, total: items.length };
+  return { month: key, from, to, items, done: items.filter((i) => i.ok).length, total: items.length };
 }
 
 /** The checklist as one WhatsApp message. */

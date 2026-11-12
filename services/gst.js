@@ -39,7 +39,8 @@ const isGstin = (gstin) => GSTIN_RE.test(String(gstin || '').trim().toUpperCase(
 
 const stateName = (code) => STATE_NAMES[String(code || '')] || '';
 
-const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// One way to round money, a half-paisa going up (utils/money.js): GST of 5% on 100.10 is 5.01.
+const { r2: round2 } = require('../utils/money');
 
 /**
  * Price the lines and split the tax.

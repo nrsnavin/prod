@@ -23,6 +23,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express  = require("express");
+const { noted } = require("../utils/noted");
 const mongoose = require("mongoose");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
@@ -240,6 +241,8 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
   // together both found the receipt free and both billed it. The second
   // now waits for the first and is told the receipt is taken.
   await onceAtATime(`bill:supplier:${supplier._id}`, async () => {
+  // What went wrong after the bill was safely in the books, to tell the person.
+  const warnings = [];
   if (inwardIds.length) {
     const taken = await SupplierBill.findOne({ inwards: { $in: inwardIds }, status: { $ne: "cancelled" } }).select("billNo").lean();
     if (taken) return next(new ErrorHandler(`A receipt on this bill is already on ${taken.billNo}`, 409));
@@ -328,13 +331,15 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
       // The mailbox item's file goes with the bill.
       if (inboxBill.data) {
         const base64 = String(inboxBill.data).split(",")[1] || "";
-        await attachments.attach(SupplierBill, "bills", _id, { buffer: Buffer.from(base64, "base64"), mimetype: inboxBill.contentType, originalname: inboxBill.filename || "bill", size: inboxBill.size }).catch(() => {});
+        await attachments.attach(SupplierBill, "bills", _id, { buffer: Buffer.from(base64, "base64"), mimetype: inboxBill.contentType, originalname: inboxBill.filename || "bill", size: inboxBill.size })
+          .catch(noted(`attaching the mailed bill's file to ${number}`, warnings, "The bill is entered, but the file that came by mail could not be attached to it — attach it by hand."));
       }
     }
     if (serviceBill?.data) {
       // The photo or PDF from the service log becomes the bill's attachment.
       const base64 = String(serviceBill.data).split(",")[1] || "";
-      await attachments.attach(SupplierBill, "bills", _id, { buffer: Buffer.from(base64, "base64"), mimetype: serviceBill.contentType, originalname: serviceBill.filename || "service-bill", size: serviceBill.size }).catch(() => {});
+      await attachments.attach(SupplierBill, "bills", _id, { buffer: Buffer.from(base64, "base64"), mimetype: serviceBill.contentType, originalname: serviceBill.filename || "service-bill", size: serviceBill.size })
+        .catch(noted(`attaching the service bill's photo to ${number}`, warnings, "The bill is entered, but the photo from the service log could not be attached to it — attach it by hand."));
     }
   } catch (err) {
     if (err?.code === 11000) {
@@ -350,10 +355,10 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     aiLedger.settle(data.aiSuggestion, {
       accepted: { supplierGstin: data.supplierGstin, billNo: data.supplierBillNo, billDate: billDate.toISOString().slice(0, 10), lines: data.lines.map((l) => ({ description: l.description, hsn: l.hsn, quantity: l.quantity, unit: l.unit, rate: l.rate, gstPercent: l.gstPercent })), totals: { taxable: data.totals.taxable, grand: data.totals.grand } },
       decidedBy: req.user?._id, expectSurface: "bill-ocr", ignoreMissing: true,
-    }).catch(() => {});
+    }).catch(noted(`scoring the bill scan against ${number}`));
     await require("../services/billImages").link(data.aiSuggestion, { docType: "SupplierBill", docId: doc._id, docNo: doc.billNo, partyName: doc.supplierName, amount: doc.totals?.grand, date: doc.billDate });
   }
-  res.status(201).json({ success: true, bill: doc.toObject() });
+  res.status(201).json({ success: true, bill: doc.toObject(), ...(warnings.length ? { warnings } : {}) });
   }, { what: "A bill from this supplier" });
 }));
 

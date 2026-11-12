@@ -609,3 +609,62 @@ describe('audit: what a voucher may settle, and who a message may go to', () => 
     expect(ok.status).toBe(200);
   });
 });
+
+describe('what a voucher will settle, worked out by the server', () => {
+  const svc = (supplier, no, date, rate, tds) => post('/accounts/bills', { supplier: supplier._id, supplierBillNo: no, kind: 'service', billDate: date, lines: [{ description: 'Dyeing', quantity: 1, rate, gstPercent: 5 }], tds: tds || { applicable: false } }).then((r) => r.body.bill);
+
+  it('spreads a payment over the oldest bills first, with the TDS on each, and posting it does exactly that', async () => {
+    const s = await supplierScene();
+    const bank = (await post('/accounts/bank-accounts', { name: 'Kotak CA', kind: 'bank', openingBalance: 500000 })).body.account;
+    const older = await svc(s.supplier, 'D/1', '2026-07-01', 50000, { applicable: true, section: '194C', rate: 2 });   // 52,500; TDS 1,000; takes 51,500
+    const newer = await svc(s.supplier, 'D/2', '2026-07-10', 20000);                                                    // 21,000; no TDS
+    const p = await post('/accounts/payments/propose', { kind: 'payment', partyType: 'supplier', party: s.supplier._id, amount: 60000 });
+    expect(p.status).toBe(200);
+    expect(p.body.allocations.map((a) => [a.docNo, a.amount, a.tds, a.rate, a.section, a.cash])).toEqual([
+      [older.billNo, 52500, 1000, 2, '194C', 51500],
+      [newer.billNo, 8500, 0, 0, '', 8500],
+    ]);
+    expect(p.body.totals).toEqual({ gross: 61000, tds: 1000, adjustments: 0, cashNeeded: 60000, cash: 60000, unallocated: 0 });
+
+    // Posted as proposed: nothing left over, and the voucher carries the same TDS.
+    const v = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s.supplier._id, amount: p.body.totals.cash, mode: 'bank', account: bank._id, date: '2026-07-20', allocations: p.body.allocations.map((a) => ({ docType: a.docType, doc: a.doc, amount: a.amount })) });
+    expect(v.status).toBe(201);
+    expect(v.body.payment).toMatchObject({ unallocated: 0, tds: { amount: 1000, section: '194C' } });
+    expect(v.body.payment.allocations.map((a) => [a.amount, a.tds])).toEqual(p.body.allocations.map((a) => [a.amount, a.tds]));
+    // What is left open is proposed next.
+    const rest = (await post('/accounts/payments/propose', { kind: 'payment', partyType: 'supplier', party: s.supplier._id, amount: 99999 })).body;
+    expect(rest.allocations.map((a) => [a.docNo, a.amount])).toEqual([[newer.billNo, 12500]]);
+    expect(rest.totals).toMatchObject({ cashNeeded: 12500, cash: 99999, unallocated: 87499 });
+  });
+
+  it('pays a bill with TDS in part: the part the money covers after the tax on that part', async () => {
+    const s = await supplierScene();
+    const b = await svc(s.supplier, 'D/3', '2026-07-01', 50000, { applicable: true, section: '194J', rate: 10 });   // 52,500; TDS on the value net of GST
+    const p = (await post('/accounts/payments/propose', { kind: 'payment', partyType: 'supplier', party: s.supplier._id, amount: 10000 })).body;
+    const [a] = p.allocations;
+    expect(a.docNo).toBe(b.billNo);
+    // The cash it takes is the money given, to the paisa, and never more.
+    expect(a.cash).toBeLessThanOrEqual(10000);
+    expect(a.cash).toBeGreaterThan(9999.9);
+    expect(a.tds).toBe(Math.round(Math.round(a.amount * (50000 / 52500) * 100) / 100 * 10) / 100);
+    expect(p.totals.unallocated).toBeLessThan(0.1);
+  });
+
+  it('takes the documents ticked, each for what it owes or the amount given; a receipt has no TDS', async () => {
+    const { customer, inv } = await customerScene();          // 10,500
+    const { inv: second } = await customerScene(21000, {}, customer);
+    const all = (await post('/accounts/payments/propose', { kind: 'receipt', partyType: 'customer', party: customer._id, amount: 15000 })).body;
+    expect(all.allocations.map((a) => [a.docNo, a.amount, a.tds])).toEqual([[inv.invoiceNumber, 10500, 0], [second.invoiceNumber, 4500, 0]]);
+    // Leaving one out.
+    const skipped = (await post('/accounts/payments/propose', { kind: 'receipt', partyType: 'customer', party: customer._id, amount: 15000, skip: [String(inv._id)] })).body;
+    expect(skipped.allocations.map((a) => [a.docNo, a.amount])).toEqual([[second.invoiceNumber, 15000]]);
+    // Ticked, with a short payment explained by bank charges.
+    const ticked = (await post('/accounts/payments/propose', { kind: 'receipt', partyType: 'customer', party: customer._id, docs: [{ doc: second._id }, { doc: inv._id, amount: 500 }], adjustments: [{ kind: 'bank_charges', amount: 50 }] })).body;
+    expect(ticked.allocations.map((a) => [a.docNo, a.amount])).toEqual([[second.invoiceNumber, 21000], [inv.invoiceNumber, 500]]);
+    expect(ticked.totals).toEqual({ gross: 21500, tds: 0, adjustments: 50, cashNeeded: 21450, cash: 21450, unallocated: 0 });
+    // Refused: more than it owes; a document that is not this party's; the wrong direction.
+    expect((await post('/accounts/payments/propose', { kind: 'receipt', partyType: 'customer', party: customer._id, docs: [{ doc: inv._id, amount: 99999 }] })).body.message).toMatch(/has only 10500\.00 outstanding/);
+    expect((await post('/accounts/payments/propose', { kind: 'receipt', partyType: 'customer', party: customer._id, docs: [{ doc: new mongoose.Types.ObjectId() }] })).status).toBe(409);
+    expect((await post('/accounts/payments/propose', { kind: 'payment', partyType: 'customer', party: customer._id, amount: 100 })).body.message).toMatch(/A refund pays back credit on account/);
+  });
+});

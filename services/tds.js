@@ -30,44 +30,65 @@ const { getSettings } = require('./booksLock');
 const { withTxn } = require('./accountsHelpers');
 const { onceAtATime } = require('../utils/onceAtATime');
 const { once } = require('./posting');
+const outstanding = require('./outstanding');
 
 const { r2 } = require('../utils/money');
 const DAY = 86_400_000;
 
-function fyRange(fy) {
-  const [y1] = String(fy).split('-').map(Number);
-  return { from: new Date(y1, 3, 1), to: new Date(y1 + 1, 2, 31, 23, 59, 59, 999), y1 };
-}
-const fyOf = (d) => { const x = new Date(d); const y = x.getMonth() >= 3 ? x.getFullYear() : x.getFullYear() - 1; return `${y}-${String(y + 1).slice(2)}`; };
-const quarterOf = (d) => { const m = new Date(d).getMonth(); return m >= 3 && m <= 5 ? 'Q1' : m >= 6 && m <= 8 ? 'Q2' : m >= 9 && m <= 11 ? 'Q3' : 'Q4'; };
-function quarterRange(fy, q) {
-  const { y1 } = fyRange(fy);
-  const start = { Q1: [y1, 3], Q2: [y1, 6], Q3: [y1, 9], Q4: [y1 + 1, 0] }[q];
-  return { from: new Date(start[0], start[1], 1), to: new Date(start[0], start[1] + 3, 0, 23, 59, 59, 999) };
-}
+// Years, quarters and months are read off the books' own calendar
+// (utils/bizDates.js), never off the clock of the machine this runs on.
+const { fyRange, fyOf, quarterOf, quarterRange, monthRange, monthKey, parts, at, today: businessToday } = require('../utils/bizDates');
+
 /** The 7th of the next month; 30 April for March. */
 function dueDate(month) {
-  const [y, m] = month.split('-').map(Number);
-  return m === 3 ? new Date(y, 3, 30) : new Date(y, m, 7);
+  const { y, m } = monthRange(month);
+  return m === 3 ? at(y, 4, 30) : at(y, m + 1, 7);
 }
-/** s.201(1A): 1.5% a month, part of a month counted whole, from the deduction to the deposit. */
+/**
+ * s.201(1A): 1.5% a month from the deduction to the deposit, and a part
+ * of a month is a month. The department counts CALENDAR months: tax
+ * deducted on 31 May and deposited on 8 June has run for May and June,
+ * two months, though nine days apart. (It was counted date to date,
+ * which made that one.)
+ */
 function interestOn(amount, deductedOn, depositedOn) {
-  const d = new Date(deductedOn); const p = new Date(depositedOn);
-  if (p <= d) return 0;
-  const months = (p.getFullYear() - d.getFullYear()) * 12 + (p.getMonth() - d.getMonth()) + (p.getDate() > d.getDate() ? 1 : 0);
+  const d = parts(deductedOn); const p = parts(depositedOn);
+  if (!d || !p || at(p.y, p.m, p.d) <= at(d.y, d.m, d.d)) return 0;
+  const months = (p.y - d.y) * 12 + (p.m - d.m) + 1;
   return r2(amount * 0.015 * Math.max(1, months));
 }
 
+/**
+ * What a payment voucher deducted, section by section. A voucher that
+ * pays bills under two sections (a contractor's bill and a professional
+ * fee, say) keeps the section and the rate on each allocation; a voucher
+ * posted before that was kept has the one section on the voucher.
+ * @returns [{ section, rate, base, tds, docs }]
+ */
+function sectionsOf(v) {
+  const withTds = (v.allocations || []).filter((a) => a.tds > 0);
+  if (!withTds.length || withTds.some((a) => a.section === undefined || a.section === null)) {
+    return [{ section: v.tds?.section || '', rate: v.tds?.rate || 0, base: r2(v.tds?.base || (v.amount || 0) + (v.tds?.amount || 0)), tds: r2(v.tds?.amount || 0), docs: (v.allocations || []).map((a) => a.docNo) }];
+  }
+  const by = new Map();
+  for (const a of withTds) {
+    const k = `${a.section || ''}|${a.rate || 0}`;
+    const g = by.get(k) || { section: a.section || '', rate: a.rate || 0, base: 0, tds: 0, docs: [] };
+    g.base = r2(g.base + (a.tdsBase || 0)); g.tds = r2(g.tds + a.tds); g.docs.push(a.docNo);
+    by.set(k, g);
+  }
+  return [...by.values()];
+}
+
 async function register(month) {
-  const [y, m] = month.split('-').map(Number);
-  const from = new Date(y, m - 1, 1); const to = new Date(y, m, 0, 23, 59, 59, 999);
+  const { from, to } = monthRange(month);
   const vouchers = await Payment.find({ status: 'posted', kind: 'payment', 'tds.amount': { $gt: 0 }, date: { $gte: from, $lte: to } }).select('voucherNo date supplier partyName amount tds allocations').sort({ date: 1 }).lean();
   const challans = await TdsChallan.find({ month }).sort({ depositedOn: 1 }).lean();
   const bySection = new Map();
-  for (const v of vouchers) {
-    const s = v.tds.section || '—';
+  for (const v of vouchers) for (const part of sectionsOf(v)) {
+    const s = part.section || '—';
     const g = bySection.get(s) || { section: s, deducted: 0, count: 0, deposited: 0, interestPaid: 0, challans: [] };
-    g.deducted = r2(g.deducted + v.tds.amount); g.count += 1;
+    g.deducted = r2(g.deducted + part.tds); g.count += 1;
     bySection.set(s, g);
   }
   for (const c of challans) {
@@ -77,7 +98,8 @@ async function register(month) {
     bySection.set(c.section, g);
   }
   const due = dueDate(month);
-  const today = new Date();
+  // Late from the day after the due day, by the calendar the books keep.
+  const today = businessToday();
   const rows = [...bySection.values()].map((g) => {
     const balance = r2(g.deducted - g.deposited);
     // Interest the balance is running up if deposited today, counted from the month's end.
@@ -87,8 +109,54 @@ async function register(month) {
   return {
     month, from, to, due, rows,
     totals: { deducted: r2(rows.reduce((t, r) => t + r.deducted, 0)), deposited: r2(rows.reduce((t, r) => t + r.deposited, 0)), balance: r2(rows.reduce((t, r) => t + r.balance, 0)), interestDue: r2(rows.reduce((t, r) => t + r.interestDue, 0)) },
-    vouchers: vouchers.map((v) => ({ _id: v._id, voucherNo: v.voucherNo, date: v.date, partyName: v.partyName, section: v.tds.section, rate: v.tds.rate, base: v.tds.base, tds: v.tds.amount, docs: (v.allocations || []).map((a) => a.docNo) })),
+    vouchers: vouchers.flatMap((v) => sectionsOf(v).map((part) => ({ _id: v._id, voucherNo: v.voucherNo, date: v.date, partyName: v.partyName, section: part.section, rate: part.rate, base: part.base, tds: part.tds, docs: part.docs }))),
+    // Booked and not yet paid: tax that was due to be deducted when the
+    // bill was credited (see notDeducted below).
+    notDeducted: await notDeducted({ asOf: to }),
   };
+}
+
+/**
+ * TDS ON BILLS BOOKED AND NOT YET PAID
+ *
+ * These books deduct TDS when a bill is PAID: the payment voucher works
+ * it out and the register, 26Q and the challan follow the payment's
+ * date. The law asks for the deduction when the supplier is credited
+ * or paid, whichever comes first (s.194C, 194J and the rest), so a bill
+ * booked in March and paid in April owes its TDS in March: deposited
+ * late it bears interest, and at the year's end 30% of an expense on
+ * which tax was not deducted can be disallowed (s.40(a)(ia)).
+ *
+ * Whether to book TDS at the bill is a decision for the firm and its
+ * accountant. Until it is made the other way, this is the check: every
+ * bill of the financial year, carrying a TDS section, that was still
+ * unpaid (in whole or part) at the end of the period asked, with the
+ * tax on its unpaid share.
+ *
+ * @param asOf  the period's end (a month's or the year's last moment)
+ * @returns {{ asOf, rows: [{ _id, billNo, supplierBillNo, supplierName, billDate, section, rate, unpaid, base, tds, month }], total, base }}
+ */
+async function notDeducted({ asOf }) {
+  const { from } = fyRange(fyOf(asOf));
+  const bills = await SupplierBill.find({ status: { $ne: 'cancelled' }, 'tds.applicable': true, 'tds.rate': { $gt: 0 }, billDate: { $gte: from, $lte: asOf } })
+    .select('billNo supplierBillNo supplier supplierName billDate totals tds paidAmount tdsAmount debitedAmount').sort({ billDate: 1 }).lean();
+  if (!bills.length) return { asOf, rows: [], total: 0, base: 0 };
+  // What was paid by the period's end: a payment dated later had not been made yet.
+  const later = await Payment.find({ status: 'posted', date: { $gt: asOf }, 'allocations.doc': { $in: bills.map((b) => b._id) } }).select('allocations').lean();
+  const paidLater = new Map();
+  for (const v of later) for (const a of v.allocations || []) if (a.docType === 'SupplierBill') paidLater.set(String(a.doc), r2((paidLater.get(String(a.doc)) || 0) + a.amount));
+  const rows = [];
+  for (const b of bills) {
+    const grand = r2(b.totals?.grand || 0);
+    const unpaid = r2(grand - (b.paidAmount || 0) - (b.tdsAmount || 0) - (b.debitedAmount || 0) + (paidLater.get(String(b._id)) || 0));
+    if (unpaid <= 0.005 || grand <= 0) continue;
+    // TDS is on the value net of GST: the unpaid share of the taxable value.
+    const base = r2(Math.min(unpaid, grand) * outstanding.ratio(b.totals));
+    const tds = r2(base * b.tds.rate / 100);
+    if (tds < 0.5) continue;
+    rows.push({ _id: b._id, billNo: b.billNo, supplierBillNo: b.supplierBillNo, supplierName: b.supplierName, billDate: b.billDate, section: b.tds.section || '', rate: b.tds.rate, unpaid, base, tds, month: monthKey(b.billDate) });
+  }
+  return { asOf, rows, total: r2(rows.reduce((t, r) => t + r.tds, 0)), base: r2(rows.reduce((t, r) => t + r.base, 0)) };
 }
 
 /**
@@ -122,19 +190,21 @@ async function form26q(fy, q) {
   const vouchers = await Payment.find({ status: 'posted', kind: 'payment', 'tds.amount': { $gt: 0 }, date: { $gte: from, $lte: to } }).select('voucherNo date supplier partyName amount tds allocations').sort({ date: 1 }).lean();
   const ids = [...new Set(vouchers.map((v) => String(v.supplier)).filter((x) => x !== 'undefined' && x !== 'null'))];
   const suppliers = new Map((await Supplier.find({ _id: { $in: ids } }).select('name pan').lean()).map((s) => [String(s._id), s]));
-  const months = [...new Set(vouchers.map((v) => `${v.date.getFullYear()}-${String(v.date.getMonth() + 1).padStart(2, '0')}`))];
+  const months = [...new Set(vouchers.map((v) => monthKey(v.date)))];
   const challans = await TdsChallan.find({ month: { $in: months } }).lean();
   const challanOf = (month, section) => challans.filter((c) => c.month === month && c.section === section).map((c) => `${c.bsrCode}/${c.challanNo}/${c.depositedOn.toISOString().slice(0, 10)}`).join(', ');
   const checks = [];
-  const rows = vouchers.map((v) => {
+  // One line for each section a voucher deducted under: the return is filed section by section.
+  const rows = vouchers.flatMap((v) => {
     const s = suppliers.get(String(v.supplier)) || {};
     const pan = s.pan || '';
-    const month = `${v.date.getFullYear()}-${String(v.date.getMonth() + 1).padStart(2, '0')}`;
-    const base = r2(v.tds.base || v.amount + v.tds.amount);
+    const month = monthKey(v.date);
     if (!pan) checks.push({ level: 'error', doc: v.voucherNo, text: `${v.partyName}: no PAN on file — without one, tax should have been deducted at 20% (s.206AA), and the return cannot carry the line` });
     else if (!/^[A-Z]{5}\d{4}[A-Z]$/.test(pan)) checks.push({ level: 'error', doc: v.voucherNo, text: `${v.partyName}: PAN ${pan} is not in the PAN form` });
-    if (!challanOf(month, v.tds.section)) checks.push({ level: 'warn', doc: v.voucherNo, text: `No challan recorded for ${v.tds.section} of ${month}` });
-    return { voucherNo: v.voucherNo, date: v.date, supplier: v.supplier, deductee: v.partyName, pan, section: v.tds.section, rate: v.tds.rate, amountPaid: base, tds: v.tds.amount, docs: (v.allocations || []).map((a) => a.docNo), challan: challanOf(month, v.tds.section) };
+    return sectionsOf(v).map((part) => {
+      if (!challanOf(month, part.section)) checks.push({ level: 'warn', doc: v.voucherNo, text: `No challan recorded for ${part.section} of ${month}` });
+      return { voucherNo: v.voucherNo, date: v.date, supplier: v.supplier, deductee: v.partyName, pan, section: part.section, rate: part.rate, amountPaid: part.base, tds: part.tds, docs: part.docs, challan: challanOf(month, part.section) };
+    });
   });
   const issued = await TdsCertificate.find({ kind: 'issued', fy, quarter: q }).lean();
   return { fy, quarter: q, from, to, rows, checks, totals: { amountPaid: r2(rows.reduce((t, r) => t + r.amountPaid, 0)), tds: r2(rows.reduce((t, r) => t + r.tds, 0)), deductees: new Set(rows.map((r) => String(r.supplier))).size }, certificates: issued };
@@ -269,4 +339,4 @@ async function apply194q(supplierId, billDate, taxable) {
   return { section: '194Q', rate: s.rate, before, limit: s.limit, over: r2(before + taxable - s.limit) };
 }
 
-module.exports = { register, addChallan, form26q, receivable, upload26as, parse26as, purchases194q, apply194q, dueDate, interestOn, fyOf, quarterOf, quarterRange, fyRange };
+module.exports = { register, addChallan, form26q, receivable, upload26as, parse26as, purchases194q, apply194q, dueDate, interestOn, fyOf, quarterOf, quarterRange, fyRange, sectionsOf, notDeducted };

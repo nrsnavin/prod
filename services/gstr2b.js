@@ -21,6 +21,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Gstr2bEntry = require('../models/Gstr2bEntry');
+const cal = require('../utils/bizDates');
 const SupplierBill = require('../models/SupplierBill');
 const AccountNote = require('../models/AccountNote');
 
@@ -94,14 +95,12 @@ async function upload({ period, json, by }) {
  */
 async function reconcile(period) {
   const entries = await Gstr2bEntry.find({ period }).lean();
-  const [y, m] = period.split('-').map(Number);
-  const from = new Date(y, m - 1, 1);
-  const to = new Date(y, m, 0, 23, 59, 59, 999);
+  const { y, m, from, to } = cal.monthRange(period);
   // Bills within a year of the month: a supplier may report late.
-  const bills = await SupplierBill.find({ status: { $ne: 'cancelled' }, supplierGstin: { $ne: '' }, billDate: { $gte: new Date(y - 1, m - 1, 1), $lte: to } })
+  const bills = await SupplierBill.find({ status: { $ne: 'cancelled' }, supplierGstin: { $ne: '' }, billDate: { $gte: cal.at(y - 1, m, 1), $lte: to } })
     .select('billNo supplierBillNo supplier supplierName supplierGstin billDate totals itc gstr2b reverseCharge').lean();
   // Our debit notes to suppliers are their credit notes in 2B.
-  const notes = await AccountNote.find({ kind: 'debit', partyType: 'supplier', status: 'issued', date: { $gte: new Date(y - 1, m - 1, 1), $lte: to } }).select('noteNo partyNoteNo partyGstin date totals').lean();
+  const notes = await AccountNote.find({ kind: 'debit', partyType: 'supplier', status: 'issued', date: { $gte: cal.at(y - 1, m, 1), $lte: to } }).select('noteNo partyNoteNo partyGstin date totals').lean();
   const taxOf = (t) => r2((t?.cgst || 0) + (t?.sgst || 0) + (t?.igst || 0));
   const byKey = new Map();
   for (const b of bills) byKey.set(`${String(b.supplierGstin).toUpperCase()}|${keyOf(b.supplierBillNo)}|invoice`, { docType: 'SupplierBill', doc: b });
@@ -166,9 +165,7 @@ async function reconcile(period) {
 /** The month's position: matched, mismatched, not in books, missing from 2B, and the ITC each side carries. */
 async function summary(period) {
   const entries = await Gstr2bEntry.find({ period }).sort({ supplierName: 1, date: 1 }).lean();
-  const [y, m] = period.split('-').map(Number);
-  const from = new Date(y, m - 1, 1);
-  const to = new Date(y, m, 0, 23, 59, 59, 999);
+  const { from, to } = cal.monthRange(period);
   const missing = await SupplierBill.find({ status: { $ne: 'cancelled' }, 'gstr2b.status': 'missing', 'gstr2b.period': period }).select('billNo supplierBillNo supplier supplierName supplierGstin billDate totals itc gstr2b').lean();
   const taxOf = (t) => r2((t?.cgst || 0) + (t?.sgst || 0) + (t?.igst || 0));
   const by = (st) => entries.filter((e) => e.match?.status === st);

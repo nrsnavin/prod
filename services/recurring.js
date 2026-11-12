@@ -2,6 +2,7 @@
 // Drafting recurring expenses on their day (models/RecurringExpense.js).
 
 const mongoose = require('mongoose');
+const cal = require('../utils/bizDates');
 const RecurringExpense = require('../models/RecurringExpense');
 const Expense = require('../models/Expense');
 const ExpenseCategory = require('../models/ExpenseCategory');
@@ -13,8 +14,9 @@ const { buildFingerprint, ACTION_CODES } = require('../utils/fingerprint');
 
 /** The date `every` months after `d`, on `day`. */
 function advance(d, every, day) {
-  const x = new Date(d);
-  return new Date(x.getFullYear(), x.getMonth() + every, Math.min(28, day || x.getDate()));
+  // On the books' calendar: the day `d` falls on in India, `every` months on, as that day's UTC midnight.
+  const x = cal.parts(d);
+  return cal.at(x.y, x.m + every, Math.min(28, day || x.d));
 }
 
 /** Upcoming dates for one template up to `until` (for the forecast). */

@@ -155,6 +155,14 @@ const AccountsSettingsSchema = new mongoose.Schema(
       // Interest charged on overdue invoices, % a year; 0 = none. Days past due before it runs.
       interestRate: { type: Number, default: 0, min: 0, max: 100 },
       graceDays:    { type: Number, default: 0, min: 0, max: 365 },
+      // What the interest is worked on (services/overdueInterest.js):
+      //   balance   what each invoice still owes on the day asked, for
+      //             the days since it fell due. A part paid late is not
+      //             charged for the days it was late.
+      //   payments  each rupee for the days it stayed unpaid after the
+      //             due date: an invoice paid late in full is charged
+      //             for its lateness.
+      interestBasis: { type: String, enum: ["balance", "payments"], default: "balance" },
     },
 
     // Export under a Letter of Undertaking (no IGST): its number and the year it covers.

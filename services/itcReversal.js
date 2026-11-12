@@ -34,14 +34,13 @@
 // ══════════════════════════════════════════════════════════════════
 
 const SupplierBill = require('../models/SupplierBill');
+const cal = require('../utils/bizDates');
 
 const DAY = 86_400_000;
 const { r2 } = require('../utils/money');
 
-function monthRange(month) {
-  const [y, m] = String(month).split('-').map(Number);
-  return { from: new Date(y, m - 1, 1), to: new Date(y, m, 0, 23, 59, 59, 999) };
-}
+// A month's window on the books' calendar (utils/bizDates.js).
+const { monthRange } = cal;
 
 /** The credit on the unpaid share of a bill. */
 function reversible(b) {
@@ -195,8 +194,7 @@ async function reclaim(billId, { month, fingerprint, by }) {
 
 /** For the GST report: reversed and re-claimed in a date range, by head. */
 async function inPeriod(from, to) {
-  const months = [];
-  for (let d = new Date(from.getFullYear(), from.getMonth(), 1); d <= to; d = new Date(d.getFullYear(), d.getMonth() + 1, 1)) months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+  const months = cal.monthsBetween(from, to);
   const rows = await SupplierBill.find({ $or: [{ 'itcReversal.period': { $in: months } }, { 'itcReversal.reclaimPeriod': { $in: months } }, { 'itcReversal.history.period': { $in: months } }] }).select('totals itcReversal').lean();
   const out = { reversed: { cgst: 0, sgst: 0, igst: 0, total: 0 }, reclaimed: { cgst: 0, sgst: 0, igst: 0, total: 0 } };
   for (const b of rows) {

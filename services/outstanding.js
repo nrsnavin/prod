@@ -178,4 +178,4 @@ function totals(rows) {
   return t;
 }
 
-module.exports = { receivables, payables, byParty, totals, BUCKETS, bucketOf, ratio };
+module.exports = { receivables, payables, byParty, totals, BUCKETS, bucketOf, ratio, dueOf, stillOpen };

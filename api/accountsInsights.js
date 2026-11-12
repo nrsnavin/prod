@@ -14,6 +14,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require("../utils/factoryDay");
+const cal = require("../utils/bizDates");
 const express = require("express");
 const ExcelJS = require("exceljs");
 const router = express.Router();
@@ -131,8 +132,7 @@ router.get("/forecast", catchAsyncErrors(async (req, res) => {
 }));
 
 router.get("/close", catchAsyncErrors(async (req, res) => {
-  const d = new Date(); const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
-  const month = /^\d{4}-\d{2}$/.test(String(req.query.month || "")) ? req.query.month : `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
+  const month = /^\d{4}-\d{2}$/.test(String(req.query.month || "")) ? req.query.month : cal.shiftMonth(cal.monthKey(), -1);
   res.json({ success: true, ...(await insights.closeChecklist(month)) });
 }));
 
@@ -171,7 +171,7 @@ router.post("/recurring", isAdmin("admin", "accounts"), catchAsyncErrors(async (
   for (const f of ["name", "category", "description", "amount", "nextDate"]) if (!body[f]) return next(new ErrorHandler(`${f} is required`, 400));
   if (!(await ExpenseCategory.exists({ _id: body.category }))) return next(new ErrorHandler("Category not found", 404));
   if (body.supplier && !(await Supplier.exists({ _id: body.supplier }))) return next(new ErrorHandler("Supplier not found", 404));
-  if (!body.dayOfMonth) body.dayOfMonth = Math.min(28, new Date(body.nextDate).getDate());
+  if (!body.dayOfMonth) body.dayOfMonth = Math.min(28, cal.parts(body.nextDate).d);
   res.status(201).json({ success: true, row: await RecurringExpense.create({ ...body, createdBy: req.user?._id }) });
 }));
 

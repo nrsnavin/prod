@@ -7,7 +7,7 @@ describe('r2: for adding up a column', () => {
   it('rounds to the paisa', () => {
     expect(r2(12.345)).toBe(12.35);
     expect(r2('12.344')).toBe(12.34);
-    expect(r2(-0.005)).toBe(-0);
+    expect(r2(-0.005)).toBe(-0.01);   // a half-paisa goes away from zero on both sides (it went to -0)
     expect(r2(1e9 + 0.004)).toBe(1e9);
   });
   it('counts an empty or missing cell as nothing, so the total is still a total', () => {
@@ -34,3 +34,37 @@ describe('parseMoney', () => {
     expect(parseMoney(null, { allowNull: true })).toEqual({ ok: true, value: null });
   });
 });
+
+describe('rounding to paise', () => {
+  const { r2, round2 } = require('../../utils/money');
+
+  it('a half-paisa goes up, also where the number cannot be held exactly', () => {
+    // 1.005 is kept as 1.00499999999999989…; times 100 that is 100.49999999999999, and Math.round took it down.
+    expect(r2(1.005)).toBe(1.01);
+    expect(r2(2.675)).toBe(2.68);
+    expect(r2(8.345)).toBe(8.35);
+    expect(r2(10.235)).toBe(10.24);
+    // GST of 5% on 100.10.
+    expect(r2(100.10 * 0.05)).toBe(5.01);
+    expect(round2(1.005)).toBe(1.01);
+  });
+
+  it('is the same both sides of zero, and leaves an honest figure below the half alone', () => {
+    expect(r2(-1.005)).toBe(-1.01);
+    expect(r2(-0.005)).toBe(-0.01);
+    expect(r2(1.0049)).toBe(1);
+    expect(r2(1.004999)).toBe(1);
+    expect(r2(123.454)).toBe(123.45);
+    expect(r2(0.1 + 0.2)).toBe(0.3);
+    expect(r2(1234567.895)).toBe(1234567.9);
+  });
+
+  it('still counts what is not a number as nothing when adding up, and as null where it must not pass for one', () => {
+    expect(r2(null)).toBe(0);
+    expect(r2('abc')).toBe(0);
+    expect(r2('12.345')).toBe(12.35);
+    expect(round2('abc')).toBeNull();
+    expect(round2(Infinity)).toBeNull();
+  });
+});
+

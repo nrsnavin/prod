@@ -131,9 +131,13 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
   // together both found the room and both took it, and a paid invoice of
   // 10,500 carried 16,800 of credit notes. The second now waits for the
   // first and is measured against what the first left.
-  await onceAtATime(`note:${target._id}`, async () => {
+  const issue = () => onceAtATime(`note:${target._id}`, async () => {
   target = await loadTarget();
   if (!target || (docType === "Invoice" ? target.status !== "issued" : target.status === "cancelled")) return next(new ErrorHandler(`${docNo} was cancelled meanwhile`, 409));
+  // The days an interest note says it covers are checked against the
+  // books, not taken from the browser: its invoices are this customer's,
+  // the days fall after each was due, and none were charged before.
+  try { await overdueInterest.checkMarkers(interest, { customer: party, date }); } catch (err) { return next(err); }
   let applied = p.totals.grand;
   if (!raises) {
     const earlier = await AccountNote.aggregate([
@@ -183,6 +187,10 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
   }
   res.status(201).json({ success: true, note: await AccountNote.findById(_id).select("-attachments.data").lean() });
   }, { what: "A note against this document" });
+  // One interest note at a time for a customer: two together would each
+  // find the same days uncharged, and both charge them.
+  if (interest.length) await onceAtATime(`interest:${party}`, issue, { what: "Interest for this customer" });
+  else await issue();
 }));
 
 /** The field a note moves on the document it is applied to. */

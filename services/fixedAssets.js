@@ -23,6 +23,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const mongoose = require('mongoose');
+const cal = require('../utils/bizDates');
 const ErrorHandler = require('../utils/ErrorHandler');
 const FixedAsset = require('../models/FixedAsset');
 const { BLOCKS } = require('../models/FixedAsset');
@@ -34,18 +35,14 @@ const journals = require('./journals');
 const { replayOf, replayAfter } = require('./posting');
 const { allocate } = require('./docNumbers');
 const { getSettings, assertOpen } = require('./booksLock');
-const { isId, r2, fp } = require('./accountsHelpers');
+const { isId, r2, fp, readDate } = require('./accountsHelpers');
 const { ACTION_CODES } = require('../utils/fingerprint');
 
 const DAY = 86_400_000;
 const FY_RE = /^\d{4}-\d{2}$/;
 
 /** "2026-27" for a date (financial year April–March), in UTC like every document date. */
-function fyOf(d) {
-  const x = new Date(d);
-  const y = x.getUTCMonth() >= 3 ? x.getUTCFullYear() : x.getUTCFullYear() - 1;
-  return `${y}-${String(y + 1).slice(2)}`;
-}
+const fyOf = (d) => cal.fyOf(d);
 const fyStartYear = (fy) => Number(String(fy).slice(0, 4));
 const fyStart = (fy) => new Date(Date.UTC(fyStartYear(fy), 3, 1));
 const fyEnd = (fy) => new Date(Date.UTC(fyStartYear(fy) + 1, 2, 31, 23, 59, 59, 999));
@@ -53,7 +50,7 @@ const nextFy = (fy) => { const y = fyStartYear(fy) + 1; return `${y}-${String(y 
 const daysBetween = (a, b) => Math.max(0, Math.round((new Date(b) - new Date(a)) / DAY) + 1);   // inclusive
 const daysInFy = (fy) => daysBetween(fyStart(fy), new Date(Date.UTC(fyStartYear(fy) + 1, 2, 31)));
 
-const DEFAULT = { depreciation: 'Depreciation', accumulatedDepreciation: 'Accumulated Depreciation' };
+const DEFAULT = { depreciation: 'Depreciation', accumulatedDepreciation: 'Accumulated Depreciation', lossOnAssetSale: 'Loss on Sale of Fixed Assets', profitOnAssetSale: 'Profit on Sale of Fixed Assets' };
 async function ledgers() {
   const t = (await getSettings()).tally || {};
   return Object.fromEntries(Object.entries(DEFAULT).map(([k, v]) => [k, String(t[k] || '').trim() || v]));
@@ -193,10 +190,10 @@ async function create(b, req) {
   if (!BLOCKS[b.block]) throw new ErrorHandler(`block must be one of ${Object.keys(BLOCKS).join(', ')}`, 400);
   const cost = r2(b.cost);
   if (!(cost > 0)) throw new ErrorHandler('cost must be more than 0', 400);
-  const purchaseDate = b.purchaseDate ? new Date(b.purchaseDate) : null;
-  if (!purchaseDate || Number.isNaN(purchaseDate.getTime())) throw new ErrorHandler('purchaseDate is required', 400);
-  const putToUse = b.putToUse ? new Date(b.putToUse) : purchaseDate;
-  if (Number.isNaN(putToUse.getTime())) throw new ErrorHandler('putToUse is not a date', 400);
+  // Dates through the one reader every document date goes through: the day in India, at UTC midnight.
+  const purchaseDate = readDate(b.purchaseDate, 'purchaseDate');
+  if (!purchaseDate) throw new ErrorHandler('purchaseDate is required', 400);
+  const putToUse = readDate(b.putToUse, 'putToUse', purchaseDate);
   if (putToUse < purchaseDate) throw new ErrorHandler('An asset cannot be put to use before it was bought', 400);
   const residualPercent = b.residualPercent === undefined || b.residualPercent === '' ? 5 : Number(b.residualPercent);
   if (!(residualPercent >= 0 && residualPercent <= 50)) throw new ErrorHandler('residualPercent must be between 0 and 50', 400);
@@ -249,21 +246,64 @@ async function dispose(id, b, req) {
   if (a.status !== 'active') throw new ErrorHandler(`Already ${a.status}`, 409);
   const how = b.how === 'scrapped' ? 'scrapped' : b.how === 'sold' ? 'sold' : null;
   if (!how) throw new ErrorHandler('how must be sold or scrapped', 400);
-  const date = b.date ? new Date(b.date) : null;
-  if (!date || Number.isNaN(date.getTime())) throw new ErrorHandler('date is required', 400);
-  if (date < new Date(a.putToUse)) throw new ErrorHandler('Disposed before it was put to use', 400);
+  const date = readDate(b.date, 'date');
+  if (!date) throw new ErrorHandler('date is required', 400);
+  if (date < cal.dayOf(a.putToUse)) throw new ErrorHandler('Disposed before it was put to use', 400);
   // A disposal changes that year's depreciation: not inside a closed period.
   await assertOpen(date, req);
   const amount = how === 'sold' ? r2(b.amount) : 0;
   if (how === 'sold' && !(amount >= 0)) throw new ErrorHandler('amount must be 0 or more', 400);
   const reason = String(b.reason || '').trim().slice(0, 200);
   const disposal = { date, amount, reason, by: req?.user?._id };
-  await FixedAsset.updateOne({ _id: a._id, status: 'active' }, {
+  // Only while it is still in use: two disposals sent together dispose of it once.
+  const r = await FixedAsset.updateOne({ _id: a._id, status: 'active' }, {
     $set: { status: how, disposal },
     $push: { fingerprints: fp(ACTION_CODES.ASSET_DISPOSED, a, req, { assetNo: a.assetNo, how, amount, reason }) },
   });
+  if (!r.modifiedCount) throw new ErrorHandler(`${a.assetNo} was disposed of a moment ago`, 409);
   const updated = await FixedAsset.findById(a._id).select('-attachments.data').lean();
-  return { asset: updated, year: schedule(updated, fyOf(date)) };
+  return { asset: updated, year: schedule(updated, fyOf(date)), journal: await disposalJournal(updated) };
 }
 
-module.exports = { schedule, register, postDepreciation, create, dispose, fyOf, fyStart, fyEnd, wdvRate, ledgers, BLOCKS };
+/**
+ * The journal that takes a disposed asset out of the books, as a DRAFT
+ * for the journal form. Disposing of an asset records the day and the
+ * price in the register and posts nothing: its cost is still on the
+ * asset ledger, its depreciation still in the accumulated ledger, and
+ * the profit or loss on it nowhere. The draft says what to post:
+ *
+ *     Dr  Accumulated depreciation      cost less its written-down value on the day
+ *     Dr  (the account the money came into)   what it was sold for
+ *     Dr  Loss on sale                  written-down value over the price
+ *         Cr  (the asset ledger)                its cost
+ *         Cr  Profit on sale                    the price over written-down value
+ *
+ * The person picks the bank account, checks the ledger names against
+ * Tally's, and posts it: nothing is posted from here.
+ *
+ * @returns null for an asset still in use, else { date, purpose, narration, reason, lines, figures }
+ */
+async function disposalJournal(asset) {
+  if (!asset || asset.status === 'active' || !asset.disposal?.date) return null;
+  const d = schedule(asset, fyOf(asset.disposal.date))?.disposal;
+  if (!d) return null;
+  const L = await ledgers();
+  const cost = r2(asset.cost); const wdv = r2(d.wdv); const amount = r2(d.amount);
+  const accumulated = r2(cost - wdv);
+  const gain = r2(amount - wdv);
+  const lines = [];
+  if (accumulated > 0.005) lines.push({ kind: 'ledger', ledger: L.accumulatedDepreciation, debit: accumulated, credit: 0, note: 'Depreciation on it up to the day it went' });
+  if (amount > 0.005) lines.push({ kind: 'bank', account: null, debit: amount, credit: 0, note: 'What it was sold for: pick the account the money came into' });
+  if (gain < -0.005) lines.push({ kind: 'ledger', ledger: L.lossOnAssetSale, debit: r2(-gain), credit: 0, note: asset.status === 'scrapped' ? 'Written off: scrapped' : 'Sold for less than its written-down value' });
+  lines.push({ kind: 'ledger', ledger: BLOCKS[asset.block]?.label || 'Fixed Assets', debit: 0, credit: cost, note: 'Its cost, off the asset ledger (use the ledger it was bought into)' });
+  if (gain > 0.005) lines.push({ kind: 'ledger', ledger: L.profitOnAssetSale, debit: 0, credit: gain, note: 'Sold for more than its written-down value' });
+  return {
+    date: asset.disposal.date, purpose: 'other',
+    narration: `${asset.assetNo} ${asset.name} ${asset.status}${amount > 0 ? ` for ₹${amount.toFixed(2)}` : ''}: cost ₹${cost.toFixed(2)}, written-down value ₹${wdv.toFixed(2)}`.slice(0, 300),
+    reason: `${asset.assetNo} ${asset.status}${asset.disposal.reason ? `: ${asset.disposal.reason}` : ''}`.slice(0, 300),
+    lines,
+    figures: { cost, accumulated, wdv, amount, gainLoss: gain },
+  };
+}
+
+module.exports = { schedule, register, postDepreciation, create, dispose, disposalJournal, fyOf, fyStart, fyEnd, wdvRate, ledgers, BLOCKS };

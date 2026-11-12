@@ -10,11 +10,12 @@
 
 const DAY = 86_400_000;
 
+const cal = require('../utils/bizDates');
+
 /** The last day a GST credit note may be dated for a supply on `invoiceDate`. */
 function limitFor(invoiceDate) {
-  const d = new Date(invoiceDate);
-  const fyEnd = d.getMonth() >= 3 ? d.getFullYear() + 1 : d.getFullYear();   // 31 March of the FY's end year
-  return new Date(fyEnd, 10, 30, 23, 59, 59, 999);                          // 30 November that year
+  const fyEnd = cal.fyRange(cal.fyOf(invoiceDate)).y1 + 1;                  // the year the invoice's financial year ends in
+  return cal.endOf(cal.at(fyEnd, 11, 30));                                  // 30 November that year, to the day's end
 }
 
 function check(invoiceDate, noteDate = new Date()) {

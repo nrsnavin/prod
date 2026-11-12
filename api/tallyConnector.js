@@ -17,6 +17,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const crypto = require("crypto");
+const { r2 } = require("../utils/money");
 const express = require("express");
 const mongoose = require("mongoose");
 const router = express.Router();
@@ -91,7 +92,7 @@ router.post("/ledgers", catchAsyncErrors(async (req, res, next) => {
     name: String(l?.name || "").trim().slice(0, 200),
     parent: String(l?.parent || "").trim().slice(0, 120),
     gstin: String(l?.gstin || "").trim().toUpperCase().slice(0, 15),
-    closing: Math.round((Number(l?.closing) || 0) * 100) / 100,
+    closing: r2(l?.closing),
   })).filter((l) => l.name);
   if (mongoose.Types.ObjectId.isValid(part)) {
     const r = await TallySnapshot.findOneAndUpdate({ _id: part }, { $push: { ledgers: { $each: clean } }, $inc: { count: clean.length } }, { new: true }).select("count").lean();

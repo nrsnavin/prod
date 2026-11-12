@@ -7,6 +7,7 @@
     "start": "node index.js",
     "dev": "nodemon index.js",
     "test": "jest --runInBand",
+    "test:accounts": "node scripts/test-accounts.js",
     "eval": "node scripts/run-evals.js",
     "seed:demo": "node scripts/seedDemoCustomer.js",
     "migrate": "migrate-mongo up",

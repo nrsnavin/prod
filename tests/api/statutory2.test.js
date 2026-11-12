@@ -85,6 +85,67 @@ describe('TDS after the deduction', () => {
     expect(new Date((await get('/accounts/tds/register?month=2027-03')).body.due).toISOString().slice(0, 10)).toBe('2027-04-30');
   });
 
+  it('counts interest on a late deposit by calendar months, as the department does', () => {
+    const { interestOn } = require('../../services/tds');
+    // Deducted 31 May, deposited 8 June: May and June, two months, though nine days apart. (It was counted as one.)
+    expect(interestOn(1000, '2026-05-31', '2026-06-08')).toBe(30);
+    expect(interestOn(1000, '2026-05-02', '2026-05-30')).toBe(15);      // within the month: one
+    expect(interestOn(1000, '2026-05-15', '2026-07-01')).toBe(45);      // May, June and a day of July: three
+    expect(interestOn(1000, '2026-12-20', '2027-01-07')).toBe(30);      // across the year's end
+    expect(interestOn(1000, '2026-05-31', '2026-05-31')).toBe(0);
+  });
+
+  it('lists the tax on bills booked and not yet paid: due when the bill is credited, deducted here only when it is paid', async () => {
+    const s = await supplier({ pan: 'AAAPS1234F' });
+    const acct = await bank();
+    const booked = await bill(s, { billDate: '2026-09-20' });            // ₹50,000 + GST, 194C @ 2%
+    const paidInTime = await bill(s, { billDate: '2026-09-05' });
+    await pay(s, { account: acct._id, bill: paidInTime }, '2026-09-25');
+    await bill(s, { billDate: '2026-09-12', tds: { applicable: false } });   // no TDS on it: not listed
+    await bill(s, { billDate: '2026-03-10' });                               // last financial year's: not this year's list
+    let reg = (await get('/accounts/tds/register?month=2026-09')).body;
+    expect(reg.notDeducted.rows).toEqual([expect.objectContaining({ billNo: booked.billNo, section: '194C', rate: 2, unpaid: 52500, base: 50000, tds: 1000, month: '2026-09' })]);
+    expect(reg.notDeducted).toMatchObject({ total: 1000, base: 50000 });
+    // Half is paid in October: at September's end it was still wholly unpaid; at October's end half.
+    await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s._id, amount: 25750, mode: 'bank', account: acct._id, date: '2026-10-08', tds: { section: '194C', rate: 2 }, allocations: [{ docType: 'SupplierBill', doc: booked._id, amount: 26250 }] });
+    reg = (await get('/accounts/tds/register?month=2026-09')).body;
+    expect(reg.notDeducted.rows[0]).toMatchObject({ unpaid: 52500, tds: 1000 });
+    const oct = (await get('/accounts/tds/register?month=2026-10')).body;
+    expect(oct.notDeducted.rows).toEqual([expect.objectContaining({ billNo: booked.billNo, unpaid: 26250, base: 25000, tds: 500 })]);
+    // The rest paid: nothing left on the list from then on.
+    await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s._id, amount: 25750, mode: 'bank', account: acct._id, date: '2026-11-05', tds: { section: '194C', rate: 2 }, allocations: [{ docType: 'SupplierBill', doc: booked._id, amount: 26250 }] });
+    expect((await get('/accounts/tds/register?month=2026-11')).body.notDeducted.rows).toEqual([]);
+    expect((await get('/accounts/tds/register?month=2026-10')).body.notDeducted.total).toBe(500);
+  });
+
+  it('a payment across two sections is reported under both, not under the first', async () => {
+    const s = await supplier({ pan: 'AAAPS1234F' });
+    const acct = await bank();
+    const contractor = await bill(s, { billDate: '2026-10-02' });                                             // 194C @ 2%
+    const fees = await bill(s, { billDate: '2026-10-03', tds: { applicable: true, section: '194J', rate: 10 } });   // 194J @ 10%
+    // One voucher for both, each bill's own section and rate: 52,500 − 1,000 and 52,500 − 5,000.
+    const v = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s._id, amount: 99000, mode: 'bank', account: acct._id, date: '2026-10-15', allocations: [{ docType: 'SupplierBill', doc: contractor._id, amount: 52500 }, { docType: 'SupplierBill', doc: fees._id, amount: 52500 }] });
+    expect(v.status).toBe(201);
+    expect(v.body.payment.tds).toMatchObject({ amount: 6000, section: '194C' });   // the voucher still names the first
+    expect(v.body.payment.allocations.map((a) => [a.section, a.rate, a.tds])).toEqual([['194C', 2, 1000], ['194J', 10, 5000]]);
+
+    const reg = (await get('/accounts/tds/register?month=2026-10')).body;
+    expect(reg.rows.map((r) => [r.section, r.deducted])).toEqual([['194C', 1000], ['194J', 5000]]);
+    expect(reg.vouchers.map((x) => [x.section, x.rate, x.base, x.tds, x.docs])).toEqual([['194C', 2, 50000, 1000, [contractor.billNo]], ['194J', 10, 50000, 5000, [fees.billNo]]]);
+    const q = (await get('/accounts/tds/26q?fy=2026-27&q=Q3')).body;
+    expect(q.rows.map((r) => [r.section, r.rate, r.amountPaid, r.tds])).toEqual([['194C', 2, 50000, 1000], ['194J', 10, 50000, 5000]]);
+    expect(q.totals).toMatchObject({ amountPaid: 100000, tds: 6000, deductees: 1 });
+    const rep = (await get('/accounts/reports/tds?from=2026-10-01&to=2026-10-31')).body;
+    expect(rep.rows.map((r) => [r.section, r.rate, r.base, r.tds, r.gross])).toEqual([['194C', 2, 50000, 1000, 52500], ['194J', 10, 50000, 5000, 52500]]);
+    expect(rep.total).toMatchObject({ base: 100000, tds: 6000 });
+    // The month-end checklist names both sections too.
+    expect((await get('/accounts/close?month=2026-10')).body.items.find((i) => i.key === 'tds').detail).toMatch(/194C ₹1,000, 194J ₹5,000/);
+    // A challan for each section clears its own line.
+    await post('/accounts/tds/challans', { month: '2026-10', section: '194J', amount: 5000, bsrCode: '0510308', challanNo: '00501', depositedOn: '2026-11-06' });
+    const after = (await get('/accounts/tds/register?month=2026-10')).body.rows;
+    expect(after.map((r) => [r.section, r.balance])).toEqual([['194C', 1000], ['194J', 0]]);
+  });
+
   it('builds the quarter\'s 26Q with PAN checks and the challan on each line', async () => {
     const withPan = await supplier({ pan: 'AAAPS1234F' });
     const noPan = await supplier();

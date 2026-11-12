@@ -30,6 +30,12 @@ const AllocationSchema = new mongoose.Schema(
     // value it was deducted on (the share net of GST).
     tds:     { type: Number, default: 0, min: 0 },
     tdsBase: { type: Number, default: 0, min: 0 },
+    // …and the section and rate it was deducted under. One voucher can
+    // pay bills under two sections; the register and Form 26Q report
+    // each allocation under its own (services/tds.js sectionsOf). A
+    // voucher posted before these were kept has only the voucher's one.
+    section: { type: String },
+    rate:    { type: Number },
     // Set when the allocation was made later, from what the voucher
     // left on account (an advance applied to a later invoice).
     appliedAt: { type: Date },

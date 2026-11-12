@@ -17,6 +17,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
+const { noted } = require("../utils/noted");
 const multer = require("multer");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
@@ -125,7 +126,7 @@ router.post(
       aiLedger.settle(aiSuggestion, {
         accepted: { authority: doc.authority, form: doc.form, reference: doc.reference, amount: doc.amount ?? null, replyBy: b.replyBy || "" },
         decidedBy: req.user?._id, expectSurface: "notice-ocr", ignoreMissing: true,
-      }).catch(() => {});
+      }).catch(noted("scoring the notice scan"));
     }
     res.status(201).json({ success: true, data: shape(doc.toObject()) });
   })

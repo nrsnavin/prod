@@ -222,7 +222,13 @@ describe('month end, recurring expenses, the inbox, Excel', () => {
     const s = await supplier();
     await post('/accounts/bills', { supplier: s._id, supplierBillNo: 'Z1', billDate: iso(new Date(prev.getFullYear(), prev.getMonth(), 10)), lines: [{ description: 'Yarn', quantity: 1, rate: 1000 }] });
     const c = (await get(`/accounts/close?month=${month}`)).body;
-    expect(c.items.map((i) => i.key)).toEqual(['bank', 'cleared', 'photos', 'approvals', 'tds', 'gst', 'msme', 'gstr2b', 'rule37', 'credits', 'tally', 'lock']);
+    expect(c.items.map((i) => i.key)).toEqual(['bank', 'cleared', 'photos', 'approvals', 'tds', 'tdsOnCredit', 'gst', 'msme', 'gstr2b', 'rule37', 'credits', 'tally', 'lock']);
+    expect(c.items.find((i) => i.key === 'tdsOnCredit')).toMatchObject({ ok: true, count: 0 });
+    // A bill booked in the month under a TDS section and not paid by its end: the tax on it was due at credit.
+    await post('/accounts/bills', { supplier: s._id, supplierBillNo: 'Z2', kind: 'service', billDate: iso(new Date(prev.getFullYear(), prev.getMonth(), 12)), lines: [{ description: 'Dyeing', quantity: 1, rate: 50000, gstPercent: 5 }], tds: { applicable: true, section: '194C', rate: 2 } });
+    const onCredit = (await get(`/accounts/close?month=${month}`)).body.items.find((i) => i.key === 'tdsOnCredit');
+    expect(onCredit).toMatchObject({ ok: false, count: 1, amount: 1000 });
+    expect(onCredit.detail).toMatch(/1 bill with a TDS section unpaid at the month's end/);
     expect(c.items.find((i) => i.key === 'photos')).toMatchObject({ ok: false, count: 1 });
     expect(c.items.find((i) => i.key === 'tally')).toMatchObject({ ok: false, count: 1 });
     expect(c.items.find((i) => i.key === 'lock').ok).toBe(false);

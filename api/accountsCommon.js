@@ -8,6 +8,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const mongoose = require("mongoose");
+const { taxOn } = require("../services/allocation");
 const multer   = require("multer");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { ACTION_CODES } = require("../utils/fingerprint");
@@ -268,12 +269,15 @@ async function prepareVoucher(b, req, opts = {}) {
     if (!settle.isOpen(a.docType, doc)) throw new ErrorHandler(`Allocation ${i + 1}: ${docNo} is not open`, 409);
     const left = settle.outstanding(a.docType, doc);
     if (gross > left + 0.005) throw new ErrorHandler(`Allocation ${i + 1}: ${docNo} has only ${left.toFixed(2)} outstanding`, 400);
-    let rate = 0;
-    if (kind === "payment") rate = a.docType === "SupplierBill" ? (tdsRate || (doc.tds?.applicable ? doc.tds.rate : 0)) : tdsRate;
-    if (kind === "payment" && a.docType === "SupplierBill" && !tdsRate && rate > 0 && !sectionFromDoc) sectionFromDoc = String(doc.tds?.section || "").trim().slice(0, 8);
-    const tdsBase = rate > 0 ? r2(gross * (a.docType === "OpeningBalance" ? 1 : outstanding.ratio(doc.totals))) : 0;
-    const tds = rate > 0 ? r2(tdsBase * rate / 100) : 0;
-    allocations.push({ docType: a.docType, doc: doc._id, docNo, amount: gross, tds, tdsBase, rate });
+    // The TDS on it, by the one function that also proposes allocations
+    // to the forms (services/allocation.js): its rate, the section it is
+    // under (the voucher's when the voucher names the rate, else the
+    // bill's own), the value it is worked on. The section is kept on the
+    // allocation, so a voucher paying bills under two sections is
+    // reported under both, not under the first.
+    const { rate, ownSection, section, tdsBase, tds } = taxOn({ kind, docType: a.docType, gross, tdsRate, tdsSection, docTds: doc.tds, ratio: a.docType === "OpeningBalance" ? 1 : outstanding.ratio(doc.totals) });
+    if (ownSection && !sectionFromDoc) sectionFromDoc = ownSection;
+    allocations.push({ docType: a.docType, doc: doc._id, docNo, amount: gross, tds, tdsBase, rate, ...(tds > 0 ? { section } : {}) });
   }
   const tdsAmount = r2(allocations.reduce((s, a) => s + a.tds, 0));
   const tdsBase = r2(allocations.reduce((s, a) => s + a.tdsBase, 0));

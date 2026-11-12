@@ -23,6 +23,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require('../utils/factoryDay');
+const cal = require('../utils/bizDates');
 const Supplier = require('../models/Supplier');
 const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
@@ -105,9 +106,7 @@ async function settlementDates(docIds) {
  * interest owed) or disallowed (unpaid at 31 March past its day).
  */
 async function yearEnd(fy) {
-  const [y1] = String(fy || '').split('-').map(Number);
-  const from = new Date(y1, 3, 1);
-  const to = new Date(y1 + 1, 2, 31, 23, 59, 59, 999);
+  const { y1, from, to } = cal.fyRange(fy);
   const suppliers = await msmeSuppliers();
   if (!suppliers.size) return { fy, rows: [], totals: { allowed: 0, late: 0, disallowed: 0, interest: 0 } };
   const ids = [...suppliers.keys()];
@@ -151,9 +150,9 @@ async function yearEnd(fy) {
  */
 async function formOne(asOfInput) {
   const asOf = asOfInput ? dayStart(asOfInput) : null;
-  const now = new Date();
+  const now = cal.parts();   // today, by the books' calendar
   // Default: the last half-year end that has passed.
-  const end = asOf || (now.getMonth() >= 9 ? new Date(now.getFullYear(), 8, 30) : now.getMonth() >= 3 ? new Date(now.getFullYear(), 2, 31) : new Date(now.getFullYear() - 1, 8, 30));
+  const end = asOf || (now.m >= 10 ? cal.at(now.y, 9, 30) : now.m >= 4 ? cal.at(now.y, 3, 31) : cal.at(now.y - 1, 9, 30));
   const endOfDay = new Date(end.getTime() + DAY - 1);
   const suppliers = await msmeSuppliers();
   if (!suppliers.size) return { asOf: end, rows: [], total: 0 };

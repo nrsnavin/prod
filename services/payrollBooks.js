@@ -20,6 +20,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Payroll = require('../models/Payroll');
+const cal = require('../utils/bizDates');
 const Journal = require('../models/Journal');
 const BankAccount = require('../models/BankAccount');
 const StatutoryDeposit = require('../models/StatutoryDeposit');
@@ -29,10 +30,8 @@ const { getSettings } = require('./booksLock');
 
 const { r2 } = require('../utils/money');
 
-function monthRange(month) {
-  const [y, m] = String(month).split('-').map(Number);
-  return { y, m, from: new Date(y, m - 1, 1), to: new Date(y, m, 0, 23, 59, 59, 999) };
-}
+// A month's window on the books' calendar (utils/bizDates.js): { y, m, from, to }.
+const { monthRange } = cal;
 const DEFAULT = { salaries: 'Salaries & Wages', salaryPayable: 'Salary Payable', pfPayable: 'PF Payable', esiPayable: 'ESI Payable', staffAdvances: 'Staff Advances' };
 async function ledgers() {
   const t = (await getSettings()).tally || {};
@@ -60,7 +59,7 @@ async function summary(month) {
     Journal.findOne({ source: 'payroll', sourceRef: `paid:${month}`, status: 'posted' }).select('journalNo date total').lean(),
   ]);
   const deposits = await StatutoryDeposit.find({ month }).sort({ depositedOn: 1 }).lean();
-  const due = new Date(y, m, 15);
+  const due = cal.at(y, m + 1, 15);   // the 15th of the next month
   const dep = (kind) => deposits.filter((d) => d.kind === kind);
   const sum = (rows) => r2(rows.reduce((s, d) => s + d.amount, 0));
   const late = (rows) => rows.some((d) => new Date(d.depositedOn) > due);

@@ -10,6 +10,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express  = require("express");
+const { noted } = require("../utils/noted");
 const mongoose = require("mongoose");
 const multer   = require("multer");
 const ExcelJS  = require("exceljs");
@@ -140,7 +141,7 @@ router.post("/journals", catchAsyncErrors(async (req, res, next) => {
   // A narration picked from the suggestions: what was posted scores them.
   if (isId(b.aiSuggestion) && !out.replay) {
     const said = String(b.narration || "").trim();
-    await aiLedger.settle(b.aiSuggestion, { accepted: { narrations: [said] }, decidedBy: req.user?._id, expectSurface: "journal-narration", ignoreMissing: true }).catch(() => {});
+    await aiLedger.settle(b.aiSuggestion, { accepted: { narrations: [said] }, decidedBy: req.user?._id, expectSurface: "journal-narration", ignoreMissing: true }).catch(noted("scoring the journal narration"));
   }
   res.status(out.replay ? 200 : 201).json({ success: true, journal: out.journal, ...(out.replay ? { replay: true } : {}) });
 }));
@@ -501,6 +502,10 @@ router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
     const r = b.receivables;
     if (r.interestRate !== undefined && Number.isFinite(Number(r.interestRate)) && Number(r.interestRate) >= 0 && Number(r.interestRate) <= 100) set["receivables.interestRate"] = Number(r.interestRate);
     if (r.graceDays !== undefined && Number.isInteger(Number(r.graceDays)) && Number(r.graceDays) >= 0 && Number(r.graceDays) <= 365) set["receivables.graceDays"] = Number(r.graceDays);
+    if (r.interestBasis !== undefined) {
+      if (!["balance", "payments"].includes(r.interestBasis)) throw new ErrorHandler("interestBasis must be balance or payments", 400);
+      set["receivables.interestBasis"] = r.interestBasis;
+    }
   }
   if (b.collections) {
     const c = b.collections;

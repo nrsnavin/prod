@@ -100,6 +100,32 @@ describe('fixed assets', () => {
     expect(sold.body.year.disposal.gainLoss).toBe(Math.round((20000 - sold.body.year.disposal.wdv) * 100) / 100);
     // Nothing under s.32 in the year of sale; the money comes off the block.
     expect(sold.body.year.incomeTax.depreciation).toBe(0);
+
+    // The disposal posts nothing by itself: it drafts the journal that takes the asset off the books.
+    const d = sold.body.year.disposal;
+    const j = sold.body.journal;
+    expect(j).toMatchObject({ purpose: 'other', figures: { cost: 60000, wdv: d.wdv, amount: 20000, gainLoss: d.gainLoss } });
+    expect(new Date(j.date).toISOString().slice(0, 10)).toBe('2027-09-30');
+    const lines = j.lines.map((l) => [l.kind, l.ledger || '', l.debit, l.credit]);
+    const r2 = (x) => Math.round(x * 100) / 100;
+    expect(lines).toEqual([
+      ['ledger', 'Accumulated Depreciation', r2(60000 - d.wdv), 0],
+      ['bank', '', 20000, 0],                                   // the account the money came into: for the person to pick
+      ...(d.gainLoss < 0 ? [['ledger', 'Loss on Sale of Fixed Assets', r2(-d.gainLoss), 0]] : []),
+      ['ledger', expect.any(String), 0, 60000],                 // its cost, off the asset ledger
+      ...(d.gainLoss > 0 ? [['ledger', 'Profit on Sale of Fixed Assets', 0, d.gainLoss]] : []),
+    ]);
+    // It balances.
+    expect(Math.abs(r2(j.lines.reduce((t, l) => t + l.debit - l.credit, 0)))).toBe(0);
+    expect(await M.Journal.countDocuments({ source: { $ne: 'depreciation' } })).toBe(0);
+    // Asked for again later; an asset still in use has none; disposing of it twice is refused.
+    expect((await get(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`)).body.journal.figures).toEqual(j.figures);
+    const printer = await M.FixedAsset.findOne({ name: 'Printer' }).lean();
+    expect((await get(`/accounts/fixed-assets/${printer._id}/disposal-journal`)).status).toBe(409);
+    expect((await post(`/accounts/fixed-assets/${a.asset._id}/dispose`, { how: 'scrapped', date: '2027-10-01' })).status).toBe(409);
+    const scrapped = await post(`/accounts/fixed-assets/${printer._id}/dispose`, { how: 'scrapped', date: '2027-09-30', reason: 'Beyond repair' });
+    expect(scrapped.body.journal.lines.map((l) => l.kind)).toEqual(['ledger', 'ledger', 'ledger']);   // no money came in
+    expect(scrapped.body.journal.figures.gainLoss).toBe(-scrapped.body.journal.figures.wdv);
     const after = (await get('/accounts/fixed-assets?fy=2028-29')).body;
     expect(after.rows.find((x) => x.name === 'Office PC')).toBeUndefined();
   });

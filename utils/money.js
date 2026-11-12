@@ -81,7 +81,32 @@ function parseMoney(value, { max = MAX_AMOUNT, label = 'value', allowNull = fals
 function round2(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return null;
-  return Math.round(v * 100) / 100;
+  return toPaise(v);
+}
+
+/**
+ * A finite number to paise, a half-paisa going up (away from zero), as
+ * every tax rule and every accountant rounds.
+ *
+ * `Math.round(v * 100) / 100` does not do that. Most numbers with a 5
+ * in the third place cannot be held exactly: 1.005 is kept as
+ * 1.00499999999999989…, times 100 is 100.49999999999999, and that
+ * rounds DOWN to 1.00. So about half of all half-paise results lost a
+ * paisa: GST of 5% on 100.10 came to 5.00, not 5.01. The same sum
+ * written in thirty places agreed with itself, and with nobody's
+ * calculator.
+ *
+ * A value that sits a hair under a half-paisa (by the error one
+ * multiplication leaves, a few parts in 10^16) is that half-paisa. It
+ * is nudged up by far less than anything money arithmetic can mean —
+ * a billionth of a paisa, or nine units in the last place the number
+ * can hold, whichever is more — before rounding. A value honestly
+ * below the half (1.0049) is nowhere near that and still rounds down.
+ */
+function toPaise(v) {
+  const y = Math.abs(v) * 100;
+  const n = Math.round(y + Math.max(1e-9, y * 2e-15));
+  return (v < 0 ? -n : n) / 100;
 }
 
 /**
@@ -97,6 +122,6 @@ function round2(n) {
  * use `round2` (null for a number that is not one), or check the input
  * with `parseMoney` before it gets that far.
  */
-const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const r2 = (n) => toPaise(Number(n) || 0);
 
-module.exports = { parseMoney, round2, r2, MAX_RATE, MAX_AMOUNT };
+module.exports = { parseMoney, round2, r2, toPaise, MAX_RATE, MAX_AMOUNT };

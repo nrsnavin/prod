@@ -57,6 +57,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const crypto = require('crypto');
+const { r2 } = require('../utils/money');
 const BankAccount = require('../models/BankAccount');
 const BankStatement = require('../models/BankStatement');
 const BankFeedMessage = require('../models/BankFeedMessage');
@@ -218,7 +219,7 @@ async function autoPost(statement, account, via = 'email') {
   for (const l of doc.lines) {
     const s = l.suggestion;
     if (l.status !== 'matched' || !s || !s.exact || s.confidence < 0.95 || s.partyType === 'other' || !s.party) continue;
-    const allocated = Math.round((s.allocations || []).reduce((t, a) => t + (a.amount || 0), 0) * 100) / 100;
+    const allocated = r2((s.allocations || []).reduce((t, a) => t + (a.amount || 0), 0));
     if (!s.allocations?.length || Math.abs(allocated - l.amount) > 0.005) continue;
     try {
       const out = await postRow({

@@ -21,6 +21,8 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express  = require("express");
+const { noted } = require("../utils/noted");
+const cal = require("../utils/bizDates");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { isAdmin }      = require("../middleware/auth");
@@ -94,7 +96,7 @@ router.post("/payments", catchAsyncErrors(async (req, res, next) => {
     aiLedger.settle(req.body.adviceSuggestion, {
       accepted: { amount: v.amount, date: new Date(v.date).toISOString().slice(0, 10), reference: v.reference || "", invoices: (v.allocations || []).filter((a) => a.docType === "Invoice").map((a) => a.docNo), tds: (v.adjustments || []).filter((a) => a.kind === "tds_by_customer").reduce((s, a) => s + a.amount, 0) },
       decidedBy: req.user?._id, expectSurface: "payment-advice", ignoreMissing: true,
-    }).catch(() => {});
+    }).catch(noted(`scoring the payment advice against ${v.voucherNo}`));
   }
   res.status(out.replay ? 200 : 201).json({ success: true, payment: v, ...(out.replay ? { replay: true } : {}) });
 }));
@@ -124,6 +126,14 @@ router.get("/credits", catchAsyncErrors(async (req, res, next) => {
   if (partyType !== "customer" && partyType !== "supplier") return next(new ErrorHandler("partyType must be customer or supplier", 400));
   if (!isId(req.query.party)) return next(new ErrorHandler("party is required", 400));
   res.json({ success: true, credits: await credits.openFor(partyType, req.query.party) });
+}));
+
+// What a receipt or payment will settle, before it is posted: the party's
+// oldest documents first (or the ones ticked), the TDS on each, the cash
+// each takes. The web form and the phone show this instead of working
+// it out for themselves; posting uses the same arithmetic.
+router.post("/payments/propose", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, ...(await require("../services/allocation").propose(req.body || {})) });
 }));
 
 router.post("/credits/apply", catchAsyncErrors(async (req, res, next) => {
@@ -170,10 +180,10 @@ router.get("/overview", catchAsyncErrors(async (_req, res) => {
   await ensureSeed();
   const now = new Date();
   // The first days of a month are spent finishing the last one: until the
-  // 10th, the month figures are last month's.
-  const back = now.getDate() < 10 ? 1 : 0;
-  const monthStart = new Date(now.getFullYear(), now.getMonth() - back, 1);
-  const monthEnd = new Date(now.getFullYear(), now.getMonth() - back + 1, 0, 23, 59, 59, 999);
+  // 10th, the month figures are last month's. (The day and the month are
+  // the books' own: India's, whatever clock the server keeps.)
+  const back = cal.parts(now).d < 10 ? 1 : 0;
+  const { from: monthStart, to: monthEnd } = cal.monthRange(cal.shiftMonth(cal.monthKey(now), -back));
   const inMonth = { $gte: monthStart, $lte: monthEnd };
   const [recv, pay, accounts, pendingExpenses, monthExpenses, monthInvoices, monthBills, recentPayments] = await Promise.all([
     outstanding.receivables(),

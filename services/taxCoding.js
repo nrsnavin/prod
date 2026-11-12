@@ -27,6 +27,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const mongoose = require('mongoose');
+const cal = require('../utils/bizDates');
 const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
 
@@ -49,9 +50,7 @@ const GTA = /\b(transport\w*|freight|lorry|truck|carriage|gta|goods transport)\b
 const ADVOCATE = /\b(advocate|lawyer|legal fees?)\b/i;
 
 function fyStart(date) {
-  const d = new Date(date);
-  const y = d.getMonth() >= 3 ? d.getFullYear() : d.getFullYear() - 1;
-  return new Date(y, 3, 1);
+  return cal.fyRange(cal.fyOf(date)).from;
 }
 
 /** The section the words point to: the head's own, else the words on the bill. */
