@@ -34,6 +34,7 @@ const { escapeRegex }  = require("../utils/escapeRegex");
 const { renderPdf }    = require("../utils/renderPdf");
 const { nextNumber }   = require("../utils/sequence");
 const { financialYearLong } = require("../utils/financialYear");
+const { burn } = require("../services/docNumbers");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { getDocumentSettings, getPdfBranding } = require("../services/documentSettings");
 const { computeInvoice, amountInWords, stateCodeFromGstin } = require("../services/gst");
@@ -273,6 +274,11 @@ router.post(
       const order = await populateOrder(Order.findById(orderId).select("orderNo po customer status elasticOrdered")).lean();
       if (!order) return next(new ErrorHandler("Order not found", 404));
       if (!order.customer) return next(new ErrorHandler("The order has no customer", 409));
+      // …and one at a time for a customer, from the credit check to the
+      // invoice: two orders of one customer invoiced together each saw the
+      // customer under their limit, because neither invoice was owed yet
+      // when the other was checked.
+      await onceAtATime(`invoice:customer:${order.customer._id || order.customer}`, async () => {
       let creditOverride = null;
       try { creditOverride = await creditControl.enforce(order.customer._id || order.customer, req, "this invoice"); } catch (err) { return next(err); }
 
@@ -353,6 +359,9 @@ router.post(
           }, session);
         });
       } catch (err) {
+        // The number drawn for this invoice is gone with it: noted, so the
+        // gap in the series is accounted for (models/BurntNumber.js).
+        await burn("invoice", { number, financialYear: fy, sequence, date: when, reason: err?.message, req });
         // A retry that lost the race above: hand back the one that won.
         if (err?.code === 11000 && requestId) {
           const dup = await Invoice.findOne({ requestId: String(requestId) });
@@ -361,6 +370,7 @@ router.post(
         throw err;
       }
       res.status(201).json({ success: true, invoice: publicInvoice(doc) });
+      }, { what: "An invoice for this customer" });
     }, { what: "An invoice for this order" });
   })
 );
@@ -474,6 +484,9 @@ function stampRegistration(inv, reg, provider, req) {
 // "Already registered — IRN …", or a cancellation that takes the IRN
 // with it. Held a little longer than the provider is given to answer.
 const PORTAL_LEASE_MS = 75_000;
+// How long an invoice is held while its IRN is cancelled at the portal:
+// a little longer than the lease, so it never lifts under a live call.
+const CANCEL_HOLD_MS = 90_000;
 const portalStep = (handler) => catchAsyncErrors((req, res, next) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) return handler(req, res, next);
   return onceAtATime(`invoice-portal:${req.params.id}`, () => handler(req, res, next), {
@@ -632,6 +645,10 @@ router.post(
     if (reason.length < MIN_REASON) {
       return next(new ErrorHandler(`Give a reason for cancelling (at least ${MIN_REASON} characters)`, 400));
     }
+    // Nothing set against it: checked again by every write below.
+    const none = (field) => ({ $or: [{ [field]: { $lte: 0 } }, { [field]: null }] });
+    const untouched = { _id: inv._id, status: "issued", $and: [none("paidAmount"), none("creditedAmount"), none("debitedAmount")] };
+    const MEANWHILE = "A receipt or note was set against this invoice meanwhile — cancel that first.";
     // A registered IRN is cancelled at the portal too, through the same
     // provider that registered it; one pasted in is cancelled there by
     // hand, and the invoice says so.
@@ -640,9 +657,17 @@ router.post(
       if (inv.einvoice.provider && inv.einvoice.provider !== "manual") {
         let provider;
         try { provider = await getProvider(); } catch (err) { return next(err); }
+        // The portal's cancel cannot be taken back. So the invoice is held
+        // first — by a write that is refused if anything is set against it
+        // — and while it is held nothing can be (services/settle.js): a
+        // receipt landing during the call used to leave the IRN cancelled
+        // at the portal and the invoice live here.
+        const held = await Invoice.updateOne(untouched, { $set: { cancellingUntil: new Date(Date.now() + CANCEL_HOLD_MS) } });
+        if (!held.modifiedCount) return next(new ErrorHandler(MEANWHILE, 409));
         try {
           await provider.cancel(inv.einvoice.irn, { reason, invoice: inv });
         } catch (err) {
+          await Invoice.updateOne({ _id: inv._id }, { $unset: { cancellingUntil: "" } });
           if (err instanceof ErrorHandler) return next(err);
           const e = new ErrorHandler(`The e-invoice provider could not be reached: ${err.message}`, 502);
           e.code = "EINVOICE_UNREACHABLE";
@@ -657,18 +682,26 @@ router.post(
       entityId: inv._id, actor: actorFromRequest(req),
       meta: { invoiceNumber: inv.invoiceNumber, reason, irn: inv.einvoice.irn || "", ...overrideMeta(req) },
     });
-    // One conditional write, so a receipt landing between the check
-    // above and here cannot settle a cancelled invoice: the write is
-    // refused once anything is set against it. (No transaction: the
-    // ledger row is dropped after, idempotently; a voucher's own write
-    // is refused by the status once this lands.)
-    const none = (field) => ({ $or: [{ [field]: { $lte: 0 } }, { [field]: null }] });
-    const r = await Invoice.updateOne(
-      { _id: inv._id, status: { $ne: "cancelled" }, $and: [none("paidAmount"), none("creditedAmount"), none("debitedAmount")] },
-      { $set: { status: "cancelled", cancel: { reason, at: new Date(), by: req.user?._id }, ...einvoiceSet }, $push: { fingerprints: mark } }
-    );
-    if (r.matchedCount === 0) return next(new ErrorHandler("A receipt or note was set against this invoice meanwhile — cancel that first.", 409));
-    await partyLedger.reverse("Invoice", inv._id);
+    // The invoice cancelled and its row off the customer's account,
+    // together: one failing after the other used to leave a cancelled
+    // invoice still owed on the ledger, with "Already cancelled" the only
+    // answer to trying again. The write is refused once anything is set
+    // against the invoice, so a receipt landing between the check above
+    // and here cannot settle a cancelled invoice.
+    try {
+      await withTxn(async (session) => {
+        const r = await Invoice.updateOne(
+          untouched,
+          { $set: { status: "cancelled", cancel: { reason, at: new Date(), by: req.user?._id }, ...einvoiceSet }, $unset: { cancellingUntil: "" }, $push: { fingerprints: mark } },
+          { session }
+        );
+        if (r.matchedCount === 0) throw new ErrorHandler(MEANWHILE, 409);
+        await partyLedger.reverse("Invoice", inv._id, session);
+      });
+    } catch (err) {
+      if (err instanceof ErrorHandler) return next(err);
+      throw err;
+    }
     res.json({ success: true, invoice: publicInvoice(await Invoice.findById(inv._id)), portalNote });
   })
 );

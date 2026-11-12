@@ -75,13 +75,10 @@ async function summary(month) {
   };
 }
 
-/** Cancel an earlier journal of this source and post the new one. */
-async function replace(ref, build, req) {
-  const old = await Journal.findOne({ source: 'payroll', sourceRef: ref, status: 'posted' }).lean();
-  if (old) await journals.cancel(old, 'Replaced by a fresh posting of the payroll month', req);
+/** Post this source's journal for the month, in place of the one posted before (services/journals.js replace). */
+function replace(ref, build, req) {
   const { date, purpose, narration, reason, lines } = build;
-  const read = await journals.read({ lines });
-  return journals.post({ date, purpose, narration, reason, lines: read.lines, total: read.total, source: 'payroll', sourceRef: ref }, req);
+  return journals.replace({ date, purpose, narration, reason, lines, source: 'payroll', sourceRef: ref }, 'Replaced by a fresh posting of the payroll month', req);
 }
 
 async function postSalary(month, req) {

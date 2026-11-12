@@ -8,6 +8,9 @@
 //  post()    the voucher, its party-ledger rows, and the documents its
 //            party lines settle (bill-wise), in one transaction
 //  cancel()  everything back
+//  replace() the one journal another process keeps for a thing (a
+//            payroll month, a year's depreciation): the old one out
+//            and the new one in, together, one request at a time
 //
 //  A party line's refs settle that party's open documents through the
 //  same conditional update a receipt uses (services/settle.js): a
@@ -32,6 +35,7 @@ const settle = require('./settle');
 const partyLedger = require('./partyLedger');
 const { allocate } = require('./docNumbers');
 const { assertOpen } = require('./booksLock');
+const { onceAtATime } = require('../utils/onceAtATime');
 const { isId, r2, withTxn, fp } = require('./accountsHelpers');
 const { ACTION_CODES } = require('../utils/fingerprint');
 
@@ -121,18 +125,8 @@ async function read(body) {
   return { lines, total: dr };
 }
 
-/**
- * Post a journal. `b` is the validated body; `req` the request (actor).
- * `source`/`sourceRef` mark journals another process makes.
- */
-async function post({ date, purpose, narration, reason, lines, total, requestId, source = 'manual', sourceRef = '' }, req) {
-  if (requestId) {
-    const dup = await Journal.findOne({ requestId: String(requestId) }).lean();
-    if (dup) return { journal: dup, replay: true };
-  }
-  // The books lock is asked here, not by each caller: the journals that
-  // payroll, depreciation and stock post come through this one door too.
-  await assertOpen(date, req);
+/** The journal's record, numbered, with its first fingerprint. */
+async function build({ date, purpose, narration, reason, lines, total, requestId, source = 'manual', sourceRef = '' }, req) {
   const { financialYear, sequence, number } = await allocate(Journal, 'JV', { at: date });
   const _id = new mongoose.Types.ObjectId();
   const data = {
@@ -142,16 +136,51 @@ async function post({ date, purpose, narration, reason, lines, total, requestId,
     createdBy: req?.user?._id, createdByName: req?.user?.name || '',
   };
   data.fingerprints = [fp(ACTION_CODES.JOURNAL_POSTED, { _id }, req, { journalNo: number, total, purpose: data.purpose, lines: lines.length })];
+  return data;
+}
+
+/** Inside a transaction: the voucher, its party-ledger rows, and what its party lines settle. */
+async function postIn(session, data, lines) {
+  const [journal] = await Journal.create([data], { session });
+  for (const [i, l] of lines.entries()) {
+    if (l.kind !== 'party') continue;
+    await partyLedger.post({ partyType: l.partyType, party: l[l.partyType], date: data.date, docType: 'Journal', doc: partyLedger.journalLineId(data._id, i), docNo: data.journalNo, debit: l.debit, credit: l.credit, narration: data.narration || data.reason, source: data._id, line: i }, session);
+    for (const r of l.refs) await settle.apply(r.docType, r.doc, { [fieldFor(l.partyType, l.debit > 0, r.docType)]: r.amount }, session, { docNo: r.docNo });
+  }
+  return journal;
+}
+
+/** Inside a transaction: everything back. Refused when it is no longer posted. */
+async function cancelIn(session, j, reason, req) {
+  const res = await Journal.updateOne({ _id: j._id, status: 'posted' }, {
+    $set: { status: 'cancelled', cancel: { reason, at: new Date(), by: req?.user?._id } },
+    $push: { fingerprints: fp(ACTION_CODES.JOURNAL_CANCELLED, j, req, { journalNo: j.journalNo, reason }) },
+  }, { session });
+  if (!res.modifiedCount) throw new ErrorHandler('Already cancelled', 409);
+  for (const [i, l] of j.lines.entries()) {
+    if (l.kind !== 'party') continue;
+    await partyLedger.reverse('Journal', partyLedger.journalLineId(j._id, i), session);
+    for (const r of l.refs || []) await settle.apply(r.docType, r.doc, { [fieldFor(l.partyType, l.debit > 0, r.docType)]: -r.amount }, session, { docNo: r.docNo });
+  }
+}
+
+/**
+ * Post a journal. `b` is the validated body; `req` the request (actor).
+ * `source`/`sourceRef` mark journals another process makes.
+ */
+async function post(b, req) {
+  const { requestId, date, lines } = b;
+  if (requestId) {
+    const dup = await Journal.findOne({ requestId: String(requestId) }).lean();
+    if (dup) return { journal: dup, replay: true };
+  }
+  // The books lock is asked here, not by each caller: the journals that
+  // payroll, depreciation and stock post come through this one door too.
+  await assertOpen(date, req);
+  const data = await build(b, req);
   let journal;
   try {
-    await withTxn(async (session) => {
-      [journal] = await Journal.create([data], { session });
-      for (const [i, l] of lines.entries()) {
-        if (l.kind !== 'party') continue;
-        await partyLedger.post({ partyType: l.partyType, party: l[l.partyType], date, docType: 'Journal', doc: partyLedger.journalLineId(_id, i), docNo: number, debit: l.debit, credit: l.credit, narration: data.narration || data.reason, source: _id, line: i }, session);
-        for (const r of l.refs) await settle.apply(r.docType, r.doc, { [fieldFor(l.partyType, l.debit > 0, r.docType)]: r.amount }, session, { docNo: r.docNo });
-      }
-    });
+    await withTxn(async (session) => { journal = await postIn(session, data, lines); });
   } catch (err) {
     if (err?.code === 11000 && requestId) {
       const dup = await Journal.findOne({ requestId: String(requestId) }).lean();
@@ -164,18 +193,48 @@ async function post({ date, purpose, narration, reason, lines, total, requestId,
 
 async function cancel(j, reason, req) {
   await assertOpen(j.date, req, { cancelling: true });
-  await withTxn(async (session) => {
-    const res = await Journal.updateOne({ _id: j._id, status: 'posted' }, {
-      $set: { status: 'cancelled', cancel: { reason, at: new Date(), by: req?.user?._id } },
-      $push: { fingerprints: fp(ACTION_CODES.JOURNAL_CANCELLED, j, req, { journalNo: j.journalNo, reason }) },
-    }, { session });
-    if (!res.modifiedCount) throw new ErrorHandler('Already cancelled', 409);
-    for (const [i, l] of j.lines.entries()) {
-      if (l.kind !== 'party') continue;
-      await partyLedger.reverse('Journal', partyLedger.journalLineId(j._id, i), session);
-      for (const r of l.refs || []) await settle.apply(r.docType, r.doc, { [fieldFor(l.partyType, l.debit > 0, r.docType)]: -r.amount }, session, { docNo: r.docNo });
-    }
-  });
+  await withTxn(async (session) => { await cancelIn(session, j, reason, req); });
 }
 
-module.exports = { read, post, cancel, fieldFor };
+/**
+ * Post the one journal a source keeps for a thing (a payroll month, a
+ * year's depreciation, a day's closing stock), taking the place of the
+ * one posted before.
+ *
+ * It was three steps — find the posted one, cancel it, post the new —
+ * with nothing between them: two requests together both found none and
+ * both posted, and the month's salaries were in the books twice; a
+ * later re-post cancelled one and left the other for good. Now one
+ * request at a time holds the lease for that source and thing, the
+ * cancel and the post are one transaction (no moment with neither, and
+ * no cancel without its replacement), and a unique index on posted
+ * journals by source and thing refuses a second.
+ *
+ * @param b       { date, purpose, narration, reason, lines, source, sourceRef } — lines as read() takes them
+ * @param why     the reason written on the journal it replaces
+ */
+async function replace(b, why, req) {
+  if (!b.source || b.source === 'manual' || !b.sourceRef) throw new ErrorHandler('replace() is for a journal another process keeps: source and sourceRef are required', 500);
+  return onceAtATime(`journal:${b.source}:${b.sourceRef}`, async () => {
+    const { lines, total } = await read({ lines: b.lines });
+    const before = await Journal.findOne({ source: b.source, sourceRef: b.sourceRef, status: 'posted' }).lean();
+    await assertOpen(b.date, req);
+    if (before) await assertOpen(before.date, req, { cancelling: true });
+    const data = await build({ ...b, lines, total }, req);
+    let journal;
+    try {
+      await withTxn(async (session) => {
+        // Read again inside: the one this transaction cancels is the one posted now.
+        const old = await Journal.findOne({ source: b.source, sourceRef: b.sourceRef, status: 'posted' }).session(session).lean();
+        if (old) await cancelIn(session, old, why, req);
+        journal = await postIn(session, data, lines);
+      });
+    } catch (err) {
+      if (err?.code === 11000) throw new ErrorHandler('This was posted by someone else a moment ago — look before posting it again', 409);
+      throw err;
+    }
+    return { journal: journal.toObject ? journal.toObject() : journal, replay: false, replaced: before ? before.journalNo : null };
+  }, { what: 'This posting' });
+}
+
+module.exports = { read, post, cancel, replace, fieldFor };

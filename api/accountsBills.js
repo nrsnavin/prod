@@ -65,6 +65,7 @@ const attachments = require("../services/attachments");
 const { getSettings: getBooksSettings } = require("../services/booksLock");
 const bankBalances = require("../services/bankBalances");
 const { assertOpen } = require("../services/booksLock");
+const { onceAtATime } = require("../utils/onceAtATime");
 const { upload, sellerStateCode, readLines, priced } = require("./accountsCommon");
 const router = express.Router();
 
@@ -235,6 +236,11 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     if (String(po.supplier) !== String(supplier._id)) return next(new ErrorHandler("That purchase order is on another supplier", 400));
   }
   const inwardIds = Array.isArray(b.inwards) ? b.inwards.filter(isId) : [];
+  // One bill at a time for a supplier. Whether a goods receipt is already
+  // on a bill is looked up and then the bill is entered: two requests
+  // together both found the receipt free and both billed it. The second
+  // now waits for the first and is told the receipt is taken.
+  await onceAtATime(`bill:supplier:${supplier._id}`, async () => {
   if (inwardIds.length) {
     const taken = await SupplierBill.findOne({ inwards: { $in: inwardIds }, status: { $ne: "cancelled" } }).select("billNo").lean();
     if (taken) return next(new ErrorHandler(`A receipt on this bill is already on ${taken.billNo}`, 409));
@@ -306,11 +312,21 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     await withTxn(async (session) => {
       [doc] = await SupplierBill.create([data], { session });
       await partyLedger.post({ partyType: "supplier", party: supplier._id, date: billDate, docType: "SupplierBill", doc: _id, docNo: number, credit: gst.totals.grand, narration: `Bill ${supplierBillNo}${po ? ` · PO #${po.poNo}` : ""}${reverseCharge ? " · reverse charge" : ""}` }, session);
-      if (serviceBill) await MachineServiceBill.updateOne({ _id: serviceBill._id, supplierBill: null }, { $set: { supplierBill: _id } }, { session });
+      // The service bill and the mailbox item are taken by writes that
+      // are refused once somebody else has them: a second bill for the
+      // same source is not entered at all (the result of this write used
+      // to go unread, and the mailbox item was marked after the fact).
+      if (serviceBill) {
+        const r = await MachineServiceBill.updateOne({ _id: serviceBill._id, supplierBill: null }, { $set: { supplierBill: _id } }, { session });
+        if (!r.modifiedCount) throw new ErrorHandler("That service bill is already entered in the books", 409);
+      }
+      if (inboxBill) {
+        const r = await require("../models/InboxBill").updateOne({ _id: inboxBill._id, status: { $ne: "entered" } }, { $set: { status: "entered", bill: _id, note: number, decidedBy: req.user?._id, decidedAt: new Date() } }, { session });
+        if (!r.modifiedCount) throw new ErrorHandler("That bill from the mailbox is entered already", 409);
+      }
     });
     if (inboxBill) {
-      // The mailbox item is done, and its file goes with the bill.
-      await require("../models/InboxBill").updateOne({ _id: inboxBill._id, status: { $ne: "entered" } }, { $set: { status: "entered", bill: _id, note: number, decidedBy: req.user?._id, decidedAt: new Date() } });
+      // The mailbox item's file goes with the bill.
       if (inboxBill.data) {
         const base64 = String(inboxBill.data).split(",")[1] || "";
         await attachments.attach(SupplierBill, "bills", _id, { buffer: Buffer.from(base64, "base64"), mimetype: inboxBill.contentType, originalname: inboxBill.filename || "bill", size: inboxBill.size }).catch(() => {});
@@ -329,6 +345,7 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
       }
       return next(new ErrorHandler(`Bill ${supplierBillNo} from ${supplier.name} is already entered`, 409));
     }
+    if (err instanceof ErrorHandler) return next(err);
     throw err;
   }
   // What the person kept of the scan: the AI's accuracy, field by field.
@@ -340,6 +357,7 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     await require("../services/billImages").link(data.aiSuggestion, { docType: "SupplierBill", docId: doc._id, docNo: doc.billNo, partyName: doc.supplierName, amount: doc.totals?.grand, date: doc.billDate });
   }
   res.status(201).json({ success: true, bill: doc.toObject() });
+  }, { what: "A bill from this supplier" });
 }));
 
 router.post("/bills/:id/cancel", catchAsyncErrors(async (req, res, next) => {
@@ -365,6 +383,17 @@ router.post("/bills/:id/cancel", catchAsyncErrors(async (req, res, next) => {
       );
       if (r.matchedCount === 0) throw new ErrorHandler("Something was set against this bill meanwhile — cancel that first.", 409);
       await partyLedger.reverse("SupplierBill", bill._id, session);
+      // What the bill was entered from is free to be entered again: the
+      // machine's service bill goes back on the "not yet in the books"
+      // list, and the mailbox item back among the new ones. (Neither was
+      // told before, so a bill cancelled to be corrected could never be
+      // entered a second time.)
+      await MachineServiceBill.updateMany({ supplierBill: bill._id }, { $set: { supplierBill: null } }, { session });
+      await require("../models/InboxBill").updateMany(
+        { bill: bill._id, status: "entered" },
+        { $set: { status: "new", bill: null, decidedBy: null, decidedAt: null, note: `${bill.billNo} was cancelled: to be entered again` } },
+        { session }
+      );
     });
   } catch (err) {
     if (err instanceof ErrorHandler) return next(err);

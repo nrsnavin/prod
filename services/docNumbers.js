@@ -31,4 +31,25 @@ async function allocate(Model, prefix, { extra = {}, at = new Date() } = {}) {
   return { financialYear: fy, sequence, number: `${prefix}/${fy}/${String(sequence).padStart(4, '0')}` };
 }
 
-module.exports = { allocate };
+/**
+ * A number that was drawn and will not be used: the write it was drawn
+ * for failed. Kept, with why, so the gap in the series is accounted for
+ * (models/BurntNumber.js). Never throws: losing the note of a lost
+ * number must not hide the error that lost it.
+ *
+ * @param series  "invoice" | "credit-note" | "debit-note"
+ */
+async function burn(series, { number, financialYear, sequence, date, reason, req }) {
+  try {
+    const BurntNumber = require('../models/BurntNumber');
+    await BurntNumber.updateOne(
+      { series, number },
+      { $setOnInsert: { series, number, financialYear: financialYear || '', sequence, date: date || new Date(), reason: String(reason || '').slice(0, 300), by: req?.user?._id, byName: req?.user?.name || '' } },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.warn(`[numbers] ${series} ${number} was lost and could not be noted: ${err.message}`);
+  }
+}
+
+module.exports = { allocate, burn };

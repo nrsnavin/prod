@@ -99,6 +99,16 @@ describe('the bills mailbox', () => {
     expect((await M.SupplierBill.findById(bill.body.bill._id).lean()).attachments?.[0]).toMatchObject({ filename: 'SY-118.pdf' });
     expect((await get('/accounts/bill-inbox')).body.bills).toEqual([]);
     expect((await post('/accounts/bills', { supplier: String(supplier._id), supplierBillNo: 'SY/119', lines: [{ description: 'x', quantity: 1, rate: 1 }], inboxBill: list[0]._id })).status).toBe(409);
+
+    // The bill is cancelled (entered wrongly): the mailed bill is among the new ones again.
+    expect((await post(`/accounts/bills/${bill.body.bill._id}/cancel`, { reason: 'Entered with the wrong quantity' })).status).toBe(200);
+    const back = await M.InboxBill.findById(list[0]._id).lean();
+    expect(back).toMatchObject({ status: 'new', bill: null });
+    expect(back.note).toMatch(/was cancelled: to be entered again/);
+    expect((await get('/accounts/bill-inbox')).body.bills).toHaveLength(1);
+    const again = await post('/accounts/bills', { supplier: String(supplier._id), supplierBillNo: 'SY/118', billDate: '2026-10-20', lines: [{ description: 'Nylon 70D', quantity: 62, rate: 310, gstPercent: 5 }], inboxBill: list[0]._id });
+    expect(again.status).toBe(201);
+    expect(await M.InboxBill.findById(list[0]._id).lean()).toMatchObject({ status: 'entered', bill: new mongoose.Types.ObjectId(again.body.bill._id) });
   });
 
   it('says when the same bill is entered already, and lets one be dismissed', async () => {

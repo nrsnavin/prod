@@ -202,6 +202,30 @@ describe('a machine\'s service bill into the books', () => {
     expect((await get(`/accounts/service-bills/${sbId}/draft`)).body.entered).toBe(String(b.body.bill._id));
     expect((await get('/accounts/inbox')).body.serviceBills.count).toBe(0);
     expect((await post('/accounts/bills', { supplier: s._id, supplierBillNo: 'CS/78', kind: 'service', serviceBill: sbId, lines: [{ description: 'x', quantity: 1, rate: 1 }] })).status).toBe(409);
+
+    // Entered wrongly and cancelled: the service bill is free again, back
+    // on the list of what is not yet in the books, and can be entered right.
+    expect((await post(`/accounts/bills/${b.body.bill._id}/cancel`, { reason: 'Entered at the wrong GST rate' })).status).toBe(200);
+    expect((await M.MachineServiceBill.findById(sbId).lean()).supplierBill).toBeNull();
+    expect((await get('/accounts/inbox')).body.serviceBills).toMatchObject({ count: 1, amount: 750 });
+    expect((await get(`/accounts/service-bills/${sbId}/draft`)).body.entered).toBeFalsy();
+    const again = await post('/accounts/bills', { supplier: s._id, supplierBillNo: 'CS/77', kind: 'service', serviceBill: sbId, billDate: '2026-10-10', lines: [{ description: 'Spare: Drive belt', quantity: 1, rate: 750, gstPercent: 28 }], tds: { applicable: false } });
+    expect(again.status).toBe(201);
+    expect(String((await M.MachineServiceBill.findById(sbId).lean()).supplierBill)).toBe(String(again.body.bill._id));
+  });
+
+  it('entered twice together becomes one bill', async () => {
+    const s = await supplier({ name: 'Comez Spares' });
+    const machine = await M.Machine.create({ ID: 'M-02', manufacturer: 'Comez', NoOfHead: 8, NoOfHooks: 24 });
+    const log = await post('/machine/add-service-log', { machineId: String(machine._id), type: 'Corrective', description: 'Replaced heald wire' });
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    const up = await request(app).post('/api/v2/machine/service-bill').set('Cookie', cookie()).field('machineId', String(machine._id)).field('serviceLogId', log.body.log._id).field('kind', 'spare_bill').field('amount', '900').field('vendor', 'Comez Spares').field('billNo', 'CS/90').field('partName', 'Heald wire').attach('file', png, { filename: 'heald.png', contentType: 'image/png' });
+    expect(up.status).toBe(201);
+    const sbId = up.body.bill._id;
+    const bill = (no) => post('/accounts/bills', { supplier: s._id, supplierBillNo: no, kind: 'service', serviceBill: sbId, billDate: '2026-10-12', lines: [{ description: 'Spare: Heald wire', quantity: 1, rate: 900, gstPercent: 18 }], tds: { applicable: false } });
+    const both = await Promise.all([bill('CS/90'), bill('CS/90-A')]);
+    expect(both.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(await M.SupplierBill.countDocuments({ serviceBill: sbId, status: { $ne: 'cancelled' } })).toBe(1);
   });
 });
 

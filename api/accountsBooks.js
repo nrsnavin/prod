@@ -268,7 +268,16 @@ router.post("/opening-balances", catchAsyncErrors(async (req, res, next) => {
   }
   let o;
   try { o = await readOpening(b); await assertOpen(o.date, req); } catch (err) { return next(err); }
-  res.status(201).json({ success: true, row: await postOpening(o, req, { requestId: b.requestId }) });
+  let row;
+  try { row = await postOpening(o, req, { requestId: b.requestId }); } catch (err) {
+    // The same request sent twice at once: the one that lost is handed the row the other made.
+    if (err?.code === 11000 && b.requestId) {
+      const dup = await OpeningBalance.findOne({ requestId: String(b.requestId) }).lean();
+      if (dup) return res.json({ success: true, row: dup, replay: true });
+    }
+    throw err;
+  }
+  res.status(201).json({ success: true, row });
 }));
 
 router.post("/opening-balances/:id/cancel", catchAsyncErrors(async (req, res, next) => {
@@ -277,11 +286,14 @@ router.post("/opening-balances/:id/cancel", catchAsyncErrors(async (req, res, ne
   if (!o) return next(new ErrorHandler("Not found", 404));
   if (o.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
   if ((o.settledAmount || 0) > 0 || (o.applications || []).length) return next(new ErrorHandler("Something is already set against this balance — cancel that first", 409));
-  const refundedBy = await require("../models/Payment").findOne({ status: "posted", "refunds.source": o._id }).select("voucherNo").lean();
-  if (refundedBy) return next(new ErrorHandler(`${o.docNo} was refunded by ${refundedBy.voucherNo} — cancel that first`, 409));
   let reason;
   try { reason = reasonFrom(req); await assertOpen(o.date, req, { cancelling: true }); } catch (err) { return next(err); }
+  try {
   await withTxn(async (session) => {
+    // A refund paid this advance back: that comes off first. Asked inside
+    // the transaction, so a refund posted a moment ago is seen.
+    const refundedBy = await require("../models/Payment").findOne({ status: "posted", "refunds.source": o._id }).select("voucherNo").session(session).lean();
+    if (refundedBy) throw new ErrorHandler(`${o.docNo} was refunded by ${refundedBy.voucherNo} — cancel that first`, 409);
     const r = await OpeningBalance.updateOne({ _id: o._id, status: "posted", settledAmount: { $lte: 0 }, "applications.0": { $exists: false } }, {
       $set: { status: "cancelled", unapplied: 0, cancel: { reason, at: new Date(), by: req.user?._id } },
       $push: { fingerprints: fp(ACTION_CODES.OPENING_CANCELLED, o, req, { docNo: o.docNo, reason }) },
@@ -289,6 +301,7 @@ router.post("/opening-balances/:id/cancel", catchAsyncErrors(async (req, res, ne
     if (r.matchedCount === 0) throw new ErrorHandler("Something was set against this balance meanwhile", 409);
     await partyLedger.reverse("OpeningBalance", o._id, session);
   });
+  } catch (err) { if (err instanceof ErrorHandler) return next(err); throw err; }
   res.json({ success: true, row: await OpeningBalance.findById(o._id).lean() });
 }));
 

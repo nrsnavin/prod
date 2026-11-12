@@ -83,4 +83,24 @@ async function onceAtATime(key, work, { waitMs = 8000, ttlMs = 60_000, what = 'T
   }
 }
 
-module.exports = { onceAtATime, take, release };
+/**
+ * An Express handler that runs one at a time per document: the lease is
+ * `<prefix>:<req.params.id>`. For routes that read a document, call out
+ * to something slow (a portal), and write what came back: the second
+ * request runs after the first and is answered by what the first did.
+ * An id that is not an id goes straight to the handler, which says so.
+ *
+ * @param {string} prefix            'note-portal'
+ * @param {Function} handler         (req, res, next) => Promise
+ * @param {object} [opts]            { what, ttlMs, waitMs } as onceAtATime takes them
+ */
+function perDocument(prefix, handler, opts = {}) {
+  return (req, res, next) => {
+    const id = String(req.params?.id || '');
+    const run = () => handler(req, res, next);
+    const work = /^[0-9a-fA-F]{24}$/.test(id) ? onceAtATime(`${prefix}:${id}`, run, opts) : Promise.resolve().then(run);
+    return Promise.resolve(work).catch(next);
+  };
+}
+
+module.exports = { onceAtATime, perDocument, take, release };

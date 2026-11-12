@@ -75,5 +75,10 @@ JournalSchema.index({ date: -1 });
 JournalSchema.index({ "lines.customer": 1 });
 JournalSchema.index({ "lines.supplier": 1 });
 JournalSchema.index({ source: 1, sourceRef: 1 });
+// One posted journal for one thing another process posts (a payroll
+// month, a year's depreciation, a day's closing stock): two requests
+// together cannot both post it. Journals written by hand carry no
+// sourceRef and are not in this index.
+JournalSchema.index({ sourceRef: 1, source: 1 }, { unique: true, partialFilterExpression: { status: "posted", sourceRef: { $gt: "" } } });
 
 module.exports = mongoose.model("Journal", JournalSchema);

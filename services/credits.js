@@ -135,7 +135,10 @@ async function apply(body, req) {
       : { applications: { $each: rows.map((r) => ({ docType: r.docType, doc: r.doc, docNo: r.docNo, amount: r.amount, at: now, by: req.user?._id })) } };
     const upd = { $inc: { [field]: -total }, $push: push };
     upd.$push.fingerprints = fp(ACTION_CODES.CREDIT_APPLIED, src, req, { applied: total, docs: rows.map((r) => r.docNo) });
-    const res = await Model.updateOne({ _id: src._id, [field]: { $gte: total - 0.005 } }, upd, { session });
+    // …and only while the credit is still live: one being cancelled in
+    // the same moment is not a credit, and an application pushed onto a
+    // cancelled voucher would settle a document with money that is gone.
+    const res = await Model.updateOne({ _id: src._id, status: sourceType === 'AccountNote' ? 'issued' : 'posted', [field]: { $gte: total - 0.005 } }, upd, { session });
     if (res.matchedCount === 0) throw new ErrorHandler(`${sourceNo(sourceType, src)} no longer has that much to apply`, 409);
     await Model.updateOne({ _id: src._id }, [{ $set: { [field]: { $round: [`$${field}`, 2] } } }], { session });
     for (const r of rows) {

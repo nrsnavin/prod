@@ -18,7 +18,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { escapeRegex }  = require("../utils/escapeRegex");
 const { ACTION_CODES } = require("../utils/fingerprint");
-const { allocate } = require("../services/docNumbers");
+const { allocate, burn } = require("../services/docNumbers");
 const partyLedger  = require("../services/partyLedger");
 const creditNoteLimit = require("../services/creditNoteLimit");
 const overdueInterest = require("../services/overdueInterest");
@@ -37,6 +37,7 @@ const {
 } = require("../services/accountsHelpers");
 const settle = require("../services/settle");
 const { assertOpen } = require("../services/booksLock");
+const { onceAtATime, perDocument } = require("../utils/onceAtATime");
 const { sellerStateCode, readLines, priced } = require("./accountsCommon");
 const router = express.Router();
 
@@ -92,7 +93,8 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
   if (reason.length < 3) return next(new ErrorHandler("reason is required", 400));
   if (!isId(b.against?.doc)) return next(new ErrorHandler("against.doc is required", 400));
   const docType = partyType === "customer" ? "Invoice" : "SupplierBill";
-  const target = docType === "Invoice" ? await Invoice.findById(b.against.doc).lean() : await SupplierBill.findById(b.against.doc).lean();
+  const loadTarget = () => (docType === "Invoice" ? Invoice.findById(b.against.doc).lean() : SupplierBill.findById(b.against.doc).lean());
+  let target = await loadTarget();
   if (!target) return next(new ErrorHandler(`${docType === "Invoice" ? "Invoice" : "Bill"} not found`, 404));
   if (docType === "Invoice" && target.status !== "issued") return next(new ErrorHandler("That invoice is cancelled", 409));
   if (docType === "SupplierBill" && target.status === "cancelled") return next(new ErrorHandler("That bill is cancelled", 409));
@@ -125,6 +127,14 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
   const docNo = docType === "Invoice" ? target.invoiceNumber : target.billNo;
   // Raises: a debit note to a customer. Lowers: the other two.
   const raises = kind === "debit" && partyType === "customer";
+  // One note at a time against a document. How much room it has left for
+  // notes is worked out and then the note is issued: two requests
+  // together both found the room and both took it, and a paid invoice of
+  // 10,500 carried 16,800 of credit notes. The second now waits for the
+  // first and is measured against what the first left.
+  await onceAtATime(`note:${target._id}`, async () => {
+  target = await loadTarget();
+  if (!target || (docType === "Invoice" ? target.status !== "issued" : target.status === "cancelled")) return next(new ErrorHandler(`${docNo} was cancelled meanwhile`, 409));
   let applied = p.totals.grand;
   if (!raises) {
     const earlier = await AccountNote.aggregate([
@@ -163,6 +173,10 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
       await partyLedger.post({ partyType, party, date, docType: "AccountNote", doc: _id, docNo: number, [side]: p.totals.grand, narration: `${reason} (${docNo})` }, session);
     });
   } catch (err) {
+    // The number drawn for this note is gone with it: noted, so the gap
+    // in the series is accounted for (models/BurntNumber.js). A note to
+    // a supplier is not a document the GST return lists.
+    await burn(partyType === "customer" ? `${kind}-note` : `${kind}-note-supplier`, { number, financialYear, sequence, date, reason: err?.message, req });
     if (err?.code === 11000 && b.requestId) {
       const dup = await AccountNote.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
       if (dup) return res.status(200).json({ success: true, note: dup, replay: true });
@@ -171,6 +185,7 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
     throw err;
   }
   res.status(201).json({ success: true, note: await AccountNote.findById(_id).select("-attachments.data").lean() });
+  }, { what: "A note against this document" });
 }));
 
 /** The field a note moves on the document it is applied to. */
@@ -180,7 +195,10 @@ function noteField(note, docType) {
   return docType === "Invoice" ? "creditedAmount" : "debitedAmount";
 }
 
-router.post("/notes/:id/cancel", catchAsyncErrors(async (req, res, next) => {
+// Under the note's portal lease (api/accountsDocs.js): a cancel sent
+// while the note is being registered waits, and then cancels a note
+// that says it holds an IRN.
+router.post("/notes/:id/cancel", perDocument("note-portal", async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Note not found", 404));
   const note = await AccountNote.findById(req.params.id).lean();
   if (!note) return next(new ErrorHandler("Note not found", 404));
@@ -189,35 +207,45 @@ router.post("/notes/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   try { reason = reasonFrom(req); await assertOpen(note.date, req, { cancelling: true }); } catch (err) { return next(err); }
   const cancel = { reason, at: new Date(), by: req.user?._id };
   const mark = fp(ACTION_CODES.NOTE_CANCELLED, note, req, { noteNo: note.noteNo, reason });
-  // What it applied to its own document — older notes carry no `applied`: all of it.
-  // Only when nothing shows where it went: applied 0, nothing left and no
-  // later application. A note applied 0 then set wholly against another
-  // invoice is not that — reversing its total off its own document took
-  // credit off an invoice that never had it.
-  const legacy = note.applied === undefined || note.applied === null || (note.applied === 0 && !note.unapplied && !(note.applications || []).length);
-  const onAgainst = legacy ? note.totals.grand : note.applied;
   // A debit note to a customer raised their invoice; once that was paid,
   // taking it off would leave the invoice settled past what it owes and
   // the money stranded on it. The receipt comes off first.
   const raised = note.kind === "debit" && note.partyType === "customer";
-  // Money already refunded out of a note's unapplied credit is gone: the refund comes off first.
-  const refundedBy = raised ? null : await Payment.findOne({ status: "posted", "refunds.source": note._id }).select("voucherNo").lean();
-  if (refundedBy) return next(new ErrorHandler(`${note.noteNo} was refunded by ${refundedBy.voucherNo} — cancel that first`, 409));
   try {
     await withTxn(async (session) => {
-      // Conditional on it still being issued: two cancels at once must not both reverse it.
-      const r = await AccountNote.updateOne({ _id: note._id, status: "issued" }, { $set: { status: "cancelled", cancel, unapplied: 0 }, $push: { fingerprints: mark } }, { session });
-      if (r.modifiedCount === 0) throw new ErrorHandler("Already cancelled", 409);
+      // Money already refunded out of a note's unapplied credit is gone: the
+      // refund comes off first. Asked inside the transaction, so a refund
+      // posted a moment ago is seen.
+      const refundedBy = raised ? null : await Payment.findOne({ status: "posted", "refunds.source": note._id }).select("voucherNo").session(session).lean();
+      if (refundedBy) throw new ErrorHandler(`${note.noteNo} was refunded by ${refundedBy.voucherNo} — cancel that first`, 409);
+      // Marked cancelled by a write that hands back the note as it stood at
+      // that moment: what is reversed is what it holds NOW. A credit of it
+      // applied to another invoice between this route's first read and
+      // here is on that record, and comes off with the rest. (Conditional
+      // on it still being issued: two cancels at once cannot both reverse it.)
+      const was = await AccountNote.findOneAndUpdate(
+        { _id: note._id, status: "issued" },
+        { $set: { status: "cancelled", cancel, unapplied: 0 }, $push: { fingerprints: mark } },
+        { session, new: false }
+      ).select("kind partyType against applied unapplied applications totals").lean();
+      if (!was) throw new ErrorHandler("Already cancelled", 409);
+      // What it applied to its own document — older notes carry no `applied`: all of it.
+      // Only when nothing shows where it went: applied 0, nothing left and no
+      // later application. A note applied 0 then set wholly against another
+      // invoice is not that — reversing its total off its own document took
+      // credit off an invoice that never had it.
+      const legacy = was.applied === undefined || was.applied === null || (was.applied === 0 && !was.unapplied && !(was.applications || []).length);
+      const onAgainst = legacy ? was.totals.grand : was.applied;
       if (raised && onAgainst > 0) {
-        const inv = await Invoice.findById(note.against.doc).session(session).lean();
+        const inv = await Invoice.findById(was.against.doc).session(session).lean();
         const left = inv ? settle.outstanding("Invoice", inv) : 0;
         if (inv && inv.status === "issued" && left < onAgainst - 0.005) {
-          throw new ErrorHandler(`${note.against.docNo} has been paid past ₹${r2(left).toFixed(2)} of this note — cancel the receipt that paid it first`, 409);
+          throw new ErrorHandler(`${was.against.docNo} has been paid past ₹${r2(left).toFixed(2)} of this note — cancel the receipt that paid it first`, 409);
         }
       }
-      if (onAgainst > 0) await settle.apply(note.against.docType, note.against.doc, { [noteField(note, note.against.docType)]: -onAgainst }, session);
-      for (const a of note.applications || []) {
-        await settle.apply(a.docType, a.doc, { [noteField(note, a.docType)]: -a.amount }, session);
+      if (onAgainst > 0) await settle.apply(was.against.docType, was.against.doc, { [noteField(was, was.against.docType)]: -onAgainst }, session);
+      for (const a of was.applications || []) {
+        await settle.apply(a.docType, a.doc, { [noteField(was, a.docType)]: -a.amount }, session);
       }
       await partyLedger.reverse("AccountNote", note._id, session);
     });
@@ -225,7 +253,11 @@ router.post("/notes/:id/cancel", catchAsyncErrors(async (req, res, next) => {
     if (err instanceof ErrorHandler) return next(err);
     throw err;
   }
-  res.json({ success: true, note: await AccountNote.findById(note._id).select("-attachments.data").lean() });
-}));
+  // A registered IRN is not cancelled from here: the person is told to do it at the portal.
+  const portalNote = note.einvoice?.status === "registered"
+    ? `This note holds IRN ${String(note.einvoice.irn || "").slice(0, 12)}… — cancel it on the e-invoice portal as well (within 24 hours of registration).`
+    : "";
+  res.json({ success: true, note: await AccountNote.findById(note._id).select("-attachments.data").lean(), ...(portalNote ? { portalNote } : {}) });
+}, { what: "This note", ttlMs: 75_000 }));
 
 module.exports = router;

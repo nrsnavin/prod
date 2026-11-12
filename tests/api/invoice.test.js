@@ -518,6 +518,67 @@ describe('two requests for one invoice at the portal', () => {
     expect(stored.einvoice).toMatchObject({ status: 'cancelled', irn: IRN });
   });
 
+  // The portal's cancel cannot be taken back. A receipt landing while the
+  // portal was being asked left the IRN cancelled there and the invoice
+  // live here. The invoice is now held for those seconds.
+  it('a receipt sent while the IRN is being cancelled at the portal is refused, and the cancel goes through', async () => {
+    const inv = await anInvoice();
+    expect((await post(`/invoice/${inv._id}/register-irn`, {})).status).toBe(200);
+    const { PROVIDERS } = require('../../services/einvoiceProvider');
+    PROVIDERS.slow = () => ({ async cancel(irn) { calls.cancel.push(irn); await new Promise((r) => setTimeout(r, 400)); } });
+    await get('/accounts/bank-accounts');
+    const bank = (await post('/accounts/bank-accounts', { name: 'Kotak CA', kind: 'bank', openingBalance: 0 })).body.account;
+    const receipt = () => post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: inv.customer, amount: 1000, mode: 'bank', account: bank._id, allocations: [{ docType: 'Invoice', doc: inv._id, amount: 1000 }] });
+
+    const cancelling = post(`/invoice/${inv._id}/cancel`, { reason: 'raised against the wrong challan' }).then((r) => r);
+    await new Promise((r) => setTimeout(r, 150)); // the cancel is at the portal now
+    const during = await receipt();
+    expect(during.status).toBe(409);
+    expect(during.body.message).toMatch(/is being cancelled just now/);
+    expect((await cancelling).status).toBe(200);
+
+    const stored = await Invoice.findById(inv._id).lean();
+    expect(stored).toMatchObject({ status: 'cancelled', paidAmount: 0, einvoice: { status: 'cancelled', irn: IRN } });
+    expect(stored.cancellingUntil).toBeUndefined();
+    expect(calls.cancel).toEqual([IRN]);
+    // Off the customer's account with the cancel, in the same step.
+    expect((await get(`/accounts/statement?partyType=customer&party=${inv.customer}`)).body.closing).toBe(0);
+    expect((await receipt()).status).toBe(409);
+  });
+
+  it('when the portal refuses the cancel the invoice is as it was, and can be paid', async () => {
+    const inv = await anInvoice();
+    await post(`/invoice/${inv._id}/register-irn`, {});
+    const { PROVIDERS } = require('../../services/einvoiceProvider');
+    PROVIDERS.slow = () => ({ async cancel() { throw new Error('socket hang up'); } });
+    const res = await post(`/invoice/${inv._id}/cancel`, { reason: 'raised against the wrong challan' });
+    expect(res.status).toBe(502);
+    const stored = await Invoice.findById(inv._id).lean();
+    expect(stored).toMatchObject({ status: 'issued', einvoice: { status: 'registered' } });
+    expect(stored.cancellingUntil).toBeUndefined();
+    await get('/accounts/bank-accounts');
+    const bank = (await post('/accounts/bank-accounts', { name: 'Kotak CA', kind: 'bank', openingBalance: 0 })).body.account;
+    const paid = await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: inv.customer, amount: 1000, mode: 'bank', account: bank._id, allocations: [{ docType: 'Invoice', doc: inv._id, amount: 1000 }] });
+    expect(paid.status).toBe(201);
+  });
+
+  it('a second click on Register for a credit note does not register it again', async () => {
+    const inv = await anInvoice();
+    const note = await post('/accounts/notes', { kind: 'credit', against: { doc: inv._id }, reason: 'Rate difference agreed', lines: [{ description: '20mm rate difference', hsn: '5806', quantity: 10, rate: 1, gstPercent: 5 }] });
+    expect(note.status).toBe(201);
+    const both = await Promise.all([
+      post(`/accounts/notes/${note.body.note._id}/register-irn`, {}),
+      post(`/accounts/notes/${note.body.note._id}/register-irn`, {}),
+    ]);
+    expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(both.find((r) => r.status === 409).body.message).toBe(`Already registered — IRN ${IRN}`);
+    expect(calls.register).toBe(1);
+    // Cancelling a registered note says the IRN is to be cancelled at the portal.
+    const cancelled = await post(`/accounts/notes/${note.body.note._id}/cancel`, { reason: 'Issued against the wrong invoice' });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.portalNote).toMatch(/cancel it on the e-invoice portal as well/);
+  });
+
   it('CONTROL: one request is answered as it always was, and leaves no lease behind', async () => {
     const inv = await anInvoice();
     const res = await post(`/invoice/${inv._id}/register-irn`, {});
@@ -584,5 +645,40 @@ describe('when an invoice falls due', () => {
     expect(res.body.rows[0].overdueDays).toBeGreaterThanOrEqual(4);
     expect(res.body.rows[0].overdueDays).toBeLessThanOrEqual(5);
     expect(res.body.rows[0].bucket).toBe('d30');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  A NUMBER DRAWN AND LOST
+//
+//  The invoice's number is drawn before the invoice is written. When the
+//  write fails the number is gone, and the next invoice takes the one
+//  after it. The gap is noted, and GSTR-1's document summary counts it
+//  as cancelled, so the series has no number unaccounted for.
+// ══════════════════════════════════════════════════════════════════
+describe('a number drawn and lost', () => {
+  it('is noted with why, and counted as cancelled in the GSTR-1 document summary', async () => {
+    const { order, dc1, dc2 } = await scene();
+    const ledger = require('../../services/partyLedger');
+    const real = ledger.post;
+    ledger.post = async () => { throw new Error('the database went away'); };
+    let failed;
+    try { failed = await post('/invoice/create', { orderId: order._id, dcIds: [dc1._id], invoiceDate: '2026-07-12' }); } finally { ledger.post = real; }
+    expect(failed.status).toBe(500);
+    expect(await Invoice.countDocuments({})).toBe(0);
+
+    const ok = await post('/invoice/create', { orderId: order._id, dcIds: [dc1._id], invoiceDate: '2026-07-12' });
+    expect(ok.status).toBe(201);
+    expect(ok.body.invoice.invoiceNumber).toBe('INV/2026-27/0002');
+    const second = await post('/invoice/create', { orderId: order._id, dcIds: [dc2._id], invoiceDate: '2026-07-13' });
+    expect(second.body.invoice.invoiceNumber).toBe('INV/2026-27/0003');
+
+    const burnt = await require('../../models/BurntNumber').find({}).lean();
+    expect(burnt).toEqual([expect.objectContaining({ series: 'invoice', number: 'INV/2026-27/0001', financialYear: '2026-27', sequence: 1, reason: 'the database went away', byName: 'Owner' })]);
+    expect(new Date(burnt[0].date).toISOString().slice(0, 10)).toBe('2026-07-12');
+
+    const g = await require('../../services/gstr1').build('2026-07');
+    const invoices = g.docs.find((d) => d.doc_num === 1);
+    expect(invoices.docs[0]).toEqual({ num: 1, from: 'INV/2026-27/0001', to: 'INV/2026-27/0003', totnum: 3, cancel: 1, net_issue: 2 });
   });
 });

@@ -27,6 +27,8 @@ const TdsCertificate = require('../models/TdsCertificate');
 const Tds26asEntry = require('../models/Tds26asEntry');
 const { parseCsv, sheetRows, parseDate } = require('./bankStatement');
 const { getSettings } = require('./booksLock');
+const { withTxn } = require('./accountsHelpers');
+const { onceAtATime } = require('../utils/onceAtATime');
 
 const { r2 } = require('../utils/money');
 const DAY = 86_400_000;
@@ -183,19 +185,32 @@ async function upload26as({ fy, buffer, filename, by }) {
   const rows = await parse26as(buffer, filename);
   const customers = await Customer.find({}).select('name tan').lean();
   const byTan = new Map(customers.filter((c) => c.tan).map((c) => [c.tan.toUpperCase(), c]));
-  await Tds26asEntry.deleteMany({ fy });
+  const learnt = [];
   const docs = rows.map((r) => {
     let customer = r.tan ? byTan.get(r.tan) : null; let matchedBy = customer ? 'tan' : '';
     if (!customer && r.deductorName) {
       const n = normName(r.deductorName);
-      customer = customers.find((c) => { const m = normName(c.name); return m.length >= 4 && (n.includes(m) || m.includes(n)); }) || null;
+      // The same name: that customer, and their TAN is learnt for next
+      // time. A name that only contains the other ("RAJA" in "MAHARAJA
+      // TEXTILES") still places the row, to be looked at — but a TAN is
+      // never learnt from it: saved on the wrong customer it would map
+      // every later line of that deductor to them, by TAN, without a doubt.
+      const exact = customers.find((c) => normName(c.name) === n) || null;
+      customer = exact || customers.find((c) => { const m = normName(c.name); return m.length >= 4 && (n.includes(m) || m.includes(n)); }) || null;
       matchedBy = customer ? 'name' : '';
-      // Learn the TAN for next time.
-      if (customer && r.tan && !customer.tan) { Customer.updateOne({ _id: customer._id }, { $set: { tan: r.tan } }).catch(() => {}); customer.tan = r.tan; byTan.set(r.tan, customer); }
+      if (exact && r.tan && !exact.tan) { learnt.push({ customer: exact._id, tan: r.tan }); exact.tan = r.tan; byTan.set(r.tan, exact); }
     }
     return { fy, ...r, customer: customer?._id, matchedBy, uploadedBy: by || undefined };
   });
-  if (docs.length) await Tds26asEntry.insertMany(docs);
+  // One upload at a time for a year, and the year's old rows go only if
+  // the new ones arrive: they were deleted and then inserted in two
+  // steps, so a file that failed half way left the year empty, and two
+  // uploads together left it double.
+  await onceAtATime(`tds-26as:${fy}`, () => withTxn(async (session) => {
+    await Tds26asEntry.deleteMany({ fy }, { session });
+    if (docs.length) await Tds26asEntry.insertMany(docs, { session });
+  }), { what: 'This year\'s Form 26AS' });
+  for (const l of learnt) await Customer.updateOne({ _id: l.customer, $or: [{ tan: '' }, { tan: null }, { tan: { $exists: false } }] }, { $set: { tan: l.tan } });
   return { fy, lines: docs.length, matched: docs.filter((d) => d.customer).length, unmatched: docs.filter((d) => !d.customer).map((d) => ({ deductorName: d.deductorName, tan: d.tan, tds: d.tds })) };
 }
 

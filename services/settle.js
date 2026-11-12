@@ -33,6 +33,12 @@ const KINDS = {
     partyType: 'customer',
     party: (d) => d.customer,
     status: null,
+    // While an invoice's IRN is being cancelled at the portal (seconds),
+    // nothing new may be set against it: the cancel cannot be taken back
+    // there, so a receipt landing in that gap left the IRN cancelled and
+    // the invoice live. The hold is a time, so one left behind by a
+    // process that died lifts by itself (api/invoice.js, cancel).
+    hold: 'cancellingUntil',
   },
   SupplierBill: {
     model: () => require('../models/SupplierBill'),
@@ -94,9 +100,10 @@ async function load(docType, id, session) {
 
 /**
  * Move a document's settlement fields by `inc` ({ paidAmount: 100 } …).
- * A positive move is refused (409) when the document is not open or
- * would be left owing less than nothing; a reversal (negative) always
- * lands. Returns nothing; throws ErrorHandler on refusal.
+ * A positive move is refused (409) when the document is not open, is
+ * held (an invoice being cancelled at the portal), or would be left
+ * owing less than nothing; a reversal (negative) always lands. Returns
+ * nothing; throws ErrorHandler on refusal.
  */
 async function apply(docType, id, inc, session, { docNo, extraSet } = {}) {
   const k = kindOf(docType);
@@ -107,11 +114,16 @@ async function apply(docType, id, inc, session, { docNo, extraSet } = {}) {
   // Debiting an invoice raises what it owes; everything else lowers it.
   const lowers = moves.reduce((s, [field, v]) => s + (field === 'debitedAmount' && docType === 'Invoice' ? -v : v), 0);
 
+  // Anything being added (a receipt, a credit, a debit note's raise) needs
+  // the document open and not held; a reversal always lands.
+  const adding = moves.some(([, v]) => v > 0);
+  const now = new Date();
   const filter = { _id: id };
-  if (lowers > 0) {
+  if (adding) {
     filter.status = { $in: k.openStatuses };
-    filter.$expr = { $gte: [k.leftExpr, lowers - 0.005] };
+    if (k.hold) filter.$or = [{ [k.hold]: { $exists: false } }, { [k.hold]: null }, { [k.hold]: { $lte: now } }];
   }
+  if (lowers > 0) filter.$expr = { $gte: [k.leftExpr, lowers - 0.005] };
   const set = {};
   for (const [field, v] of moves) set[field] = { $round: [{ $add: [f(field), v] }, 2] };
   const stages = [{ $set: set }];
@@ -126,6 +138,7 @@ async function apply(docType, id, inc, session, { docNo, extraSet } = {}) {
     const doc = await load(docType, id, session);
     if (!doc) throw new ErrorHandler(`${docNo || docType} not found`, 404);
     if (!k.openStatuses.includes(doc.status)) throw new ErrorHandler(`${docNo || numberOf(docType, doc)} is not open`, 409);
+    if (k.hold && doc[k.hold] && new Date(doc[k.hold]) > now) throw new ErrorHandler(`${docNo || numberOf(docType, doc)} is being cancelled just now — look again in a moment`, 409);
     throw new ErrorHandler(`${docNo || numberOf(docType, doc)} has only ${k.left(doc).toFixed(2)} outstanding`, 409);
   }
 }

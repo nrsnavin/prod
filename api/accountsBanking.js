@@ -26,6 +26,7 @@ const ErrorHandler = require("../utils/ErrorHandler");
 const { ACTION_CODES } = require("../utils/fingerprint");
 const { allocate } = require("../services/docNumbers");
 const { assertOpen } = require("../services/booksLock");
+const { onceAtATime } = require("../utils/onceAtATime");
 const bankBalances = require("../services/bankBalances");
 const { isId, r2, readDate, businessDay, fp, withTxn, paging } = require("../services/accountsHelpers");
 const BankAccount = require("../models/BankAccount");
@@ -129,10 +130,18 @@ router.post("/deposits", catchAsyncErrors(async (req, res, next) => {
     if (!isId(b.cashFrom)) return next(new ErrorHandler("Pick the cash box the cash comes from", 400));
     cashFrom = await BankAccount.findById(b.cashFrom).lean();
     if (!cashFrom || cashFrom.kind !== "cash" || cashFrom.active === false) return next(new ErrorHandler("The cash comes from a cash account", 400));
+  }
+  if (!cheques.length && !(cash > 0)) return next(new ErrorHandler("Pick the cheques, or enter the cash, to deposit", 400));
+
+  // Cash out of a box, one deposit at a time: what the box holds is looked
+  // up and then the cash is taken, and two deposits together each found
+  // enough for itself. (Cheques need no lease: each is taken by a write
+  // that is refused once it is no longer in hand.)
+  const post = async () => {
+  if (cash > 0) {
     const inBox = await bankBalances.balanceBefore(cashFrom, new Date(date.getTime() + 86_400_000));
     if (cash > inBox + 0.005) return next(new ErrorHandler(`${cashFrom.name} has only ₹${inBox.toFixed(2)} on that day`, 400));
   }
-  if (!cheques.length && !(cash > 0)) return next(new ErrorHandler("Pick the cheques, or enter the cash, to deposit", 400));
 
   const ordered = ids.map((id) => cheques.find((x) => String(x._id) === id));
   const total = r2(ordered.reduce((t, c) => t + c.amount, 0) + cash);
@@ -178,6 +187,9 @@ router.post("/deposits", catchAsyncErrors(async (req, res, next) => {
     throw err;
   }
   res.status(201).json({ success: true, slip: await DepositSlip.findById(_id).select("-fingerprints").lean() });
+  };
+  if (cash > 0) await onceAtATime(`cash-box:${cashFrom._id}`, post, { what: "Cash from this box" });
+  else await post();
 }));
 
 // ── The slip to hand in ────────────────────────────────────────────

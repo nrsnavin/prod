@@ -170,18 +170,16 @@ async function postDepreciation(fy, req) {
   const reg = await register(fy);
   if (!(reg.totals.caDep > 0)) throw new ErrorHandler(`No depreciation to post for ${fy}`, 409);
   const L = await ledgers();
-  const old = await Journal.findOne({ source: 'depreciation', sourceRef: fy, status: 'posted' }).lean();
-  if (old) await journals.cancel(old, 'Replaced by a fresh posting of the year\'s depreciation', req);
   const lines = [
     { kind: 'ledger', ledger: L.depreciation, debit: reg.totals.caDep },
     { kind: 'ledger', ledger: L.accumulatedDepreciation, credit: reg.totals.caDep },
   ];
-  const read = await journals.read({ lines });
-  const out = await journals.post({
+  // One journal for the year, in place of the one posted before (services/journals.js replace).
+  const out = await journals.replace({
     date: new Date(Date.UTC(fyStartYear(fy) + 1, 2, 31)), purpose: 'depreciation',
     narration: `Depreciation for ${fy} on ${reg.rows.length} assets (Schedule II)`, reason: `Fixed asset register ${fy}`,
-    lines: read.lines, total: read.total, source: 'depreciation', sourceRef: fy,
-  }, req);
+    lines, source: 'depreciation', sourceRef: fy,
+  }, 'Replaced by a fresh posting of the year\'s depreciation', req);
   return { ...out, register: await register(fy) };
 }
 

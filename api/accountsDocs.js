@@ -25,6 +25,7 @@ const router = express.Router();
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
 const { renderPdf } = require("../utils/renderPdf");
+const { perDocument } = require("../utils/onceAtATime");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { getDocumentSettings, getPdfBranding } = require("../services/documentSettings");
 const { buildEinvoiceJson, readiness } = require("../services/einvoice");
@@ -91,7 +92,14 @@ function stamp(note, reg, provider, req) {
   note.fingerprints.push(buildFingerprint(ACTION_CODES.NOTE_IRN_REGISTERED, { entityId: note._id, actor: actorFromRequest(req), meta: { noteNo: note.noteNo, irn: reg.irn, provider } }));
 }
 
-router.post("/notes/:id/register-irn", catchAsyncErrors(async (req, res, next) => {
+// Registering a note's IRN reads the note, calls the provider (seconds)
+// and writes what came back. One at a time per note, as an invoice's
+// portal steps are (api/invoice.js): a second click is answered
+// "Already registered", and a cancel waits for a registration in flight
+// instead of leaving a live IRN on a cancelled note.
+const NOTE_PORTAL = { what: "This note's registration", ttlMs: 75_000 };
+
+router.post("/notes/:id/register-irn", perDocument("note-portal", async (req, res, next) => {
   const note = await loadNote(req, next);
   if (!note || !customerOnly(note, next)) return;
   if (note.status === "cancelled") return next(new ErrorHandler("A cancelled note cannot be registered", 409));
@@ -117,9 +125,9 @@ router.post("/notes/:id/register-irn", catchAsyncErrors(async (req, res, next) =
   stamp(note, reg, provider.name, req);
   await note.save();
   res.json({ success: true, note: note.toObject() });
-}));
+}, NOTE_PORTAL));
 
-router.post("/notes/:id/irn", catchAsyncErrors(async (req, res, next) => {
+router.post("/notes/:id/irn", perDocument("note-portal", async (req, res, next) => {
   const note = await loadNote(req, next);
   if (!note || !customerOnly(note, next)) return;
   if (note.status === "cancelled") return next(new ErrorHandler("A cancelled note cannot be registered", 409));
@@ -137,7 +145,7 @@ router.post("/notes/:id/irn", catchAsyncErrors(async (req, res, next) => {
     throw err;
   }
   res.json({ success: true, note: note.toObject() });
-}));
+}, NOTE_PORTAL));
 
 // ── Receipts / payment advice ─────────────────────────────────────
 async function partyOf(partyType, id) {

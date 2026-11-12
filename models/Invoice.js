@@ -146,6 +146,9 @@ const InvoiceSchema = new mongoose.Schema(
     notes: { type: String, default: "", trim: true },
 
     status: { type: String, enum: ["issued", "cancelled"], default: "issued" },
+    // Set for the seconds its IRN is being cancelled at the portal:
+    // nothing is set against the invoice until then (services/settle.js).
+    cancellingUntil: { type: Date },
     cancel: {
       reason: { type: String, default: "" },
       at:     { type: Date },

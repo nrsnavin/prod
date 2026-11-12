@@ -100,11 +100,8 @@ async function value(asOf) {
   };
 }
 
-async function replace(ref, build, req) {
-  const old = await Journal.findOne({ source: 'stock', sourceRef: ref, status: 'posted' }).lean();
-  if (old) await journals.cancel(old, 'Replaced by a fresh stock valuation', req);
-  const read = await journals.read({ lines: build.lines });
-  return journals.post({ ...build, lines: read.lines, total: read.total, source: 'stock', sourceRef: ref }, req);
+function replace(ref, build, req) {
+  return journals.replace({ ...build, source: 'stock', sourceRef: ref }, 'Replaced by a fresh stock valuation', req);
 }
 
 /** Post the closing stock on `asOf` and bring it forward the next day. */

@@ -331,7 +331,8 @@ async function createVoucher(b, req, opts = {}) {
       // two refunds of the same advance cannot both spend it.
       for (const x of refundLines) {
         const Model = REFUND_SOURCES[x.sourceType];
-        const res = await Model.updateOne({ _id: x.source, [x.field]: { $gte: x.amount - 0.005 } }, { $inc: { [x.field]: -x.amount } }, { session });
+        // …and only a credit that is still live: one cancelled in the same moment has nothing to pay back.
+        const res = await Model.updateOne({ _id: x.source, status: x.sourceType === "AccountNote" ? "issued" : "posted", [x.field]: { $gte: x.amount - 0.005 } }, { $inc: { [x.field]: -x.amount } }, { session });
         if (res.matchedCount === 0) throw new ErrorHandler(`${x.docNo} no longer has ₹${x.amount.toFixed(2)} on account`, 409);
         await Model.updateOne({ _id: x.source }, [{ $set: { [x.field]: { $round: [`$${x.field}`, 2] } } }], { session });
       }

@@ -53,13 +53,15 @@ const posOf = (doc) => (/^\d{2}$/.test(String(doc.placeOfSupply || '')) ? doc.pl
 async function build(month) {
   const { from, to, fp } = monthRange(month);
   const range = { $gte: from, $lte: to };
-  const [invoices, cancelled, notes, cancelledNotes, settings, docSettings] = await Promise.all([
+  const [invoices, cancelled, notes, cancelledNotes, settings, docSettings, burnt] = await Promise.all([
     Invoice.find({ status: 'issued', invoiceDate: range }).select('invoiceNumber invoiceDate customer buyer supplyType placeOfSupply lines totals einvoice.irn export').sort({ invoiceDate: 1, sequence: 1 }).lean(),
     Invoice.find({ status: 'cancelled', invoiceDate: range }).select('invoiceNumber').lean(),
     AccountNote.find({ status: 'issued', partyType: 'customer', date: range, financial: { $ne: true } }).select('kind noteNo date customer partyName partyGstin against supplyType lines totals').sort({ date: 1 }).lean(),
     AccountNote.find({ status: 'cancelled', partyType: 'customer', date: range }).select('noteNo kind').lean(),
     getSettings(),
     getDocumentSettings(),
+    // Numbers drawn in the month and lost to a posting that failed (models/BurntNumber.js).
+    require('../models/BurntNumber').find({ series: { $in: ['invoice', 'credit-note', 'debit-note'] }, date: range }).select('series number').lean(),
   ]);
   const hsnDigits = settings.gst?.hsnDigits || 4;
   const ourGstin = docSettings?.gstin || '';
@@ -138,16 +140,19 @@ async function build(month) {
   for (const n of notes) addHsn(n.lines, n.kind === 'credit' ? -1 : 1);
   const hsnRows = [...hsn.values()].sort((a, b) => a.hsn_sc.localeCompare(b.hsn_sc) || a.rt - b.rt).map((g, i) => ({ num: i + 1, ...g }));
 
-  // Document series: the numbers issued this month, and how many cancelled.
-  const series = (docs, cancelledDocs, no, nature) => {
-    const nos = [...docs.map((d) => d[no]), ...cancelledDocs.map((d) => d[no])].sort();
+  // Document series: the numbers issued this month, and how many
+  // cancelled. A number drawn and lost counts as cancelled: the series
+  // runs from its first number to its last with no number unaccounted for.
+  const series = (docs, cancelledDocs, no, nature, lost) => {
+    const gone = [...cancelledDocs.map((d) => d[no]), ...burnt.filter((x) => x.series === lost).map((x) => x.number)];
+    const nos = [...docs.map((d) => d[no]), ...gone].sort();
     if (!nos.length) return null;
-    return { doc_num: nature, doc_typ: nature === 1 ? 'Invoices for outward supply' : nature === 4 ? 'Debit Note' : 'Credit Note', docs: [{ num: 1, from: nos[0], to: nos[nos.length - 1], totnum: nos.length, cancel: cancelledDocs.length, net_issue: nos.length - cancelledDocs.length }] };
+    return { doc_num: nature, doc_typ: nature === 1 ? 'Invoices for outward supply' : nature === 4 ? 'Debit Note' : 'Credit Note', docs: [{ num: 1, from: nos[0], to: nos[nos.length - 1], totnum: nos.length, cancel: gone.length, net_issue: nos.length - gone.length }] };
   };
   const docs = [
-    series(invoices, cancelled, 'invoiceNumber', 1),
-    series(notes.filter((n) => n.kind === 'credit'), cancelledNotes.filter((n) => n.kind === 'credit'), 'noteNo', 5),
-    series(notes.filter((n) => n.kind === 'debit'), cancelledNotes.filter((n) => n.kind === 'debit'), 'noteNo', 4),
+    series(invoices, cancelled, 'invoiceNumber', 1, 'invoice'),
+    series(notes.filter((n) => n.kind === 'credit'), cancelledNotes.filter((n) => n.kind === 'credit'), 'noteNo', 5, 'credit-note'),
+    series(notes.filter((n) => n.kind === 'debit'), cancelledNotes.filter((n) => n.kind === 'debit'), 'noteNo', 4, 'debit-note'),
   ].filter(Boolean);
 
   const sumRows = (rows, pick) => rows.reduce((t, r) => { const x = pick(r); return { count: t.count + 1, val: r2(t.val + (x.val || 0)), txval: r2(t.txval + x.txval), tax: r2(t.tax + x.iamt + x.camt + x.samt) }; }, { count: 0, val: 0, txval: 0, tax: 0 });
