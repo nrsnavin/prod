@@ -27,6 +27,39 @@ const EmployeeSchema = new mongoose.Schema(
       type: String,
       select: false,
     },
+    // As on their Aadhaar card, which can fill them from its QR code.
+    // Older records have none of these.
+    dob:     { type: String, trim: true, maxlength: 10 },   // YYYY-MM-DD
+    gender:  { type: String, enum: ["male", "female", "other", ""] },
+    address: { type: String, trim: true, maxlength: 400 },
+    pincode: { type: String, trim: true, maxlength: 6 },
+    // The last check of their Aadhaar card's QR code (utils/aadhaarQr.js):
+    // whether UIDAI's signature held, and how the card compared with this
+    // record. Only the outcome is kept. The photo, the address and the
+    // number on the card are not. No defaults inside: a record never
+    // checked has no aadhaarCheck at all.
+    aadhaarCheck: {
+      method:       { type: String, enum: ["qr"] },
+      kind:         { type: String, enum: ["secure", "old"] },
+      version:      { type: String },
+      layout:       { type: String, enum: ["known", "guessed", "unreadable"] },
+      signature:    { type: String, enum: ["valid", "invalid", "unchecked", "unsigned"] },
+      key:          { type: String },
+      last4:        { type: String },
+      issuedAt:     { type: Date },
+      nameOnCard:   { type: String },
+      dobOnCard:    { type: String },
+      genderOnCard: { type: String },
+      matches: {
+        last4: { type: Boolean },
+        name:  { type: String, enum: ["same", "close", "different"] },
+        phone: { type: Boolean },
+      },
+      consent: { type: Boolean },
+      at:      { type: Date },
+      by:      { type: mongoose.Types.ObjectId, ref: "User" },
+      byName:  { type: String },
+    },
     skill: {
       type: Number,
       required: true,

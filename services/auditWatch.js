@@ -40,7 +40,9 @@ const CANCELLED = new Set(['INVOICE_CANCELLED', 'BILL_CANCELLED', 'PAYMENT_CANCE
 const DELETED = new Set(['ORDER_DELETED', 'PO_DELETED', 'DC_DELETED', 'PACKING_DELETED', 'WASTAGE_DELETED', 'SHIFT_PRODUCTION_DELETED', 'WARPING_PLAN_DELETED']);
 const EDITED = new Set(['SHIFT_PRODUCTION_EDITED']);
 const STOCK = new Set(['STOCK_COUNT_POSTED', 'ELASTIC_STOCK_ADJUST']);
-const ACCESS = new Set(['LOGIN_CREATED', 'LOGIN_UPDATED', 'LOGIN_DELETED', 'PHONE_SIGNIN_RESET', 'AADHAAR_VIEWED']);
+const ACCESS = new Set(['LOGIN_CREATED', 'LOGIN_UPDATED', 'LOGIN_DELETED', 'PHONE_SIGNIN_RESET', 'AADHAAR_VIEWED', 'AADHAAR_QR_CHECKED']);
+// Access entries about an employee record rather than a login.
+const ABOUT_EMPLOYEE = new Set(['AADHAAR_VIEWED', 'AADHAAR_QR_CHECKED']);
 
 // Money documents and their own date, for back-dating.
 const DATED = [
@@ -90,8 +92,8 @@ async function watch({ days = 7, now = new Date() } = {}) {
   }
   for (const a of access) {
     if (!ACCESS.has(a.code)) continue;
-    const e = { ...a, entityType: a.code === 'AADHAAR_VIEWED' ? 'Employee' : 'Login', entityId: a.subject?.id, entityNo: a.subject?.name };
-    push('access', a.code === 'AADHAAR_VIEWED' || a.code === 'LOGIN_UPDATED' ? 'info' : 'check', e, `${a.label || a.code}: ${a.subject?.name || a.subject?.email || ''}`.trim(), a.meta?.changes ? `Changed: ${[].concat(a.meta.changes).join(', ')}` : '');
+    const e = { ...a, entityType: ABOUT_EMPLOYEE.has(a.code) ? 'Employee' : 'Login', entityId: a.subject?.id, entityNo: a.subject?.name };
+    push('access', ABOUT_EMPLOYEE.has(a.code) || a.code === 'LOGIN_UPDATED' ? 'info' : 'check', e, `${a.label || a.code}: ${a.subject?.name || a.subject?.email || ''}`.trim(), a.meta?.changes ? `Changed: ${[].concat(a.meta.changes).join(', ')}` : '');
   }
 
   // Late at night: one line per person, with how many changes.

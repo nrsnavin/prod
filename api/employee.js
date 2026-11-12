@@ -27,6 +27,11 @@ const EMPLOYEE_FIELDS = {
   aadhar: textish(30).nullable().optional(),
   hourlyRate: numberish.nullable().optional(),
   skillProfile: z.record(z.string(), z.unknown()).nullable().optional(),
+  // As on the Aadhaar card (its QR code can fill them).
+  dob: textish(10).nullable().optional(),
+  gender: text(10).nullable().optional(),
+  address: text(400).nullable().optional(),
+  pincode: textish(6).nullable().optional(),
 };
 const { recordAccess } = require("../utils/accessLog");
 const { ACTION_CODES } = require("../utils/fingerprint");
@@ -51,6 +56,34 @@ function publicEmployee(doc) {
   if (stored !== undefined) out.aadhar = maskedAadhaar(stored);
   return out;
 }
+
+/**
+ * Date of birth, gender, address and pin code as they may be stored;
+ * "" clears one. { values } or { error }.
+ */
+function personalFields(body) {
+  const values = {};
+  const str = (v) => (v == null ? "" : String(v).trim());
+  if (body.dob !== undefined) {
+    const v = str(body.dob);
+    if (v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) return { error: "Date of birth must be a date (YYYY-MM-DD)" };
+    values.dob = v;
+  }
+  if (body.gender !== undefined) {
+    const v = str(body.gender).toLowerCase();
+    if (v && !["male", "female", "other"].includes(v)) return { error: "Gender must be male, female or other" };
+    values.gender = v;
+  }
+  if (body.address !== undefined) values.address = str(body.address).slice(0, 400);
+  if (body.pincode !== undefined) {
+    const v = str(body.pincode);
+    if (v && !/^\d{6}$/.test(v)) return { error: "Pin code must be 6 digits" };
+    values.pincode = v;
+  }
+  return { values };
+}
+
+const CONSENT_NEEDED = "The employee's consent is needed to check their Aadhaar QR code";
 
 // All employee management routes are admin-only.
 router.use(isAuthenticated, isAdmin('admin', 'accounts', 'production'));
@@ -106,10 +139,66 @@ router.post(
   })
 );
 
+// ── The QR code on an Aadhaar card ──
+//  POST /aadhaar-qr { qr, consent: true, employeeId?, compare? }
+//  Reads the card's QR code and checks UIDAI's signature on it
+//  (utils/aadhaarQr.js), then compares the card with the employee or,
+//  on the new-employee form, with what has been typed (`compare`). With
+//  an employee, the outcome is kept on their record and the check goes
+//  in the access log. Offline verification is the holder's to agree to,
+//  so the request has to say they did.
+router.post(
+  "/aadhaar-qr",
+  isAdmin("admin"),
+  validate({ body: z.object({
+    qr: text(12000),
+    consent: z.boolean().optional(),
+    employeeId: objectId.optional(),
+    compare: z.object({
+      name: text(100).nullable().optional(),
+      phoneNumber: textish(20).nullable().optional(),
+      aadhar: textish(30).nullable().optional(),
+    }).optional(),
+  }) }),
+  catchAsyncErrors(async (req, res, next) => {
+    if (req.body.consent !== true) return next(new ErrorHandler(CONSENT_NEEDED, 400));
+    const qr = require("../utils/aadhaarQr");
+    let read;
+    try { read = await qr.readAadhaarQr(req.body.qr); } catch (err) {
+      return next(new ErrorHandler(err.message, err.status || 400));
+    }
+    let employee = null;
+    let against = req.body.compare || {};
+    if (req.body.employeeId) {
+      employee = await Employee.findById(req.body.employeeId).select("name phoneNumber +aadhar").lean();
+      if (!employee) return next(new ErrorHandler("Employee not found", 404));
+      let number = null;
+      try { number = employee.aadhar ? aadhaar.open(employee.aadhar) : null; } catch { number = null; }
+      against = { name: employee.name, phoneNumber: employee.phoneNumber, aadhar: number };
+    }
+    const matches = qr.compare(read, against);
+    let check = null;
+    if (employee) {
+      check = qr.checkRecord(read, matches, req.user);
+      // Not a save of the record: an edit form open on it keeps its version.
+      await Employee.updateOne({ _id: employee._id }, { $set: { aadhaarCheck: check } });
+      await recordAccess(req, ACTION_CODES.AADHAAR_QR_CHECKED, { _id: employee._id, name: employee.name }, { signature: check.signature, layout: check.layout });
+    }
+    res.set("Cache-Control", "no-store");
+    res.json({ success: true, read: qr.publicRead(read), matches, check });
+  })
+);
+
 router.post(
   "/create-employee",
   isAdmin("admin"),
-  validate({ body: z.object(EMPLOYEE_FIELDS) }),
+  validate({ body: z.object({
+    ...EMPLOYEE_FIELDS,
+    // The card's QR code, when it was scanned on the form: read again
+    // here, so what is kept is what the card says.
+    aadhaarQr: text(12000).optional(),
+    aadhaarQrConsent: z.boolean().optional(),
+  }) }),
   catchAsyncErrors(async (req, res, next) => {
     const { name, phoneNumber, role, department, aadhar } = req.body;
 
@@ -142,6 +231,19 @@ router.post(
       }
     }
 
+    const personal = personalFields(req.body);
+    if (personal.error) return next(new ErrorHandler(personal.error, 400));
+    let qrCheck = null;
+    if (req.body.aadhaarQr) {
+      if (req.body.aadhaarQrConsent !== true) return next(new ErrorHandler(CONSENT_NEEDED, 400));
+      const qr = require("../utils/aadhaarQr");
+      let read;
+      try { read = await qr.readAadhaarQr(req.body.aadhaarQr); } catch (err) {
+        return next(new ErrorHandler(err.message, err.status || 400));
+      }
+      qrCheck = qr.checkRecord(read, qr.compare(read, { name, phoneNumber, aadhar }), req.user);
+    }
+
     const hourlyRate = Number(req.body.hourlyRate);
     const employee = await Employee.create({
       name:        name.trim(),
@@ -154,7 +256,12 @@ router.post(
       hourlyRate:  Number.isFinite(hourlyRate) && hourlyRate >= 0 ? hourlyRate : 0,
       // Skill & performance questionnaire — schema enums validate levels.
       skillProfile: req.body.skillProfile || undefined,
+      ...Object.fromEntries(Object.entries(personal.values).filter(([, v]) => v !== "")),
+      aadhaarCheck: qrCheck || undefined,
     });
+    if (qrCheck) {
+      await recordAccess(req, ACTION_CODES.AADHAAR_QR_CHECKED, { _id: employee._id, name: employee.name }, { signature: qrCheck.signature, layout: qrCheck.layout });
+    }
 
     console.log(`[employee/create] ${employee.name} registered`);
 
@@ -256,6 +363,13 @@ router.get(
         skill:       employee.skill       || 0,
         hourlyRate:  employee.hourlyRate  || 0,
         skillProfile: employee.skillProfile || null,
+        // As on their Aadhaar card, and the last check of its QR code
+        // (none until someone checks it).
+        dob:         employee.dob     || "",
+        gender:      employee.gender  || "",
+        address:     employee.address || "",
+        pincode:     employee.pincode || "",
+        aadhaarCheck: employee.aadhaarCheck?.at ? (employee.toObject?.().aadhaarCheck ?? employee.aadhaarCheck) : null,
         status:      employee.status || "active",
         offboarding: employee.status === "offboarded" ? {
           lastWorkingDay: employee.offboarding?.lastWorkingDay ?? null,
@@ -350,7 +464,11 @@ router.put(
       }
     }
 
-    const allowed = ["name", "phoneNumber", "role", "department", "aadhar", "skill", "hourlyRate", "skillProfile"];
+    const personal = personalFields(req.body);
+    if (personal.error) return next(new ErrorHandler(personal.error, 400));
+    Object.assign(req.body, personal.values);
+
+    const allowed = ["name", "phoneNumber", "role", "department", "aadhar", "skill", "hourlyRate", "skillProfile", "dob", "gender", "address", "pincode"];
     for (const field of allowed) {
       if (req.body[field] !== undefined) {
         employee[field] = req.body[field];

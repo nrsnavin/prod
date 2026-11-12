@@ -221,6 +221,7 @@ than starting from blank. What to fill in:
 | Bank statements by email | `BANK_FEED_IMAP_*`, `BANK_FEED_SENDERS`, `BANK_FEED_EVERY_MIN` | `.env.example` |
 | Bank statements by SFTP | `BANK_SFTP_*` | `.env.example` |
 | Error reporting | `SENTRY_DSN` | `.env.example` |
+| Aadhaar QR check (UIDAI's signature) | none: run `node scripts/fetch-uidai-certs.js` once | `config/uidai/README.md` |
 
 Everything else (process counts, timeouts, report times, retention,
 the plant's time zone) has a working default, and the example says what

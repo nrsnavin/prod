@@ -1,0 +1,4 @@
+# Downloaded on each server by scripts/fetch-uidai-certs.js.
+*.cer
+*.crt
+*.pem
