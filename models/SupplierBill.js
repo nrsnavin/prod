@@ -74,7 +74,11 @@ const SupplierBillSchema = new mongoose.Schema(
       at:      { type: Date },
     },
     // Input credit reversed because the supplier was not paid within 180
-    // days (CGST Rule 37), and re-claimed when paid.
+    // days (CGST Rule 37), and re-claimed as it is paid. `amount` and
+    // `reclaimAmount` are running totals (a bill paid in parts is
+    // re-claimed in parts), `period` / `reclaimPeriod` the month of the
+    // latest step, and `history` every step with the 3B month it belongs
+    // to (services/itcReversal.js).
     itcReversal: {
       amount:        { type: Number, default: 0 },
       period:        { type: String, default: "" },
@@ -82,6 +86,14 @@ const SupplierBillSchema = new mongoose.Schema(
       reclaimAmount: { type: Number, default: 0 },
       reclaimPeriod: { type: String, default: "" },
       reclaimAt:     { type: Date },
+      history: { type: [new mongoose.Schema({
+        kind:   { type: String, enum: ["reverse", "reclaim"], required: true },
+        amount: { type: Number, required: true, min: 0 },
+        period: { type: String, default: "" },
+        at:     { type: Date },
+        by:     { type: mongoose.Types.ObjectId, ref: "User" },
+        byName: { type: String, default: "" },
+      }, { _id: false })], default: undefined },
     },
     // TDS to deduct when paying this bill.
     tds: {

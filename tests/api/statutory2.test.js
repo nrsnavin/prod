@@ -160,11 +160,20 @@ describe('payroll into the books', () => {
     expect(j.lines.map((l) => [l.ledger, l.debit, l.credit])).toEqual([
       ['Salaries & Wages', 35150, 0], ['PF Payable', 0, 4200], ['ESI Payable', 0, 150], ['Staff Advances', 0, 500], ['Salary Payable', 0, 30300],
     ]);
-    // Posting again replaces it.
+    // Posted again with nothing changed in HR: the journal stays as it is.
+    const same = await post('/accounts/payroll-books/salary', { month: '2026-10' });
+    expect(same.status).toBe(201);
+    expect(same.body.journal.journalNo).toBe(j.journalNo);
+    expect(await M.Journal.countDocuments({ source: 'payroll', sourceRef: 'salary:2026-10' })).toBe(1);
+    // A slip corrected in HR: posting again replaces it.
+    await M.Payroll.updateOne({ employee: emp2._id, year: 2026, month: 10 }, { $set: { grossEarnings: 15200, netPay: 13400 } });
     const again = await post('/accounts/payroll-books/salary', { month: '2026-10' });
     expect(again.status).toBe(201);
+    expect(again.body.journal.journalNo).not.toBe(j.journalNo);
     expect(await M.Journal.countDocuments({ source: 'payroll', sourceRef: 'salary:2026-10', status: 'posted' })).toBe(1);
     expect(await M.Journal.countDocuments({ source: 'payroll', sourceRef: 'salary:2026-10', status: 'cancelled' })).toBe(1);
+    await M.Payroll.updateOne({ employee: emp2._id, year: 2026, month: 10 }, { $set: { grossEarnings: 15000, netPay: 13200 } });
+    expect((await post('/accounts/payroll-books/salary', { month: '2026-10' })).status).toBe(201);
     // The cash went out in November.
     expect((await post('/accounts/payroll-books/paid', { month: '2026-10' })).status).toBe(409);
     const nov = (await get('/accounts/payroll-books?month=2026-11')).body;
@@ -177,6 +186,55 @@ describe('payroll into the books', () => {
     expect(dep.status).toBe(201);
     expect(dep.body.summary.statutory.pf).toMatchObject({ due: 4200, deposited: 4200, late: true });
     expect(new Date(dep.body.summary.statutory.due).toISOString().slice(0, 10)).toBe('2026-11-15');
+  });
+});
+
+describe('a challan, a deposit or a certificate is recorded once', () => {
+  it('the same save sent twice, or the same challan entered again, does not double what was deposited', async () => {
+    const challan = { month: '2026-09', section: '194C', amount: 1000, bsrCode: '0510308', challanNo: '00412', depositedOn: '2026-10-06' };
+    const first = await post('/accounts/tds/challans', { ...challan, requestId: 'ch-1' });
+    expect(first.status).toBe(201);
+    // The same request again: answered by the first one's challan.
+    const again = await post('/accounts/tds/challans', { ...challan, requestId: 'ch-1' });
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ replay: true, challan: { _id: first.body.challan._id } });
+    // Entered a second time by hand: refused, saying it is there.
+    const twice = await post('/accounts/tds/challans', challan);
+    expect(twice.status).toBe(409);
+    expect(twice.body.message).toMatch(/Challan 00412 of 2026-10-06 for ₹1000\.00 is already recorded for 2026-09, section 194C/);
+    // Two saves at the same moment: one challan.
+    const other = { ...challan, challanNo: '00455', amount: 700 };
+    const both = await Promise.all([post('/accounts/tds/challans', other), post('/accounts/tds/challans', other)]);
+    expect(both.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(await M.TdsChallan.countDocuments({})).toBe(2);
+    // One challan paid for two months is entered against each: not the same entry.
+    expect((await post('/accounts/tds/challans', { ...challan, month: '2026-08', amount: 400 })).status).toBe(201);
+    // With no challan number yet there is nothing to tell two apart by, but a request id still does.
+    const blank = { month: '2026-09', section: '194J', amount: 250, depositedOn: '2026-10-06', requestId: 'ch-2' };
+    expect((await post('/accounts/tds/challans', blank)).status).toBe(201);
+    expect((await post('/accounts/tds/challans', blank)).status).toBe(200);
+    expect(await M.TdsChallan.countDocuments({ section: '194J' })).toBe(1);
+
+    const StatutoryDeposit = require('../../models/StatutoryDeposit');
+    const dep = { kind: 'pf', month: '2026-10', amount: 4200, challanNo: 'TRRN1234', depositedOn: '2026-11-10' };
+    expect((await post('/accounts/payroll-books/deposits', { ...dep, requestId: 'dep-1' })).status).toBe(201);
+    expect((await post('/accounts/payroll-books/deposits', { ...dep, requestId: 'dep-1' })).body.replay).toBe(true);
+    const depTwice = await post('/accounts/payroll-books/deposits', dep);
+    expect(depTwice.status).toBe(409);
+    expect(depTwice.body.message).toMatch(/PF challan TRRN1234 of 2026-11-10 for ₹4200\.00 is already recorded for 2026-10/);
+    expect((await post('/accounts/payroll-books/deposits', { ...dep, kind: 'esi' })).status).toBe(201);
+    expect(await StatutoryDeposit.countDocuments({})).toBe(2);
+
+    const TdsCertificate = require('../../models/TdsCertificate');
+    const s = await supplier({ name: 'Raja Dyers', pan: 'AAAPR1234F' });
+    const cert = { kind: 'issued', party: s._id, fy: '2026-27', quarter: 'Q2', certNo: 'ABCDEFG', section: '194C', amount: 1000, on: '2026-11-10' };
+    expect((await post('/accounts/tds/certificates', { ...cert, requestId: 'cert-1' })).status).toBe(201);
+    expect((await post('/accounts/tds/certificates', { ...cert, requestId: 'cert-1' })).body.replay).toBe(true);
+    const certTwice = await post('/accounts/tds/certificates', cert);
+    expect(certTwice.status).toBe(409);
+    expect(certTwice.body.message).toMatch(/Certificate ABCDEFG for Raja Dyers, 2026-27 Q2, section 194C is already recorded/);
+    expect((await post('/accounts/tds/certificates', { ...cert, quarter: 'Q3' })).status).toBe(201);
+    expect(await TdsCertificate.countDocuments({})).toBe(2);
   });
 });
 

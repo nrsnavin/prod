@@ -8,6 +8,12 @@
 //  cash box. The slip is what ties them together, numbered
 //  DEP/2026-27/0001, and what the bank's statement will show as one
 //  credit (or one line per cheque, as some banks do).
+//
+//  A slip made by mistake is cancelled as a whole: its cheques go back
+//  in hand (into the account each was entered against) and its cash
+//  contra is cancelled with it. The contra cannot be cancelled by
+//  itself — that left a slip saying cash went in that the books no
+//  longer showed.
 // ══════════════════════════════════════════════════════════════════
 
 const mongoose = require("mongoose");
@@ -33,6 +39,10 @@ const DepositSlipSchema = new mongoose.Schema(
         chequeDate: { type: Date },
         partyName: { type: String, default: "" },
         amount:    { type: Number, required: true },
+        // Where the cheque's voucher stood before the deposit moved it
+        // into this bank: where it goes back to if the slip is cancelled.
+        accountBefore:     { type: mongoose.Types.ObjectId, ref: "BankAccount" },
+        accountNameBefore: { type: String, default: "" },
       }, { _id: false })],
       default: [],
     },
@@ -41,6 +51,9 @@ const DepositSlipSchema = new mongoose.Schema(
     contra:     { type: mongoose.Types.ObjectId, ref: "Contra" },
     contraNo:   { type: String, default: "" },
     total:      { type: Number, required: true },
+    // A slip stored before it could be cancelled has no status: it is posted.
+    status:     { type: String, enum: ["posted", "cancelled"], default: "posted" },
+    cancel:     { reason: String, at: Date, by: { type: mongoose.Types.ObjectId, ref: "User" } },
     createdBy:  { type: mongoose.Types.ObjectId, ref: "User" },
     fingerprints: { type: [FingerprintSchema], default: [] },
   },

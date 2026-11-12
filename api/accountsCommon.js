@@ -85,9 +85,25 @@ const VOUCHER_FIELD = { Invoice: "paidAmount", SupplierBill: "paidAmount", Expen
 const REFUND_SOURCES = { Payment, AccountNote, OpeningBalance: require("../models/OpeningBalance") };
 
 /**
- * Post a receipt or payment voucher from a request body. Throws an
- * ErrorHandler for anything the caller got wrong; returns the voucher
- * (or the one a replayed requestId already made).
+ * A receipt or payment voucher from a request body — THE way a voucher
+ * is made, in two steps:
+ *
+ *   prepareVoucher()  everything but the writes: the checks (account and
+ *                     mode, the books lock, the party, refunds, TDS,
+ *                     adjustments, each allocation, the payment risk
+ *                     checks), then the number, then the document.
+ *   writeVoucher()    the writes, inside a transaction: the voucher,
+ *                     what it takes off each credit it refunds, what it
+ *                     settles on each document, the party's ledger row.
+ *
+ * createVoucher() does both in a transaction of its own. A caller that
+ * posts a voucher as part of something bigger (an expense entered and
+ * paid in one go) prepares it, and writes it inside its own transaction
+ * (api/accountsExpenses.js) — so there is no second place that knows
+ * how a voucher is checked or what it moves.
+ *
+ * Throws an ErrorHandler for anything the caller got wrong; returns the
+ * voucher (or the one a replayed requestId already made).
  *
  * Settled on the documents = money + TDS + adjustments. TDS on a
  * payment is deducted on each document's value net of GST.
@@ -97,8 +113,13 @@ const REFUND_SOURCES = { Payment, AccountNote, OpeningBalance: require("../model
  * server's own reading of the stored line, never from the request body.
  * A line that a live voucher already answers gets that voucher back
  * (replay), whatever request id it was first posted under.
+ *
+ * `opts.pending`: documents the caller will create in the same
+ * transaction as the voucher, as plain objects with their `_id`. An
+ * allocation naming one is checked against it, since it is not in the
+ * database yet.
  */
-async function createVoucher(b, req, opts = {}) {
+async function prepareVoucher(b, req, opts = {}) {
   const kind = b.kind === "receipt" ? "receipt" : b.kind === "payment" ? "payment" : null;
   if (!kind) throw new ErrorHandler("kind must be receipt or payment", 400);
   const bankLine = opts.bankLine ? String(opts.bankLine) : null;
@@ -236,7 +257,7 @@ async function createVoucher(b, req, opts = {}) {
     seen.add(String(a.doc));
     const gross = r2(a.amount);
     if (!(gross > 0)) throw new ErrorHandler(`Allocation ${i + 1}: amount must be more than 0`, 400);
-    const doc = await settle.load(a.docType, a.doc);
+    const doc = (opts.pending || []).find((d) => String(d._id) === String(a.doc)) || await settle.load(a.docType, a.doc);
     if (!doc) throw new ErrorHandler(`Allocation ${i + 1}: document not found`, 404);
     const docNo = settle.numberOf(a.docType, doc);
     const docParty = settle.kindOf(a.docType).party(doc);
@@ -323,48 +344,75 @@ async function createVoucher(b, req, opts = {}) {
   };
   data.fingerprints = [fp(ACTION_CODES.PAYMENT_POSTED, { _id }, req, { voucherNo: number, amount, tds: tdsAmount, adjustments: adjTotal, docs: allocations.map((a) => a.docNo), ...(risk ? { risk: risk.flags, riskNote: risk.note } : {}) })];
 
+  return { data, kind, partyType, party, account, allocations, refundLines, settledTotal, adjTotal, bankLine, requestId: b.requestId ? String(b.requestId) : null };
+}
+
+/**
+ * The writes of a prepared voucher, inside the caller's transaction.
+ * Safe to run again when the transaction is retried: the voucher is
+ * created from plain data and everything else is a conditional update.
+ */
+async function writeVoucher(p, req, session) {
+  const { data, kind, partyType, party, account, allocations, refundLines, settledTotal, adjTotal } = p;
+  const { _id, date, voucherNo: number, mode } = data;
+  const [voucher] = await Payment.create([data], { session });
+  // A refund takes what it pays back off each credit, conditionally:
+  // two refunds of the same advance cannot both spend it.
+  for (const x of refundLines) {
+    const Model = REFUND_SOURCES[x.sourceType];
+    // …and only a credit that is still live: one cancelled in the same moment has nothing to pay back.
+    const res = await Model.updateOne({ _id: x.source, status: x.sourceType === "AccountNote" ? "issued" : "posted", [x.field]: { $gte: x.amount - 0.005 } }, { $inc: { [x.field]: -x.amount } }, { session });
+    if (res.matchedCount === 0) throw new ErrorHandler(`${x.docNo} no longer has ₹${x.amount.toFixed(2)} on account`, 409);
+    await Model.updateOne({ _id: x.source }, [{ $set: { [x.field]: { $round: [`$${x.field}`, 2] } } }], { session });
+  }
+  for (const a of allocations) {
+    if (a.docType === "SupplierBill") {
+      await settle.apply("SupplierBill", a.doc, { paidAmount: r2(a.amount - a.tds), tdsAmount: a.tds }, session, { docNo: a.docNo });
+    } else if (a.docType === "Expense") {
+      await settle.apply("Expense", a.doc, { paidAmount: a.amount }, session, { docNo: a.docNo, extraSet: { paidFrom: account._id, paidAt: date } });
+      await Expense.updateOne({ _id: a.doc }, { $push: { fingerprints: fp(ACTION_CODES.EXPENSE_PAID, { _id: a.doc }, req, { voucherNo: number, amount: a.amount, account: account.name }) } }, { session });
+    } else {
+      await settle.apply(a.docType, a.doc, { [VOUCHER_FIELD[a.docType]]: a.amount }, session, { docNo: a.docNo });
+    }
+  }
+  if (party) {
+    await partyLedger.post({
+      partyType, party: party._id, date, docType: "Payment", doc: _id, docNo: number,
+      ...(kind === "receipt" ? { credit: settledTotal } : { debit: settledTotal }),
+      narration: data.narration || (refundLines.length ? `Refund of ${refundLines.map((x) => x.docNo).join(", ")} by ${mode}` : null) || `${kind === "receipt" ? "Received" : "Paid"} by ${mode}${data.reference ? ` · ${data.reference}` : ""}${adjTotal ? ` · adjusted ₹${adjTotal.toFixed(2)}` : ""}`,
+    }, session);
+  }
+  return voucher;
+}
+
+/**
+ * The voucher that already answers this request, when a write was
+ * refused as a duplicate: the same request id sent twice, or the same
+ * bank line posted by two requests together (the index let one in, and
+ * this one is handed the voucher that won).
+ */
+async function voucherAlreadyPosted(err, p) {
+  if (err?.code !== 11000) return null;
+  if (p.requestId) {
+    const dup = await Payment.findOne({ requestId: p.requestId }).select("-attachments.data").lean();
+    if (dup) return dup;
+  }
+  if (p.bankLine) {
+    const held = await Payment.findOne({ bankLine: p.bankLine, status: "posted" }).select("-attachments.data").lean();
+    if (held) return held;
+  }
+  return null;
+}
+
+async function createVoucher(b, req, opts = {}) {
+  const p = await prepareVoucher(b, req, opts);
+  if (p.replay) return p;
   let voucher;
   try {
-    await withTxn(async (session) => {
-      [voucher] = await Payment.create([data], { session });
-      // A refund takes what it pays back off each credit, conditionally:
-      // two refunds of the same advance cannot both spend it.
-      for (const x of refundLines) {
-        const Model = REFUND_SOURCES[x.sourceType];
-        // …and only a credit that is still live: one cancelled in the same moment has nothing to pay back.
-        const res = await Model.updateOne({ _id: x.source, status: x.sourceType === "AccountNote" ? "issued" : "posted", [x.field]: { $gte: x.amount - 0.005 } }, { $inc: { [x.field]: -x.amount } }, { session });
-        if (res.matchedCount === 0) throw new ErrorHandler(`${x.docNo} no longer has ₹${x.amount.toFixed(2)} on account`, 409);
-        await Model.updateOne({ _id: x.source }, [{ $set: { [x.field]: { $round: [`$${x.field}`, 2] } } }], { session });
-      }
-      for (const a of allocations) {
-        if (a.docType === "SupplierBill") {
-          await settle.apply("SupplierBill", a.doc, { paidAmount: r2(a.amount - a.tds), tdsAmount: a.tds }, session, { docNo: a.docNo });
-        } else if (a.docType === "Expense") {
-          await settle.apply("Expense", a.doc, { paidAmount: a.amount }, session, { docNo: a.docNo, extraSet: { paidFrom: account._id, paidAt: date } });
-          await Expense.updateOne({ _id: a.doc }, { $push: { fingerprints: fp(ACTION_CODES.EXPENSE_PAID, { _id: a.doc }, req, { voucherNo: number, amount: a.amount }) } }, { session });
-        } else {
-          await settle.apply(a.docType, a.doc, { [VOUCHER_FIELD[a.docType]]: a.amount }, session, { docNo: a.docNo });
-        }
-      }
-      if (party) {
-        await partyLedger.post({
-          partyType, party: party._id, date, docType: "Payment", doc: _id, docNo: number,
-          ...(kind === "receipt" ? { credit: settledTotal } : { debit: settledTotal }),
-          narration: data.narration || (refundLines.length ? `Refund of ${refundLines.map((x) => x.docNo).join(", ")} by ${b.mode}` : null) || `${kind === "receipt" ? "Received" : "Paid"} by ${b.mode}${data.reference ? ` · ${data.reference}` : ""}${adjTotal ? ` · adjusted ₹${adjTotal.toFixed(2)}` : ""}`,
-        }, session);
-      }
-    });
+    await withTxn(async (session) => { voucher = await writeVoucher(p, req, session); });
   } catch (err) {
-    if (err?.code === 11000 && b.requestId) {
-      const dup = await Payment.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
-      if (dup) return { voucher: dup, replay: true };
-    }
-    // The same bank line posted by two requests together: the index let
-    // one in, and this one is handed the voucher that won.
-    if (err?.code === 11000 && bankLine) {
-      const held = await Payment.findOne({ bankLine, status: "posted" }).select("-attachments.data").lean();
-      if (held) return { voucher: held, replay: true };
-    }
+    const dup = await voucherAlreadyPosted(err, p);
+    if (dup) return { voucher: dup, replay: true };
     throw err;
   }
   return { voucher, replay: false };
@@ -376,4 +424,7 @@ module.exports = {
   readLines,
   priced,
   createVoucher,
+  prepareVoucher,
+  writeVoucher,
+  voucherAlreadyPosted,
 };

@@ -41,6 +41,7 @@ const ErrorHandler = require("../utils/ErrorHandler");
 const { keepRequestContext } = require("../middleware/userContext");
 const { ACTION_CODES } = require("../utils/fingerprint");
 const { isId, readDate, fp } = require("../services/accountsHelpers");
+const { once } = require("../services/posting");
 const msme = require("../services/msme");
 const gstr2b = require("../services/gstr2b");
 const itcReversal = require("../services/itcReversal");
@@ -142,9 +143,13 @@ const itcAction = (fn, code) => catchAsyncErrors(async (req, res, next) => {
   const month = String(req.body?.month || "");
   if (!MONTH.test(month)) return next(new ErrorHandler("month must be YYYY-MM", 400));
   try {
-    const r = await fn(req.params.id, { month, fingerprint: fp(code, { _id: req.params.id }, req, { month }) });
+    // Not held by the books lock: a step is a figure for that month's
+    // GSTR-3B kept on the bill, worked out after the month's books have
+    // closed and gone to Tally, and it changes nothing that went there.
+    const r = await fn(req.params.id, { month, by: req.user, fingerprint: fp(code, { _id: req.params.id }, req, { month }) });
     res.json({ success: true, ...r });
   } catch (err) {
+    if (err instanceof ErrorHandler) return next(err);
     if (err.status) return next(new ErrorHandler(err.message, err.status));
     throw err;
   }
@@ -206,8 +211,8 @@ router.post("/tds/challans", isAdmin("admin", "accounts"), catchAsyncErrors(asyn
   let depositedOn;
   try { depositedOn = readDate(b.depositedOn, "depositedOn", null); } catch (err) { return next(err); }
   try {
-    const c = await tds.addChallan({ ...b, depositedOn, account: isId(b.account) ? b.account : undefined, by: req.user?._id });
-    res.status(201).json({ success: true, challan: c, register: await tds.register(c.month) });
+    const { challan: c, replay } = await tds.addChallan({ ...b, depositedOn, account: isId(b.account) ? b.account : undefined, by: req.user?._id });
+    res.status(replay ? 200 : 201).json({ success: true, challan: c, register: await tds.register(c.month), ...(replay ? { replay: true } : {}) });
   } catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
 }));
 
@@ -247,8 +252,23 @@ router.post("/tds/certificates", isAdmin("admin", "accounts"), catchAsyncErrors(
   if (!(amount >= 0)) return next(new ErrorHandler("amount must be 0 or more", 400));
   let on;
   try { on = readDate(b.on, "on", new Date()); } catch (err) { return next(err); }
-  const row = await TdsCertificate.create({ kind: b.kind, partyType, party: party._id, partyName: party.name, fy: fyOf(b.fy), quarter: b.quarter, certNo: String(b.certNo || "").trim().slice(0, 20), section: String(b.section || "").trim().toUpperCase(), amount: Math.round(amount * 100) / 100, on, note: String(b.note || "").trim().slice(0, 200), createdBy: req.user?._id });
-  res.status(201).json({ success: true, certificate: row });
+  const data = { kind: b.kind, partyType, party: party._id, partyName: party.name, fy: fyOf(b.fy), quarter: b.quarter, certNo: String(b.certNo || "").trim().slice(0, 20), section: String(b.section || "").trim().toUpperCase(), amount: Math.round(amount * 100) / 100, on, note: String(b.note || "").trim().slice(0, 200), createdBy: req.user?._id };
+  // Recorded once: the same request sent twice is answered by the first
+  // one's row, and a certificate number is entered once for a party,
+  // quarter and section.
+  const already = () => new ErrorHandler(`Certificate ${data.certNo} for ${party.name}, ${data.fy} ${data.quarter}${data.section ? `, section ${data.section}` : ""} is already recorded`, 409);
+  let out;
+  try {
+    out = await once(TdsCertificate, b.requestId, async (id) => {
+      if (data.certNo && await TdsCertificate.exists({ kind: data.kind, party: party._id, fy: data.fy, quarter: data.quarter, section: data.section, certNo: data.certNo })) throw already();
+      return (await TdsCertificate.create({ ...data, requestId: id })).toObject();
+    });
+  } catch (err) {
+    if (err?.code === 11000) return next(already());   // two saves together: the index let one in
+    if (err instanceof ErrorHandler) return next(err);
+    throw err;
+  }
+  res.status(out.replay ? 200 : 201).json({ success: true, certificate: out.doc, ...(out.replay ? { replay: true } : {}) });
 }));
 
 router.get("/tds/receivable", catchAsyncErrors(async (req, res) => {
@@ -288,8 +308,8 @@ router.post("/payroll-books/deposits", isAdmin("admin", "accounts"), catchAsyncE
   let depositedOn;
   try { depositedOn = readDate(b.depositedOn, "depositedOn", null); } catch (err) { return next(err); }
   try {
-    const d = await payrollBooks.addDeposit({ ...b, depositedOn, account: isId(b.account) ? b.account : undefined, by: req.user?._id });
-    res.status(201).json({ success: true, deposit: d, summary: await payrollBooks.summary(d.month) });
+    const { deposit: d, replay } = await payrollBooks.addDeposit({ ...b, depositedOn, account: isId(b.account) ? b.account : undefined, by: req.user?._id });
+    res.status(replay ? 200 : 201).json({ success: true, deposit: d, summary: await payrollBooks.summary(d.month), ...(replay ? { replay: true } : {}) });
   } catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
 }));
 

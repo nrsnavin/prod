@@ -31,6 +31,7 @@ const SupplierBill = require('../models/SupplierBill');
 const Supplier = require('../models/Supplier');
 const Machine = require('../models/Machine');
 const journals = require('./journals');
+const { replayOf, replayAfter } = require('./posting');
 const { allocate } = require('./docNumbers');
 const { getSettings, assertOpen } = require('./booksLock');
 const { isId, r2, fp } = require('./accountsHelpers');
@@ -185,10 +186,8 @@ async function postDepreciation(fy, req) {
 
 /** Read an asset from a request body, filling what a bill or a machine already says. */
 async function create(b, req) {
-  if (b.requestId) {
-    const dup = await FixedAsset.findOne({ requestId: String(b.requestId) }).lean();
-    if (dup) return { asset: dup, replay: true };
-  }
+  const before = await replayOf(FixedAsset, b.requestId);
+  if (before) return { asset: before, replay: true };
   const name = String(b.name || '').trim();
   if (name.length < 2) throw new ErrorHandler('Name the asset', 400);
   if (!BLOCKS[b.block]) throw new ErrorHandler(`block must be one of ${Object.keys(BLOCKS).join(', ')}`, 400);
@@ -237,10 +236,8 @@ async function create(b, req) {
     const asset = await FixedAsset.create(data);
     return { asset: asset.toObject(), replay: false };
   } catch (err) {
-    if (err?.code === 11000 && b.requestId) {
-      const dup = await FixedAsset.findOne({ requestId: String(b.requestId) }).lean();
-      if (dup) return { asset: dup, replay: true };
-    }
+    const dup = await replayAfter(err, FixedAsset, b.requestId);
+    if (dup) return { asset: dup, replay: true };
     throw err;
   }
 }

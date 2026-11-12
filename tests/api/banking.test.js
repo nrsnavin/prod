@@ -110,6 +110,81 @@ describe('deposits', () => {
     expect(list.slips.map((s) => s.slipNo)).toEqual([slip.slipNo]);
   });
 
+  it('a slip made by mistake is cancelled as a whole: cheques in hand again where they were, cash back in the box', async () => {
+    const a = (await chequeIn(41000)).payment;                          // entered against Kotak
+    const c2 = (await chequeIn(17500, { account: sbi._id })).payment;   // entered against SBI
+    await ok(post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: customer._id, amount: 15000, mode: 'cash', account: cash._id, date: today }));
+    const books = async () => { const b = await ok(get('/accounts/banking'), 200); return { kotak: b.accounts.find((x) => x.name === 'Kotak CA').balance, sbi: b.accounts.find((x) => x.name === 'SBI CC').balance, cash: b.totals.cash, inHand: b.inHand.map((c) => c.voucherNo) }; };
+    const before = await books();
+    const slip = (await ok(post('/accounts/deposits', { account: kotak._id, date: today, cheques: [a._id, c2._id], cash: 15000, cashFrom: cash._id }))).slip;
+    expect(slip.status).toBe('posted');
+    expect(slip.cheques.map((c) => c.accountNameBefore || '')).toEqual(['', 'SBI CC']);
+    expect(await books()).not.toEqual(before);
+
+    // The cash on a slip cannot be cancelled by itself (it left the slip saying cash went in that the books no longer showed).
+    const alone = await post(`/accounts/contras/${slip.contra}/cancel`, { reason: 'Cash was not deposited' });
+    expect(alone.status).toBe(409);
+    expect(alone.body.message).toContain(`is the cash on deposit slip ${slip.slipNo} — cancel the slip`);
+    expect((await M.Contra.findById(slip.contra).lean()).status).toBe('posted');
+    expect((await post(`/accounts/deposits/${slip._id}/cancel`, {})).status).toBe(400);
+
+    const res = await ok(post(`/accounts/deposits/${slip._id}/cancel`, { reason: 'The slip was written for the wrong bank' }), 200);
+    expect(res.slip).toMatchObject({ status: 'cancelled', cancel: { reason: 'The slip was written for the wrong bank' } });
+    expect(res.chequesBack).toEqual([a.voucherNo, c2.voucherNo]);
+    expect(res.note).toBeUndefined();
+    const va = await M.Payment.findById(a._id).lean();
+    expect(va.cheque.status).toBe('held');
+    expect(va.cheque.slipNo).toBeUndefined();
+    expect(va.cheque.depositedOn).toBeUndefined();
+    // The cheque entered against SBI is under SBI again.
+    expect(await M.Payment.findById(c2._id).lean()).toMatchObject({ accountName: 'SBI CC', cheque: { status: 'held' } });
+    expect(await M.Contra.findById(slip.contra).lean()).toMatchObject({ status: 'cancelled', cancel: { reason: expect.stringContaining(slip.slipNo) } });
+    // The books are as they were before the slip.
+    expect(await books()).toEqual(before);
+    expect((await post(`/accounts/deposits/${slip._id}/cancel`, { reason: 'The slip was written for the wrong bank' })).status).toBe(409);
+    expect((await get(`/accounts/deposits/${slip._id}/pdf`).buffer(true).parse(binary)).status).toBe(200);
+    expect((await ok(get('/accounts/deposits'), 200)).slips.find((x) => x._id === slip._id).status).toBe('cancelled');
+
+    // The same cheques go in on a new slip, into the right bank this time.
+    const again = (await ok(post('/accounts/deposits', { account: sbi._id, date: today, cheques: [a._id, c2._id] }))).slip;
+    expect(again.slipNo).not.toBe(slip.slipNo);
+    expect(await M.Payment.findById(a._id).lean()).toMatchObject({ accountName: 'SBI CC', cheque: { status: 'deposited', slipNo: again.slipNo } });
+  });
+
+  it('a slip the bank has taken cannot be cancelled; two cancels together cancel a slip once', async () => {
+    const a = (await chequeIn(52000)).payment;
+    const b2 = (await chequeIn(53000)).payment;
+    const slip = (await ok(post('/accounts/deposits', { account: kotak._id, date: today, cheques: [a._id, b2._id] }))).slip;
+    await ok(post(`/accounts/payments/${b2._id}/cheque`, { action: 'cleared', on: today }), 200);
+    const res = await post(`/accounts/deposits/${slip._id}/cancel`, { reason: 'The slip was written for the wrong bank' });
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/Cheque 153000 has cleared — the bank took this slip/);
+    // Nothing of it was undone.
+    expect((await M.DepositSlip.findById(slip._id).lean()).status).toBe('posted');
+    expect((await M.Payment.findById(a._id).lean()).cheque).toMatchObject({ status: 'deposited', slipNo: slip.slipNo });
+
+    const c = (await chequeIn(54000)).payment;
+    const other = (await ok(post('/accounts/deposits', { account: kotak._id, date: today, cheques: [c._id] }))).slip;
+    const both = await Promise.all([1, 2].map(() => post(`/accounts/deposits/${other._id}/cancel`, { reason: 'Entered twice by mistake' })));
+    expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect((await M.Payment.findById(c._id).lean()).fingerprints.filter((f) => f.meta?.to === 'held')).toHaveLength(1);
+  });
+
+  it('a slip made before slips could be cancelled is cancelled too, and says what it cannot know', async () => {
+    const a = (await chequeIn(61000, { account: sbi._id })).payment;
+    await ok(post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: customer._id, amount: 5000, mode: 'cash', account: cash._id, date: today }));
+    const slip = (await ok(post('/accounts/deposits', { account: kotak._id, date: today, cheques: [a._id], cash: 5000, cashFrom: cash._id }))).slip;
+    // As it was stored before: no status, nothing about where the cheque came from — and its cash contra cancelled by itself.
+    await M.DepositSlip.collection.updateOne({ _id: new mongoose.Types.ObjectId(slip._id) }, { $unset: { status: '', 'cheques.0.accountBefore': '', 'cheques.0.accountNameBefore': '' } });
+    await M.Contra.collection.updateOne({ _id: new mongoose.Types.ObjectId(slip.contra) }, { $set: { status: 'cancelled', cancel: { reason: 'Cancelled by itself', at: new Date() } } });
+    // Such a contra's slip is still live, and the slip is what is cancelled.
+    const res = await ok(post(`/accounts/deposits/${slip._id}/cancel`, { reason: 'The cash never went to the bank' }), 200);
+    expect(res.slip.status).toBe('cancelled');
+    expect(res.note).toMatch(/in hand again under Kotak CA\. This slip was made before the app kept which account/);
+    expect(await M.Payment.findById(a._id).lean()).toMatchObject({ accountName: 'Kotak CA', cheque: { status: 'held' } });
+    expect((await M.Contra.findById(slip.contra).lean()).cancel.reason).toBe('Cancelled by itself');
+  });
+
   it('shows the cheques we issued not yet cleared, and what the bank has not shown yet', async () => {
     await ok(post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: supplier._id, amount: 9000, mode: 'cheque', account: kotak._id, date: today, cheque: { number: '000451' } }));
     const b = await ok(get('/accounts/banking'), 200);

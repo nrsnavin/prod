@@ -190,6 +190,116 @@ describe('expenses', () => {
     expect((await post('/accounts/expenses', { category: cat._id, description: 'Toner', amount: 2500 })).body.expense.status).toBe('pending');
   });
 
+  it('is paid by the same rules as any payment: the account and the mode agree, a card works, the day is open', async () => {
+    const cat = await category('Office & stationery');
+    const cash = await cashBox();
+    const kotak = (await post('/accounts/bank-accounts', { name: 'Kotak CA', kind: 'bank', openingBalance: 50000 })).body.account;
+    const card = (await post('/accounts/bank-accounts', { name: 'HDFC Card', kind: 'card', bankName: 'HDFC' })).body.account;
+    const raise = async (description) => (await post('/accounts/expenses', { category: cat._id, description, payeeName: 'Stationers', amount: 800, date: '2026-07-05' })).body.expense._id;
+
+    // Cash does not come out of a bank account, nor a transfer out of the cash box (an expense used to take either).
+    const a = await raise('Printer paper');
+    const wrong = await post(`/accounts/expenses/${a}/pay`, { account: kotak._id, mode: 'cash' });
+    expect(wrong.status).toBe(400);
+    expect(wrong.body.message).toMatch(/Cash is received into and paid from a cash account/);
+    expect((await post(`/accounts/expenses/${a}/pay`, { account: cash._id, mode: 'bank' })).body.message).toMatch(/is the cash box/);
+    expect((await post(`/accounts/expenses/${a}/pay`, { account: kotak._id, mode: 'wire' })).status).toBe(400);
+    expect(await M.Payment.countDocuments({})).toBe(0);
+    expect((await M.Expense.findById(a).lean())).toMatchObject({ status: 'approved', paidAmount: 0 });
+
+    // On the company card: by card, whether the request says so or not (an expense used to refuse a card).
+    const byCard = await post(`/accounts/expenses/${a}/pay`, { account: card._id });
+    expect(byCard.status).toBe(200);
+    expect(await M.Payment.findById(byCard.body.voucher._id).lean()).toMatchObject({ mode: 'card', accountName: 'HDFC Card', partyType: 'other', amount: 800, allocations: [expect.objectContaining({ docType: 'Expense', amount: 800 })] });
+    const paid = await M.Expense.findById(a).lean();
+    expect(paid).toMatchObject({ status: 'paid', paidAmount: 800 });
+    expect(String(paid.paidFrom)).toBe(String(card._id));
+    expect(paid.fingerprints[paid.fingerprints.length - 1].meta).toMatchObject({ voucherNo: byCard.body.voucher.voucherNo, amount: 800, account: 'HDFC Card' });
+
+    // By cheque: the cheque is on the voucher, issued, like any cheque we write.
+    const b = await raise('Toner');
+    const byCheque = await post(`/accounts/expenses/${b}/pay`, { account: kotak._id, mode: 'cheque', reference: '000812', date: '2026-07-06' });
+    expect(byCheque.status).toBe(200);
+    expect((await M.Payment.findById(byCheque.body.voucher._id).lean())).toMatchObject({ mode: 'cheque', cheque: { number: '000812', status: 'deposited' } });
+
+    // The books lock is asked for the day it is paid on.
+    const c = await raise('Files');
+    await post('/accounts/lock', { lockDate: '2026-07-31' });
+    const locked = await post(`/accounts/expenses/${c}/pay`, { account: cash._id, date: '2026-07-20' }, clerk);
+    expect(locked.status).toBe(409);
+    expect(locked.body.code).toBe('BOOKS_LOCKED');
+    expect((await post(`/accounts/expenses/${c}/pay`, { account: cash._id, date: '2026-08-02' }, clerk)).status).toBe(200);
+  });
+
+  it('the same pay request sent twice pays once; two together pay once', async () => {
+    const cat = await category('Office & stationery');
+    const cash = await cashBox();
+    const a = (await post('/accounts/expenses', { category: cat._id, description: 'Printer paper', payeeName: 'Stationers', amount: 800 })).body.expense._id;
+    const first = await post(`/accounts/expenses/${a}/pay`, { account: cash._id, requestId: 'pay-a-1' });
+    expect(first.status).toBe(200);
+    expect(first.body.replay).toBeUndefined();
+    const again = await post(`/accounts/expenses/${a}/pay`, { account: cash._id, requestId: 'pay-a-1' });
+    expect(again.status).toBe(200);
+    expect(again.body).toMatchObject({ replay: true, voucher: { voucherNo: first.body.voucher.voucherNo } });
+    expect(await M.Payment.countDocuments({})).toBe(1);
+
+    const b = (await post('/accounts/expenses', { category: cat._id, description: 'Toner', payeeName: 'Stationers', amount: 900 })).body.expense._id;
+    const both = await Promise.all([1, 2].map(() => post(`/accounts/expenses/${b}/pay`, { account: cash._id, requestId: 'pay-b-1' })));
+    expect(both.map((r) => r.status)).toEqual([200, 200]);
+    expect(new Set(both.map((r) => r.body.voucher.voucherNo)).size).toBe(1);
+    expect(await M.Payment.countDocuments({ 'allocations.doc': b, status: 'posted' })).toBe(1);
+    expect((await M.Expense.findById(b).lean()).paidAmount).toBe(900);
+    // Without a request id the second is refused, not paid again.
+    const c = (await post('/accounts/expenses', { category: cat._id, description: 'Files', payeeName: 'Stationers', amount: 300 })).body.expense._id;
+    const two = await Promise.all([1, 2].map(() => post(`/accounts/expenses/${c}/pay`, { account: cash._id })));
+    expect(two.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect((await M.Expense.findById(c).lean()).paidAmount).toBe(300);
+  });
+
+  it('paying a supplier whose bank account changed lately is stopped until someone says how it was confirmed', async () => {
+    const cat = await category('Job work');
+    const kotak = (await post('/accounts/bank-accounts', { name: 'Kotak CA', kind: 'bank', openingBalance: 50000 })).body.account;
+    const supplier = await M.Supplier.create({ name: 'Colour Works', gstin: '33AAAPC0101F1Z5', address: 'Erode', bank: { accountNo: '50100011223344', ifsc: 'HDFC0000123', changedAt: new Date(Date.now() - 3 * 86_400_000), changedByName: 'Clerk', previousAccountNo: '7612149219' } });
+    const ex = (await post('/accounts/expenses', { category: cat._id, description: 'Dyeing lot 12', supplier: supplier._id, amount: 1500, gstPercent: 12 }, clerk)).body.expense;
+    // Approving and paying in one go is stopped the same way, and the approval with it.
+    const both = await post(`/accounts/expenses/${ex._id}/approve`, { payNow: { account: kotak._id } });
+    expect(both.status).toBe(409);
+    expect(both.body.code).toBe('PAYMENT_RISK');
+    expect((await M.Expense.findById(ex._id).lean()).status).toBe('pending');
+    expect((await post(`/accounts/expenses/${ex._id}/approve`, {})).status).toBe(200);
+    const stopped = await post(`/accounts/expenses/${ex._id}/pay`, { account: kotak._id });
+    expect(stopped.status).toBe(409);
+    expect(stopped.body.code).toBe('PAYMENT_RISK');
+    expect(stopped.body.message).toMatch(/bank account was changed on/);
+    expect(await M.Payment.countDocuments({})).toBe(0);
+    const paid = await post(`/accounts/expenses/${ex._id}/pay`, { account: kotak._id, confirmRisk: true, riskNote: 'Called Mr Kumar on the number on file' });
+    expect(paid.status).toBe(200);
+    const v = await M.Payment.findById(paid.body.voucher._id).lean();
+    expect(v).toMatchObject({ partyType: 'supplier', amount: 1680, risk: { flags: ['BANK_CHANGED'], note: 'Called Mr Kumar on the number on file' } });
+    // On the supplier's account: the expense, and the payment against it.
+    expect((await get(`/accounts/statement?partyType=supplier&party=${supplier._id}`)).body.rows.map((r) => [r.docType, r.debit || 0, r.credit || 0])).toEqual([['Expense', 0, 1680], ['Payment', 1680, 0]]);
+  });
+
+  it('approved and paid in one go: one voucher, numbered for the day it is dated', async () => {
+    const cat = await category('Transport & freight');
+    const cash = await cashBox();
+    const id = (await post('/accounts/expenses', { category: cat._id, description: 'Lorry to Tiruppur', payeeName: 'VRL', amount: 6000, gstPercent: 5 }, clerk)).body.expense._id;
+    // A bad account stops the approval too: nothing is half done.
+    const bad = await post(`/accounts/expenses/${id}/approve`, { payNow: { account: cash._id, mode: 'bank' } });
+    expect(bad.status).toBe(400);
+    expect((await M.Expense.findById(id).lean()).status).toBe('pending');
+    const ok = await post(`/accounts/expenses/${id}/approve`, { payNow: { account: cash._id } });
+    expect(ok.status).toBe(200);
+    expect(ok.body.expense).toMatchObject({ status: 'paid', paidAmount: 6300 });
+    const v = await M.Payment.findById(ok.body.voucher._id).lean();
+    const today = require('../../services/accountsHelpers').businessDay(new Date());
+    expect(new Date(v.date).getTime()).toBe(today.getTime());
+    // The number is drawn for that day's financial year (it was drawn for the server's clock).
+    const y = today.getUTCFullYear();
+    expect(v.financialYear).toBe(today.getUTCMonth() >= 3 ? `${y}-${String(y + 1).slice(2)}` : `${y - 1}-${String(y).slice(2)}`);
+    expect(await M.Payment.countDocuments({})).toBe(1);
+  });
+
   it('two people deciding one expense at the same moment: the first decision stands', async () => {
     // Each read "waiting for approval" and then wrote its decision. The
     // later write won: an expense already approved and on the supplier's

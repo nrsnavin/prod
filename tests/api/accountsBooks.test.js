@@ -256,6 +256,67 @@ describe('opening balances', () => {
     expect(bulk.body).toMatchObject({ posted: 3, failed: 0 });
     expect((await get(`/accounts/statement?partyType=customer&party=${c._id}`)).body.closing).toBe(46500);
     expect((await get('/accounts/opening-balances')).body.totals).toEqual({ customer: { due: 48500, advance: 2000 }, supplier: { due: 32150, advance: 0 } });
+
+    // The same file posted again — under any name, with any ids the
+    // browser sends — finds every balance already there. (It doubled them.)
+    const rows = res.body.rows.filter((r) => !r.problem);
+    const again = await post('/accounts/opening-balances/bulk', { rows: rows.map((r, i) => ({ ...r, requestId: `another-name.xlsx:${i}:${r.amount}` })) });
+    expect(again.body).toMatchObject({ posted: 3, failed: 0 });
+    expect(again.body.results.every((r) => r.replay)).toBe(true);
+    expect(again.body.results.map((r) => r.docNo)).toEqual(bulk.body.results.map((r) => r.docNo));
+    expect((await get('/accounts/opening-balances')).body.totals).toEqual({ customer: { due: 48500, advance: 2000 }, supplier: { due: 32150, advance: 0 } });
+
+    // A corrected file with the same name: the corrected row is a new
+    // balance and is posted; the rest are already there. (It was taken as posted.)
+    const fixed = rows.map((r) => (r.refNo === 'INV-1' ? { ...r, amount: 48700 } : r));
+    const third = await post('/accounts/opening-balances/bulk', { rows: fixed });
+    expect(third.body.results.map((r) => !!r.replay)).toEqual([false, true, true]);
+    expect((await get('/accounts/opening-balances')).body.totals.customer.due).toBe(48500 + 48700);
+
+    // The wrong one is cancelled; imported again after that, it is posted afresh, not taken as there.
+    const wrong = await M.OpeningBalance.findOne({ refNo: 'INV-1', amount: 48500 }).lean();
+    expect((await post(`/accounts/opening-balances/${wrong._id}/cancel`, { reason: 'Imported with the wrong amount' })).status).toBe(200);
+    const fourth = await post('/accounts/opening-balances/bulk', { rows: [rows.find((r) => r.refNo === 'INV-1')] });
+    expect(fourth.body.results[0]).toMatchObject({ ok: true });
+    expect(fourth.body.results[0].replay).toBeUndefined();
+
+    // Two rows alike in one file are two balances; sent again, both are found.
+    const twin = { partyType: 'customer', party: String(c._id), kind: 'due', refNo: '', date: '2026-03-28', amount: 500 };
+    const two = await post('/accounts/opening-balances/bulk', { rows: [twin, twin] });
+    expect(two.body.results.map((r) => !!r.replay)).toEqual([false, false]);
+    expect(new Set(two.body.results.map((r) => r.docNo)).size).toBe(2);
+    expect((await post('/accounts/opening-balances/bulk', { rows: [twin, twin] })).body.results.map((r) => !!r.replay)).toEqual([true, true]);
+    // Twice at the same moment: still two.
+    const twin2 = { ...twin, date: '2026-03-29' };
+    await Promise.all([post('/accounts/opening-balances/bulk', { rows: [twin2] }), post('/accounts/opening-balances/bulk', { rows: [twin2] })]);
+    expect(await M.OpeningBalance.countDocuments({ date: new Date('2026-03-29T00:00:00Z'), status: 'posted' })).toBe(1);
+  });
+
+  it('a credit applied by the same request twice is applied once', async () => {
+    const c = await customer();
+    const inv = await invoice(c);
+    const acct = await bank();
+    const adv = await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: c._id, amount: 9000, mode: 'bank', account: acct._id, date: '2026-06-10' });
+    const body = { source: { type: 'Payment', id: adv.body.payment._id }, allocations: [{ docType: 'Invoice', doc: inv._id, amount: 3000 }], requestId: 'apply-1' };
+    const first = await post('/accounts/credits/apply', body);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ applied: 3000 });
+    expect(first.body.replay).toBeUndefined();
+    // Sent again: answered by what the first did. (There was room for it a second time.)
+    const second = await post('/accounts/credits/apply', body);
+    expect(second.status).toBe(200);
+    expect(second.body).toMatchObject({ applied: 3000, replay: true, docs: [{ docNo: inv.invoiceNumber, amount: 3000 }] });
+    expect((await M.Invoice.findById(inv._id).lean()).paidAmount).toBe(3000);
+    expect((await M.Payment.findById(adv.body.payment._id).lean()).unallocated).toBe(6000);
+    // Twice at the same moment under one id: once.
+    const body2 = { ...body, requestId: 'apply-2', allocations: [{ docType: 'Invoice', doc: inv._id, amount: 2000 }] };
+    const both = await Promise.all([post('/accounts/credits/apply', body2), post('/accounts/credits/apply', body2)]);
+    expect(both.map((r) => r.status)).toEqual([200, 200]);
+    expect((await M.Invoice.findById(inv._id).lean()).paidAmount).toBe(5000);
+    expect((await M.Payment.findById(adv.body.payment._id).lean()).unallocated).toBe(4000);
+    // Another request is another application.
+    expect((await post('/accounts/credits/apply', { ...body, requestId: 'apply-3', allocations: [{ docType: 'Invoice', doc: inv._id, amount: 1000 }] })).body.applied).toBe(1000);
+    expect((await M.Invoice.findById(inv._id).lean()).paidAmount).toBe(6000);
   });
 });
 
@@ -297,7 +358,7 @@ describe('the books lock', () => {
 // ══════════════════════════════════════════════════════════════════
 describe('the lock is asked by every posting', () => {
   const Journal = () => require('../../models/Journal');
-  const asset = () => post('/accounts/fixed-assets', { name: 'Needle loom 12', block: 'plant', purchaseDate: '2025-05-01', putToUse: '2025-05-10', cost: 1000000 });
+  const asset = (over = {}) => post('/accounts/fixed-assets', { name: 'Needle loom 12', block: 'plant', purchaseDate: '2025-05-01', putToUse: '2025-05-10', cost: 1000000, ...over });
 
   it('depreciation, closing stock and an asset disposal are refused inside a closed year', async () => {
     const a = await asset();
@@ -327,9 +388,15 @@ describe('the lock is asked by every posting', () => {
     const j = await Journal().findOne({ source: 'depreciation', sourceRef: '2025-26', status: 'posted' }).lean();
     expect(j.fingerprints[0].meta).toMatchObject({ lockOverride: 'Auditor asked for the depreciation entry' });
 
-    // Re-posting cancels the first and posts another: both inside the closed year, both need the reason.
+    // Posted again with nothing changed, the journal stays as it is: nothing in the closed year moves, so nothing is asked.
+    const same = await post('/accounts/fixed-assets/depreciation', { fy: '2025-26' }, clerk);
+    expect(same.status).toBe(201);
+    expect(await Journal().countDocuments({ source: 'depreciation' })).toBe(1);
+    // Another asset of that year: re-posting cancels the first and posts another, both inside the closed year, both need the reason.
+    expect((await asset({ name: 'Warping machine', cost: 400000 })).status).toBe(201);
     expect((await post('/accounts/fixed-assets/depreciation', { fy: '2025-26' }, clerk)).status).toBe(409);
     expect(await Journal().countDocuments({ source: 'depreciation', status: 'posted' })).toBe(1);
+    expect(await Journal().countDocuments({ source: 'depreciation' })).toBe(1);
 
     const h = (await get('/accounts/lock/history')).body.events;
     expect(h.map((e) => e.kind)).toEqual(['override', 'closed']);

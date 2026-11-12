@@ -33,6 +33,7 @@ const { parseCsv, parseDate } = require("../services/bankStatement");
 
 const BankAccount      = require("../models/BankAccount");
 const Contra           = require("../models/Contra");
+const depositSlips = require("../services/depositSlips");
 const OpeningBalance   = require("../models/OpeningBalance");
 const AccountsSettings = require("../models/AccountsSettings");
 const Customer         = require("../models/Customer");
@@ -65,10 +66,8 @@ router.get("/contras/:id", catchAsyncErrors(async (req, res, next) => {
 
 router.post("/contras", catchAsyncErrors(async (req, res, next) => {
   const b = req.body || {};
-  if (b.requestId) {
-    const dup = await Contra.findOne({ requestId: String(b.requestId) }).lean();
-    if (dup) return res.json({ success: true, contra: dup, replay: true });
-  }
+  const before = await replayOf(Contra, b.requestId);
+  if (before) return res.json({ success: true, contra: before, replay: true });
   if (!isId(b.from) || !isId(b.to)) return next(new ErrorHandler("Pick the account the money left and the one it went to", 400));
   if (String(b.from) === String(b.to)) return next(new ErrorHandler("The two accounts must differ", 400));
   const [from, to] = await Promise.all([BankAccount.findById(b.from).lean(), BankAccount.findById(b.to).lean()]);
@@ -89,10 +88,8 @@ router.post("/contras", catchAsyncErrors(async (req, res, next) => {
       fingerprints: [fp(ACTION_CODES.CONTRA_POSTED, { _id }, req, { contraNo: number, from: from.name, to: to.name, amount })],
     });
   } catch (err) {
-    if (err?.code === 11000 && b.requestId) {
-      const dup = await Contra.findOne({ requestId: String(b.requestId) }).lean();
-      if (dup) return res.json({ success: true, contra: dup, replay: true });
-    }
+    const dup = await replayAfter(err, Contra, b.requestId);
+    if (dup) return res.json({ success: true, contra: dup, replay: true });
     throw err;
   }
   res.status(201).json({ success: true, contra: await Contra.findById(_id).lean() });
@@ -101,6 +98,7 @@ router.post("/contras", catchAsyncErrors(async (req, res, next) => {
 // ── Journal vouchers ───────────────────────────────────────────────
 const Journal = require("../models/Journal");
 const journals = require("../services/journals");
+const { once, replayOf, replayAfter } = require("../services/posting");
 
 router.get("/journals", catchAsyncErrors(async (req, res) => {
   const { page, limit, skip, range } = paging(req);
@@ -176,6 +174,11 @@ router.post("/contras/:id/cancel", catchAsyncErrors(async (req, res, next) => {
   const c = await Contra.findById(req.params.id).lean();
   if (!c) return next(new ErrorHandler("Contra not found", 404));
   if (c.status === "cancelled") return next(new ErrorHandler("Already cancelled", 409));
+  // The cash on a deposit slip is cancelled with its slip, not by itself:
+  // cancelled alone it left a slip saying cash went in that the books no
+  // longer showed.
+  const slip = await depositSlips.owning(c._id);
+  if (slip) return next(new ErrorHandler(`${c.contraNo} is the cash on deposit slip ${slip.slipNo} — cancel the slip, and this goes with it`, 409));
   let reason;
   try { reason = reasonFrom(req); await assertOpen(c.date, req, { cancelling: true }); } catch (err) { return next(err); }
   try {
@@ -262,22 +265,13 @@ async function postOpening(o, req, { importBatch = "", requestId } = {}) {
 
 router.post("/opening-balances", catchAsyncErrors(async (req, res, next) => {
   const b = req.body || {};
-  if (b.requestId) {
-    const dup = await OpeningBalance.findOne({ requestId: String(b.requestId) }).lean();
-    if (dup) return res.json({ success: true, row: dup, replay: true });
-  }
+  // The same request sent twice (or twice at once) is answered by the row the first made.
+  const before = await replayOf(OpeningBalance, b.requestId);
+  if (before) return res.json({ success: true, row: before, replay: true });
   let o;
   try { o = await readOpening(b); await assertOpen(o.date, req); } catch (err) { return next(err); }
-  let row;
-  try { row = await postOpening(o, req, { requestId: b.requestId }); } catch (err) {
-    // The same request sent twice at once: the one that lost is handed the row the other made.
-    if (err?.code === 11000 && b.requestId) {
-      const dup = await OpeningBalance.findOne({ requestId: String(b.requestId) }).lean();
-      if (dup) return res.json({ success: true, row: dup, replay: true });
-    }
-    throw err;
-  }
-  res.status(201).json({ success: true, row });
+  const { doc, replay } = await once(OpeningBalance, b.requestId, (id) => postOpening(o, req, { requestId: id }));
+  res.status(replay ? 200 : 201).json({ success: true, row: doc, ...(replay ? { replay: true } : {}) });
 }));
 
 router.post("/opening-balances/:id/cancel", catchAsyncErrors(async (req, res, next) => {
@@ -296,6 +290,10 @@ router.post("/opening-balances/:id/cancel", catchAsyncErrors(async (req, res, ne
     if (refundedBy) throw new ErrorHandler(`${o.docNo} was refunded by ${refundedBy.voucherNo} — cancel that first`, 409);
     const r = await OpeningBalance.updateOne({ _id: o._id, status: "posted", settledAmount: { $lte: 0 }, "applications.0": { $exists: false } }, {
       $set: { status: "cancelled", unapplied: 0, cancel: { reason, at: new Date(), by: req.user?._id } },
+      // A cancelled balance gives up the id it was posted under: the
+      // same balance, imported again after the mistake is put right, is
+      // posted afresh and not taken as already there.
+      $unset: { requestId: "" },
       $push: { fingerprints: fp(ACTION_CODES.OPENING_CANCELLED, o, req, { docNo: o.docNo, reason }) },
     }, { session });
     if (r.matchedCount === 0) throw new ErrorHandler("Something was set against this balance meanwhile", 409);
@@ -388,17 +386,27 @@ router.post("/opening-balances/bulk", catchAsyncErrors(async (req, res, next) =>
   const fallbackDate = readDate(req.body?.asOn, "asOn", null);
   const importBatch = `import:${Date.now().toString(36)}`;
   const results = [];
+  const alike = new Map();
   for (const [i, raw] of rows.entries()) {
     try {
       const o = await readOpening({ ...raw, date: raw.date || fallbackDate }, i + 1);
       await assertOpen(o.date, req);
-      const requestId = raw.requestId ? String(raw.requestId) : undefined;
-      if (requestId) {
-        const dup = await OpeningBalance.findOne({ requestId }).lean();
-        if (dup) { results.push({ index: i, ok: true, docNo: dup.docNo, replay: true }); continue; }
-      }
-      const row = await postOpening(o, req, { importBatch, requestId });
-      results.push({ index: i, ok: true, docNo: row.docNo });
+      // A balance is known by what it is — whose, which side, its date,
+      // its reference and its amount — and that is the id it is posted
+      // under, whatever the browser sent. The same file posted again
+      // (or under another name, or the same request retried) finds its
+      // rows already there; a corrected row is a different balance and
+      // is posted. Two rows alike in one file are the first and the
+      // second of their kind. (The id used to be the file's name, the
+      // line and the amount: a second upload of one file doubled every
+      // balance when the name differed, and a corrected file with the
+      // same name was taken as posted.)
+      const what = `opening:${o.partyType}:${o.party._id}:${o.kind}:${o.date.toISOString().slice(0, 10)}:${o.refNo.toLowerCase()}:${o.amount.toFixed(2)}`;
+      const nth = (alike.get(what) || 0) + 1;
+      alike.set(what, nth);
+      const requestId = `${what}#${nth}`;
+      const { doc, replay } = await once(OpeningBalance, requestId, () => postOpening(o, req, { importBatch, requestId }), { filter: { status: "posted" } });
+      results.push({ index: i, ok: true, docNo: doc.docNo, ...(replay ? { replay: true } : {}) });
     } catch (err) {
       results.push({ index: i, ok: false, error: err.message });
     }

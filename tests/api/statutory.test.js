@@ -214,6 +214,115 @@ describe('Rule 37: credit on bills unpaid 180 days', () => {
     expect((await get('/accounts/reports/gst?from=2026-11-01&to=2026-11-30')).body.totals.rule37.reclaimed.total).toBe(250);
     expect((await get('/accounts/itc-reversal?month=2026-11')).body.totals.reclaimed).toBe(250);
   });
+
+  it('a bill paid in parts is re-claimed in parts: nothing is lost with the second half', async () => {
+    const s = await supplier();
+    const acct = await bank();
+    const old = await bill(s, { billDate: '2026-03-10' });   // unpaid on its 180th day: all 500 of credit goes back
+    expect((await post(`/accounts/bills/${old._id}/itc-reverse`, { month: '2026-09' })).body).toMatchObject({ amount: 500, reversed: 500, reclaimed: 0 });
+
+    // Half is paid in October: half the credit comes back there.
+    await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s._id, amount: 5250, mode: 'bank', account: acct._id, date: '2026-10-05', allocations: [{ docType: 'SupplierBill', doc: old._id, amount: 5250 }] });
+    expect((await get('/accounts/itc-reversal?month=2026-10')).body.toReclaim).toEqual([expect.objectContaining({ billNo: old.billNo, reversed: 500, reclaimed: 0, reclaim: 250, fully: false, outstanding: 5250 })]);
+    expect((await post(`/accounts/bills/${old._id}/itc-reclaim`, { month: '2026-10' })).body).toMatchObject({ amount: 250, period: '2026-10', reversed: 500, reclaimed: 250 });
+    // Nothing more until more is paid.
+    expect((await get('/accounts/itc-reversal?month=2026-10')).body).toMatchObject({ toReclaim: [], toReverse: [], totals: { reclaimed: 250 } });
+    const early = await post(`/accounts/bills/${old._id}/itc-reclaim`, { month: '2026-10' });
+    expect(early.status).toBe(409);
+    expect(early.body.message).toMatch(/has not been paid since the last re-claim/);
+
+    // The rest is paid in November: the other half comes back. (It was refused as "already re-claimed", and lost.)
+    await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s._id, amount: 5250, mode: 'bank', account: acct._id, date: '2026-11-03', allocations: [{ docType: 'SupplierBill', doc: old._id, amount: 5250 }] });
+    expect((await get('/accounts/itc-reversal?month=2026-11')).body.toReclaim).toEqual([expect.objectContaining({ billNo: old.billNo, reversed: 500, reclaimed: 250, reclaim: 250, fully: true })]);
+    expect((await post(`/accounts/bills/${old._id}/itc-reclaim`, { month: '2026-11' })).body).toMatchObject({ amount: 250, reversed: 500, reclaimed: 500 });
+    const done = await post(`/accounts/bills/${old._id}/itc-reclaim`, { month: '2026-11' });
+    expect(done.status).toBe(409);
+    expect(done.body.message).toMatch(/already re-claimed in full, last in 2026-11/);
+
+    // Each month's GST summary carries its own step.
+    const gst = async (from, to) => (await get(`/accounts/reports/gst?from=${from}&to=${to}`)).body.totals.rule37;
+    expect(await gst('2026-09-01', '2026-09-30')).toMatchObject({ reversed: { total: 500, cgst: 250, sgst: 250 }, reclaimed: { total: 0 } });
+    expect(await gst('2026-10-01', '2026-10-31')).toMatchObject({ reversed: { total: 0 }, reclaimed: { total: 250, cgst: 125, sgst: 125 } });
+    expect(await gst('2026-11-01', '2026-11-30')).toMatchObject({ reclaimed: { total: 250 } });
+    expect(await gst('2026-09-01', '2026-11-30')).toMatchObject({ reversed: { total: 500 }, reclaimed: { total: 500 } });
+    expect((await get('/accounts/itc-reversal?month=2026-10')).body.done.reclaimed).toEqual([expect.objectContaining({ billNo: old.billNo, amount: 250 })]);
+
+    const stored = await M.SupplierBill.findById(old._id).lean();
+    expect(stored.itcReversal).toMatchObject({ amount: 500, period: '2026-09', reclaimAmount: 500, reclaimPeriod: '2026-11' });
+    expect(stored.itcReversal.history.map((h) => [h.kind, h.amount, h.period, h.byName])).toEqual([['reverse', 500, '2026-09', 'Owner'], ['reclaim', 250, '2026-10', 'Owner'], ['reclaim', 250, '2026-11', 'Owner']]);
+  });
+
+  it('a payment cancelled after the re-claim puts the bill back among those to reverse', async () => {
+    const s = await supplier();
+    const acct = await bank();
+    const old = await bill(s, { billDate: '2026-03-10' });
+    await post(`/accounts/bills/${old._id}/itc-reverse`, { month: '2026-09' });
+    const paid = await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s._id, amount: 10500, mode: 'bank', account: acct._id, date: '2026-10-05', allocations: [{ docType: 'SupplierBill', doc: old._id, amount: 10500 }] });
+    expect((await post(`/accounts/bills/${old._id}/itc-reclaim`, { month: '2026-10' })).body.amount).toBe(500);
+    // A paid bill with everything re-claimed has no next step.
+    expect((await get('/accounts/itc-reversal?month=2026-11')).body).toMatchObject({ toReverse: [], toReclaim: [] });
+
+    expect((await post(`/accounts/payments/${paid.body.payment._id}/cancel`, { reason: 'The cheque was returned unpaid' })).status).toBe(200);
+    const nov = (await get('/accounts/itc-reversal?month=2026-11')).body;
+    expect(nov.toReverse).toEqual([expect.objectContaining({ billNo: old.billNo, reverse: 500, again: true, reversed: 500, reclaimed: 500 })]);
+    expect((await post(`/accounts/bills/${old._id}/itc-reverse`, { month: '2026-11' })).body).toMatchObject({ amount: 500, reversed: 1000, reclaimed: 500 });
+    const stored = await M.SupplierBill.findById(old._id).lean();
+    expect(stored.itcReversal.history.map((h) => [h.kind, h.amount, h.period])).toEqual([['reverse', 500, '2026-09'], ['reclaim', 500, '2026-10'], ['reverse', 500, '2026-11']]);
+    // What stands reversed is one bill's credit, not two.
+    expect(require('../../services/itcReversal').standing(stored)).toEqual({ reversed: 1000, reclaimed: 500, net: 500 });
+    expect((await get('/accounts/reports/gst?from=2026-09-01&to=2026-11-30')).body.totals.rule37).toMatchObject({ reversed: { total: 1000 }, reclaimed: { total: 500 } });
+  });
+
+  it('refuses a reversal before the 180 days, a re-claim dated before its reversal, and a step on a cancelled bill', async () => {
+    const s = await supplier();
+    const acct = await bank();
+    const young = await bill(s, { billDate: '2026-08-01' });   // 180 days: 28 Jan 2027
+    const tooSoon = await post(`/accounts/bills/${young._id}/itc-reverse`, { month: '2026-09' });
+    expect(tooSoon.status).toBe(409);
+    expect(tooSoon.body.message).toMatch(/reaches its 180 days on 2027-01-28: there is nothing to reverse in 2026-09/);
+
+    const old = await bill(s, { billDate: '2026-03-10' });
+    await post(`/accounts/bills/${old._id}/itc-reverse`, { month: '2026-09' });
+    await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s._id, amount: 10500, mode: 'bank', account: acct._id, date: '2026-10-05', allocations: [{ docType: 'SupplierBill', doc: old._id, amount: 10500 }] });
+    const before = await post(`/accounts/bills/${old._id}/itc-reclaim`, { month: '2026-08' });
+    expect(before.status).toBe(409);
+    expect(before.body.message).toMatch(/was reversed in 2026-09: re-claim it in that month or a later one/);
+
+    const gone = await bill(s, { billDate: '2026-03-12' });
+    await post(`/accounts/bills/${gone._id}/cancel`, { reason: 'Entered twice by mistake' });
+    const dead = await post(`/accounts/bills/${gone._id}/itc-reverse`, { month: '2026-09' });
+    expect(dead.status).toBe(409);
+    expect(dead.body.message).toMatch(/is cancelled/);
+  });
+
+  it('two people pressing re-claim together re-claim it once', async () => {
+    const s = await supplier();
+    const acct = await bank();
+    const old = await bill(s, { billDate: '2026-03-10' });
+    const both = await Promise.all([post(`/accounts/bills/${old._id}/itc-reverse`, { month: '2026-09' }), post(`/accounts/bills/${old._id}/itc-reverse`, { month: '2026-09' })]);
+    expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
+    await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s._id, amount: 10500, mode: 'bank', account: acct._id, date: '2026-10-05', allocations: [{ docType: 'SupplierBill', doc: old._id, amount: 10500 }] });
+    const two = await Promise.all([post(`/accounts/bills/${old._id}/itc-reclaim`, { month: '2026-10' }), post(`/accounts/bills/${old._id}/itc-reclaim`, { month: '2026-10' })]);
+    expect(two.map((r) => r.status).sort()).toEqual([200, 409]);
+    const stored = await M.SupplierBill.findById(old._id).lean();
+    expect(stored.itcReversal).toMatchObject({ amount: 500, reclaimAmount: 500 });
+    expect(stored.itcReversal.history).toHaveLength(2);
+  });
+
+  it('a bill reversed before steps were kept is read the same, and gets its history with the next step', async () => {
+    const s = await supplier();
+    const acct = await bank();
+    const old = await bill(s, { billDate: '2026-03-10' });
+    // As the app left it before: one reversal, no history.
+    await M.SupplierBill.collection.updateOne({ _id: new mongoose.Types.ObjectId(old._id) }, { $set: { itcReversal: { amount: 500, period: '2026-09', at: new Date('2026-09-20T05:00:00Z'), reclaimAmount: 0, reclaimPeriod: '', reclaimAt: null } } });
+    expect((await get('/accounts/reports/gst?from=2026-09-01&to=2026-09-30')).body.totals.rule37.reversed.total).toBe(500);
+    expect((await get('/accounts/itc-reversal?month=2026-09')).body.done.reversed).toEqual([expect.objectContaining({ billNo: old.billNo, amount: 500 })]);
+    await post('/accounts/payments', { kind: 'payment', partyType: 'supplier', supplier: s._id, amount: 5250, mode: 'bank', account: acct._id, date: '2026-10-05', allocations: [{ docType: 'SupplierBill', doc: old._id, amount: 5250 }] });
+    expect((await post(`/accounts/bills/${old._id}/itc-reclaim`, { month: '2026-10' })).body.amount).toBe(250);
+    const stored = await M.SupplierBill.findById(old._id).lean();
+    expect(stored.itcReversal.history.map((h) => [h.kind, h.amount, h.period])).toEqual([['reverse', 500, '2026-09'], ['reclaim', 250, '2026-10']]);
+    expect((await get('/accounts/reports/gst?from=2026-09-01&to=2026-10-31')).body.totals.rule37).toMatchObject({ reversed: { total: 500 }, reclaimed: { total: 250 } });
+  });
 });
 
 describe('GSTR-1 for a month', () => {

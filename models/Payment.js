@@ -33,6 +33,8 @@ const AllocationSchema = new mongoose.Schema(
     // Set when the allocation was made later, from what the voucher
     // left on account (an advance applied to a later invoice).
     appliedAt: { type: Date },
+    // …and the request that applied it: the same request sent twice applies it once.
+    applyId: { type: String },
     // The Tally batch whose journal carried this later application.
     tallyBatch: { type: mongoose.Types.ObjectId, ref: "TallyBatch" },
   },

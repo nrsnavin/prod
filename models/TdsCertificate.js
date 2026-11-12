@@ -22,6 +22,8 @@ const TdsCertificateSchema = new mongoose.Schema(
     amount:    { type: Number, required: true, min: 0 },
     on:        { type: Date, required: true },           // issued / received on
     note:      { type: String, trim: true, default: "", maxlength: 200 },
+    // The request that recorded it: the same request sent twice records it once.
+    requestId: { type: String, unique: true, sparse: true },
     createdBy: { type: mongoose.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }
@@ -29,5 +31,10 @@ const TdsCertificateSchema = new mongoose.Schema(
 
 TdsCertificateSchema.index({ kind: 1, fy: 1, quarter: 1 });
 TdsCertificateSchema.index({ party: 1, fy: 1 });
+// A certificate number is one certificate: for one party, one quarter, one section.
+TdsCertificateSchema.index(
+  { kind: 1, party: 1, fy: 1, quarter: 1, section: 1, certNo: 1 },
+  { unique: true, partialFilterExpression: { certNo: { $gt: "" } } }
+);
 
 module.exports = mongoose.model("TdsCertificate", TdsCertificateSchema);

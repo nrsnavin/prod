@@ -36,6 +36,7 @@ const partyLedger = require('./partyLedger');
 const { allocate } = require('./docNumbers');
 const { assertOpen } = require('./booksLock');
 const { onceAtATime } = require('../utils/onceAtATime');
+const { replayOf, replayAfter } = require('./posting');
 const { isId, r2, withTxn, fp } = require('./accountsHelpers');
 const { ACTION_CODES } = require('../utils/fingerprint');
 
@@ -170,10 +171,8 @@ async function cancelIn(session, j, reason, req) {
  */
 async function post(b, req) {
   const { requestId, date, lines } = b;
-  if (requestId) {
-    const dup = await Journal.findOne({ requestId: String(requestId) }).lean();
-    if (dup) return { journal: dup, replay: true };
-  }
+  const before = await replayOf(Journal, requestId);
+  if (before) return { journal: before, replay: true };
   // The books lock is asked here, not by each caller: the journals that
   // payroll, depreciation and stock post come through this one door too.
   await assertOpen(date, req);
@@ -182,10 +181,8 @@ async function post(b, req) {
   try {
     await withTxn(async (session) => { journal = await postIn(session, data, lines); });
   } catch (err) {
-    if (err?.code === 11000 && requestId) {
-      const dup = await Journal.findOne({ requestId: String(requestId) }).lean();
-      if (dup) return { journal: dup, replay: true };
-    }
+    const dup = await replayAfter(err, Journal, requestId);
+    if (dup) return { journal: dup, replay: true };
     throw err;
   }
   return { journal: journal.toObject ? journal.toObject() : journal, replay: false };
@@ -213,11 +210,34 @@ async function cancel(j, reason, req) {
  * @param b       { date, purpose, narration, reason, lines, source, sourceRef } — lines as read() takes them
  * @param why     the reason written on the journal it replaces
  */
+/** What a line says, for telling two journals apart. */
+const lineSays = (l) => [
+  l.kind, l.ledger || '', r2(l.debit), r2(l.credit), String(l.customer || l.supplier || ''), String(l.account || ''), String(l.category || ''),
+  (l.refs || []).map((r) => `${r.docType}:${r.doc}:${r2(r.amount)}`).join(','),
+].join('|');
+
+/** Whether a posted journal already says exactly what is about to be posted. */
+function sameJournal(posted, { date, narration, lines, total }) {
+  return new Date(posted.date).getTime() === new Date(date).getTime()
+    && r2(posted.total) === r2(total)
+    && String(posted.narration || '') === String(narration || '').trim().slice(0, 300)
+    && (posted.lines || []).length === lines.length
+    && posted.lines.every((l, i) => lineSays(l) === lineSays(lines[i]));
+}
+
 async function replace(b, why, req) {
   if (!b.source || b.source === 'manual' || !b.sourceRef) throw new ErrorHandler('replace() is for a journal another process keeps: source and sourceRef are required', 500);
   return onceAtATime(`journal:${b.source}:${b.sourceRef}`, async () => {
     const { lines, total } = await read({ lines: b.lines });
     const before = await Journal.findOne({ source: b.source, sourceRef: b.sourceRef, status: 'posted' }).lean();
+    // The same journal again — the button pressed twice, the request
+    // retried, a month posted again with nothing changed: it is already
+    // in the books, and stays as it is. (Replacing it with its own copy
+    // cancelled a voucher and used a number for nothing, and sent Tally
+    // a cancellation and a new voucher for no change.)
+    if (before && sameJournal(before, { date: b.date, narration: b.narration, lines, total })) {
+      return { journal: before, replay: true, unchanged: true, replaced: null };
+    }
     await assertOpen(b.date, req);
     if (before) await assertOpen(before.date, req, { cancelling: true });
     const data = await build({ ...b, lines, total }, req);

@@ -66,6 +66,7 @@ const { getSettings: getBooksSettings } = require("../services/booksLock");
 const bankBalances = require("../services/bankBalances");
 const { assertOpen } = require("../services/booksLock");
 const { onceAtATime } = require("../utils/onceAtATime");
+const { replayOf, replayAfter } = require("../services/posting");
 const { upload, sellerStateCode, readLines, priced } = require("./accountsCommon");
 const router = express.Router();
 
@@ -210,10 +211,8 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
   if (!isId(b.supplier)) return next(new ErrorHandler("supplier is required", 400));
   const supplierBillNo = String(b.supplierBillNo || "").trim();
   if (!supplierBillNo) return next(new ErrorHandler("The supplier's bill number is required", 400));
-  if (b.requestId) {
-    const dup = await SupplierBill.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
-    if (dup) return res.status(200).json({ success: true, bill: dup, replay: true });
-  }
+  const before = await replayOf(SupplierBill, b.requestId, { select: "-attachments.data" });
+  if (before) return res.status(200).json({ success: true, bill: before, replay: true });
   const supplier = await Supplier.findById(b.supplier).lean();
   if (!supplier) return next(new ErrorHandler("Supplier not found", 404));
   let billDate, dueDate, lines;
@@ -339,10 +338,8 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     }
   } catch (err) {
     if (err?.code === 11000) {
-      if (b.requestId) {
-        const dup = await SupplierBill.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
-        if (dup) return res.status(200).json({ success: true, bill: dup, replay: true });
-      }
+      const dup = await replayAfter(err, SupplierBill, b.requestId, { select: "-attachments.data" });
+      if (dup) return res.status(200).json({ success: true, bill: dup, replay: true });
       return next(new ErrorHandler(`Bill ${supplierBillNo} from ${supplier.name} is already entered`, 409));
     }
     if (err instanceof ErrorHandler) return next(err);

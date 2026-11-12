@@ -29,6 +29,7 @@ const { parseCsv, sheetRows, parseDate } = require('./bankStatement');
 const { getSettings } = require('./booksLock');
 const { withTxn } = require('./accountsHelpers');
 const { onceAtATime } = require('../utils/onceAtATime');
+const { once } = require('./posting');
 
 const { r2 } = require('../utils/money');
 const DAY = 86_400_000;
@@ -90,12 +91,29 @@ async function register(month) {
   };
 }
 
-async function addChallan({ month, section, amount, interest = 0, bsrCode, challanNo, depositedOn, account, note, by }) {
+/**
+ * Record a challan, once: the same request sent twice is answered by
+ * the challan the first made, and a challan already on the register
+ * (same bank code, serial, date, month, section and amount) is refused.
+ * @returns {{ challan, replay }}
+ */
+async function addChallan({ month, section, amount, interest = 0, bsrCode, challanNo, depositedOn, account, note, by, requestId }) {
   if (!/^\d{4}-\d{2}$/.test(String(month || ''))) throw Object.assign(new Error('month must be YYYY-MM'), { status: 400 });
   if (!(r2(amount) > 0)) throw Object.assign(new Error('amount must be more than 0'), { status: 400 });
   if (!section) throw Object.assign(new Error('section is required'), { status: 400 });
   if (!depositedOn) throw Object.assign(new Error('depositedOn is required'), { status: 400 });
-  return TdsChallan.create({ month, section: String(section).toUpperCase(), amount: r2(amount), interest: r2(interest), bsrCode: String(bsrCode || '').trim(), challanNo: String(challanNo || '').trim(), depositedOn, account: account || undefined, note: String(note || '').trim(), createdBy: by || undefined });
+  const data = { month, section: String(section).toUpperCase(), amount: r2(amount), interest: r2(interest), bsrCode: String(bsrCode || '').trim(), challanNo: String(challanNo || '').trim(), depositedOn, account: account || undefined, note: String(note || '').trim(), createdBy: by || undefined };
+  const already = () => Object.assign(new Error(`Challan ${data.challanNo} of ${depositedOn.toISOString().slice(0, 10)} for ₹${data.amount.toFixed(2)} is already recorded for ${month}, section ${data.section}`), { status: 409 });
+  try {
+    const { doc, replay } = await once(TdsChallan, requestId, async (id) => {
+      if (data.challanNo && await TdsChallan.exists({ month, section: data.section, bsrCode: data.bsrCode, challanNo: data.challanNo, depositedOn, amount: data.amount })) throw already();
+      return (await TdsChallan.create({ ...data, requestId: id })).toObject();
+    });
+    return { challan: doc, replay };
+  } catch (err) {
+    if (err?.code === 11000) throw already();   // two saves together: the index let one in
+    throw err;
+  }
 }
 
 /** The quarter's deductee-wise rows and the checks a return preparer makes. */

@@ -38,6 +38,7 @@ const {
 const settle = require("../services/settle");
 const { assertOpen } = require("../services/booksLock");
 const { onceAtATime, perDocument } = require("../utils/onceAtATime");
+const { replayOf, replayAfter } = require("../services/posting");
 const { sellerStateCode, readLines, priced } = require("./accountsCommon");
 const router = express.Router();
 
@@ -85,10 +86,8 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
   if (!kind) return next(new ErrorHandler("kind must be credit or debit", 400));
   // A credit note is to a customer; a debit note to a supplier unless it says customer.
   const partyType = kind === "credit" ? "customer" : b.partyType === "customer" ? "customer" : "supplier";
-  if (b.requestId) {
-    const dup = await AccountNote.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
-    if (dup) return res.status(200).json({ success: true, note: dup, replay: true });
-  }
+  const before = await replayOf(AccountNote, b.requestId, { select: "-attachments.data" });
+  if (before) return res.status(200).json({ success: true, note: before, replay: true });
   const reason = String(b.reason || "").trim();
   if (reason.length < 3) return next(new ErrorHandler("reason is required", 400));
   if (!isId(b.against?.doc)) return next(new ErrorHandler("against.doc is required", 400));
@@ -177,10 +176,8 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
     // in the series is accounted for (models/BurntNumber.js). A note to
     // a supplier is not a document the GST return lists.
     await burn(partyType === "customer" ? `${kind}-note` : `${kind}-note-supplier`, { number, financialYear, sequence, date, reason: err?.message, req });
-    if (err?.code === 11000 && b.requestId) {
-      const dup = await AccountNote.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
-      if (dup) return res.status(200).json({ success: true, note: dup, replay: true });
-    }
+    const dup = await replayAfter(err, AccountNote, b.requestId, { select: "-attachments.data" });
+    if (dup) return res.status(200).json({ success: true, note: dup, replay: true });
     if (err instanceof ErrorHandler) return next(err);
     throw err;
   }

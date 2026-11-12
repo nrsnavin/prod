@@ -89,7 +89,12 @@ const sourceNo = (sourceType, src) => (sourceType === 'Payment' ? src.voucherNo 
 const isLive = (sourceType, src) => (sourceType === 'AccountNote' ? src.status === 'issued' : src.status === 'posted');
 
 /**
- * body: { source: { type, id }, allocations: [{ docType, doc, amount }] }
+ * body: { source: { type, id }, allocations: [{ docType, doc, amount }], requestId? }
+ *
+ * With a request id the same request sent twice applies the credit once:
+ * the lines it made carry the id, the second request is answered by
+ * them, and the write itself refuses a credit that already carries it
+ * (two requests together cannot both get past the look-up).
  */
 async function apply(body, req) {
   const sourceType = body.source?.type;
@@ -97,7 +102,17 @@ async function apply(body, req) {
   if (!Model) throw new ErrorHandler('source.type must be Payment, AccountNote or OpeningBalance', 400);
   if (!isId(body.source?.id)) throw new ErrorHandler('source.id is required', 400);
   const src = await Model.findById(body.source.id).lean();
+  const applyId = body.requestId ? String(body.requestId).slice(0, 200) : null;
+  const list = sourceType === 'Payment' ? 'allocations' : 'applications';
+  // What an earlier request with this id applied from this credit, if it did.
+  const earlier = (s) => {
+    const made = applyId ? (s?.[list] || []).filter((r) => r.applyId === applyId) : [];
+    if (!made.length) return null;
+    return { applied: r2(made.reduce((t, r) => t + r.amount, 0)), source: { type: sourceType, id: s._id, docNo: sourceNo(sourceType, s) }, docs: made.map((r) => ({ docType: r.docType, doc: r.doc, docNo: r.docNo, amount: r.amount })), replay: true };
+  };
   if (!src || !isLive(sourceType, src)) throw new ErrorHandler('That credit is not available', 404);
+  const before = earlier(src);
+  if (before) return before;
   const rules = rulesFor(sourceType, src);
   const raw = Array.isArray(body.allocations) ? body.allocations : [];
   if (!raw.length) throw new ErrorHandler('Pick at least one document', 400);
@@ -126,25 +141,34 @@ async function apply(body, req) {
     throw new ErrorHandler(`${sourceNo(sourceType, src)} has only ₹${available(sourceType, src).toFixed(2)} to apply`, 400);
   }
   const now = new Date();
+  const mark = applyId ? { applyId } : {};
 
+  let replayed = null;
   await withTxn(async (session) => {
+    replayed = null;
     // Take it off the credit first, conditionally, so two applications cannot spend it twice.
     const field = sourceType === 'Payment' ? 'unallocated' : 'unapplied';
     const push = sourceType === 'Payment'
-      ? { allocations: { $each: rows.map((r) => ({ docType: r.docType, doc: r.doc, docNo: r.docNo, amount: r.amount, tds: 0, tdsBase: 0, appliedAt: now })) } }
-      : { applications: { $each: rows.map((r) => ({ docType: r.docType, doc: r.doc, docNo: r.docNo, amount: r.amount, at: now, by: req.user?._id })) } };
+      ? { allocations: { $each: rows.map((r) => ({ docType: r.docType, doc: r.doc, docNo: r.docNo, amount: r.amount, tds: 0, tdsBase: 0, appliedAt: now, ...mark })) } }
+      : { applications: { $each: rows.map((r) => ({ docType: r.docType, doc: r.doc, docNo: r.docNo, amount: r.amount, at: now, by: req.user?._id, ...mark })) } };
     const upd = { $inc: { [field]: -total }, $push: push };
     upd.$push.fingerprints = fp(ACTION_CODES.CREDIT_APPLIED, src, req, { applied: total, docs: rows.map((r) => r.docNo) });
     // …and only while the credit is still live: one being cancelled in
     // the same moment is not a credit, and an application pushed onto a
     // cancelled voucher would settle a document with money that is gone.
-    const res = await Model.updateOne({ _id: src._id, status: sourceType === 'AccountNote' ? 'issued' : 'posted', [field]: { $gte: total - 0.005 } }, upd, { session });
-    if (res.matchedCount === 0) throw new ErrorHandler(`${sourceNo(sourceType, src)} no longer has that much to apply`, 409);
+    // …and only once for a request id: the same request, sent again while the first was still on its way.
+    const res = await Model.updateOne({ _id: src._id, status: sourceType === 'AccountNote' ? 'issued' : 'posted', [field]: { $gte: total - 0.005 }, ...(applyId ? { [`${list}.applyId`]: { $ne: applyId } } : {}) }, upd, { session });
+    if (res.matchedCount === 0) {
+      replayed = applyId ? earlier(await Model.findById(src._id).session(session).lean()) : null;
+      if (replayed) return;
+      throw new ErrorHandler(`${sourceNo(sourceType, src)} no longer has that much to apply`, 409);
+    }
     await Model.updateOne({ _id: src._id }, [{ $set: { [field]: { $round: [`$${field}`, 2] } } }], { session });
     for (const r of rows) {
       await settle.apply(r.docType, r.doc, { [r.field]: r.amount }, session, { docNo: r.docNo });
     }
   });
+  if (replayed) return replayed;
   return { applied: total, source: { type: sourceType, id: src._id, docNo: sourceNo(sourceType, src) }, docs: rows.map((r) => ({ docType: r.docType, doc: r.doc, docNo: r.docNo, amount: r.amount })) };
 }
 

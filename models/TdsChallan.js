@@ -20,11 +20,23 @@ const TdsChallanSchema = new mongoose.Schema(
     depositedOn: { type: Date, required: true },
     account:     { type: mongoose.Types.ObjectId, ref: "BankAccount" },
     note:        { type: String, trim: true, default: "", maxlength: 200 },
+    // The request that recorded it: the same request sent twice records it once.
+    requestId:   { type: String, unique: true, sparse: true },
     createdBy:   { type: mongoose.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }
 );
 
 TdsChallanSchema.index({ month: 1, section: 1 });
+// One challan is recorded once. A challan is known by its bank code,
+// its serial and its date; one paid for two months is entered against
+// each month for that month's part, so the month, the section and the
+// amount are part of what makes an entry the same entry. (A challan
+// saved twice doubled what the register showed as deposited, and hid
+// the balance still to pay.)
+TdsChallanSchema.index(
+  { month: 1, section: 1, bsrCode: 1, challanNo: 1, depositedOn: 1, amount: 1 },
+  { unique: true, partialFilterExpression: { challanNo: { $gt: "" } } }
+);
 
 module.exports = mongoose.model("TdsChallan", TdsChallanSchema);

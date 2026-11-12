@@ -86,7 +86,7 @@ async function purchase({ from, to }) {
       state: stateName(b.supplierStateCode || b.supplierGstin?.slice(0, 2)) || '', supplyType: b.supplyType, poNo: b.poNo ?? null, costCentre: b.costCentre?.name || '',
       taxable: r2(t.taxable), cgst: r2(t.cgst), sgst: r2(t.sgst), igst: r2(t.igst), tax: r2(t.tax), roundOff: r2(t.roundOff), grand: r2(t.grand), byRate: byRate(b.lines),
       itc: b.itc?.eligible !== false, itcAmount: r2(b.itc?.amount), reverseCharge: !!b.reverseCharge, rcmTax: r2(b.rcm?.tax), tds: b.tds?.applicable ? `${b.tds.section} @ ${b.tds.rate}%` : '',
-      gstr2b: b.gstr2b?.status || '', itcReversed: r2(b.itcReversal?.amount), cancelled: b.status === 'cancelled', sign: 1,
+      gstr2b: b.gstr2b?.status || '', itcReversed: r2((b.itcReversal?.amount || 0) - (b.itcReversal?.reclaimAmount || 0)), cancelled: b.status === 'cancelled', sign: 1,
       outstanding: b.status === 'cancelled' ? 0 : r2(t.grand - (b.paidAmount || 0) - (b.tdsAmount || 0) - (b.debitedAmount || 0)),
     });
   }

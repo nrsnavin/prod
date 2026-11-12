@@ -77,14 +77,23 @@ describe('a journal another process keeps is posted once', () => {
     expect((await post('/accounts/fixed-assets', { name: 'Needle loom 12', block: 'plant', purchaseDate: '2025-05-01', putToUse: '2025-05-10', cost: 1000000 })).status).toBe(201);
     const both = await Promise.all([post('/accounts/fixed-assets/depreciation', { fy: '2025-26' }), post('/accounts/fixed-assets/depreciation', { fy: '2025-26' })]);
     expect(both.map((r) => r.status)).toEqual([201, 201]);
-    // The second waited for the first, and took its place.
+    // The second waited for the first, found the year's journal already
+    // there saying the same thing, and left it: one journal, one number.
     expect(await posted()).toHaveLength(1);
-    expect(await M.Journal.countDocuments({ source: 'depreciation' })).toBe(2);
+    expect(await M.Journal.countDocuments({ source: 'depreciation' })).toBe(1);
+    expect(both[0].body.journal.journalNo).toBe(both[1].body.journal.journalNo);
 
-    // Posting it again replaces it again: one posted, whatever happened before.
+    // Posted again with nothing changed: still that one journal.
     expect((await post('/accounts/fixed-assets/depreciation', { fy: '2025-26' })).status).toBe(201);
+    expect(await M.Journal.countDocuments({ source: 'depreciation' })).toBe(1);
+
+    // Another asset bought in the year: the journal is replaced, and there is still one posted.
+    expect((await post('/accounts/fixed-assets', { name: 'Warping machine', block: 'plant', purchaseDate: '2025-08-01', putToUse: '2025-08-05', cost: 400000 })).status).toBe(201);
+    const again = await post('/accounts/fixed-assets/depreciation', { fy: '2025-26' });
+    expect(again.status).toBe(201);
+    expect(again.body.journal.journalNo).not.toBe(both[0].body.journal.journalNo);
     expect(await posted()).toHaveLength(1);
-    expect(await M.Journal.countDocuments({ source: 'depreciation', status: 'cancelled' })).toBe(2);
+    expect(await M.Journal.countDocuments({ source: 'depreciation', status: 'cancelled' })).toBe(1);
   });
 
   it('the database itself refuses a second posted journal for the same thing', async () => {
@@ -102,6 +111,10 @@ describe('a journal another process keeps is posted once', () => {
     expect(second.replaced).toBe(first.journal.journalNo);
     const live = await M.Journal.find({ source: 'payroll', sourceRef: 'salary:2026-10', status: 'posted' }).lean();
     expect(live.map((j) => j.total)).toEqual([1200]);
+    // The same thing again changes nothing.
+    const third = await journals.replace(b(1200), 'Replaced', req);
+    expect(third).toMatchObject({ unchanged: true, replay: true, journal: { journalNo: second.journal.journalNo } });
+    expect(await M.Journal.countDocuments({ source: 'payroll', sourceRef: 'salary:2026-10' })).toBe(2);
     // A journal written by hand is not held to one.
     const lines = [{ kind: 'ledger', ledger: 'Depreciation', debit: 100 }, { kind: 'ledger', ledger: 'Accumulated Depreciation', credit: 100 }];
     expect((await post('/accounts/journals', { reason: 'Year end test entry', lines })).status).toBe(201);

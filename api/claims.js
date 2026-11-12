@@ -41,6 +41,7 @@ const aiLedger = require("../services/aiLedger");
 const { promptVersion } = require("../utils/aiPrompts");
 const { suggestCategory } = require("../services/accountsInsights");
 const { onceAtATime } = require("../utils/onceAtATime");
+const { replayOf, replayAfter } = require("../services/posting");
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1 } });
 const PUBLIC = "expenseNo date dueDate categoryName description payeeName totals.grand status approval.byName approval.note approval.at paidAmount paidAt attachments.filename attachments._id attachments.contentType attachments.size createdAt";
@@ -125,10 +126,10 @@ router.get("/:id", catchAsyncErrors(async (req, res, next) => {
 
 router.post("/", catchAsyncErrors(async (req, res, next) => {
   const b = req.body || {};
-  if (b.requestId) {
-    const dup = await Expense.findOne({ requestId: String(b.requestId), "claimant.user": req.user._id }).select(PUBLIC).lean();
-    if (dup) return res.json({ success: true, claim: dup, replay: true });
-  }
+  // Only this person's own claim is a replay.
+  const mine = { select: PUBLIC, filter: { "claimant.user": req.user._id } };
+  const before = await replayOf(Expense, b.requestId, mine);
+  if (before) return res.json({ success: true, claim: before, replay: true });
   if (!isId(b.category)) return next(new ErrorHandler("Pick what it was for", 400));
   const category = await ExpenseCategory.findOne({ _id: b.category, active: { $ne: false } }).lean();
   if (!category) return next(new ErrorHandler("That head is not available", 404));
@@ -178,7 +179,7 @@ async function fileClaim(req, res, next, { b, category, description, amount, dat
   } catch (err) {
     if (err?.code === 11000 && b.requestId) {
       // Only this person's own claim is a replay; another's with the same id is a clash.
-      const dup = await Expense.findOne({ requestId: String(b.requestId), "claimant.user": req.user._id }).select(PUBLIC).lean();
+      const dup = await replayAfter(err, Expense, b.requestId, mine);
       if (dup) return res.json({ success: true, claim: dup, replay: true });
       return next(new ErrorHandler("That request id is already used", 409));
     }

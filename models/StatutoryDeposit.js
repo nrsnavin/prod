@@ -18,11 +18,18 @@ const StatutoryDepositSchema = new mongoose.Schema(
     depositedOn: { type: Date, required: true },
     account:     { type: mongoose.Types.ObjectId, ref: "BankAccount" },
     note:        { type: String, trim: true, default: "", maxlength: 200 },
+    // The request that recorded it: the same request sent twice records it once.
+    requestId:   { type: String, unique: true, sparse: true },
     createdBy:   { type: mongoose.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }
 );
 
 StatutoryDepositSchema.index({ month: 1, kind: 1 });
+// One challan is recorded once for a month (a deposit saved twice showed the month paid twice over).
+StatutoryDepositSchema.index(
+  { kind: 1, month: 1, challanNo: 1, depositedOn: 1, amount: 1 },
+  { unique: true, partialFilterExpression: { challanNo: { $gt: "" } } }
+);
 
 module.exports = mongoose.model("StatutoryDeposit", StatutoryDepositSchema);

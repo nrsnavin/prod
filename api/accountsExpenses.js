@@ -37,15 +37,15 @@ const {
   DAY,
   isId,
   readDate,
-  businessDay,
   reasonFrom,
   fp,
   withTxn,
   paging,
 } = require("../services/accountsHelpers");
 const settle = require("../services/settle");
+const { replayOf, replayAfter } = require("../services/posting");
 const { assertOpen } = require("../services/booksLock");
-const { sellerStateCode, readLines, priced } = require("./accountsCommon");
+const { sellerStateCode, readLines, priced, prepareVoucher, writeVoucher, voucherAlreadyPosted } = require("./accountsCommon");
 const router = express.Router();
 
 // ══════════════════════════════════════════════════════════════════
@@ -79,50 +79,56 @@ router.get("/expenses/:id", catchAsyncErrors(async (req, res, next) => {
   res.json({ success: true, expense, payments });
 }));
 
-/** The voucher that pays an expense, inside the caller's transaction. */
-//
-// The voucher number is drawn BEFORE the transaction (payVoucherNo) —
-// withTransaction retries a transient conflict by running the callback
-// again, and a number drawn inside it would be burnt on every retry.
-async function payVoucherNo(when) { return allocate(Payment, "PAY", { extra: { kind: "payment" }, at: when || new Date() }); }
+// What an account pays by when the request does not say: the cash box by
+// cash, a card by card, a UPI handle by UPI, a bank by transfer.
+const MODE_OF = { cash: "cash", card: "card", upi: "upi" };
 
-async function payExpense(expenseId, { account, mode, reference, date, req, voucherNo }, session) {
-  const expense = await Expense.findById(expenseId).session(session);
-  if (!expense) throw new ErrorHandler("Expense not found", 404);
-  const acct = await BankAccount.findById(account).session(session);
-  if (!acct || !acct.active) throw new ErrorHandler("Pick the account the money went from", 400);
-  const amount = expense.outstanding();
-  if (amount <= 0) throw new ErrorHandler("Nothing left to pay on this expense", 409);
-  const when = date || new Date();
-  const { financialYear, sequence, number } = voucherNo;
+/**
+ * The voucher that pays an expense in full, PREPARED: checked and
+ * numbered, nothing written. It is prepared by the one function that
+ * prepares any voucher (accountsCommon.prepareVoucher), so paying an
+ * expense is held to what every payment is held to: the account and the
+ * mode agree, the date is a day the books are open on, the payment risk
+ * checks have their say, and the number is drawn for the voucher's own
+ * business day. The caller writes it inside its transaction with
+ * writeVoucher(), next to whatever else it is doing.
+ *
+ * (Expenses used to build their own voucher here: a card account was
+ * refused, a cash payment could be put through a bank account, the
+ * supplier's changed bank account was not asked about, and the number
+ * was drawn for the server's clock, not the voucher's date.)
+ *
+ * @param expense  the expense as it will stand when the voucher is
+ *                 written. `pending: true` when that is not what the
+ *                 database holds yet: one being created, or approved,
+ *                 in the same transaction.
+ * @returns what prepareVoucher returns: the prepared voucher, or
+ *          { voucher, replay: true } for a request id seen before
+ */
+async function prepareExpensePayment(expense, { account, mode, reference, date, requestId, confirmRisk, riskNote }, req, { pending = false } = {}) {
+  if (!isId(account)) throw new ErrorHandler("Pick the account the money went from", 400);
+  const before = await replayOf(Payment, requestId, { select: "-attachments.data" });
+  if (before) return { voucher: before, replay: true };
   if (expense.status !== "approved") throw new ErrorHandler(`Only an approved expense can be paid (this one is ${expense.status})`, 409);
-  if (mode !== undefined && mode !== null && mode !== "" && !["cash", "bank", "upi", "cheque"].includes(mode)) throw new ErrorHandler("mode must be cash, bank, upi or cheque", 400);
-  const partyType = expense.supplier ? "supplier" : "other";
-  const vId = new mongoose.Types.ObjectId();
-  const voucherData = {
-    _id: vId, kind: "payment", voucherNo: number, financialYear, sequence, date: when,
-    partyType, supplier: expense.supplier || undefined, partyName: expense.payeeName || expense.categoryName || "Expense",
-    amount, mode: mode || (acct.kind === "cash" ? "cash" : acct.kind === "upi" ? "upi" : "bank"), account: acct._id, accountName: acct.name,
-    reference: String(reference || "").trim().slice(0, 60),
-    allocations: [{ docType: "Expense", doc: expense._id, docNo: expense.expenseNo, amount, tds: 0 }],
-    unallocated: 0, narration: `${expense.categoryName}: ${expense.description}`, createdBy: req.user?._id,
-    fingerprints: [fp(ACTION_CODES.PAYMENT_POSTED, { _id: vId }, req, { voucherNo: number, amount, expense: expense.expenseNo })],
-  };
-  const [voucher] = await Payment.create([voucherData], { session });
-  await settle.apply("Expense", expense._id, { paidAmount: amount }, session, { docNo: expense.expenseNo, extraSet: { paidFrom: acct._id, paidAt: when } });
-  await Expense.updateOne({ _id: expense._id }, { $push: { fingerprints: fp(ACTION_CODES.EXPENSE_PAID, expense, req, { voucherNo: number, amount, account: acct.name }) } }, { session });
-  if (expense.supplier) {
-    await partyLedger.post({ partyType: "supplier", party: expense.supplier, date: when, docType: "Payment", doc: vId, docNo: number, debit: amount, narration: voucherData.narration }, session);
-  }
-  return voucher;
+  const amount = settle.outstanding("Expense", expense);
+  if (amount <= 0) throw new ErrorHandler("Nothing left to pay on this expense", 409);
+  const acct = await BankAccount.findById(account).select("kind active").lean();
+  if (!acct || !acct.active) throw new ErrorHandler("Pick the account the money went from", 400);
+  return prepareVoucher({
+    kind: "payment",
+    partyType: expense.supplier ? "supplier" : "other", supplier: expense.supplier ? String(expense.supplier) : undefined,
+    partyName: expense.payeeName || expense.categoryName || "Expense",
+    amount, mode: mode || MODE_OF[acct.kind] || "bank", account: String(account), reference, date,
+    allocations: [{ docType: "Expense", doc: String(expense._id), amount }],
+    narration: `${expense.categoryName}: ${expense.description}`,
+    requestId, confirmRisk, riskNote,
+  }, req, { pending: pending ? [expense] : undefined });
 }
 
 router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
   const b = req.body || {};
-  if (b.requestId) {
-    const dup = await Expense.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
-    if (dup) return res.status(200).json({ success: true, expense: dup, replay: true });
-  }
+  const before = await replayOf(Expense, b.requestId, { select: "-attachments.data" });
+  if (before) return res.status(200).json({ success: true, expense: before, replay: true });
   if (!isId(b.category)) return next(new ErrorHandler("category is required", 400));
   const category = await ExpenseCategory.findById(b.category).lean();
   if (!category) return next(new ErrorHandler("Category not found", 404));
@@ -173,25 +179,27 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
   let voucher = null;
   const payNow = b.payNow && !needsApproval ? b.payNow : null;
   if (payNow && !isId(payNow.account)) return next(new ErrorHandler("payNow.account is required", 400));
-  const payNo = payNow ? await payVoucherNo(date) : null;
+  // Paid on the spot (petty cash, UPI from the phone): the voucher
+  // comes with it — but only once it needs no approval. Prepared here,
+  // against the expense as it is about to be stored, and written with it.
+  let payment = null;
+  if (payNow) {
+    try {
+      payment = await prepareExpensePayment(data, { account: payNow.account, mode: payNow.mode, reference: payNow.reference, date, confirmRisk: payNow.confirmRisk, riskNote: payNow.riskNote }, req, { pending: true });
+    } catch (err) { return next(err); }
+  }
   try {
     await withTxn(async (session) => {
       await Expense.create([data], { session });
       if (!needsApproval && supplier) {
         await partyLedger.post({ partyType: "supplier", party: supplier._id, date, docType: "Expense", doc: _id, docNo: number, credit: p.totals.grand, narration: `${category.name}: ${description}` }, session);
       }
-      // Paid on the spot (petty cash, UPI from the phone): the voucher
-      // comes with it — but only once it needs no approval.
-      if (payNow) {
-        voucher = await payExpense(_id, { account: payNow.account, mode: payNow.mode, reference: payNow.reference, date, req, voucherNo: payNo }, session);
-      }
+      if (payment) voucher = await writeVoucher(payment, req, session);
     });
   } catch (err) {
     if (err instanceof ErrorHandler) return next(err);
-    if (err?.code === 11000 && b.requestId) {
-      const dup = await Expense.findOne({ requestId: String(b.requestId) }).select("-attachments.data").lean();
-      if (dup) return res.status(200).json({ success: true, expense: dup, replay: true });
-    }
+    const dup = await replayAfter(err, Expense, b.requestId, { select: "-attachments.data" });
+    if (dup) return res.status(200).json({ success: true, expense: dup, replay: true });
     throw err;
   }
   const expense = await Expense.findById(_id).select("-attachments.data").lean();
@@ -224,7 +232,15 @@ router.post("/expenses/:id/approve", isAdmin("admin", "accounts"), catchAsyncErr
   let voucher = null;
   const payNow = req.body?.payNow?.account ? req.body.payNow : null;
   if (payNow && !isId(payNow.account)) return next(new ErrorHandler("payNow.account is required", 400));
-  const payNo = payNow ? await payVoucherNo(new Date()) : null;
+  // Approved and paid in one go: the voucher is prepared against the
+  // expense as it will stand once approved, dated today (the business
+  // day, which is also the day its number is drawn for).
+  let payment = null;
+  if (payNow) {
+    try {
+      payment = await prepareExpensePayment({ ...e.toObject(), status: "approved" }, { account: payNow.account, mode: payNow.mode, reference: payNow.reference, confirmRisk: payNow.confirmRisk, riskNote: payNow.riskNote }, req, { pending: true });
+    } catch (err) { return next(err); }
+  }
   try {
     await withTxn(async (session) => {
       // Approved only while it is still waiting: the check above was
@@ -235,9 +251,7 @@ router.post("/expenses/:id/approve", isAdmin("admin", "accounts"), catchAsyncErr
       if (e.supplier) {
         await partyLedger.post({ partyType: "supplier", party: e.supplier, date: e.date, docType: "Expense", doc: e._id, docNo: e.expenseNo, credit: e.totals.grand, narration: `${e.categoryName}: ${e.description}` }, session);
       }
-      if (payNow) {
-        voucher = await payExpense(e._id, { account: payNow.account, mode: payNow.mode, reference: payNow.reference, date: businessDay(new Date()), req, voucherNo: payNo }, session);
-      }
+      if (payment) voucher = await writeVoucher(payment, req, session);
     });
   } catch (err) {
     if (err instanceof ErrorHandler) return next(err);
@@ -268,21 +282,26 @@ router.post("/expenses/:id/reject", isAdmin("admin", "accounts"), catchAsyncErro
 router.post("/expenses/:id/pay", catchAsyncErrors(async (req, res, next) => {
   const e = await loadExpense(req, next);
   if (!e) return;
-  if (e.status !== "approved") return next(new ErrorHandler(`Only an approved expense can be paid (this one is ${e.status})`, 409));
-  if (!isId(req.body?.account)) return next(new ErrorHandler("account is required", 400));
-  let date;
-  try { date = readDate(req.body?.date, "date", new Date()); await assertOpen(date, req); } catch (err) { return next(err); }
-  let voucher;
-  const payNo = await payVoucherNo(date);
+  const b = req.body || {};
+  if (!isId(b.account)) return next(new ErrorHandler("account is required", 400));
+  // The same request sent twice (a double tap, a retry on a slow line)
+  // is answered with the voucher the first one made.
+  const answer = async (voucher, replay) => res.json({ success: true, expense: await Expense.findById(e._id).select("-attachments.data").lean(), voucher: { _id: voucher._id, voucherNo: voucher.voucherNo }, ...(replay ? { replay: true } : {}) });
+  let payment;
   try {
-    await withTxn(async (session) => {
-      voucher = await payExpense(e._id, { account: req.body.account, mode: req.body.mode, reference: req.body.reference, date, req, voucherNo: payNo }, session);
-    });
+    payment = await prepareExpensePayment(e.toObject(), { account: b.account, mode: b.mode, reference: b.reference, date: b.date, requestId: b.requestId, confirmRisk: b.confirmRisk, riskNote: b.riskNote }, req);
+  } catch (err) { return next(err); }
+  if (payment.replay) return answer(payment.voucher, true);
+  let voucher;
+  try {
+    await withTxn(async (session) => { voucher = await writeVoucher(payment, req, session); });
   } catch (err) {
+    const dup = await voucherAlreadyPosted(err, payment);
+    if (dup) return answer(dup, true);
     if (err instanceof ErrorHandler) return next(err);
     throw err;
   }
-  res.json({ success: true, expense: await Expense.findById(e._id).select("-attachments.data").lean(), voucher: { _id: voucher._id, voucherNo: voucher.voucherNo } });
+  return answer(voucher, false);
 }));
 
 router.post("/expenses/:id/cancel", catchAsyncErrors(async (req, res, next) => {

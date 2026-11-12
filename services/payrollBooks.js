@@ -23,6 +23,7 @@ const Payroll = require('../models/Payroll');
 const Journal = require('../models/Journal');
 const BankAccount = require('../models/BankAccount');
 const StatutoryDeposit = require('../models/StatutoryDeposit');
+const { once } = require('./posting');
 const journals = require('./journals');
 const { getSettings } = require('./booksLock');
 
@@ -110,12 +111,29 @@ async function postPaid(month, req) {
   return { ...out, summary: await summary(month) };
 }
 
-async function addDeposit({ kind, month, amount, challanNo, depositedOn, account, note, by }) {
+/**
+ * Record a PF / ESI / professional tax deposit, once: the same request
+ * sent twice is answered by the deposit the first made, and a challan
+ * already recorded for the month is refused.
+ * @returns {{ deposit, replay }}
+ */
+async function addDeposit({ kind, month, amount, challanNo, depositedOn, account, note, by, requestId }) {
   if (!['pf', 'esi', 'pt'].includes(kind)) throw Object.assign(new Error('kind must be pf, esi or pt'), { status: 400 });
   if (!/^\d{4}-\d{2}$/.test(String(month || ''))) throw Object.assign(new Error('month must be YYYY-MM'), { status: 400 });
   if (!(r2(amount) > 0)) throw Object.assign(new Error('amount must be more than 0'), { status: 400 });
   if (!depositedOn) throw Object.assign(new Error('depositedOn is required'), { status: 400 });
-  return StatutoryDeposit.create({ kind, month, amount: r2(amount), challanNo: String(challanNo || '').trim(), depositedOn, account: account || undefined, note: String(note || '').trim(), createdBy: by || undefined });
+  const data = { kind, month, amount: r2(amount), challanNo: String(challanNo || '').trim(), depositedOn, account: account || undefined, note: String(note || '').trim(), createdBy: by || undefined };
+  const already = () => Object.assign(new Error(`${kind.toUpperCase()} challan ${data.challanNo} of ${depositedOn.toISOString().slice(0, 10)} for ₹${data.amount.toFixed(2)} is already recorded for ${month}`), { status: 409 });
+  try {
+    const { doc, replay } = await once(StatutoryDeposit, requestId, async (id) => {
+      if (data.challanNo && await StatutoryDeposit.exists({ kind, month, challanNo: data.challanNo, depositedOn, amount: data.amount })) throw already();
+      return (await StatutoryDeposit.create({ ...data, requestId: id })).toObject();
+    });
+    return { deposit: doc, replay };
+  } catch (err) {
+    if (err?.code === 11000) throw already();   // two saves together: the index let one in
+    throw err;
+  }
 }
 
 module.exports = { summary, postSalary, postPaid, addDeposit, ledgers };
