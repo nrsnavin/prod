@@ -46,9 +46,11 @@
   "tests/api/taxCoding.test.js",
   "tests/api/wave2Ai.test.js",
   "tests/api/weeklyStatement.test.js",
+  "tests/architecture/accountsSuites.test.js",
   "tests/migrations/bankLineLinks.test.js",
   "tests/migrations/invoiceDueDates.test.js",
   "tests/migrations/itcReversalHistory.test.js",
+  "tests/scripts/accountsAuditCheck.test.js",
   "tests/services/collectionsTemplate.test.js",
   "tests/utils/dailyAnomalyAlerts.test.js",
   "tests/utils/money.test.js"
