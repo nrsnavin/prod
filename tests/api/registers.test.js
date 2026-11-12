@@ -129,6 +129,83 @@ describe('fixed assets', () => {
     const after = (await get('/accounts/fixed-assets?fy=2028-29')).body;
     expect(after.rows.find((x) => x.name === 'Office PC')).toBeUndefined();
   });
+
+  // ── Taking a disposed asset off the books ──────────────────────────
+  // The draft was offered every time it was asked for, and nothing knew
+  // whether it had been posted: asked twice, the same loom came off the
+  // asset ledger twice. The journal is now kept one an asset.
+  it('posts the disposal journal once for an asset, and replaces it when it is posted again changed', async () => {
+    const bank = await require('../../models/BankAccount.js').create({ name: 'Kotak CA', kind: 'bank', isDefault: true });
+    const other = await require('../../models/BankAccount.js').create({ name: 'SBI CA', kind: 'bank' });
+    const a = (await post('/accounts/fixed-assets', { name: 'Old loom', block: 'plant', purchaseDate: '2026-04-01', cost: 500000 })).body;
+    // Still in use: nothing to post.
+    expect((await post(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`, {})).status).toBe(409);
+    const sold = await post(`/accounts/fixed-assets/${a.asset._id}/dispose`, { how: 'sold', date: '2027-09-30', amount: 300000, reason: 'Replaced by a new loom' });
+    expect(sold.status).toBe(200);
+    const draft = sold.body.journal;
+    expect(draft.posted).toBeNull();
+    // On the register it is gone, and not yet off the books.
+    const row = async () => (await get('/accounts/fixed-assets?fy=2027-28')).body.rows.find((x) => x.name === 'Old loom');
+    expect((await row()).disposalJournal).toBeNull();
+
+    // The draft as it stands has no account for the money: said, and nothing posted.
+    const bare = await post(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`, {});
+    expect(bare.status).toBe(400);
+    expect(bare.body.message).toMatch(/pick the account/);
+    expect(await M.Journal.countDocuments({ source: 'asset-disposal' })).toBe(0);
+
+    // With the account picked it posts, dated the day the asset went (whatever the request says).
+    const lines = (account) => draft.lines.map((l) => ({ kind: l.kind, ledger: l.ledger, account: l.kind === 'bank' ? account : undefined, debit: l.debit, credit: l.credit }));
+    const first = await post(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`, { lines: lines(bank._id), date: '2030-01-01' });
+    expect(first.status).toBe(201);
+    expect(first.body.journal).toMatchObject({ source: 'asset-disposal', sourceRef: String(a.asset._id), status: 'posted', purpose: 'other' });
+    expect(new Date(first.body.journal.date).toISOString().slice(0, 10)).toBe('2027-09-30');
+    expect(first.body.journal.narration).toMatch(/Old loom sold for ₹300000\.00/);
+    expect(first.body.journal.total).toBe(Math.max(500000, 500000 + draft.figures.gainLoss));
+    expect((await row()).disposalJournal).toMatchObject({ journalNo: first.body.journal.journalNo, total: first.body.journal.total });
+    // The draft, asked for again, says it is in the books.
+    expect((await get(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`)).body.journal.posted.journalNo).toBe(first.body.journal.journalNo);
+
+    // The same again — the button pressed twice — is answered by the one in the books.
+    const same = await post(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`, { lines: lines(bank._id) });
+    expect(same.status).toBe(200);
+    expect(same.body).toMatchObject({ replay: true, journal: { journalNo: first.body.journal.journalNo } });
+    expect(await M.Journal.countDocuments({ source: 'asset-disposal' })).toBe(1);
+
+    // Two together, with the money into the other account: one journal stands, never two.
+    const both = await Promise.all([
+      post(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`, { lines: lines(other._id) }),
+      post(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`, { lines: lines(other._id) }),
+    ]);
+    expect(both.map((r) => r.status).filter((st) => st < 300).length).toBeGreaterThanOrEqual(1);
+    const all = await M.Journal.find({ source: 'asset-disposal', sourceRef: String(a.asset._id) }).lean();
+    expect(all.filter((j) => j.status === 'posted')).toHaveLength(1);
+    expect(all.filter((j) => j.status === 'cancelled').map((j) => j.journalNo)).toEqual([first.body.journal.journalNo]);
+    const now = all.find((j) => j.status === 'posted');
+    expect(String(now.lines.find((l) => l.kind === 'bank').account)).toBe(String(other._id));
+    expect((await row()).disposalJournal.journalNo).toBe(now.journalNo);
+  });
+
+  it('holds the disposal journal to the approval limit and to a reason', async () => {
+    const bank = await require('../../models/BankAccount.js').create({ name: 'Kotak CA', kind: 'bank', isDefault: true });
+    const clerk = await M.User.create({ name: 'Clerk', email: 'reg-clerk@t.co', password: 'pass1234', role: 'accounts', department: 'finance' });
+    const asClerk = (url, body) => request(app).post(`/api/v2${url}`).set('Cookie', [`token=${jwt.sign({ id: clerk._id, role: 'accounts' }, process.env.JWT_SECRET_KEY)}`]).send(body);
+    await put('/accounts/settings', { journals: { approvalAbove: 100000 } });
+    const a = (await post('/accounts/fixed-assets', { name: 'Compressor', block: 'plant', purchaseDate: '2026-04-01', cost: 200000 })).body;
+    const sold = await post(`/accounts/fixed-assets/${a.asset._id}/dispose`, { how: 'sold', date: '2027-06-30', amount: 150000 });
+    const lines = sold.body.journal.lines.map((l) => ({ kind: l.kind, ledger: l.ledger, account: l.kind === 'bank' ? bank._id : undefined, debit: l.debit, credit: l.credit }));
+    const refused = await asClerk(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`, { lines });
+    expect(refused.status).toBe(403);
+    expect(refused.body.message).toMatch(/needs an admin/);
+    // A reason too short to mean anything is refused before anything is posted.
+    const short = await post(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`, { lines, reason: 'sold' });
+    expect(short.status).toBe(400);
+    expect(await M.Journal.countDocuments({ source: 'asset-disposal' })).toBe(0);
+    const ok = await post(`/accounts/fixed-assets/${a.asset._id}/disposal-journal`, { lines, reason: 'Compressor sold to the scrap dealer' });
+    expect(ok.status).toBe(201);
+    expect(ok.body.journal.reason).toBe('Compressor sold to the scrap dealer');
+    await M.User.deleteOne({ _id: clerk._id });
+  });
 });
 
 describe('closing stock', () => {

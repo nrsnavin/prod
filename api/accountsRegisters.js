@@ -5,6 +5,8 @@
 //    GET  /fixed-assets?fy=2026-27        the register with the year's depreciation
 //    POST /fixed-assets                   add an asset
 //    POST /fixed-assets/:id/dispose       sold or scrapped
+//    GET  /fixed-assets/:id/disposal-journal   the journal that takes it off the books, as a draft
+//    POST /fixed-assets/:id/disposal-journal   post it (one an asset; again replaces it)
 //    POST /fixed-assets/depreciation      post the year's journal
 //    GET  /fixed-assets/register.xlsx?fy= the register as Excel
 //    GET  /closing-stock?asOf=            stock valued on a day
@@ -120,7 +122,8 @@ router.get("/fixed-assets/:id", catchAsyncErrors(async (req, res, next) => {
 }));
 
 // The journal that takes a disposed asset off the books, as a draft for
-// the journal form (nothing is posted from here).
+// the journal form (nothing is posted from here), with the one already
+// posted for it, if there is one.
 router.get("/fixed-assets/:id/disposal-journal", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Asset not found", 404));
   const a = await FixedAsset.findById(req.params.id).select("-attachments.data").lean();
@@ -128,6 +131,15 @@ router.get("/fixed-assets/:id/disposal-journal", catchAsyncErrors(async (req, re
   const journal = await fixedAssets.disposalJournal(a);
   if (!journal) return next(new ErrorHandler(`${a.assetNo} is still in use`, 409));
   res.json({ success: true, journal });
+}));
+
+// Post it: the draft's lines as the person left them. One journal an
+// asset; posting again with something changed takes the earlier one's place.
+router.post("/fixed-assets/:id/disposal-journal", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {
+  try {
+    const out = await fixedAssets.postDisposalJournal(req.params.id, req.body || {}, req);
+    res.status(out.replay ? 200 : 201).json({ success: true, journal: out.journal, replaced: out.replaced || null, ...(out.replay ? { replay: true } : {}) });
+  } catch (err) { return fail(err, next); }
 }));
 
 router.post("/fixed-assets/:id/dispose", isAdmin("admin", "accounts"), catchAsyncErrors(async (req, res, next) => {

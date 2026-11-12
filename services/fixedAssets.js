@@ -153,6 +153,12 @@ async function register(fy) {
     if (s.disposal) sum.disposals = r2(sum.disposals + s.disposal.amount);
   }
   const journal = await Journal.findOne({ source: 'depreciation', sourceRef: fy, status: 'posted' }).select('journalNo date total').lean();
+  // An asset gone: the journal that took it off the books, or null while it is still to be posted.
+  const gone = rows.filter((a) => a.status !== 'active');
+  if (gone.length) {
+    const posted = await disposalPosted(gone.map((a) => a._id));
+    for (const a of gone) a.disposalJournal = posted.get(String(a._id)) || null;
+  }
   return {
     fy, from: fyStart(fy), to: fyEnd(fy), rows, blocks: [...byBlock.values()], totals: sum,
     journal, journalStale: journal ? Math.abs(journal.total - sum.caDep) > 0.005 : false,
@@ -265,6 +271,16 @@ async function dispose(id, b, req) {
   return { asset: updated, year: schedule(updated, fyOf(date)), journal: await disposalJournal(updated) };
 }
 
+// A disposed asset's journal is kept like the year's depreciation: one
+// posted journal for the asset, found by this source and the asset's id.
+const DISPOSAL = 'asset-disposal';
+
+/** The journal posted for each of these assets' disposal: Map of asset id → { _id, journalNo, date, total }. */
+async function disposalPosted(ids) {
+  const found = await Journal.find({ source: DISPOSAL, sourceRef: { $in: ids.map(String) }, status: 'posted' }).select('journalNo date total sourceRef').lean();
+  return new Map(found.map((j) => [j.sourceRef, { _id: j._id, journalNo: j.journalNo, date: j.date, total: j.total }]));
+}
+
 /**
  * The journal that takes a disposed asset out of the books, as a DRAFT
  * for the journal form. Disposing of an asset records the day and the
@@ -279,9 +295,10 @@ async function dispose(id, b, req) {
  *         Cr  Profit on sale                    the price over written-down value
  *
  * The person picks the bank account, checks the ledger names against
- * Tally's, and posts it: nothing is posted from here.
+ * Tally's, and posts it with postDisposalJournal(): nothing is posted
+ * from here. `posted` is the journal already in the books for it.
  *
- * @returns null for an asset still in use, else { date, purpose, narration, reason, lines, figures }
+ * @returns null for an asset still in use, else { date, purpose, narration, reason, lines, figures, posted }
  */
 async function disposalJournal(asset) {
   if (!asset || asset.status === 'active' || !asset.disposal?.date) return null;
@@ -303,7 +320,49 @@ async function disposalJournal(asset) {
     reason: `${asset.assetNo} ${asset.status}${asset.disposal.reason ? `: ${asset.disposal.reason}` : ''}`.slice(0, 300),
     lines,
     figures: { cost, accumulated, wdv, amount, gainLoss: gain },
+    posted: (await disposalPosted([asset._id])).get(String(asset._id)) || null,
   };
 }
 
-module.exports = { schedule, register, postDepreciation, create, dispose, disposalJournal, fyOf, fyStart, fyEnd, wdvRate, ledgers, BLOCKS };
+/**
+ * Post the journal that takes a disposed asset out of the books.
+ *
+ * The lines are the draft's as the person left them — the account the
+ * money came into picked, the ledger names set to Tally's, a line added
+ * for the GST on a sale — or the draft's own when none are sent. It is
+ * dated the day the asset went, whatever the request says: that is the
+ * day it left the books.
+ *
+ * One journal an asset. The draft was offered every time it was asked
+ * for and nothing knew whether it had been posted, so asking twice
+ * could take the same loom off the asset ledger twice. Now the journal
+ * is kept by its source like the year's depreciation: posting again
+ * with nothing changed is answered by the one in the books, and a
+ * changed one takes its place in one transaction (journals.replace).
+ *
+ * A journal above the approval limit needs an admin, as any other does.
+ *
+ * @param b  { lines?, narration?, reason? }
+ * @returns { journal, replay, replaced }
+ */
+async function postDisposalJournal(id, b, req) {
+  if (!isId(id)) throw new ErrorHandler('Asset not found', 404);
+  const a = await FixedAsset.findById(id).select('-attachments.data').lean();
+  if (!a) throw new ErrorHandler('Asset not found', 404);
+  const draft = await disposalJournal(a);
+  if (!draft) throw new ErrorHandler(`${a.assetNo} is still in use`, 409);
+  const reason = String(b.reason || draft.reason).trim().slice(0, 300);
+  if (reason.length < 8) throw new ErrorHandler('Say why (a reason of at least 8 characters)', 400);
+  const lines = Array.isArray(b.lines) && b.lines.length ? b.lines : draft.lines;
+  // Read here as well as in replace(): a line that will not post is said before anything is asked of the lock.
+  const { total } = await journals.read({ lines });
+  const limit = (await getSettings()).journals?.approvalAbove || 0;
+  if (limit > 0 && total > limit && req?.user?.role !== 'admin') throw new ErrorHandler(`A journal above ₹${limit.toLocaleString('en-IN')} needs an admin to post it`, 403);
+  return journals.replace({
+    date: draft.date, purpose: 'other',
+    narration: String(b.narration || draft.narration).trim().slice(0, 300), reason,
+    lines, source: DISPOSAL, sourceRef: String(a._id),
+  }, `Replaced by a fresh posting of ${a.assetNo}'s disposal`, req);
+}
+
+module.exports = { schedule, register, postDepreciation, create, dispose, disposalJournal, postDisposalJournal, fyOf, fyStart, fyEnd, wdvRate, ledgers, BLOCKS };
