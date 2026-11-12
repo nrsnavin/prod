@@ -16,6 +16,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const ProductionSettings = require('../models/ProductionSettings');
+const { settingsDoc } = require('../utils/settingsDoc');
 const { currentShift } = require('./machineLoading');
 
 const EVERY_MS = 5 * 60_000;
@@ -83,7 +84,7 @@ async function deliver(phones, body, tag) {
  * time and whether it was sent, and claims nothing.
  */
 async function run({ now = new Date(), force = false } = {}) {
-  const s = await ProductionSettings.findOneAndUpdate({ key: 'production' }, { $setOnInsert: { key: 'production' } }, { upsert: true, new: true }).lean();
+  const s = await settingsDoc(ProductionSettings, 'production');
   const n = s.shiftEndNudge || {};
   const due = minutesLeft(now);
   if (!force) {

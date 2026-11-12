@@ -13,6 +13,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const AccountsSettings = require("../models/AccountsSettings");
+const { settingsDoc } = require("../utils/settingsDoc");
 const OpeningBalance = require("../models/OpeningBalance");
 const OpeningNone = require("../models/OpeningNone");
 const Customer = require("../models/Customer");
@@ -31,7 +32,7 @@ const ymd = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
 
 async function settings() {
   // Made if missing, so finishing below always has a row to mark.
-  const s = await AccountsSettings.findOneAndUpdate({ key: "accounts" }, { $setOnInsert: { key: "accounts" } }, { upsert: true, new: true, projection: { openingOnboarding: 1 } }).lean();
+  const s = await settingsDoc(AccountsSettings, "accounts", { projection: { openingOnboarding: 1 } });
   return s?.openingOnboarding || {};
 }
 

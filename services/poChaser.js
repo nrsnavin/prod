@@ -25,6 +25,7 @@
 const PurchaseOrder = require('../models/PurchaseOrder');
 const Supplier = require('../models/Supplier');
 const ProductionSettings = require('../models/ProductionSettings');
+const { settingsDoc } = require('../utils/settingsDoc');
 const factoryDay = require('../utils/factoryDay');
 const { e164 } = require('./collections');
 const { dateIn } = require('./collectionReply');
@@ -43,7 +44,7 @@ const dmy = (d) => (d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit'
 const ymd = (d) => factoryDay.ymd(d);
 
 async function settings() {
-  const s = await ProductionSettings.findOneAndUpdate({ key: 'production' }, { $setOnInsert: { key: 'production' } }, { upsert: true, new: true }).lean();
+  const s = await settingsDoc(ProductionSettings, 'production');
   return { auto: false, hour: 10, gapDays: 2, acknowledge: false, ...(s.poChase || {}) };
 }
 

@@ -11,10 +11,12 @@
 
 const factoryDay = require('../utils/factoryDay');
 const AccountsSettings = require('../models/AccountsSettings');
+const { settingsDoc } = require('../utils/settingsDoc');
 const ErrorHandler = require('../utils/ErrorHandler');
 
 async function getSettings() {
-  return AccountsSettings.findOneAndUpdate({ key: 'accounts' }, { $setOnInsert: { key: 'accounts' } }, { upsert: true, new: true }).lean();
+  // Every part filled in, also on a record saved before that part existed.
+  return settingsDoc(AccountsSettings, 'accounts');
 }
 
 const dayEnd = (d) => factoryDay.calendarDayEnd(d) || new Date(NaN);

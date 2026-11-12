@@ -28,12 +28,14 @@ const ShiftDetail = require('../models/ShiftDetail');
 const TimerPhoto = require('../models/TimerPhoto');
 const Machine = require('../models/Machine');
 const ProductionSettings = require('../models/ProductionSettings');
+const { settingsDoc } = require('../utils/settingsDoc');
 const pm = require('./productionModel');
 
 const r1 = (n) => Math.round(Number(n) * 10) / 10;
 
 async function settings() {
-  return ProductionSettings.findOneAndUpdate({ key: 'production' }, { $setOnInsert: { key: 'production' } }, { upsert: true, new: true }).lean();
+  // Every part filled in, also on a record saved before that part existed.
+  return settingsDoc(ProductionSettings, 'production');
 }
 
 /** What the loom's sensor says it ran on the entry's shift, or null. */

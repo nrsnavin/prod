@@ -18,6 +18,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const ProductionSettings = require('../models/ProductionSettings');
+const { settingsDoc } = require('../utils/settingsDoc');
 const MachineIssue = require('../models/MachineIssue');
 const { currentShift } = require('./machineLoading');
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
@@ -134,7 +135,7 @@ async function deliver(phones, body, tag) {
  * once. `force` sends it now for the shift just ended, claiming nothing.
  */
 async function run({ now = new Date(), force = false } = {}) {
-  const s = await ProductionSettings.findOneAndUpdate({ key: 'production' }, { $setOnInsert: { key: 'production' } }, { upsert: true, new: true }).lean();
+  const s = await settingsDoc(ProductionSettings, 'production');
   const h = s.shiftHandover || {};
   const { minutesLeft } = require('./shiftEndNudge');
   const cur = minutesLeft(now);
