@@ -10,8 +10,9 @@
 //    the title, across the sheet (a draft or a cancelled challan is
 //      marked on it, and stamped across the page)
 //    the letterhead: the logo left, the company centred
-//    the particulars: challan number and date, the order, the e-way
-//      bill; the vehicle, driver, transporter and LR number
+//    the particulars: challan number and date, the order and the
+//      customer's P.O.; the vehicle, driver, transporter and LR number;
+//      the e-way bill
 //    the consignee: name and address; GSTIN, state and phone
 //    the lines: description, HSN where it is known, and quantity, with
 //      a total row
@@ -230,7 +231,7 @@ function render({ dc, branding, settings, D }) {
       ['Challan No.', dc.dcNumber || '—'],
       ['Challan Date', ddmmyyyy(dc.dispatchDate || dc.createdAt)],
       ['Order No.', dc.orderNo != null ? `#${dc.orderNo}` : '—'],
-      ['E-way Bill No.', eway],
+      ['Customer P.O. No.', dc.customerPo || '—'],
     ];
     const right = [
       ['Vehicle No.', dc.vehicleNo || ewb.vehicleNo || '—'],
@@ -247,6 +248,9 @@ function render({ dc, branding, settings, D }) {
       }
       y += h;
     }
+    // The e-way bill, with its validity, across the sheet.
+    pair(L, y, labW, W - labW, D.row, 'E-way Bill No.', eway);
+    y += D.row;
   }
 
   // ── Consignee ─────────────────────────────────────────────────

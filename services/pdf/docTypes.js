@@ -45,6 +45,7 @@ const DC_FIELDS = [
   { key: "partyGstin", label: "Consignee GSTIN" },
   { key: "partyContact", label: "Consignee phone" },
   { key: "orderNo", label: "Against order" },
+  { key: "poNumber", label: "Customer P.O. no." },
   { key: "vehicleNo", label: "Vehicle no." },
   { key: "driverName", label: "Driver name" },
   { key: "transporter", label: "Transporter" },
@@ -84,6 +85,7 @@ function dcSample() {
       partyAddress: "48 Textile Park, Tiruppur 641604",
       partyGstin: "33AAExx9999F1Z2",
       orderNo: "Order #1042",
+      poNumber: "PO/SG/2026/118",
       vehicleNo: "TN 33 BX 4417",
       driverName: "R. Murugan",
       transporter: "Sri Balaji Transports",
@@ -137,8 +139,10 @@ function dcStarter() {
     value("v_no", "docNo", 401, 83, 80, { bold: true }),
     label("l_dt", "DATE", 486, 73, 70),
     value("v_dt", "docDate", 486, 83, 70),
-    label("l_ord", "AGAINST ORDER", 401, 97, 155),
-    value("v_ord", "orderNo", 401, 105, 155, { fontSize: 8 }),
+    label("l_ord", "AGAINST ORDER", 401, 97, 80),
+    value("v_ord", "orderNo", 401, 105, 80, { fontSize: 8 }),
+    label("l_po", "CUSTOMER P.O.", 486, 97, 70),
+    value("v_po", "poNumber", 486, 105, 70, { fontSize: 8 }),
 
     { id: "hrule", type: "line", x: L, y: 122, w: W, h: 0, lineWidth: 1.2, color: INK },
 

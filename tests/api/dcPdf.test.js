@@ -171,3 +171,41 @@ describe('fields the challan records but never printed', () => {
     }
   });
 });
+
+describe("the customer's purchase-order number", () => {
+  const { dcToContext } = require('../../services/pdf/dcContext.js');
+  const { starterTemplate, DOC_TYPES } = require('../../services/pdf/docTypes.js');
+  const { pdfText } = require('../helpers/pdfText');
+
+  it('is a field the designer offers and the starter layout prints', () => {
+    expect(dcToContext({ ...dc.toObject(), customerPo: 'PO/SG/118' }, {}).fields.poNumber).toBe('PO/SG/118');
+    expect(dcToContext(dc.toObject(), {}).fields.poNumber).toBe('');
+    expect(DOC_TYPES['delivery-challan'].fields.map((f) => f.key)).toContain('poNumber');
+    const bound = starterTemplate('delivery-challan').elements.filter((e) => e.type === 'field').map((e) => e.field);
+    expect(bound).toContain('poNumber');
+  });
+
+  it('is read off the challan\'s order and printed on the challan', async () => {
+    await PdfTemplate.deleteMany({});
+    const Customer = require('../../models/Customer.js');
+    const Elastic = require('../../models/Elastic.js');
+    const Order = require('../../models/Order.js');
+    const customer = await Customer.create({ name: 'Sunrise Garments', contactName: 'Ravi', phoneNumber: '9000000001', gstin: '33AAEPS1111F1Z2', address: 'Tiruppur' });
+    const elastic = await Elastic.create({ name: '20mm Knitted', weaveType: '8', spandexEnds: 40, yarnEnds: 120, pick: 12, noOfHook: 8, weight: 2.4, stock: 5000 });
+    const order = await Order.create({ customer: customer._id, po: 'PO/SG/118', date: new Date(), supplyDate: new Date(), status: 'InProgress', elasticOrdered: [{ elastic: elastic._id, quantity: 500, rate: 4 }] });
+    const withOrder = await DeliveryChallan.create({
+      dcNumber: 'DC/2026/0043', type: 'elastic', financialYear: '2026-27', sequence: 43, order: order._id, orderNo: order.orderNo,
+      customerName: 'Sunrise Garments', dispatchDate: new Date('2026-07-23'), status: 'dispatched',
+      items: [{ elastic: elastic._id, elasticName: '20mm Knitted', unit: 'm', quantity: 500 }], totalQuantity: 500,
+    });
+    const res = await asPdf(request(app).get(`/api/v2/dc/${withOrder._id}/pdf`).set('Cookie', cookie(admin)));
+    expect(res.status).toBe(200);
+    const text = pdfText(res.body);
+    expect(text).toMatch(/Customer P\.O\. No\./);
+    expect(text).toMatch(/PO\/SG\/118/);
+    // No order (the first challan): the row is there, empty.
+    const none = pdfText((await asPdf(request(app).get(`/api/v2/dc/${dc._id}/pdf`).set('Cookie', cookie(admin)))).body);
+    expect(none).toMatch(/Customer P\.O\. No\./);
+    expect(none).not.toMatch(/PO\/SG\/118/);
+  });
+});

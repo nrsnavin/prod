@@ -59,6 +59,9 @@ function dcToContext(dc, branding = {}) {
       // the goods never travelled with them.
       remarks: dc.remarks || "",
       orderNo: dc.orderNo != null ? `Order #${dc.orderNo}` : "",
+      // The customer's purchase order: on the order, looked up when the
+      // challan is printed (services/pdf/dcPdf.js).
+      poNumber: dc.customerPo || "",
       // ── footer / terms (from Document Settings) ──
       footerNote: branding.footerNote || "",
       termsText: branding.termsText || "",

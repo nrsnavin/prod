@@ -303,7 +303,7 @@ function render({ inv, branding, settings, qrs, D }) {
     ['Invoice No.', inv.invoiceNumber || '—'],
     ['Invoice Date', ddmmyyyy(inv.invoiceDate)],
     ['Due Date', ddmmyyyy(inv.dueDate)],
-    ['P.O. No.', inv.customerPo || '—'],
+    ['Customer P.O. No.', inv.customerPo || '—'],
     ['Delivery Challan', (inv.dcs || []).map((d) => d.dcNumber).join(', ') || '—'],
   ];
   const rightRows = inv.detailRows?.right || [

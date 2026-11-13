@@ -230,6 +230,9 @@ describe('the printed invoice and the e-invoice JSON', () => {
     expect(text).toMatch(/Twenty Six Thousand Five Hundred Sixty Five/);
     expect(text).toMatch(/SBIN0001234/);
     expect(text).toMatch(new RegExp(dc1.dcNumber.replace(/[-/]/g, '\\$&')));
+    // The customer's purchase order, from the order.
+    expect(text).toMatch(/Customer P\.O\. No\./);
+    expect(text).toMatch(/PO-77/);
     // Not registered yet: no IRN on the paper.
     expect(text).not.toMatch(/Ack no/i);
   });
