@@ -18,6 +18,9 @@ const DCItemSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: 0 },
     rate:     { type: Number, default: 0 },   // per unit
     amount:   { type: Number, default: 0 },   // quantity × rate (computed)
+    // How many boxes (cartons) the line went out in. The invoice raised
+    // against the challan takes its boxes from here (api/invoice.js).
+    boxes:    { type: Number, default: 0, min: 0 },
 
     // ─ Reservation split (elastic DCs against a reserved order) ─
     // Populated at /create when the parent DC has an order and that
@@ -115,6 +118,8 @@ const DeliveryChallanSchema = new mongoose.Schema(
     // ── Totals (denormalised for quick display) ───────────────
     totalQuantity: { type: Number, default: 0 },
     totalAmount:   { type: Number, default: 0 },
+    // Every line's boxes added up.
+    totalBoxes:    { type: Number, default: 0 },
 
     // The e-way bill for the goods' movement (CGST Rule 138).
     ewaybill: {

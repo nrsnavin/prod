@@ -46,6 +46,12 @@ function dcToContext(dc, branding = {}) {
       // one. Rate and amount are deliberately absent from this context, so
       // a template cannot bind them even by hand.
       totalQty: `${Number(dc.totalQuantity || 0).toLocaleString("en-IN")}`,
+      // Every line's boxes, added up from the lines (a challan from
+      // before boxes were kept has no stored total). Blank when none.
+      totalBoxes: (() => {
+        const n = items.reduce((a, it) => a + (Number(it.boxes) || 0), 0);
+        return n > 0 ? n.toLocaleString("en-IN") : "";
+      })(),
       lineCount: String(items.length),
       // ── transport ──
       vehicleNo: dc.vehicleNo || "",
@@ -70,6 +76,8 @@ function dcToContext(dc, branding = {}) {
       sno: i + 1,
       description: it.elasticName || it.description || (it.elastic && it.elastic.name) || "—",
       unit: it.unit || "",
+      // Blank rather than 0 for a line with no boxes.
+      boxes: Number(it.boxes) > 0 ? Number(it.boxes) : "",
       qty: Number(it.quantity || 0),
       // `rate` and `amount` are not carried. The DC document still stores
       // them (the create form captures a value), but they are not part of

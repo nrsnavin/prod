@@ -46,6 +46,7 @@ const partyLedger = require("../services/partyLedger");
 const { assertOpen, overrideMeta } = require("../services/booksLock");
 const creditControl = require("../services/creditControl");
 const exportSupply = require("../services/exportSupply");
+const { boxesOf } = require("../services/invoiceBoxes");
 const { getSettings: getBooksSettings } = require("../services/booksLock");
 
 const Invoice         = require("../models/Invoice");
@@ -100,7 +101,7 @@ async function invoiceableDcs(order) {
   const match = [{ order: order._id }];
   if (order.orderNo != null) match.push({ orderNo: order.orderNo });
   const dcs = await DeliveryChallan.find({ $or: match, type: "elastic" })
-    .select("dcNumber status dispatchDate items totalQuantity customerAddress")
+    .select("dcNumber status dispatchDate items totalQuantity totalBoxes customerAddress")
     .sort({ dispatchDate: 1, createdAt: 1 })
     .lean();
   const onInvoices = await Invoice.find({ order: order._id, status: "issued" })
@@ -119,7 +120,9 @@ async function invoiceableDcs(order) {
 /**
  * The challans' lines merged per elastic, priced from the order.
  * `overrides` ({ [elasticId]: { rate, hsn, gstPercent } }) is what the
- * form changed before raising.
+ * form changed before raising. The boxes are the challans' own, added
+ * up: they are counted on the challan when the goods go out, and the
+ * invoice does not ask again (services/invoiceBoxes.js).
  */
 async function buildLines(order, dcs, settings, overrides = {}) {
   const inv = settings.invoice || {};
@@ -129,8 +132,9 @@ async function buildLines(order, dcs, settings, overrides = {}) {
     for (const item of dc.items || []) {
       if (!item.elastic) continue;
       const key = String(item.elastic);
-      const row = byElastic.get(key) || { elastic: item.elastic, name: item.elasticName || "", unit: item.unit || "m", quantity: 0, dcNumbers: [], dcRate: 0 };
+      const row = byElastic.get(key) || { elastic: item.elastic, name: item.elasticName || "", unit: item.unit || "m", quantity: 0, boxes: 0, dcNumbers: [], dcRate: 0 };
       row.quantity = Math.round((row.quantity + (Number(item.quantity) || 0)) * 1000) / 1000;
+      row.boxes += Number(item.boxes) || 0;
       if (!row.dcNumbers.includes(dc.dcNumber)) row.dcNumbers.push(dc.dcNumber);
       if (!row.dcRate && Number(item.rate) > 0) row.dcRate = Number(item.rate);
       if (!row.name && item.elasticName) row.name = item.elasticName;
@@ -152,7 +156,7 @@ async function buildLines(order, dcs, settings, overrides = {}) {
     return {
       elastic: row.elastic, name: e.name || row.name || "Elastic", unit: row.unit, quantity: row.quantity,
       rate, hsn, gstPercent, dcNumbers: row.dcNumbers,
-      boxes: o.boxes !== undefined && o.boxes !== null && o.boxes !== "" ? Number(o.boxes) : 0,
+      boxes: row.boxes,
       // Where the figure came from, for the form to say so.
       rateSource: o.rate !== undefined && o.rate !== "" ? "entered" : (orderRate.get(key) ? "order" : (row.dcRate ? "challan" : "none")),
     };
@@ -165,11 +169,12 @@ function readOverrides(raw) {
   raw.forEach((l, i) => {
     if (!l || !isId(l.elastic)) throw new ErrorHandler(`Line ${i + 1}: elastic id is missing`, 400);
     const o = {};
-    for (const k of ["rate", "gstPercent", "boxes"]) {
+    // Boxes are not read: they are the challans' (see buildLines). A form
+    // from before that still sends them is not refused for it.
+    for (const k of ["rate", "gstPercent"]) {
       if (l[k] === undefined || l[k] === null || l[k] === "") continue;
       const n = Number(l[k]);
       if (!Number.isFinite(n) || n < 0) throw new ErrorHandler(`Line ${i + 1}: ${k} must be a number of 0 or more`, 400);
-      if (k === "boxes" && !Number.isInteger(n)) throw new ErrorHandler(`Line ${i + 1}: boxes must be a whole number`, 400);
       o[k] = n;
     }
     if (l.hsn !== undefined && l.hsn !== null) {
@@ -233,8 +238,10 @@ router.get(
       placeOfSupply: priced.placeOfSupply,
       dcs: dcs.map((d) => ({
         _id: d._id, dcNumber: d.dcNumber, status: d.status, dispatchDate: d.dispatchDate, totalQuantity: d.totalQuantity,
+        // Worked out from the lines: a challan from before boxes were kept has no total.
+        totalBoxes: boxesOf([d]).total,
         invoicedOn: d.invoicedOn, eligible: d.eligible,
-        items: (d.items || []).map((i) => ({ elastic: i.elastic, elasticName: i.elasticName, quantity: i.quantity, unit: i.unit })),
+        items: (d.items || []).map((i) => ({ elastic: i.elastic, elasticName: i.elasticName, quantity: i.quantity, unit: i.unit, boxes: Number(i.boxes) || 0 })),
       })),
       lines,
       defaults: { hsn: settings.invoice?.defaultHsn || "", gstPercent: settings.invoice?.defaultGstPercent ?? 5 },
@@ -334,7 +341,8 @@ router.post(
           elastic: l.elastic, name: l.name, hsn: l.hsn, unit: l.unit, quantity: l.quantity, boxes: l.boxes || 0, rate: l.rate,
           taxable: l.taxable, gstPercent: l.gstPercent, cgst: l.cgst, sgst: l.sgst, igst: l.igst, amount: l.amount, dcNumbers: l.dcNumbers,
         })),
-        totalBoxes: priced.lines.reduce((a, l) => a + (l.boxes || 0), 0),
+        // Every box on its challans (services/invoiceBoxes.js).
+        totalBoxes: boxesOf(chosen).total,
         totals: priced.totals,
         amountInWords: amountInWords(priced.totals.grand),
         notes: String(notes || "").trim().slice(0, 500),

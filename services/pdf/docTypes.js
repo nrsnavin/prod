@@ -52,6 +52,7 @@ const DC_FIELDS = [
   { key: "lrNumber", label: "LR / GC no." },
   { key: "remarks", label: "Remarks" },
   { key: "totalQty", label: "Total quantity" },
+  { key: "totalBoxes", label: "Total boxes" },
   { key: "lineCount", label: "Number of line items" },
   { key: "footerNote", label: "Footer note" },
   { key: "termsText", label: "Terms & conditions" },
@@ -63,6 +64,7 @@ const DC_COLUMNS = [
   { field: "sno", header: "S.No", width: 0.6, align: "left", format: "text" },
   { field: "description", header: "Description of Goods", width: 4.4, align: "left", format: "text" },
   { field: "unit", header: "UOM", width: 0.9, align: "center", format: "text" },
+  { field: "boxes", header: "Boxes", width: 0.9, align: "right", format: "number" },
   { field: "qty", header: "Quantity", width: 1.3, align: "right", format: "number" },
 ];
 
@@ -92,14 +94,15 @@ function dcSample() {
       lrNumber: "LR-88213",
       remarks: "Handle rolls flat — do not stack on edge.",
       totalQty: "1,250",
+      totalBoxes: "25",
       lineCount: "3",
       footerNote: "This is a computer-generated document.",
       termsText: "Goods once dispatched will not be taken back. Subject to Erode jurisdiction.",
     },
     rows: [
-      { sno: 1, description: '3/4" Woven Elastic — White', unit: "m", qty: 500 },
-      { sno: 2, description: '1" Knitted Elastic — Black', unit: "m", qty: 450 },
-      { sno: 3, description: '2" Jacquard Elastic — Navy', unit: "m", qty: 300 },
+      { sno: 1, description: '3/4" Woven Elastic — White', unit: "m", boxes: 10, qty: 500 },
+      { sno: 2, description: '1" Knitted Elastic — Black', unit: "m", boxes: 9, qty: 450 },
+      { sno: 3, description: '2" Jacquard Elastic — Navy', unit: "m", boxes: 6, qty: 300 },
     ],
     logo: "",
   };
@@ -184,6 +187,8 @@ function dcStarter() {
     { id: "totbox", type: "box", x: L, y: 664, w: W, h: 22, lineWidth: 0.6, color: RULE },
     { id: "totlines_l", type: "text", text: "Total line items:", x: L + 6, y: 671, w: 90, h: 12, fontSize: 8, color: MUTED },
     { id: "totlines", type: "field", field: "lineCount", x: L + 98, y: 671, w: 40, h: 12, fontSize: 9, bold: true, color: INK },
+    { id: "totbx_l", type: "text", text: "TOTAL BOXES", x: 200, y: 671, w: 80, h: 12, fontSize: 8, bold: true, align: "right", color: MUTED },
+    { id: "totbx", type: "field", field: "totalBoxes", x: 284, y: 670, w: 70, h: 14, fontSize: 11, bold: true, color: INK },
     { id: "totqty_l", type: "text", text: "TOTAL QUANTITY", x: 380, y: 671, w: 110, h: 12, fontSize: 8, bold: true, align: "right", color: MUTED },
     { id: "totqty", type: "field", field: "totalQty", x: 494, y: 670, w: R - 500, h: 14, fontSize: 11, bold: true, align: "right", color: INK },
 

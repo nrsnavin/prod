@@ -81,7 +81,7 @@ const makeDc = (order, items, over = {}) => DeliveryChallan.create({
   dcNumber: `E-26/27-${String(++dcSeq).padStart(4, '0')}`, type: 'elastic', financialYear: '26/27', sequence: dcSeq,
   order: order._id, orderNo: order.orderNo, customerName: 'Sunrise Garments', status: 'dispatched',
   dispatchDate: new Date('2026-07-10'),
-  items: items.map((i) => ({ elastic: i.elastic._id, elasticName: i.elastic.name, unit: 'm', quantity: i.quantity, rate: 0 })),
+  items: items.map((i) => ({ elastic: i.elastic._id, elasticName: i.elastic.name, unit: 'm', quantity: i.quantity, rate: 0, boxes: i.boxes || 0 })),
   totalQuantity: items.reduce((a, i) => a + i.quantity, 0),
   ...over,
 });
@@ -94,7 +94,7 @@ async function scene(customerOver = {}) {
   const b = await makeElastic({ hsn: '5604', gstPercent: 12 });
   const order = await makeOrder(customer, [{ elastic: a, quantity: 1000, rate: 12.5 }, { elastic: b, quantity: 300, rate: 40 }]);
   const dc1 = await makeDc(order, [{ elastic: a, quantity: 600 }]);
-  const dc2 = await makeDc(order, [{ elastic: a, quantity: 400 }, { elastic: b, quantity: 300 }]);
+  const dc2 = await makeDc(order, [{ elastic: a, quantity: 400 }, { elastic: b, quantity: 300, boxes: 3 }]);
   const draft = await makeDc(order, [{ elastic: a, quantity: 50 }], { status: 'draft' });
   return { customer, a, b, order, dc1, dc2, draft };
 }
@@ -131,7 +131,7 @@ describe('raising an invoice', () => {
     const { order, dc1, dc2, a, b, customer } = await scene();
     const res = await post('/invoice/create', {
       orderId: order._id, dcIds: [dc1._id, dc2._id], invoiceDate: '2026-07-12', requestId: 'r1',
-      shipTo: 'Gate 2, Kongu Nagar, Tiruppur', lines: [{ elastic: b._id, boxes: 3 }],
+      shipTo: 'Gate 2, Kongu Nagar, Tiruppur', lines: [{ elastic: b._id, boxes: 40 }],
     });
     expect(res.status).toBe(201);
     const inv = res.body.invoice;

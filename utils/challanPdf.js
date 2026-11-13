@@ -294,12 +294,17 @@ function render({ dc, branding, settings, D }) {
     sno: String(i + 1),
     desc: it.elasticName || it.description || it.elastic?.name || '—',
     hsn: hsnOf(it),
+    boxes: Number(it.boxes) > 0 ? qty(it.boxes) : '',
     qty: `${qty(it.quantity)} ${it.unit || ''}`.trim(),
   }));
   const units = [...new Set(items.map((it) => it.unit || ''))];
   const totalQty = items.reduce((a, it) => a + (Number(it.quantity) || 0), 0);
+  // The boxes the goods went out in: a column, and its total, only when
+  // the lines carry any (a machine part sent loose has none).
+  const totalBoxes = items.reduce((a, it) => a + (Number(it.boxes) || 0), 0);
   const totalsRow = {
     desc: `Total  ·  ${items.length} item${items.length === 1 ? '' : 's'}`,
+    boxes: totalBoxes > 0 ? qty(totalBoxes) : '',
     qty: units.length === 1 ? `${qty(Math.round(totalQty * 1000) / 1000)} ${units[0]}`.trim() : '',
   };
   const showHsn = rows.some((r) => r.hsn);
@@ -307,6 +312,7 @@ function render({ dc, branding, settings, D }) {
     { k: 'sno', h: '#', a: 'center', min: 22 },
     { k: 'desc', h: 'Item & Description', a: 'left', flex: true },
     ...(showHsn ? [{ k: 'hsn', h: 'HSN/SAC', a: 'center', min: 64 }] : []),
+    ...(totalBoxes > 0 ? [{ k: 'boxes', h: 'Boxes', a: 'right', num: true, min: 52 }] : []),
     { k: 'qty', h: 'Quantity', a: 'right', num: true, min: 96 },
   ];
   for (const c of cols) {

@@ -91,7 +91,8 @@ describe('delivery-challan template', () => {
 
   test('offers no money column or bindable money field', () => {
     const dcType = getDocType('delivery-challan');
-    expect(dcType.columns.map((c) => c.field)).toEqual(['sno', 'description', 'unit', 'qty']);
+    // Boxes is a count, like the quantity: still no money on a challan.
+    expect(dcType.columns.map((c) => c.field)).toEqual(['sno', 'description', 'unit', 'boxes', 'qty']);
     expect(dcType.columns.some((c) => c.format === 'currency')).toBe(false);
     expect(dcType.fields.map((f) => f.key)).not.toContain('totalAmount');
   });

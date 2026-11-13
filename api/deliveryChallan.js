@@ -12,6 +12,7 @@ const { requireReason } = require("../utils/auditReason");
 const { escapeRegex } = require("../utils/escapeRegex");
 
 const DeliveryChallan = require("../models/DeliveryChallan");
+const { syncInvoiceBoxes } = require("../services/invoiceBoxes");
 const Order           = require("../models/Order");
 const JobOrder        = require("../models/JobOrder");
 const StockMovement   = require("../models/StockMovement");
@@ -158,6 +159,15 @@ function readDcItems(raw, type) {
       throw new ErrorHandler(`Line ${i + 1}: rate cannot be negative`, 400);
     }
 
+    // The boxes the line went out in: a whole number, none when blank.
+    // The invoice raised against this challan takes its boxes from here.
+    const boxes = item?.boxes === undefined || item?.boxes === null || item?.boxes === ""
+      ? 0
+      : Number(item.boxes);
+    if (!Number.isInteger(boxes) || boxes < 0) {
+      throw new ErrorHandler(`Line ${i + 1}: boxes must be a whole number, 0 or more`, 400);
+    }
+
     return {
       elastic:     item.elastic || undefined,
       elasticName: item.elasticName || "",
@@ -166,11 +176,32 @@ function readDcItems(raw, type) {
       quantity,
       rate,
       amount:      quantity * rate,
+      boxes,
       // Populated by _applyDcItems. Zeroed here on every path: a stale
       // split would make the NEXT reversal put back the wrong figure.
       consumedFromReservation: 0,
       consumedFromStock:       0,
     };
+  });
+}
+
+/** Every line's boxes added up: the challan's total boxes. */
+const sumBoxes = (items) => (items || []).reduce((s, i) => s + (Number(i.boxes) || 0), 0);
+
+/**
+ * The new lines are the old ones with only their boxes changed: the same
+ * elastic or part, unit, quantity and rate, line for line. Then an edit
+ * corrects the count in place instead of moving stock.
+ */
+function onlyBoxesDiffer(before, after) {
+  if (!Array.isArray(before) || before.length !== after.length) return false;
+  return before.every((b, i) => {
+    const a = after[i];
+    return String(b.elastic || "") === String(a.elastic || "")
+      && String(b.description || "") === String(a.description || "")
+      && String(b.unit || "m") === String(a.unit || "m")
+      && Number(b.quantity) === Number(a.quantity)
+      && Number(b.rate || 0) === Number(a.rate || 0);
   });
 }
 
@@ -729,6 +760,7 @@ router.post(
     }
     const totalQuantity = processedItems.reduce((s, i) => s + i.quantity, 0);
     const totalAmount   = processedItems.reduce((s, i) => s + i.amount,   0);
+    const totalBoxes    = sumBoxes(processedItems);
 
     // The order number is READ off the order, not taken on trust.
     //
@@ -787,6 +819,7 @@ router.post(
           items:           processedItems,
           totalQuantity,
           totalAmount,
+          totalBoxes,
           remarks:         remarks || "",
           status:          "draft",
         }], { session });
@@ -801,6 +834,7 @@ router.post(
             orderNo:       dc.orderNo  || null,
             totalQuantity: dc.totalQuantity,
             totalAmount:   dc.totalAmount,
+            totalBoxes:    dc.totalBoxes,
             itemCount:     processedItems.length,
           },
         });
@@ -921,9 +955,11 @@ router.put(
             name:     i.elasticName || i.description || "",
             quantity: i.quantity,
             rate:     i.rate,
+            boxes:    i.boxes || 0,
           })),
           totalQuantity: dc.totalQuantity,
           totalAmount:   dc.totalAmount,
+          totalBoxes:    dc.totalBoxes || 0,
         };
 
         if (changingItems) {
@@ -935,22 +971,32 @@ router.put(
           // a working challan into one the system does not see.
           const nextItems = await resolveElasticLines(readDcItems(items, dc.type), dc.type);
 
-          // 1. Put back everything this challan took. Same reversal the
-          //    cancel path uses, so the two cannot disagree.
-          for (const item of dc.items || []) {
-            await _reverseDcItem(
-              session, dc, item, `DC ${dc.dcNumber} edited`, req.user?._id
-            );
+          if (onlyBoxesDiffer(dc.items, nextItems)) {
+            // The same goods went out; only the count of boxes is being
+            // corrected. Nothing goes back on the shelf and nothing comes
+            // off it again: a recount must not leave a return-and-despatch
+            // pair in the elastic's stock ledger.
+            dc.items.forEach((item, i) => { item.boxes = nextItems[i].boxes; });
+            dc.totalBoxes = sumBoxes(dc.items);
+          } else {
+            // 1. Put back everything this challan took. Same reversal the
+            //    cancel path uses, so the two cannot disagree.
+            for (const item of dc.items || []) {
+              await _reverseDcItem(
+                session, dc, item, `DC ${dc.dcNumber} edited`, req.user?._id
+              );
+            }
+
+            // 2. Replace the lines.
+            dc.items = nextItems;
+            dc.totalQuantity = dc.items.reduce((s, i) => s + i.quantity, 0);
+            dc.totalAmount   = dc.items.reduce((s, i) => s + i.amount,   0);
+            dc.totalBoxes    = sumBoxes(dc.items);
+
+            // 3. Take the new lines out again, through the same helper
+            //    /create uses.
+            await _applyDcItems(session, dc, req.user?._id, { shortfallReason: req.body?.stockShortfallReason });
           }
-
-          // 2. Replace the lines.
-          dc.items = nextItems;
-          dc.totalQuantity = dc.items.reduce((s, i) => s + i.quantity, 0);
-          dc.totalAmount   = dc.items.reduce((s, i) => s + i.amount,   0);
-
-          // 3. Take the new lines out again, through the same helper
-          //    /create uses.
-          await _applyDcItems(session, dc, req.user?._id, { shortfallReason: req.body?.stockShortfallReason });
         }
 
         // ── The despatch detail ─────────────────────────────────────
@@ -979,9 +1025,11 @@ router.put(
                 name:     i.elasticName || i.description || "",
                 quantity: i.quantity,
                 rate:     i.rate,
+                boxes:    i.boxes || 0,
               })),
               totalQuantity: dc.totalQuantity,
               totalAmount:   dc.totalAmount,
+              totalBoxes:    dc.totalBoxes || 0,
             },
           },
         });
@@ -989,7 +1037,12 @@ router.put(
         dc.increment();
         await dc.save({ session });
 
-        resp = { dc, fingerprint: fp };
+        // An issued invoice carrying this challan takes its boxes from
+        // its challans (services/invoiceBoxes.js): the corrected count
+        // goes on it too, in the same transaction.
+        const invoiceBoxes = changingItems ? await syncInvoiceBoxes(dc._id, session) : [];
+
+        resp = { dc, fingerprint: fp, ...(invoiceBoxes.length ? { invoiceBoxesUpdated: invoiceBoxes } : {}) };
       });
       res.json({ success: true, message: "Delivery challan updated", ...resp });
     } catch (err) {
