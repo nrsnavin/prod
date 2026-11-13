@@ -62,6 +62,11 @@ const { requireReason } = require("../utils/auditReason");
 // staff roles (accounts, purchasing) also reach these routes.
 router.use(isAuthenticated);
 
+// A supplier's price list or quotation read and kept as the rates they
+// quoted; a PO line above them flagged. The same routes sit under
+// /accounts: the buyer here may hold Purchase orders without Accounts.
+router.use(require("./priceListRoutes"));
+
 
 // ─────────────────────────────────────────────────────────────────────────
 // OVER-RECEIPT

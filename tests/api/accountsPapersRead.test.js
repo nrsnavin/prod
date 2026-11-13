@@ -77,7 +77,7 @@ describe('a customer\'s debit note, into our credit note', () => {
     const res = await upload('/accounts/debit-notes/read');
     expect(res.status).toBe(200);
     expect(res.body.customer).toMatchObject({ name: 'Sunrise Garments', matchedBy: 'gstin' });
-    expect(res.body.invoice).toMatchObject({ invoiceNumber: 'INV/2026-27/0701', gstPercent: 5 });
+    expect(res.body.invoice).toMatchObject({ invoiceNumber: 'INV/2026-27/0701', gstPercent: 5, supplyType: 'intra' });
     expect(res.body.checks.map((c) => c.code)).toEqual(['SHORT_NO']);
     expect(res.body.draft).toMatchObject({
       kind: 'credit', against: { docType: 'Invoice', docNo: 'INV/2026-27/0701' }, partyNoteNo: 'DN/112', financial: false,
@@ -189,6 +189,20 @@ describe('suppliers\' price lists', () => {
     expect(above[0].message).toBe('Nylon 70D at ₹320 is 4.92% above Sri Yarn Traders\'s price list PL-Dec of ₹305/kg');
     expect((await post('/accounts/price-lists/check', { supplier: sriYarn._id, lines: [{ rawMaterial: String(nylon._id), rate: 310 }] })).body.flags).toEqual([]);
   });
+
+  it('the same routes sit under /supplier: a buyer with Purchase orders and not Accounts checks a PO line and sees the rates', async () => {
+    const buyer = await M.User.create({ name: 'Buyer', email: 'buyer3@t.co', password: 'pass1234', role: 'admin', department: 'admin', features: ['/purchase-orders'] });
+    const as = [`token=${jwt.sign({ id: buyer._id, role: 'admin' }, process.env.JWT_SECRET_KEY)}`];
+    const lines = [{ rawMaterial: String(nylon._id), description: 'Nylon 70D', rate: 320 }];
+    // Accounts writes are not theirs …
+    expect((await request(app).post('/api/v2/accounts/price-lists/check').set('Cookie', as).send({ supplier: sriYarn._id, lines })).status).toBe(403);
+    // … the supplier mount is.
+    const res = await request(app).post('/api/v2/supplier/price-lists/check').set('Cookie', as).send({ supplier: sriYarn._id, lines });
+    expect(res.status).toBe(200);
+    expect(res.body.flags).toEqual([expect.objectContaining({ code: 'ABOVE_QUOTE', line: 0 })]);
+    const rates = await request(app).get(`/api/v2/supplier/price-lists?supplier=${sriYarn._id}`).set('Cookie', as);
+    expect(rates.body.rates.map((x) => x.rate)).toEqual([305, 900]);
+  });
 });
 
 describe('power cost per metre', () => {
@@ -205,7 +219,12 @@ describe('power cost per metre', () => {
       await M.ShiftDetail.create({ date: new Date(`${d}T00:00:00Z`), shift: 'DAY', timer: '08:00:00', elastics: [], employee: new mongoose.Types.ObjectId(), shiftPlan: new mongoose.Types.ObjectId(), machine: new mongoose.Types.ObjectId(), status: 'closed', productionMeters: m });
     }
     const rep = (await get('/accounts/power-bills/report')).body.rows;
-    expect(rep[0]).toMatchObject({ month: '2026-10', units: 24850, total: 266005, metres: 75000, costPerMetre: 3.55, unitsPerMetre: 0.331, ratePerUnit: 10.7 });
+    expect(rep[0]).toMatchObject({ month: '2026-10', units: 24850, total: 266005, metres: 75000, costPerMetre: 3.55, unitsPerMetre: 0.331, ratePerUnit: 10.7, partial: false });
+    // This month's bill, entered before the month is over: marked, and not set against last month.
+    const now = bizDates.monthKey(bizDates.today());
+    await post('/accounts/power-bills', { month: now, consumerNo: '059-001-234', units: 9000, total: 96000 });
+    const after = (await get('/accounts/power-bills/report')).body.rows;
+    expect(after[0]).toMatchObject({ month: now, partial: true, change: null });
   });
 
   it('parts that do not make the total, and a rate a unit no Tamil Nadu bill has, are said', async () => {

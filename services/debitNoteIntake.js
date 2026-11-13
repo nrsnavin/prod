@@ -102,7 +102,7 @@ async function fromPhoto({ pages, customer = null } = {}) {
   let invoice = null;
   let others = [];
   if (party) {
-    const invoices = await Invoice.find({ customer: party._id, status: 'issued' }).select('invoiceNumber invoiceDate totals lines.gstPercent').sort({ invoiceDate: -1 }).limit(500).lean();
+    const invoices = await Invoice.find({ customer: party._id, status: 'issued' }).select('invoiceNumber invoiceDate totals supplyType lines.gstPercent').sort({ invoiceDate: -1 }).limit(500).lean();
     const found = fields.invoices.map((no) => ({ no, ...invoiceFor(no, invoices) }));
     const hits = found.filter((f) => f.invoice);
     for (const f of found.filter((x) => !x.invoice)) flag('INVOICE', 'warning', `${f.why}`);
@@ -138,7 +138,7 @@ async function fromPhoto({ pages, customer = null } = {}) {
   return {
     read: fields,
     customer: party ? { _id: String(party._id), name: party.name, matchedBy: party.matchedBy } : null,
-    invoice: invoice ? { _id: String(invoice._id), invoiceNumber: invoice.invoiceNumber, invoiceDate: invoice.invoiceDate, grand: invoice.totals?.grand || 0, gstPercent, others } : null,
+    invoice: invoice ? { _id: String(invoice._id), invoiceNumber: invoice.invoiceNumber, invoiceDate: invoice.invoiceDate, grand: invoice.totals?.grand || 0, gstPercent, supplyType: invoice.supplyType || 'intra', others } : null,
     notesSoFar: room,
     draft, checks,
     aiSuggestion: await record({ customer: party ? String(party._id) : null, invoice: invoice ? String(invoice._id) : null, taxable: amt.taxable }),

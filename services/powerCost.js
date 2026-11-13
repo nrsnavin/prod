@@ -10,7 +10,8 @@
 //  save(body)   the confirmed figures kept for the month.
 //  report()     each month: units, the bill, metres woven (closed shift
 //               entries), power cost per metre and units per metre, and
-//               how each moved on the month before.
+//               how each moved on the month before. A month not over yet
+//               is marked `partial` and not compared.
 // ══════════════════════════════════════════════════════════════════
 
 const PowerBill = require('../models/PowerBill');
@@ -115,7 +116,11 @@ async function report({ months = 12 } = {}) {
     byMonth.set(b.month, g);
   }
   const rows = [...byMonth.values()].sort((a, b) => (a.month < b.month ? 1 : -1)).slice(0, months);
+  // A month not over yet has only some of its metres woven: its cost per
+  // metre is not comparable, and is not compared.
+  const thisMonth = bizDates.monthKey(bizDates.today());
   for (const r of rows) {
+    r.partial = r.month >= thisMonth;
     r.metres = Math.round(await metresIn(r.month));
     r.ratePerUnit = r.units > 0 ? r2(r.total / r.units) : null;
     r.costPerMetre = r.metres > 0 ? r2(r.total / r.metres) : null;
@@ -123,7 +128,7 @@ async function report({ months = 12 } = {}) {
   }
   for (let i = 0; i < rows.length; i++) {
     const prev = rows[i + 1];
-    rows[i].change = prev && prev.costPerMetre && rows[i].costPerMetre ? r2(((rows[i].costPerMetre - prev.costPerMetre) / prev.costPerMetre) * 100) : null;
+    rows[i].change = prev && !rows[i].partial && prev.costPerMetre && rows[i].costPerMetre ? r2(((rows[i].costPerMetre - prev.costPerMetre) / prev.costPerMetre) * 100) : null;
   }
   return { rows };
 }
