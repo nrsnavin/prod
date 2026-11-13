@@ -530,6 +530,60 @@ router.post(
   })
 );
 
+// ── POST /:id/company-details ──────────────────────────────────
+// The company's own details on an invoice are copied from Settings when
+// it is raised. One raised before they were filled in (no GSTIN, no PIN
+// code) keeps the blanks, and the e-invoice portal refuses it. Until it
+// is registered there, it can take the details as Settings now hold
+// them: the number, date, lines and amounts stay as they are.
+//
+// Not once it is registered (the portal has signed those details), nor
+// when it is cancelled, nor when the new details would change the tax
+// from CGST + SGST to IGST or back: that is a different invoice, cancelled
+// and raised again.
+router.post(
+  "/:id/company-details",
+  portalStep(async (req, res, next) => {
+    const inv = await loadInvoice(req.params.id, next);
+    if (!inv) return;
+    if (inv.status === "cancelled") return next(new ErrorHandler("A cancelled invoice keeps the details it had", 409));
+    if (inv.einvoice?.status === "registered") {
+      return next(new ErrorHandler(
+        `This invoice is registered with the e-invoice portal (IRN ${inv.einvoice.irn}), which signed its details. ` +
+        "New invoices will carry the new details; to change this one, cancel it and raise it again.", 409));
+    }
+    const seller = sellerFrom(await getDocumentSettings());
+    const before = inv.seller?.toObject ? inv.seller.toObject() : { ...(inv.seller || {}) };
+    const fields = ["name", "address", "city", "pincode", "stateCode", "gstin", "phone", "email"];
+    if (fields.every((k) => String(before[k] || "") === String(seller[k] || ""))) {
+      return res.json({ success: true, unchanged: true, invoice: publicInvoice(inv) });
+    }
+    // The tax split the new details would give, worked out as at raising.
+    if (inv.supplyType === "intra" || inv.supplyType === "inter") {
+      const split = computeInvoice([], { sellerStateCode: seller.stateCode, buyerStateCode: inv.buyer?.stateCode });
+      if (split.supplyType !== inv.supplyType) {
+        const word = (t) => (t === "intra" ? "CGST + SGST" : "IGST");
+        return next(new ErrorHandler(
+          `With these details the tax on this invoice would be ${word(split.supplyType)} instead of ${word(inv.supplyType)} ` +
+          `(your state ${seller.stateCode || "unknown"}, the customer's ${inv.buyer?.stateCode || "unknown"}). ` +
+          "Cancel this invoice and raise it again.", 409));
+      }
+      if (!inv.placeOfSupply && split.placeOfSupply) inv.placeOfSupply = split.placeOfSupply;
+    }
+    inv.seller = seller;
+    inv.fingerprints.push(buildFingerprint(ACTION_CODES.INVOICE_SELLER_UPDATED, {
+      entityId: inv._id, actor: actorFromRequest(req),
+      meta: {
+        invoiceNumber: inv.invoiceNumber,
+        changed: fields.filter((k) => String(before[k] || "") !== String(seller[k] || "")),
+        before: Object.fromEntries(fields.map((k) => [k, before[k] || ""])),
+      },
+    }));
+    await inv.save();
+    res.json({ success: true, invoice: publicInvoice(inv) });
+  })
+);
+
 // ── Export details that come later: the shipping bill, the port ──
 // Customs issue the shipping bill after the invoice; it changes no
 // value, so it is the one thing an issued invoice takes afterwards.

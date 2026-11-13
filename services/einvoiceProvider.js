@@ -19,10 +19,12 @@
 //  the screen offers the other door: paste the IRN and signed QR that
 //  the portal (or the accountant's GSP console) gives back.
 //
-//  One adapter ships: "http-json", a plain POST of the INV-01 JSON to
-//  the configured URL with the credentials as headers, taking back the
-//  portal's standard field names. Most GSP proxies speak this; a
-//  provider with its own handshake (a token call first, encryption)
+//  Two adapters ship:
+//    "http-json"  a plain POST of the INV-01 JSON to the configured URL
+//                 with the credentials as headers, taking back the
+//                 portal's standard field names (most GSP proxies);
+//    "cleartax"   ClearTax's own e-invoicing API (see CLEARTAX below).
+//  A provider with its own handshake (a token call first, encryption)
 //  gets its own factory here.
 // ══════════════════════════════════════════════════════════════════
 
@@ -49,6 +51,9 @@ function readAckDate(v) {
   if (!v) return new Date();
   const m = /^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}):(\d{2}))?/.exec(String(v));
   if (m) return new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
+  // "2026-11-13 10:30:00" (ClearTax): the portal's clock, India time.
+  const iso = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})$/.exec(String(v));
+  if (iso) return new Date(`${iso[1]}T${iso[2]}+05:30`);
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? new Date() : d;
 }
@@ -117,7 +122,126 @@ async function callProvider(cfg, path, body, { notConfigured = 'EINVOICE_NOT_CON
   return { res, body: reply };
 }
 
+// ── CLEARTAX ──────────────────────────────────────────────────────
+// ClearTax's own e-invoicing API (docs.cleartax.in → E-Invoicing API →
+// Govt compatible APIs):
+//
+//    POST {host}/einv/v1/govt/api/Invoice/           the INV-01 JSON as it is
+//    POST {host}/einv/v1/govt/api/Cancel             { irn, CnlRsn, CnlRem }
+//    POST {host}/einv/v1/govt/api/einvewb/ewaybill   { Irn, Distance, TransMode, … }
+//
+// with the headers x-cleartax-auth-token (the workspace's token, made in
+// ClearTax), x-cleartax-product: EInvoice and gstin. The reply carries
+// the portal's fields at its top level, with Success "Y" or "N" and
+// ErrorDetails. The IRP API user's name and password are kept in
+// ClearTax, added there with the GSTIN; they are not sent from here.
+// Host: https://api.clear.in, or https://api-sandbox.clear.in for
+// ClearTax's sandbox (which takes only its own test GSTINs).
+const CLEARTAX_HOST = 'https://api.clear.in';
+
+// The token opens the company's ClearTax workspace, so it is sent to
+// ClearTax only: not to an address left in Settings from a GSP used
+// before, nor to one typed by mistake.
+const CLEARTAX_DOMAINS = ['clear.in', 'cleartax.in', 'cleartax.co'];
+function onClearTax(url) {
+  let host;
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return false; }
+  return CLEARTAX_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
+async function callClearTax(cfg, path, body, rejected = 'EINVOICE_REJECTED') {
+  const base = (cfg.baseUrl || CLEARTAX_HOST).replace(/\/$/, '');
+  const problem = outboundUrlProblem(base);
+  if (problem) throw failure(`ClearTax's address in Settings → Invoice cannot be used: ${problem}.`, 'EINVOICE_NOT_CONFIGURED');
+  if (!onClearTax(base)) {
+    throw failure(`The address in Settings → Invoice (${base}) is not ClearTax's. Choose Live or Sandbox there and save.`, 'EINVOICE_NOT_CONFIGURED');
+  }
+  if (!cfg.clientSecret) throw failure('No ClearTax auth token in Settings → Invoice.', 'EINVOICE_NOT_CONFIGURED');
+  if (!cfg.gstin) throw failure('Your GSTIN is missing (Settings → Documents): ClearTax needs it.', 'EINVOICE_NOT_CONFIGURED');
+  let res;
+  try {
+    res = await fetch(base + path, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-cleartax-auth-token': cfg.clientSecret,
+        'x-cleartax-product': 'EInvoice',
+        gstin: cfg.gstin,
+      },
+      body: JSON.stringify(body),
+      redirect: 'error', // the token goes to ClearTax's address, nowhere it points on to
+      signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const slow = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+    throw failure(
+      slow ? 'ClearTax did not answer in time. Check on ClearTax or the portal before trying again: it may have gone through.'
+           : 'ClearTax could not be reached. Try again in a minute.',
+      rejected, 502
+    );
+  }
+  let reply;
+  try { reply = await res.json(); } catch { reply = {}; }
+  return { res, body: reply };
+}
+
+/** ClearTax's errors in its own words: "2150: Duplicate IRN; …". */
+function clearTaxErrors(body) {
+  const list = Array.isArray(body?.ErrorDetails) ? body.ErrorDetails
+    : Array.isArray(body?.errors?.errors) ? body.errors.errors
+      : Array.isArray(body?.errors) ? body.errors : [];
+  const said = list
+    .map((e) => [e?.error_code ?? e?.ErrorCode ?? e?.code, e?.error_message ?? e?.ErrorMessage ?? e?.message].filter((x) => x !== undefined && x !== null && x !== '').join(': '))
+    .filter(Boolean)
+    .join('; ');
+  return said || String(body?.message || body?.error_message || '');
+}
+
+const refusal = (what, res, body, code) => {
+  const why = clearTaxErrors(body);
+  return failure(`ClearTax ${what}${res.ok ? '' : ` (${res.status})`}${why ? `: ${why}` : ''}.`, code, 502);
+};
+
 const PROVIDERS = {
+  cleartax: (cfg) => ({
+    async register(payload) {
+      const { res, body } = await callClearTax(cfg, '/einv/v1/govt/api/Invoice/', payload);
+      // A repeat of an invoice ClearTax already registered comes back as a
+      // success with the same IRN (info DUPIRN_CLEARTAX): taken as one.
+      if (body?.Success === 'Y' && body?.Irn) {
+        return {
+          irn: String(body.Irn),
+          ackNo: String(body.AckNo ?? ''),
+          ackDate: readAckDate(body.AckDt),
+          signedQr: String(body.SignedQRCode ?? ''),
+          raw: body,
+        };
+      }
+      const err = refusal('did not register it', res, body, 'EINVOICE_REJECTED');
+      if (/\b2150\b/.test(err.message)) {
+        err.message += ' The portal already has an IRN for this invoice number: paste it in from the portal or ClearTax ("Paste IRN…").';
+      }
+      throw err;
+    },
+    async ewaybill(payload) {
+      const { res, body } = await callClearTax(cfg, '/einv/v1/govt/api/einvewb/ewaybill', payload, 'EWB_REJECTED');
+      if (body?.EwbNo && body?.Success !== 'N' && body?.EwbStatus !== 'FAILED') {
+        return {
+          number: String(body.EwbNo),
+          generatedAt: readAckDate(body.EwbDt),
+          validUpto: body.EwbValidTill ? readAckDate(body.EwbValidTill) : undefined,
+          raw: body,
+        };
+      }
+      throw refusal('did not generate the e-way bill', res, body, 'EWB_REJECTED');
+    },
+    async cancel(irn, { reason } = {}) {
+      // "4" is Others: the reason typed here goes with it as the remark.
+      const { res, body } = await callClearTax(cfg, '/einv/v1/govt/api/Cancel', { irn, CnlRsn: '4', CnlRem: String(reason || 'Cancelled').slice(0, 100) });
+      if (body?.Success === 'Y') return { cancelledAt: body.CancelDate ? readAckDate(body.CancelDate) : new Date(), raw: body };
+      throw refusal('refused the cancellation', res, body, 'EINVOICE_REJECTED');
+    },
+  }),
   'http-json': (cfg) => ({
     async register(payload) {
       const { res, body } = await callProvider(cfg, '/generate', payload);

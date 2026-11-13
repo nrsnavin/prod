@@ -399,6 +399,36 @@ describe('invoice settings', () => {
   });
 });
 
+// The IRP API user was made with ClearTax as the GSP. Register IRN sends
+// the invoice to ClearTax with the token stored in Settings and the
+// company's GSTIN, and keeps what the portal gave back.
+describe('e-invoice through ClearTax', () => {
+  const realFetch = global.fetch;
+  afterEach(() => { global.fetch = realFetch; });
+
+  it('Register IRN sends the invoice to ClearTax with the stored token and the GSTIN, and keeps the reply', async () => {
+    const { order, dc1 } = await scene();
+    const saved = await put('/settings/document', { invoice: { gsp: { provider: 'cleartax', baseUrl: 'https://api-sandbox.clear.in', clientSecret: 'ws-token-1' } } });
+    expect(saved.body.settings.invoice.gsp).toMatchObject({ provider: 'cleartax', baseUrl: 'https://api-sandbox.clear.in', configured: true });
+    expect(saved.body.settings.invoice.gsp.clientSecret).toBeUndefined();
+    const inv = (await post('/invoice/create', { orderId: order._id, dcIds: [dc1._id] })).body.invoice;
+
+    const IRN = 'c'.repeat(64);
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true, status: 200,
+      json: async () => ({ Success: 'Y', Irn: IRN, AckNo: 112610012345678, AckDt: '2026-11-13 10:30:00', SignedQRCode: 'eyJ.signed.qr' }),
+    });
+    const res = await post(`/invoice/${inv._id}/register-irn`, {});
+    expect(res.status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = global.fetch.mock.calls[0];
+    expect(url).toBe('https://api-sandbox.clear.in/einv/v1/govt/api/Invoice/');
+    expect(init.headers).toMatchObject({ 'x-cleartax-auth-token': 'ws-token-1', 'x-cleartax-product': 'EInvoice', gstin: '33AAECB1234F1Z5' });
+    expect(JSON.parse(init.body).DocDtls.No).toBe(inv.invoiceNumber);
+    expect(res.body.invoice.einvoice).toMatchObject({ status: 'registered', irn: IRN, ackNo: '112610012345678', provider: 'cleartax' });
+  });
+});
+
 describe('raised once, whole or not at all', () => {
   const PartyLedgerEntry = () => require('../../models/PartyLedgerEntry');
   const create = (order, dcs, extra = {}) => post('/invoice/create', { orderId: order._id, dcIds: dcs.map((d) => d._id), ...extra });

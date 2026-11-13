@@ -256,9 +256,13 @@ function render({ inv, branding, settings, qrs, D }) {
     const side = logo || qrs.signed ? 100 : 0;
     const cx = L + side + PAD;
     const cw = W - side * 2 - PAD * 2;
-    const addressLines = Array.isArray(branding.addressLines) && branding.addressLines.length
-      ? branding.addressLines.filter(Boolean)
-      : (seller.address ? [seller.address] : []);
+    // The address the invoice was raised with, like its name and GSTIN
+    // (an invoice keeps the details it was issued with; one not yet
+    // registered can take Settings' current ones: POST /:id/company-details).
+    // The logo is not part of the invoice and is always Settings' own.
+    const addressLines = seller.address
+      ? [seller.address]
+      : (Array.isArray(branding.addressLines) ? branding.addressLines.filter(Boolean) : []);
     const cityPart = [[seller.city, seller.stateCode ? stateName(seller.stateCode) : ''].filter(Boolean).join(', '), seller.pincode].filter(Boolean).join(' - ');
     const rows = [
       [[...addressLines, cityPart].filter(Boolean).join(', '), false, INK],
