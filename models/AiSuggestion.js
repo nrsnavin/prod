@@ -146,6 +146,12 @@ const AI_SURFACES = Object.freeze([
   'inbox-triage',
   // A notice for workers put into Tamil and Hindi.
   'notice-translate',
+  // A customer's cheque read from a photo into a receipt (or a post-dated
+  // cheque held until its date); the receipt posted from it settles it.
+  'cheque-receipt-ocr',
+  // A photo sent to the WhatsApp number sorted: a production slip, a bill,
+  // a receipt, a cheque, a challan, a PO, a payment advice, or other.
+  'whatsapp-sort',
 ]);
 
 /** How a suggestion ended up. */

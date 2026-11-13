@@ -487,6 +487,12 @@ router.put("/settings", isAdmin("admin"), catchAsyncErrors(async (req, res) => {
     if (Number.isFinite(p) && p >= 0 && p <= 100) set["bills.rateVariancePercent"] = p;
   }
   if (b.gst?.hsnDigits !== undefined && [4, 6, 8].includes(Number(b.gst.hsnDigits))) set["gst.hsnDigits"] = Number(b.gst.hsnDigits);
+  if (b.bankLines) {
+    const l = b.bankLines;
+    if (l.postLearned !== undefined) set["bankLines.postLearned"] = !!l.postLearned;
+    if (l.learnedAfter !== undefined && Number.isInteger(Number(l.learnedAfter)) && Number(l.learnedAfter) >= 2 && Number(l.learnedAfter) <= 50) set["bankLines.learnedAfter"] = Number(l.learnedAfter);
+    if (l.learnedUpTo !== undefined && Number.isFinite(Number(l.learnedUpTo)) && Number(l.learnedUpTo) >= 0) set["bankLines.learnedUpTo"] = Number(l.learnedUpTo);
+  }
   if (b.tds?.purchase194q !== undefined) {
     const q = b.tds.purchase194q || {};
     if (q.enabled !== undefined) set["tds.purchase194q.enabled"] = !!q.enabled;

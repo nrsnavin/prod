@@ -98,6 +98,17 @@ router.post("/payments", catchAsyncErrors(async (req, res, next) => {
       decidedBy: req.user?._id, expectSurface: "payment-advice", ignoreMissing: true,
     }).catch(noted(`scoring the payment advice against ${v.voucherNo}`));
   }
+  // Entered from a cheque photo: the number, date, amount and who paid score the read.
+  if (!out.replay && isId(req.body?.chequeSuggestion)) {
+    const chequeIntake = require("../services/chequeIntake");
+    aiLedger.settle(req.body.chequeSuggestion, { accepted: chequeIntake.accepted(v), decidedBy: req.user?._id, expectSurface: chequeIntake.SURFACE })
+      .catch(noted(`scoring the cheque read against ${v.voucherNo}`));
+  }
+  // From a photo sent on WhatsApp: it is done, and its sort was right.
+  if (!out.replay && isId(req.body?.paper)) {
+    await require("../services/whatsappPapers").markEntered(req.body.paper, { doc: "Payment", docId: v._id, label: v.voucherNo }, { user: req.user })
+      .catch(noted(`closing WhatsApp photo ${req.body.paper} with ${v.voucherNo}`));
+  }
   res.status(out.replay ? 200 : 201).json({ success: true, payment: v, ...(out.replay ? { replay: true } : {}) });
 }));
 

@@ -38,6 +38,7 @@ const router = express.Router();
 //   accountsReports.js      GST, TDS, expenses, cash book, day book
 //   accountsReaders.js      bill scans, payment advice, supplier statements,
 //                           the mailboxes, bank statements
+//   accountsPapers.js       cheque photos, photos sent on WhatsApp
 //   accountsCollections.js  reminding customers who owe
 //
 // accountsCommon.js holds what more than one of them uses.
@@ -55,6 +56,7 @@ router.use(require("./accountsNotes"));
 router.use(require("./accountsVouchers"));
 router.use(require("./accountsReports"));
 router.use(require("./accountsReaders"));
+router.use(require("./accountsPapers"));
 router.use(require("./accountsCollections"));
 
 // Contras, opening balances, settings and the lock.

@@ -193,6 +193,32 @@ async function handle(raw) {
   return { status: out.status, kind: kind.kind };
 }
 
+/**
+ * A photo sent to the WhatsApp number that is a customer's order or a
+ * payment advice (services/whatsappPapers.js): read by the reader a
+ * mail's attachment goes to, and kept beside the mails in Accounts →
+ * Inbox. `customer` is the customer on file when they sent it
+ * themselves; one of our people forwarding it leaves it to be picked.
+ * → { inboxMail, status, note }
+ */
+async function fileWhatsApp({ messageId, from, caption = '', kind, pages, customer = null, paper = null, notifyOffice = false }) {
+  const extOf = (t) => ({ 'application/pdf': 'pdf', 'image/png': 'png', 'image/webp': 'webp' }[t] || 'jpg');
+  const files = (pages || []).slice(0, MAX_FILES).map((p, i) => ({ buffer: p.buffer, type: p.mimetype, filename: `whatsapp-${i + 1}.${extOf(p.mimetype)}`, size: p.buffer.length }));
+  const text = String(caption || '').slice(0, 6000);
+  await InboxMail.create({ messageId, from, subject: 'WhatsApp photo', receivedAt: new Date(), source: 'whatsapp', paper });
+  let out;
+  try { out = await route(kind, { customer, text, files, from }); } catch (err) { out = { status: 'new', note: `Could not be handled: ${err.message}`.slice(0, 300) }; }
+  const inboxMail = await InboxMail.findOneAndUpdate({ messageId }, { $set: {
+    text, files: files.map((f) => ({ filename: f.filename, contentType: f.type, size: f.size })),
+    customer: customer?._id || null, customerName: customer?.name || '', kind, summary: '', aiSuggestion: out.aiSuggestion || '', ...out,
+  } }, { new: true }).select('-text -draft').lean();
+  if (notifyOffice) {
+    const { notify } = require('../utils/notify');
+    await notify('customerMail', { body: `📱 *${customer?.name || from}* ${WORDS[kind] || 'sent a photo'} on WhatsApp${out.note ? `\n${out.note}` : ''}` }).catch(() => null);
+  }
+  return { inboxMail, status: out.status, note: out.note || '' };
+}
+
 let running = false;
 async function run({ now = new Date() } = {}) {
   const c = config();
@@ -221,4 +247,4 @@ function start() {
 function stop() { if (timer) clearInterval(timer); timer = null; }
 function status() { const c = config(); return { configured: configured(c), mailbox: configured(c) ? c.user : '', everyMin: c.everyMin }; }
 
-module.exports = { run, start, stop, handle, status, classify, keywordKind, customerForEmail, bodyOf, setFetcher, config, configured, SURFACE };
+module.exports = { run, start, stop, handle, fileWhatsApp, route, status, classify, keywordKind, customerForEmail, bodyOf, setFetcher, config, configured, SURFACE };

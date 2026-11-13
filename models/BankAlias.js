@@ -29,6 +29,14 @@ const BankAliasSchema = new mongoose.Schema(
     createdBy: { type: mongoose.Types.ObjectId, ref: "User" },
     createdByName: { type: String, default: "" },
     lastMatchedAt: { type: Date, default: null },
+    // Lines it suggested that a person posted exactly as suggested, in a
+    // row; any change starts it again. Enough of them and its lines post
+    // themselves, when the books allow it (services/learnedPosting.js).
+    acceptedUnchanged: { type: Number, default: 0, min: 0 },
+    lastAcceptedAt:    { type: Date, default: null },
+    changedAt:         { type: Date, default: null },
+    autoPosted:        { type: Number, default: 0, min: 0 },
+    lastAutoPostedAt:  { type: Date, default: null },
   },
   { timestamps: true }
 );

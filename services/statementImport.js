@@ -116,6 +116,14 @@ async function importStatement({ account, buffer, mimetype, filename = '', rows:
   });
   // What the bank shows is cleared in the books.
   for (const r of matched) if (r.status === 'recorded' && r.recorded) await reconcile.markCleared(r.recorded.voucherType, r.recorded._id, account._id, r.date);
+  // A remembered payer a person has posted unchanged often enough: its
+  // lines post themselves, when the books allow it (services/learnedPosting.js).
+  const learned = await require('./learnedPosting').postLearned(statement._id, account._id, { via: source })
+    .catch((err) => { console.warn(`[statement-import] lines posting themselves: ${err.message}`); return { posted: [] }; });
+  for (const p of learned.posted) {
+    const r = matched.find((x) => x.index === p.index);
+    if (r) Object.assign(r, { status: 'posted', voucherNo: p.voucherNo, note: `Posted by itself: lines with "${p.text}" were posted unchanged before` });
+  }
   const counts = { recorded: 0, matched: 0, unmatched: 0 };
   for (const r of matched) counts[r.status] = (counts[r.status] || 0) + 1;
   return { statement, rows: matched, counts, closingBalance: statement.closingBalance, newLines: matched.length, total: parsed.length, continuity };

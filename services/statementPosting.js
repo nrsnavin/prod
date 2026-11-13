@@ -104,9 +104,14 @@ async function rememberPayer(r, partyType, voucher, req) {
     if (partyType !== 'other' && !party) return false;
     const partyName = String(voucher.partyName || r.partyName || '').trim().slice(0, 120);
     if (!partyName) return false;
+    // Told again to the same party, it keeps the times it was posted
+    // unchanged; told to someone else, those times were for another party.
+    const before = await BankAlias.findOne({ text, direction }).select('partyType party head incomeLedger').lean();
+    const same = before && before.partyType === partyType && String(before.party || '') === String(party || '')
+      && String(before.head || '') === String(voucher.head || '') && String(before.incomeLedger || '') === String(voucher.incomeLedger || '');
     await BankAlias.updateOne(
       { text, direction },
-      { $set: { partyType, party, partyName, head: voucher.head || null, headName: voucher.headName || '', incomeLedger: voucher.incomeLedger || '', createdBy: req.user?._id, createdByName: req.user?.name || '' }, $setOnInsert: { text, direction } },
+      { $set: { partyType, party, partyName, head: voucher.head || null, headName: voucher.headName || '', incomeLedger: voucher.incomeLedger || '', createdBy: req.user?._id, createdByName: req.user?.name || '', ...(same ? {} : { acceptedUnchanged: 0 }) }, $setOnInsert: { text, direction } },
       { upsert: true }
     );
     return true;
@@ -122,9 +127,10 @@ async function rememberPayer(r, partyType, voucher, req) {
  * @param row        what the person confirmed: { index, partyType, party, partyName, head, incomeLedger, allocations, adjustments, mode, contra, remember }
  *                   (+ date, amount, direction, narration, ref, requestId, used only when there is no stored line)
  * @param note       a note to leave on the line (the bank feed says how it was posted)
+ * @param auto       posted by the server itself (the bank feed, a learned payer), not by a person
  * @returns { ok, voucherNo, _id, replay, already?, contra?, remembered? }
  */
-async function postRow({ accountId, statement = null, row: r, req, note = '' }) {
+async function postRow({ accountId, statement = null, row: r, req, note = '', auto = false }) {
   const { createVoucher } = require('../api/accountsCommon');
   let line = null;
   let id = null;
@@ -166,6 +172,11 @@ async function postRow({ accountId, statement = null, row: r, req, note = '' }) 
     requestId: r.requestId,
   }, req, { bankLine: id });
   await mark({ status: 'posted', voucherType: 'Payment', voucher: voucher._id, voucherNo: voucher.voucherNo });
+  // A person posting a remembered payer's line: exactly as suggested
+  // counts towards its lines posting themselves; a change starts again.
+  if (!replay && !auto && req?.user?._id && line?.suggestion?.remembered) {
+    await require('./learnedPosting').score(line.suggestion, { ...r, partyType });
+  }
   // "Remember": the next statement's lines carrying this text are this party.
   const remembered = r.remember ? await rememberPayer({ ...r, ...bank }, partyType, voucher, req) : false;
   return { ok: true, voucherNo: voucher.voucherNo, _id: voucher._id, replay: !!replay, ...(r.remember ? { remembered } : {}) };

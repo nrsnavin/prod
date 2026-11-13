@@ -27,6 +27,7 @@ const NotifSettings = NotificationSettings;
 const axios         = require("axios");
 const Order         = require("../models/Order.js");
 const slips         = require("../services/slipIngest.js");
+const papers        = require("../services/whatsappPapers.js");
 
 // Build a normalized events map so the admin app always sees
 // {enabled,recipients,tier,throttleSeconds} per event regardless of
@@ -326,12 +327,26 @@ async function handleIncoming(req) {
 
   const senderE164 = from.replace(/^whatsapp:/i, "").trim();
 
-  // 1b. A production slip: a photo, or a reply about one. Its own
-  //     sender check (production logins by phone, plus the owner list).
+  // 1b. A reply about a production slip (OK 4821, NO 4821, 4821 DAY 06-10).
+  //     Its own sender check (production logins by phone, plus the owner list).
   const slipCmd = slips.parseSlipCommand(body);
-  if (Number(req.body?.NumMedia || 0) > 0 || slipCmd) {
-    return handleSlipMessage(req, senderE164, slipCmd);
+  if (slipCmd) return handleSlipMessage(req, senderE164, slipCmd);
+
+  // 1c. A reply that says what a photo is (BILL 4821, IGNORE 4821), from
+  //     one of our people. From anyone else it is an ordinary message.
+  const paperCmd = papers.parseCommand(body);
+  if (paperCmd) {
+    try {
+      const r = await papers.handleCommand(senderE164, paperCmd);
+      if (r) return { status: 200, body: twimlReply(r.reply) };
+    } catch (err) {
+      console.warn(`[whatsapp:paper] ${err?.message}`);
+      return { status: 200, body: twimlReply("Sorry, something went wrong with that photo. Please try again.") };
+    }
   }
+
+  // 1d. A photo: sorted, and handed to the reader for what it is.
+  if (Number(req.body?.NumMedia || 0) > 0) return handlePhoto(req, senderE164);
 
   // 2. Allow-list: sender's E.164 must be in NotificationSettings.recipients.
   const settings = await NotifSettings.load();
@@ -379,7 +394,7 @@ async function handleIncoming(req) {
         "Sorry, I didn't recognize that command. Reply with:\n" +
         "  APPROVE <orderNo>\n" +
         "  APPROVE <orderNo> force: <reason>\n" +
-        "Or send a photo of a production slip."
+        "Or send a photo of a production slip, a bill, a receipt or a cheque."
       ),
     };
   }
@@ -457,6 +472,46 @@ async function handleIncoming(req) {
       status: 200,
       body:   twimlReply(`✗ Could not approve #${cmd.orderNo} — server error.`),
     };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// A photo sent to the WhatsApp number (services/whatsappPapers.js).
+//
+// One of our people, a customer or a supplier on file may send one;
+// anyone else is told their number is not set up. A slip sender's photo
+// captioned with its shift ("DAY 06-10") goes to the slip reader as it
+// always did. Every other photo is kept and sorted in the background —
+// a bill to the bills inbox, a cheque to be entered, a slip to the slip
+// reader — and the sender is told where it went.
+// ─────────────────────────────────────────────────────────────────
+async function handlePhoto(req, senderE164) {
+  const caption = req.body.Body || "";
+  const sender = await papers.whoSent(senderE164);
+  if (!sender) {
+    return {
+      status: 200,
+      body: twimlReply(
+        `Your number (${senderE164}) is not set up to send production slips or bills here. ` +
+        "Ask an admin to put this phone on your employee record and give your login production or accounts access."
+      ),
+    };
+  }
+  if (sender.who === "staff" && sender.slips && papers.isSlipCaption(caption)) {
+    return handleSlipMessage(req, senderE164, null);
+  }
+  try {
+    const count = Math.min(Number(req.body.NumMedia) || 0, 10);
+    const media = [];
+    for (let i = 0; i < count; i++) media.push({ url: req.body[`MediaUrl${i}`], contentType: req.body[`MediaContentType${i}`] });
+    const out = await papers.receive({ messageSid: req.body.MessageSid, from: senderE164, caption, media, sender });
+    if (out.unsupported) return { status: 200, body: twimlReply("I can read photos and PDFs only. Send the paper as a photo or a PDF.") };
+    if (out.capped) return { status: 200, body: twimlReply("That is more photos than one phone may send in a day. Send the rest tomorrow, or upload them on the web.") };
+    if (sender.who !== "staff") return { status: 200, body: twimlReply("Thank you, we have received it. Our office will look at it.") };
+    return { status: 200, body: twimlReply(`Got it (${out.paper.code}). I'll work out what it is and reply in a minute or two.`) };
+  } catch (err) {
+    console.warn(`[whatsapp:photo] ${err?.message}`);
+    return { status: 200, body: twimlReply("Sorry, something went wrong with that photo. Please send it again.") };
   }
 }
 

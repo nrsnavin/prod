@@ -275,6 +275,18 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'cheque-receipt-ocr': {
+    version: 'v1.0',
+    notes: 'A customer\'s cheque read from a photo into number, date, amount (figures and words), payee, drawer and bank. The figure is checked against the words, the date for post-dated and stale, the payee against our name, all in services/chequeIntake.js. Lives in utils/chequeOcr.js.',
+    system: null,
+  },
+
+  'whatsapp-sort': {
+    version: 'v1.0',
+    notes: 'A photo or PDF sent to the WhatsApp number sorted into production slip, supplier bill, expense receipt, cheque, delivery challan, purchase order, payment advice or other, then handed to the reader that exists for it. A caption or an e-invoice QR decides first; the model only when they do not. Lives in services/whatsappPapers.js.',
+    system: null,
+  },
+
   'cheque-ocr': {
     version: 'v1.0',
     notes: 'A cancelled cheque, passbook page or bank letter read into account number, IFSC, bank, branch and holder; the holder compared with the party\'s name. Lives in utils/kycOcr.js.',

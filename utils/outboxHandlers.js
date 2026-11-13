@@ -136,6 +136,14 @@ const HANDLERS = {
     const { readSlipJob } = require("../services/slipIngest.js");
     await readSlipJob(slipId);
   },
+
+  // A photo sent to the WhatsApp number: fetch it, work out what it is,
+  // hand it to that paper's reader, tell the sender where it went
+  // (services/whatsappPapers.js). Queued for the same reason as a slip.
+  async "paper.sort"({ paperId }) {
+    const { sortJob } = require("../services/whatsappPapers.js");
+    await sortJob(paperId);
+  },
 };
 
 function getHandler(kind) {

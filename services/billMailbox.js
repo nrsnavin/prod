@@ -109,50 +109,67 @@ async function handle(raw, c = config()) {
   let made = 0;
   for (let i = 0; i < files.length; i++) {
     const { a, type } = files[i];
-    const buffer = a.content;
-    const doc = { ...base, part: i + 1, filename: String(a.filename || `bill-${i + 1}`).slice(0, 120), contentType: type, size: buffer?.length || 0 };
-    if (!buffer || buffer.length > MAX_BYTES) {
-      await InboxBill.create({ ...doc, status: 'failed', note: 'The file is over 10 MB' }).catch(() => null);
-      continue;
-    }
-    doc.data = `data:${type};base64,${buffer.toString('base64')}`;
-    const startedAt = Date.now();
-    let read;
-    try {
-      read = await readBill([{ buffer, mimetype: type }]);
-    } catch (err) {
-      await aiLedger.record({ surface: 'bill-ocr', model: '?', promptVersion: promptVersion('bill-ocr'), latencyMs: Date.now() - startedAt, error: err.message }).catch(() => null);
-      await InboxBill.create({ ...doc, status: 'failed', note: err.code === 'ANTHROPIC_KEY_MISSING' ? 'Bill reading is not set up on this server — open the file and enter it by hand' : `Could not read it: ${err.message}`.slice(0, 300) }).catch(() => null);
-      continue;
-    }
-    const aiSuggestion = await aiLedger.record({
-      surface: 'bill-ocr', model: read.model, promptVersion: promptVersion('bill-ocr'),
-      proposed: { kind: read.kind, supplierName: read.supplierName, supplierGstin: read.supplierGstin, billNo: read.billNo, billDate: read.billDate, lines: read.lines, totals: read.totals, confidence: read.confidence },
-      latencyMs: read.latencyMs, usage: read.usage,
-    }).catch(() => null);
-    if (read.problem) {
-      await InboxBill.create({ ...doc, status: 'skipped', note: read.problem === 'not_a_bill' ? 'Not a bill' : 'Could not be read', read, aiSuggestion }).catch(() => null);
-      continue;
-    }
-    // The supplier's e-invoice QR, when the file carries one: what the
-    // portal signed replaces what was read (services/billQr.js).
-    const billQr = require('./billQr');
-    const found = await billQr.findEinvoice([{ buffer, mimetype: type }]).catch((err) => { console.warn(`[bills-mailbox] looking for an e-invoice QR failed: ${err.message}`); return null; });
-    const withQr = await billQr.withEinvoice(read, found);
-    read = withQr.read;
-    doc.einvoiceQr = withQr.einvoiceQr;
-    const match = await matchRead(read);
-    const senderKnown = !!(match.supplierEmail && String(match.supplierEmail).toLowerCase().split(/[,;\s]+/).includes(from));
-    await InboxBill.create({
-      ...doc, status: 'new', read, aiSuggestion,
-      supplier: match.supplier?._id || null, supplierName: match.supplier?.name || read.supplierName || '', matchedBy: match.supplier?.matchedBy || null,
-      senderKnown, alreadyEntered: match.alreadyEntered, grand: read.totals?.grand ?? null,
-      note: match.alreadyEntered ? `Already entered as ${match.alreadyEntered}` : '',
-    });
-    made += 1;
+    const doc = { ...base, part: i + 1, filename: String(a.filename || `bill-${i + 1}`).slice(0, 120), contentType: type, size: a.content?.length || 0 };
+    const out = await fileOne(doc, a.content, type);
+    if (out.status === 'new') made += 1;
   }
   await settle('skipped', `${made} bill${made === 1 ? '' : 's'} read from ${files.length} file${files.length === 1 ? '' : 's'}`);
   return { status: 'read', bills: made };
+}
+
+/**
+ * One bill file read, matched and kept as an InboxBill: from the bills
+ * mailbox (one per attachment) or from the WhatsApp number
+ * (services/whatsappPapers.js). `doc` says where it came from (messageId,
+ * part, from, subject, receivedAt, filename, contentType, size; source,
+ * sentByName, paper). `senderSupplier`: the supplier the sender is on
+ * file as, when known by other means than the mail address.
+ *
+ * → { status: 'new' | 'failed' | 'skipped', inboxBill }
+ */
+async function fileOne(doc, buffer, type, { senderSupplier = null } = {}) {
+  if (!buffer || buffer.length > MAX_BYTES) {
+    const inboxBill = await InboxBill.create({ ...doc, status: 'failed', note: 'The file is over 10 MB' }).catch(() => null);
+    return { status: 'failed', inboxBill };
+  }
+  doc = { ...doc, data: `data:${type};base64,${buffer.toString('base64')}` };
+  const startedAt = Date.now();
+  let read;
+  try {
+    read = await readBill([{ buffer, mimetype: type }]);
+  } catch (err) {
+    await aiLedger.record({ surface: 'bill-ocr', model: '?', promptVersion: promptVersion('bill-ocr'), latencyMs: Date.now() - startedAt, error: err.message }).catch(() => null);
+    const inboxBill = await InboxBill.create({ ...doc, status: 'failed', note: err.code === 'ANTHROPIC_KEY_MISSING' ? 'Bill reading is not set up on this server — open the file and enter it by hand' : `Could not read it: ${err.message}`.slice(0, 300) }).catch(() => null);
+    return { status: 'failed', inboxBill };
+  }
+  const aiSuggestion = await aiLedger.record({
+    surface: 'bill-ocr', model: read.model, promptVersion: promptVersion('bill-ocr'),
+    proposed: { kind: read.kind, supplierName: read.supplierName, supplierGstin: read.supplierGstin, billNo: read.billNo, billDate: read.billDate, lines: read.lines, totals: read.totals, confidence: read.confidence },
+    latencyMs: read.latencyMs, usage: read.usage,
+  }).catch(() => null);
+  if (read.problem) {
+    const inboxBill = await InboxBill.create({ ...doc, status: 'skipped', note: read.problem === 'not_a_bill' ? 'Not a bill' : 'Could not be read', read, aiSuggestion }).catch(() => null);
+    return { status: 'skipped', inboxBill };
+  }
+  // The supplier's e-invoice QR, when the file carries one: what the
+  // portal signed replaces what was read (services/billQr.js).
+  const billQr = require('./billQr');
+  const found = await billQr.findEinvoice([{ buffer, mimetype: type }]).catch((err) => { console.warn(`[bills-mailbox] looking for an e-invoice QR failed: ${err.message}`); return null; });
+  const withQr = await billQr.withEinvoice(read, found);
+  read = withQr.read;
+  doc.einvoiceQr = withQr.einvoiceQr;
+  const match = await matchRead(read);
+  const from = String(doc.from || '').toLowerCase();
+  const senderKnown = senderSupplier
+    ? !!(match.supplier && String(match.supplier._id) === String(senderSupplier))
+    : !!(match.supplierEmail && String(match.supplierEmail).toLowerCase().split(/[,;\s]+/).includes(from));
+  const inboxBill = await InboxBill.create({
+    ...doc, status: 'new', read, aiSuggestion,
+    supplier: match.supplier?._id || null, supplierName: match.supplier?.name || read.supplierName || '', matchedBy: match.supplier?.matchedBy || null,
+    senderKnown, alreadyEntered: match.alreadyEntered, grand: read.totals?.grand ?? null,
+    note: match.alreadyEntered ? `Already entered as ${match.alreadyEntered}` : '',
+  });
+  return { status: 'new', inboxBill };
 }
 
 let running = false;
@@ -195,4 +212,4 @@ function status() {
   return { configured: configured(c), mailbox: configured(c) ? c.user : '', everyMin: c.everyMin, senders: c.senders };
 }
 
-module.exports = { run, start, stop, handle, status, config, configured, setFetcher, senderOk, imapFetch };
+module.exports = { run, start, stop, handle, fileOne, status, config, configured, setFetcher, senderOk, imapFetch };

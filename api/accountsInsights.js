@@ -63,7 +63,10 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
     msme.dues({ asOf: now }),
   ]);
   // Bills that came by mail, read and waiting to be checked and entered.
-  const mailedBills = await require("../models/InboxBill").find({ status: "new", part: { $gt: 0 } }).select("supplierName from receivedAt grand alreadyEntered senderKnown read.billNo").sort({ receivedAt: -1 }).limit(50).lean();
+  const mailedBills = await require("../models/InboxBill").find({ status: "new", part: { $gt: 0 } }).select("supplierName from receivedAt grand alreadyEntered senderKnown read.billNo source sentByName").sort({ receivedAt: -1 }).limit(50).lean();
+  // Photos sent on WhatsApp that a person still has to do something with:
+  // a cheque to enter, a challan to receive, one nobody could tell.
+  const papers = await require("../models/WhatsAppPaper").find({ status: "waiting" }).select("code kind summary note sentByName partyName from createdAt result.draft.amount result.customer.name result.read.drawer result.read.supplierName result.read.dcNo result.po").sort({ createdAt: -1 }).limit(50).lean();
   const serviceBills = await MachineServiceBill.find({ supplierBill: null, amount: { $gt: 0 } }).select("machine serviceLog kind vendor billNo billDate amount filename createdAt").sort({ createdAt: -1 }).limit(20).lean();
   // Cheques in the drawer whose date has come (or comes this week): to be deposited.
   const cheques = await Payment.find({ status: "posted", "cheque.status": "held", "cheque.date": { $lte: weekEnd } }).select("kind voucherNo partyName amount cheque.number cheque.bank cheque.date").sort({ "cheque.date": 1 }).limit(20).lean();
@@ -103,7 +106,14 @@ router.get("/inbox", catchAsyncErrors(async (req, res) => {
     toChase: { count: chase.filter((c) => !c.recentlyContacted).length, amount: r2(chase.filter((c) => !c.recentlyContacted).reduce((s, c) => s + c.overdue, 0)), top: chase.filter((c) => !c.recentlyContacted).slice(0, 5).map((c) => ({ party: c.party, partyName: c.partyName, overdue: c.overdue, oldestDays: c.oldestDays, next: c.next })) },
     promisesDue: { count: promised.length, top: promised.slice(0, 5).map((c) => ({ party: c.party, partyName: c.partyName, promise: c.promise })) },
     variances: { count: varianceBills.length, top: varianceBills },
-    mailedBills: { count: mailedBills.length, amount: r2(mailedBills.reduce((t, x) => t + (x.grand || 0), 0)), top: mailedBills.slice(0, 6).map((x) => ({ _id: x._id, supplierName: x.supplierName, from: x.from, receivedAt: x.receivedAt, grand: x.grand, billNo: x.read?.billNo || "", alreadyEntered: x.alreadyEntered, senderKnown: !!x.senderKnown })) },
+    mailedBills: { count: mailedBills.length, amount: r2(mailedBills.reduce((t, x) => t + (x.grand || 0), 0)), top: mailedBills.slice(0, 6).map((x) => ({ _id: x._id, supplierName: x.supplierName, from: x.from, receivedAt: x.receivedAt, grand: x.grand, billNo: x.read?.billNo || "", alreadyEntered: x.alreadyEntered, senderKnown: !!x.senderKnown, source: x.source || "mail", sentByName: x.sentByName || "" })) },
+    whatsappPapers: { count: papers.length, top: papers.slice(0, 6).map((p) => ({
+      _id: p._id, code: p.code, kind: p.kind, note: p.note, sentByName: p.sentByName || p.partyName || p.from, createdAt: p.createdAt,
+      amount: p.result?.draft?.amount ?? null,
+      label: p.kind === "cheque" ? `Cheque${p.result?.customer?.name || p.result?.read?.drawer ? ` from ${p.result?.customer?.name || p.result?.read?.drawer}` : ""}`
+        : p.kind === "delivery_challan" ? `Challan${p.result?.read?.supplierName ? ` from ${p.result.read.supplierName}` : ""}${p.result?.read?.dcNo ? ` (DC ${p.result.read.dcNo})` : ""}${p.result?.po ? ` · PO #${p.result.po.poNo}` : ""}`
+        : p.summary || "A photo nobody could tell",
+    })) },
     serviceBills: { count: serviceBills.length, amount: r2(serviceBills.reduce((s, b) => s + (b.amount || 0), 0)), top: serviceBills.slice(0, 6) },
     statementsDue: { count: statementsDue.length, top: statementsDue.slice(0, 6) },
     chequesDue: { count: cheques.length, amount: r2(cheques.reduce((s, c) => s + c.amount, 0)), overdue: cheques.filter((c) => new Date(c.cheque.date) < today).length, top: cheques.slice(0, 6) },

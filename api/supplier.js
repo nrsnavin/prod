@@ -612,33 +612,15 @@ router.post(
     }
     if (read.problem) return res.json({ success: true, read, rows: [], aiSuggestion: null });
     const { model, usage, latencyMs, ...fields } = read;
-    // The PO: the one this form is on, else the number the document quotes.
-    let po = null;
-    if (mongoose.isValidObjectId(String(req.query.poId || ""))) po = await PurchaseOrder.findById(req.query.poId).populate("items.rawMaterial", "name").lean();
-    if (!po && fields.poNumber) {
-      const n = Number(String(fields.poNumber).replace(/\D/g, ""));
-      if (n) po = await PurchaseOrder.findOne({ poNo: n }).populate("items.rawMaterial", "name").lean();
-    }
-    const { rank } = require("../utils/fuzzyMatch");
-    const choices = (po?.items || []).filter((it) => it.rawMaterial).map((it) => ({ id: String(it.rawMaterial._id || it.rawMaterial), label: it.rawMaterial.name || "" }));
-    // Lines matched to the PO's materials; several lines of one material (two lots) kept apart.
-    const rows = fields.lines.map((l) => {
-      const m = choices.length ? rank(l.description, choices) : { confident: false, best: null, candidates: [] };
-      const item = m.confident ? po.items.find((it) => String(it.rawMaterial._id || it.rawMaterial) === m.best.id) : null;
-      return {
-        ...l,
-        rawMaterial: m.confident ? m.best.id : null,
-        materialName: m.confident ? m.best.label : null,
-        pending: item ? Math.max(0, (item.quantity || 0) - (item.receivedQuantity || 0)) : null,
-        candidates: (m.candidates || []).slice(0, 4).map((c) => ({ id: c.id, name: c.label, score: c.score })),
-      };
-    });
+    // The PO (the one this form is on, else the number the document quotes)
+    // and each line on one of its materials; two lots of one material kept apart.
+    const { po, rows } = await require("../services/inwardMatch").matchInward(fields, { poId: req.query.poId });
     const aiSuggestion = await aiLedger.record({
       surface: "inward-dc-ocr", model, promptVersion: promptVersion("inward-dc-ocr"), refType: "PurchaseOrder", refId: po?._id,
       proposed: { dcNo: fields.dcNo, poNumber: fields.poNumber, lines: rows.map((r) => ({ material: r.materialName, quantity: r.quantity, lotNo: r.lotNo, shade: r.shade })) },
       latencyMs, usage,
     });
-    res.json({ success: true, read: fields, po: po ? { _id: po._id, poNo: po.poNo } : null, rows, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
+    res.json({ success: true, read: fields, po, rows, aiSuggestion: aiSuggestion ? String(aiSuggestion) : null });
   })
 );
 
@@ -980,6 +962,12 @@ router.post(
         throw err;
       } finally {
         await session.endSession();
+      }
+
+      // Received from a challan photo sent on WhatsApp: that photo is done.
+      if (req.body.paper) {
+        await require("../services/whatsappPapers").markEntered(req.body.paper, { doc: "PurchaseOrder", docId: po._id, label: `Goods received on PO #${po.poNo}` }, { user: req.user })
+          .catch((err) => console.warn(`[inward-stock] closing WhatsApp photo ${req.body.paper}: ${err.message}`));
       }
 
       return res.status(201).json({

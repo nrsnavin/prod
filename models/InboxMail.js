@@ -6,6 +6,9 @@ const mongoose = require('mongoose');
 
 const InboxMailSchema = new mongoose.Schema({
   messageId:  { type: String, required: true, unique: true },
+  /** Mailed, or a photo sent to the WhatsApp number (services/whatsappPapers.js). */
+  source:     { type: String, enum: ['mail', 'whatsapp'], default: 'mail' },
+  paper:      { type: mongoose.Types.ObjectId, ref: 'WhatsAppPaper', default: null },
   from:       { type: String, default: '' },
   subject:    { type: String, default: '' },
   receivedAt: { type: Date, default: Date.now, index: true },

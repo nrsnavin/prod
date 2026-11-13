@@ -17,6 +17,11 @@ const InboxBillSchema = new mongoose.Schema(
     messageId: { type: String, required: true },
     /** Which attachment of the mail it is: one bill per file. */
     part: { type: Number, default: 0 },
+    /** Mailed to the bills address, or sent to the WhatsApp number (services/whatsappPapers.js). */
+    source: { type: String, enum: ['mail', 'whatsapp'], default: 'mail' },
+    /** For a WhatsApp photo: who sent it, and the photo as it came. */
+    sentByName: { type: String, default: '' },
+    paper: { type: mongoose.Types.ObjectId, ref: 'WhatsAppPaper', default: null },
     from: { type: String, default: '' },
     subject: { type: String, default: '' },
     receivedAt: { type: Date },

@@ -191,6 +191,7 @@ router.post("/supplier-recon", keepRequestContext(statementPagesUpload.array("fi
 }));
 const inboxRow = (x) => ({
   _id: x._id, status: x.status, note: x.note, from: x.from, subject: x.subject, receivedAt: x.receivedAt, filename: x.filename, contentType: x.contentType,
+  source: x.source || "mail", sentByName: x.sentByName || "",
   supplier: x.supplier, supplierName: x.supplierName, matchedBy: x.matchedBy, senderKnown: !!x.senderKnown, alreadyEntered: x.alreadyEntered, grand: x.grand,
   billNo: x.read?.billNo || "", billDate: x.read?.billDate || null, confidence: x.read?.confidence ?? null, kind: x.read?.kind || null, bill: x.bill, decidedAt: x.decidedAt,
 });
@@ -314,7 +315,7 @@ router.post("/bank/statement/post", catchAsyncErrors(async (req, res, next) => {
   // of one account's statement is never marked posted off another's.
   let statement = null;
   if (isId(req.body?.statement)) {
-    statement = await BankStatement.findById(req.body.statement).select("account lines.index lines.key lines.occurrence lines.date lines.narration lines.ref lines.amount lines.direction lines.status lines.voucher lines.voucherType lines.voucherNo").lean();
+    statement = await BankStatement.findById(req.body.statement).select("account lines.index lines.key lines.occurrence lines.date lines.narration lines.ref lines.amount lines.direction lines.status lines.voucher lines.voucherType lines.voucherNo lines.suggestion").lean();
     if (!statement) return next(new ErrorHandler("Statement not found", 404));
     if (String(statement.account) !== String(req.body.account)) return next(new ErrorHandler("That statement is on another account", 400));
   }

@@ -246,6 +246,29 @@ async function receiveUpload({ files, caption, dateKey, shift, user }) {
   return slip.toObject();
 }
 
+/**
+ * A photo sent to the WhatsApp number that the sorter found to be a slip
+ * (services/whatsappPapers.js): fetched already, so kept as it is and
+ * read like any other. The sender is told what was read, as for a slip
+ * sent with its shift in the caption.
+ */
+async function receivePages({ from, caption, pages, sender }) {
+  const list = (pages || []).filter((p) => p && p.buffer && p.buffer.length).slice(0, 10);
+  if (!list.length) throw new ErrorHandler('No photo of the slip to read.', 400);
+  const slip = await SlipIngest.create({
+    source: 'whatsapp',
+    from,
+    sentBy: sender?.userId || null,
+    sentByName: sender?.name || '',
+    caption: String(caption || '').slice(0, 500),
+    pages: list.length,
+    confirmCode: await newConfirmCode(),
+  });
+  await storePhotos(slip._id, list.map((p) => ({ buffer: p.buffer, mimetype: p.mimetype })));
+  await enqueue(null, 'slip.read', { slipId: String(slip._id) });
+  return { slip: slip.toObject() };
+}
+
 async function storePhotos(slipId, pages) {
   const expiresAt = SlipPhoto.expiryFrom();
   for (let i = 0; i < pages.length; i++) {
@@ -986,6 +1009,8 @@ async function slipByCode(code, from) {
 module.exports = {
   receiveFromWhatsApp,
   receiveUpload,
+  receivePages,
+  downloadMedia,
   readSlipJob,
   setShift,
   createPlanFromSlip,

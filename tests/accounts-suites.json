@@ -57,5 +57,8 @@
   "tests/scripts/accountsAuditCheck.test.js",
   "tests/services/collectionsTemplate.test.js",
   "tests/utils/dailyAnomalyAlerts.test.js",
-  "tests/utils/money.test.js"
+  "tests/utils/money.test.js",
+  "tests/api/accountsCheques.test.js",
+  "tests/api/whatsappPapers.test.js",
+  "tests/api/bankLearned.test.js"
 ]

@@ -223,7 +223,7 @@ async function autoPost(statement, account, via = 'email') {
     if (!s.allocations?.length || Math.abs(allocated - l.amount) > 0.005) continue;
     try {
       const out = await postRow({
-        accountId: account._id, statement: doc, req,
+        accountId: account._id, statement: doc, req, auto: true,
         row: { index: l.index, partyType: s.partyType, party: s.party, mode: 'bank', allocations: s.allocations.map((a) => ({ docType: a.docType, doc: a.doc, amount: a.amount })) },
         note: via === 'sftp' ? 'Posted from the bank\'s SFTP statement' : 'Posted from the emailed statement',
       });

@@ -91,6 +91,15 @@ const AccountsSettingsSchema = new mongoose.Schema(
       lastResult:  { type: mongoose.Schema.Types.Mixed, default: null },
     },
 
+    // Statement lines of a remembered payer that a person has posted
+    // exactly as suggested `learnedAfter` times running post themselves
+    // (services/learnedPosting.js) — never above `learnedUpTo`. Off by default.
+    bankLines: {
+      postLearned:  { type: Boolean, default: false },
+      learnedAfter: { type: Number, default: 5, min: 2, max: 50 },
+      learnedUpTo:  { type: Number, default: 50000, min: 0 },
+    },
+
     bills: {
       // Percent a billed rate may differ from the PO rate before it needs a note.
       rateVariancePercent: { type: Number, default: 2, min: 0, max: 100 },
