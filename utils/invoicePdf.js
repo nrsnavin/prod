@@ -130,6 +130,7 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   const R = L + W;
   const BOTTOM = doc.page.height - 32; // the sheet stops here; the page line sits below
   const PAD = 5;
+  const TP = 4; // inside the item table's cells
   let y = M;
 
   const setFont = (bold, size) => doc.font(bold ? FB : F).fontSize(size);
@@ -178,8 +179,8 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   let frameTop = y;
   const closeFrame = () => { if (y > frameTop) strokeRect(L, frameTop, W, y - frameTop, FRAME, 0.9); };
   const titleBand = (continued) => {
-    const h = continued ? 20 : 28;
-    const size = continued ? 10 : 15;
+    const h = continued ? 20 : 26;
+    const size = continued ? 10 : 14;
     cell(L, y, W, h, HEAD);
     const label = continued ? `${title}  ·  ${inv.invoiceNumber || ''}  ·  continued` : title;
     txt(label, L, mid(y, h, size, true), { bold: true, size, color: ACCENT, width: W, align: 'center', spacing: continued ? 0.5 : 2 });
@@ -210,7 +211,7 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
 
   // ── Letterhead ────────────────────────────────────────────────
   {
-    const qrSize = 82;
+    const qrSize = 80;
     // The same width each side, so the company stays centred on the sheet.
     const side = logo || signedQr ? 100 : 0;
     const cx = L + side + PAD;
@@ -224,14 +225,14 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
       [[seller.gstin && `GSTIN: ${seller.gstin}`, seller.stateCode && `State Code: ${seller.stateCode}`].filter(Boolean).join('     '), true, INK],
       [[seller.phone && `Phone: ${seller.phone}`, seller.email && `Email: ${seller.email}`].filter(Boolean).join('     '), false, MUTED],
     ].filter(([s]) => s);
-    const nameSize = 17;
+    const nameSize = 16;
     const nameH = hOf(company, cw, nameSize, true);
-    const rowsH = rows.reduce((a, [s, b]) => a + hOf(s, cw, 8.5, b) + 2, 0);
+    const rowsH = rows.reduce((a, [s, b]) => a + hOf(s, cw, 8.5, b) + 1.5, 0);
     const contentH = nameH + 3 + rowsH;
-    const h = Math.max(contentH + 20, signedQr ? qrSize + 26 : 0, logo ? 80 : 0, 66);
+    const h = Math.max(contentH + 14, signedQr ? qrSize + 20 : 0, logo ? 72 : 0, 58);
     cell(L, y, W, h);
     if (logo) {
-      const fitH = Math.min(64, h - 16);
+      const fitH = Math.min(60, h - 14);
       doc.image(logo, L + 10, y + (h - fitH) / 2, { fit: [side - 20, fitH], align: 'center', valign: 'center' });
     }
     let cy = y + (h - contentH) / 2 + 1;
@@ -239,7 +240,7 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
     cy += nameH + 3;
     for (const [s, b, color] of rows) {
       txt(s, cx, cy, { bold: b, size: 8.5, color, width: cw, align: 'center', wrap: true });
-      cy += hOf(s, cw, 8.5, b) + 2;
+      cy += hOf(s, cw, 8.5, b) + 1.5;
     }
     if (signedQr) {
       const qx = R - side + (side - qrSize) / 2;
@@ -284,8 +285,8 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   for (let i = 0; i < Math.max(leftRows.length, rightRows.length); i++) {
     const a = leftRows[i];
     const b = rightRows[i];
-    const need = (row) => (row ? hOf(row[1], valW - 2 * PAD, 8.5, true) + 8 : 0);
-    const h = Math.max(17, need(a), need(b));
+    const need = (row) => (row ? hOf(row[1], valW - 2 * PAD, 8.5, true) + 6 : 0);
+    const h = Math.max(15.5, need(a), need(b));
     for (const [row, x] of [[a, L], [b, L + half]]) {
       if (row) pair(x, y, labW, valW, h, relabel(row[0]), row[1], { wrap: true });
       else cell(x, y, half, h);
@@ -295,7 +296,7 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
 
   // ── e-Invoice particulars ─────────────────────────────────────
   if (registered) {
-    const h = 17;
+    const h = 15.5;
     pair(L, y, labW, W - labW, h, 'IRN', inv.einvoice.irn);
     y += h;
     pair(L, y, labW, valW, h, 'Ack No.', inv.einvoice.ackNo || '—');
@@ -305,7 +306,7 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
 
   // ── Bill To / Ship To ─────────────────────────────────────────
   {
-    const headH = 17;
+    const headH = 16;
     cell(L, y, half, headH, HEAD);
     cell(L + half, y, half, headH, HEAD);
     txt('Bill To', L + PAD, mid(y, headH, 8.5, true), { bold: true, size: 8.5, color: ACCENT, width: half - 2 * PAD });
@@ -321,17 +322,17 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
     ].filter(([s]) => s);
     const ship = inv.shipTo || [buyer.address, [buyer.city, buyer.pincode].filter(Boolean).join(' - ')].filter(Boolean).join(', ');
     const nameH = hOf(name, pw, 10, true);
-    const billH = nameH + 3 + bill.reduce((a, [s, b]) => a + hOf(s, pw, 8.5, b) + 1.5, 0);
+    const billH = nameH + 3 + bill.reduce((a, [s, b]) => a + hOf(s, pw, 8.5, b) + 1, 0);
     const shipH = nameH + 3 + hOf(ship || '—', pw, 8.5);
-    const h = Math.max(billH, shipH) + 14;
+    const h = Math.max(billH, shipH) + 10;
     cell(L, y, half, h);
     cell(L + half, y, half, h);
-    let by = y + 7;
+    let by = y + 5;
     txt(name, L + PAD, by, { bold: true, size: 10, width: pw, wrap: true });
     by += nameH + 3;
-    for (const [s, b] of bill) { txt(s, L + PAD, by, { bold: b, size: 8.5, width: pw, wrap: true }); by += hOf(s, pw, 8.5, b) + 1.5; }
-    txt(name, L + half + PAD, y + 7, { bold: true, size: 10, width: pw, wrap: true });
-    txt(ship || '—', L + half + PAD, y + 7 + nameH + 3, { size: 8.5, width: pw, wrap: true });
+    for (const [s, b] of bill) { txt(s, L + PAD, by, { bold: b, size: 8.5, width: pw, wrap: true }); by += hOf(s, pw, 8.5, b) + 1; }
+    txt(name, L + half + PAD, y + 5, { bold: true, size: 10, width: pw, wrap: true });
+    txt(ship || '—', L + half + PAD, y + 5 + nameH + 3, { size: 8.5, width: pw, wrap: true });
     y += h;
   }
 
@@ -380,12 +381,12 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
       if (c.flex) continue;
       const head = Math.max(...c.h.map((s) => wOf(s, headSize, true)));
       const body = Math.max(0, ...rowsData.map((r) => wOf(r[c.k], bodySize, false, c.num)), wOf(totalsRow[c.k] || '', bodySize, true, c.num));
-      c.w = Math.ceil(Math.max(c.min || 0, Math.max(head, body) + 2 * PAD + 1));
+      c.w = Math.ceil(Math.max(c.min || 0, Math.max(head, body) + 2 * TP + 1));
     }
     for (const g of ['CGST', 'SGST', 'IGST']) {
       const gc = cols.filter((c) => c.g === g);
       if (!gc.length) continue;
-      const need = wOf(g, headSize, true) + 2 * PAD;
+      const need = wOf(g, headSize, true) + 2 * TP;
       const have = gc.reduce((a, c) => a + c.w, 0);
       if (have < need) gc[gc.length - 1].w += Math.ceil(need - have);
     }
@@ -395,9 +396,9 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   while (cols.find((c) => c.flex).w < 120 && bodySize > 7.5) { bodySize -= 0.5; fit(); }
   const xs = [];
   cols.reduce((x, c) => { xs.push(x); return x + c.w; }, L);
-  const descW = cols.find((c) => c.flex).w - 2 * PAD;
+  const descW = cols.find((c) => c.flex).w - 2 * TP;
 
-  const tier = 13;
+  const tier = 12.5;
   const headH = tier * 2;
   const tableHeader = () => {
     fillRect(L, y, W, headH, HEAD);
@@ -412,12 +413,12 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
           txt(c.g, x, mid(y, tier, headSize, true), { bold: true, size: headSize, width: gw, align: 'center' });
         }
         strokeRect(x, y + tier, c.w, tier);
-        txt(c.h[0], x + PAD, mid(y + tier, tier, headSize, true), { bold: true, size: headSize, width: c.w - 2 * PAD, align: c.a });
+        txt(c.h[0], x + TP, mid(y + tier, tier, headSize, true), { bold: true, size: headSize, width: c.w - 2 * TP, align: c.a });
       } else {
         strokeRect(x, y, c.w, headH);
         const lineH = lh(headSize, true);
         let ty = y + (headH - c.h.length * lineH) / 2 + 0.6;
-        for (const s of c.h) { txt(s, x + PAD, ty, { bold: true, size: headSize, width: c.w - 2 * PAD, align: c.a }); ty += lineH; }
+        for (const s of c.h) { txt(s, x + TP, ty, { bold: true, size: headSize, width: c.w - 2 * TP, align: c.a }); ty += lineH; }
       }
     });
     y += headH;
@@ -438,35 +439,42 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   bodyTop = y;
   rowsData.forEach((r, i) => {
     const textH = hOf(r.desc, descW, bodySize);
-    const h = Math.max(18, textH + 8);
+    const h = Math.max(16, textH + 6);
     if (!room(h)) continueTable();
     if (i % 2 === 1) fillRect(L, y, W, h, BAND);
     cols.forEach((c, k) => {
-      if (c.flex) txt(r.desc, xs[k] + PAD, y + (h - textH) / 2 + 0.6, { size: bodySize, width: descW, wrap: true });
-      else txt(r[c.k], xs[k] + PAD, mid(y, h, bodySize), { size: bodySize, width: c.w - 2 * PAD, align: c.a, num: c.num });
+      if (c.flex) txt(r.desc, xs[k] + TP, y + (h - textH) / 2 + 0.6, { size: bodySize, width: descW, wrap: true });
+      else txt(r[c.k], xs[k] + TP, mid(y, h, bodySize), { size: bodySize, width: c.w - 2 * TP, align: c.a, num: c.num });
     });
     y += h;
     rowRules.push(y);
   });
   if (!lines.length) {
-    txt('No lines.', L + PAD, mid(y, 18), { color: MUTED, width: W - 2 * PAD });
-    y += 18;
+    txt('No lines.', L + PAD, mid(y, 16), { color: MUTED, width: W - 2 * PAD });
+    y += 16;
     rowRules.push(y);
   }
   {
-    const h = 18;
+    const h = 16;
     if (!room(h)) continueTable();
     fillRect(L, y, W, h, HEAD);
     cols.forEach((c, k) => {
       const v = totalsRow[c.k];
-      if (v) txt(v, xs[k] + PAD, mid(y, h, bodySize, true), { bold: true, size: bodySize, width: c.w - 2 * PAD, align: c.flex ? 'right' : c.a, num: c.num });
+      if (v) txt(v, xs[k] + TP, mid(y, h, bodySize, true), { bold: true, size: bodySize, width: c.w - 2 * TP, align: c.flex ? 'right' : c.a, num: c.num });
     });
     y += h;
     rowRules.push(y);
   }
   closeBody();
 
-  // ── Amount in words | tax totals and the grand total ──────────
+  // ── The end of the invoice, kept together ────────────────────
+  // The amount in words beside the totals, the HSN summary, the notes and
+  // declaration, the bank beside the signature (and a cancelled one's
+  // reason). When they do not all fit under the table they start the
+  // next page together, so the signature never sits on a page alone.
+  const blocks = [];
+
+  // Amount in words | tax totals and the grand total.
   {
     const rates = [...new Set(lines.map((l) => Number(l.gstPercent) || 0))].sort((a, b) => a - b);
     const sumBy = (rate, k) => r2(lines.filter((l) => (Number(l.gstPercent) || 0) === rate).reduce((a, l) => a + (Number(l[k]) || 0), 0));
@@ -485,26 +493,27 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
     const labT = totW - valT;
     const lw = W - totW;
     const lpw = lw - 2 * PAD;
-    const rowH = 16;
-    const grandH = 22;
+    const rowH = 15;
+    const grandH = 20;
     const words = inv.amountInWords || '—';
-    const wordsH = 12 + hOf(words, lpw, 9.5, true);
-    const h = Math.max(rows.length * rowH + grandH, wordsH + 16);
-    if (!room(h)) newPage();
-    cell(L, y, lw, h);
-    txt('Amount in Words', L + PAD, y + 7, { bold: true, size: 8, color: ACCENT, width: lpw });
-    txt(words, L + PAD, y + 19, { bold: true, size: 9.5, width: lpw, wrap: true });
-    let ty = y;
-    for (const [k, v] of rows) { pair(L + lw, ty, labT, valT, rowH, k, v, { align: 'right', num: true }); ty += rowH; }
-    const gh = h - (ty - y);
-    cell(L + lw, ty, labT, gh, TOTAL);
-    cell(L + lw + labT, ty, valT, gh, TOTAL);
-    txt('Grand Total', L + lw + PAD, mid(ty, gh, 10, true), { bold: true, size: 10, color: ACCENT, width: labT - 2 * PAD });
-    txt(`${RS}${money(t.grand)}`, L + lw + labT + PAD, mid(ty, gh, 10.5, true), { bold: true, size: 10.5, width: valT - 2 * PAD, align: 'right', num: true });
-    y += h;
+    const wordsH = 11 + hOf(words, lpw, 9.5, true);
+    const h = Math.max(rows.length * rowH + grandH, wordsH + 14);
+    blocks.push({ h, draw: () => {
+      cell(L, y, lw, h);
+      txt('Amount in Words', L + PAD, y + 6, { bold: true, size: 8, color: ACCENT, width: lpw });
+      txt(words, L + PAD, y + 17, { bold: true, size: 9.5, width: lpw, wrap: true });
+      let ty = y;
+      for (const [k, v] of rows) { pair(L + lw, ty, labT, valT, rowH, k, v, { align: 'right', num: true }); ty += rowH; }
+      const gh = h - (ty - y);
+      cell(L + lw, ty, labT, gh, TOTAL);
+      cell(L + lw + labT, ty, valT, gh, TOTAL);
+      txt('Grand Total', L + lw + PAD, mid(ty, gh, 10, true), { bold: true, size: 10, color: ACCENT, width: labT - 2 * PAD });
+      txt(`${RS}${money(t.grand)}`, L + lw + labT + PAD, mid(ty, gh, 10.5, true), { bold: true, size: 10.5, width: valT - 2 * PAD, align: 'right', num: true });
+      y += h;
+    } });
   }
 
-  // ── HSN / SAC summary ─────────────────────────────────────────
+  // The HSN / SAC summary.
   {
     const groups = new Map();
     for (const l of lines) {
@@ -521,92 +530,105 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
     const unit = W / sCols.reduce((a, c) => a + c[1], 0);
     const sw = sCols.map((c) => c[1] * unit);
     const sx = sw.reduce((acc, w, i) => { acc.push(i ? acc[i - 1] + sw[i - 1] : L); return acc; }, []);
-    const rowH = 16;
-    const need = rowH * (rows.length + 3);
-    if (!room(need)) newPage();
-    cell(L, y, W, rowH, LABEL);
-    txt('HSN/SAC Summary', L + PAD, mid(y, rowH, 8, true), { bold: true, size: 8, color: ACCENT, width: W - 2 * PAD });
-    y += rowH;
-    const drawRow = (cells, { fill, bold } = {}) => {
-      cells.forEach((v, i) => {
-        cell(sx[i], y, sw[i], rowH, fill);
-        txt(v, sx[i] + PAD, mid(y, rowH, 8, bold), { bold, size: 8, width: sw[i] - 2 * PAD, align: sCols[i][2], num: i > 0 });
-      });
+    const rowH = 15;
+    blocks.push({ h: rowH * (rows.length + 3), draw: () => {
+      cell(L, y, W, rowH, LABEL);
+      txt('HSN/SAC Summary', L + PAD, mid(y, rowH, 8, true), { bold: true, size: 8, color: ACCENT, width: W - 2 * PAD });
       y += rowH;
-    };
-    drawRow(sCols.map((c) => c[0]), { fill: HEAD, bold: true });
-    for (const g of rows) {
+      const drawRow = (cells, { fill, bold } = {}) => {
+        cells.forEach((v, i) => {
+          cell(sx[i], y, sw[i], rowH, fill);
+          txt(v, sx[i] + PAD, mid(y, rowH, 8, bold), { bold, size: 8, width: sw[i] - 2 * PAD, align: sCols[i][2], num: i > 0 });
+        });
+        y += rowH;
+      };
+      drawRow(sCols.map((c) => c[0]), { fill: HEAD, bold: true });
+      for (const g of rows) {
+        drawRow(inter
+          ? [g.hsn, money(g.taxable), pct(g.rate), money(g.igst), money(g.igst)]
+          : [g.hsn, money(g.taxable), pct(g.rate / 2), money(g.cgst), pct(g.rate / 2), money(g.sgst), money(g.cgst + g.sgst)]);
+      }
       drawRow(inter
-        ? [g.hsn, money(g.taxable), pct(g.rate), money(g.igst), money(g.igst)]
-        : [g.hsn, money(g.taxable), pct(g.rate / 2), money(g.cgst), pct(g.rate / 2), money(g.sgst), money(g.cgst + g.sgst)]);
-    }
-    drawRow(inter
-      ? ['Total', money(total('taxable')), '', money(total('igst')), money(total('igst'))]
-      : ['Total', money(total('taxable')), '', money(total('cgst')), '', money(total('sgst')), money(total('cgst') + total('sgst'))], { fill: HEAD, bold: true });
+        ? ['Total', money(total('taxable')), '', money(total('igst')), money(total('igst'))]
+        : ['Total', money(total('taxable')), '', money(total('cgst')), '', money(total('sgst')), money(total('cgst') + total('sgst'))], { fill: HEAD, bold: true });
+    } });
   }
 
-  // ── Bank and notes | signature ────────────────────────────────
+  // Notes and the declaration, a form row each, across the sheet.
+  {
+    const declaration = [exportSupply.declaration(exp), invSettings.declaration].filter(Boolean).join('\n');
+    const notes = String(inv.notes || '').trim();
+    const tw = W - labW - 2 * PAD;
+    for (const [label, text] of [['Notes', notes], ['Declaration', declaration]]) {
+      if (!text) continue;
+      const th = hOf(text, tw, 7.5);
+      const h = Math.max(15.5, th + 6);
+      blocks.push({ h, draw: () => {
+        cell(L, y, labW, h, LABEL);
+        cell(L + labW, y, W - labW, h);
+        txt(label, L + PAD, mid(y, h, 8), { size: 8, color: MUTED, width: labW - 2 * PAD });
+        txt(text, L + labW + PAD, y + (h - th) / 2 + 0.6, { size: 7.5, width: tw, wrap: true });
+        y += h;
+      } });
+    }
+  }
+
+  // The bank, with a scan-to-pay code | the signature.
   {
     const sigW = 200;
     const bw = W - sigW;
-    const bpw = bw - 2 * PAD;
-    const qr = upi ? 58 : 0;
-    const textW = bpw - (qr ? qr + 12 : 0);
+    const qr = upi ? 54 : 0;
+    const textW = bw - 2 * PAD - (qr ? qr + 12 : 0);
     const bankRows = [
       ['Bank', [bank.name, bank.branch].filter(Boolean).join(', ')],
       ['A/c No.', bank.account],
       ['IFSC', bank.ifsc],
       ['UPI ID', bank.upiId],
     ].filter(([, v]) => v);
-    const declaration = [exportSupply.declaration(exp), invSettings.declaration].filter(Boolean).join('\n');
-    const notes = String(inv.notes || '').trim();
-    const sections = [
-      ...(notes ? [['Notes', notes]] : []),
-      ...(declaration ? [['Declaration', declaration]] : []),
-    ];
-    const bankH = bankRows.length ? 13 + bankRows.length * 12 : 0;
-    const bankBlockH = Math.max(bankH, qr ? qr + 12 : 0);
-    const sectionsH = sections.reduce((a, [, s]) => a + 13 + hOf(s, bpw, 7.5) + 6, 0);
-    const h = Math.max(8 + bankBlockH + (bankBlockH && sections.length ? 8 : 0) + sectionsH + 4, 86);
-    if (!room(h)) newPage();
-    cell(L, y, bw, h);
-    cell(L + bw, y, sigW, h);
-    let by = y + 7;
-    if (bankRows.length) {
-      txt('Bank Details', L + PAD, by, { bold: true, size: 8, color: ACCENT, width: textW });
-      by += 13;
-      for (const [k, v] of bankRows) {
-        txt(k, L + PAD, by, { size: 8, color: MUTED, width: 48 });
-        txt(v, L + PAD + 48, by, { bold: true, size: 8.5, width: textW - 48 });
+    const bankH = bankRows.length ? 6 + 12 + bankRows.length * 11.5 + 4 : 0;
+    const qrH = qr ? 6 + qr + 10 + 4 : 0;
+    const h = Math.max(bankH, qrH, 72);
+    blocks.push({ h, draw: () => {
+      cell(L, y, bw, h);
+      cell(L + bw, y, sigW, h);
+      if (bankRows.length) {
+        let by = y + 6;
+        txt('Bank Details', L + PAD, by, { bold: true, size: 8, color: ACCENT, width: textW });
         by += 12;
+        for (const [k, v] of bankRows) {
+          txt(k, L + PAD, by, { size: 8, color: MUTED, width: 48 });
+          txt(v, L + PAD + 48, by, { bold: true, size: 8.5, width: textW - 48 });
+          by += 11.5;
+        }
       }
-    }
-    if (upi) {
-      const qx = L + bw - PAD - qr;
-      doc.image(upi, qx, y + 7, { width: qr, height: qr });
-      txt('Scan to pay', qx - 6, y + 7 + qr + 1, { size: 7, color: MUTED, width: qr + 12, align: 'center' });
-    }
-    by = y + 7 + bankBlockH + (bankBlockH && sections.length ? 8 : 0);
-    sections.forEach(([label, s], i) => {
-      if (i || bankBlockH) rule(L, by - 5, L + bw, by - 5);
-      txt(label, L + PAD, by, { bold: true, size: 8, color: ACCENT, width: bpw });
-      by += 13;
-      txt(s, L + PAD, by, { size: 7.5, width: bpw, wrap: true });
-      by += hOf(s, bpw, 7.5) + 6;
-    });
-    txt(`For ${company}`, L + bw + PAD, y + 8, { bold: true, size: 9, width: sigW - 2 * PAD, align: 'center' });
-    rule(L + bw + 40, y + h - 20, R - 40, y + h - 20, MUTED, 0.5);
-    txt('Authorised Signatory', L + bw + PAD, y + h - 16, { size: 8, color: MUTED, width: sigW - 2 * PAD, align: 'center' });
-    y += h;
+      if (upi) {
+        const qx = L + bw - PAD - qr;
+        const qy = y + (h - qr - 10) / 2;
+        doc.image(upi, qx, qy, { width: qr, height: qr });
+        txt('Scan to pay', qx - 6, qy + qr + 1, { size: 7, color: MUTED, width: qr + 12, align: 'center' });
+      }
+      txt(`For ${company}`, L + bw + PAD, y + 7, { bold: true, size: 9, width: sigW - 2 * PAD, align: 'center' });
+      rule(L + bw + 40, y + h - 19, R - 40, y + h - 19, MUTED, 0.5);
+      txt('Authorised Signatory', L + bw + PAD, y + h - 15, { size: 8, color: MUTED, width: sigW - 2 * PAD, align: 'center' });
+      y += h;
+    } });
   }
 
   if (cancelled) {
     const reason = `Cancelled${inv.cancel?.reason ? `: ${inv.cancel.reason}` : ''}`;
-    const h = Math.max(18, hOf(reason, W - 2 * PAD, 8.5, true) + 8);
-    if (!room(h)) newPage();
-    cell(L, y, W, h);
-    txt(reason, L + PAD, y + (h - hOf(reason, W - 2 * PAD, 8.5, true)) / 2 + 0.6, { bold: true, size: 8.5, color: ALERT, width: W - 2 * PAD, wrap: true });
-    y += h;
+    const rh = hOf(reason, W - 2 * PAD, 8.5, true);
+    const h = Math.max(17, rh + 7);
+    blocks.push({ h, draw: () => {
+      cell(L, y, W, h);
+      txt(reason, L + PAD, y + (h - rh) / 2 + 0.6, { bold: true, size: 8.5, color: ALERT, width: W - 2 * PAD, wrap: true });
+      y += h;
+    } });
+  }
+
+  if (!room(blocks.reduce((a, b) => a + b.h, 0))) newPage();
+  for (const b of blocks) {
+    if (!room(b.h)) newPage();
+    b.draw();
   }
   closeFrame();
 
