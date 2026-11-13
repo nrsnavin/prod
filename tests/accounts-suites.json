@@ -61,5 +61,6 @@
   "tests/api/accountsCheques.test.js",
   "tests/api/whatsappPapers.test.js",
   "tests/api/bankLearned.test.js",
-  "tests/api/accountsPapersRead.test.js"
+  "tests/api/accountsPapersRead.test.js",
+  "tests/api/accountsPaymentRun.test.js"
 ]

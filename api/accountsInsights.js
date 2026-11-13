@@ -141,6 +141,33 @@ router.get("/forecast", catchAsyncErrors(async (req, res) => {
   res.json({ success: true, ...(await insights.forecast({ weeks })) });
 }));
 
+// ── The week's payment run (services/paymentRun.js) ───────────────
+//  GET  /payment-run?horizon=&cushion=&useReceipts=&budget=&account=
+//         whom to pay by then, in what order and why; nothing is saved
+//  POST /payment-run/pay   the suppliers ticked, paid; the run kept
+//  GET  /payment-runs      the runs paid lately
+const runParams = (q) => ({
+  horizon: q.horizon, cushion: q.cushion, account: q.account,
+  useReceipts: q.useReceipts === true || q.useReceipts === "true",
+  budget: q.budget === undefined || q.budget === null || q.budget === "" ? null : Number(q.budget),
+});
+router.get("/payment-run", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, ...(await require("../services/paymentRun").propose(runParams(req.query))) });
+}));
+router.post("/payment-run/pay", catchAsyncErrors(async (req, res, next) => {
+  const b = req.body || {};
+  try {
+    const out = await require("../services/paymentRun").pay({ ...runParams(b), requestId: b.requestId, account: b.account, date: b.date, suppliers: b.suppliers, riskNotes: b.riskNotes }, req);
+    res.status(out.replay ? 200 : 201).json({ success: true, run: out.run, ...(out.replay ? { replay: true } : {}) });
+  } catch (err) {
+    if (err.status) return next(new ErrorHandler(err.message, err.status));
+    throw err;
+  }
+}));
+router.get("/payment-runs", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, runs: await require("../services/paymentRun").recent(Number(req.query.limit) || 10) });
+}));
+
 router.get("/close", catchAsyncErrors(async (req, res) => {
   const month = /^\d{4}-\d{2}$/.test(String(req.query.month || "")) ? req.query.month : cal.shiftMonth(cal.monthKey(), -1);
   res.json({ success: true, ...(await insights.closeChecklist(month)) });
