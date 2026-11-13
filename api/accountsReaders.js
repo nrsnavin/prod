@@ -232,7 +232,21 @@ router.get("/bill-inbox", catchAsyncErrors(async (req, res) => {
   const status = ["new", "entered", "dismissed", "failed", "skipped"].includes(req.query.status) ? req.query.status : "new";
   // Part 0 is the mail itself (its claim); the bills are its files.
   const rows = await InboxBill.find({ status, part: { $gt: 0 } }).sort({ receivedAt: -1 }).limit(200).lean();
-  res.json({ success: true, bills: rows.map(inboxRow) });
+  if (status !== "new") return res.json({ success: true, bills: rows.map(inboxRow) });
+  // Whether each waiting bill needs a person, or only a click (services/billReady.js).
+  const ready = await require("../services/billReady").readinessAll(rows);
+  res.json({ success: true, bills: rows.map((x, i) => ({ ...inboxRow(x), ready: ready[i].ready, readyWhy: ready[i].why })) });
+}));
+// ══════════════════════════════════════════════════════════════════
+//  GET /bill-inbox/ready — the mailed bills nothing is left to decide on,
+//  each with the body POST /accounts/bills takes (and its request id).
+//  They are entered by that route, one by one, with all its checks.
+// ══════════════════════════════════════════════════════════════════
+router.get("/bill-inbox/ready", catchAsyncErrors(async (_req, res) => {
+  const rows = await InboxBill.find({ status: "new", part: { $gt: 0 } }).sort({ receivedAt: 1 }).limit(100).lean();
+  const ready = await require("../services/billReady").readinessAll(rows);
+  const bills = rows.map((x, i) => ({ _id: x._id, ...ready[i] })).filter((r) => r.ready).map(({ _id, summary, body }) => ({ _id, summary, body }));
+  res.json({ success: true, bills, waiting: rows.length });
 }));
 router.get("/bill-inbox/:id", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));

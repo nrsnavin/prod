@@ -16,6 +16,7 @@
   "tests/api/billMailbox.test.js",
   "tests/api/billPhotoDuplicate.test.js",
   "tests/api/billReadChecks.test.js",
+  "tests/api/billReady.test.js",
   "tests/api/booksAudit.test.js",
   "tests/api/collectionReplies.test.js",
   "tests/api/concurrency.audit.test.js",
