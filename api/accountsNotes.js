@@ -185,7 +185,13 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
     if (err instanceof ErrorHandler) return next(err);
     throw err;
   }
-  res.status(201).json({ success: true, note: await AccountNote.findById(_id).select("-attachments.data").lean() });
+  const issued = await AccountNote.findById(_id).select("-attachments.data").lean();
+  // Issued from a customer's debit note read from a photo: what was kept scores the read.
+  if (b.debitNoteSuggestion && mongoose.isValidObjectId(String(b.debitNoteSuggestion))) {
+    const intake = require("../services/debitNoteIntake");
+    require("../services/aiLedger").settle(b.debitNoteSuggestion, { accepted: intake.accepted(issued), decidedBy: req.user?._id, expectSurface: intake.SURFACE }).catch(() => null);
+  }
+  res.status(201).json({ success: true, note: issued });
   }, { what: "A note against this document" });
   // One interest note at a time for a customer: two together would each
   // find the same days uncharged, and both charge them.

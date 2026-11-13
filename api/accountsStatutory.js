@@ -214,6 +214,8 @@ router.post("/tds/challans", isAdmin("admin", "accounts"), catchAsyncErrors(asyn
   try { depositedOn = readDate(b.depositedOn, "depositedOn", null); } catch (err) { return next(err); }
   try {
     const { challan: c, replay } = await tds.addChallan({ ...b, depositedOn, account: isId(b.account) ? b.account : undefined, by: req.user?._id });
+    // Entered from a challan read from a photo: what was kept scores the read.
+    if (!replay && isId(b.tdsSuggestion)) require("../services/aiLedger").settle(b.tdsSuggestion, { accepted: { kind: "challan", bsrCode: c.bsrCode, challanNo: c.challanNo, depositedOn: c.depositedOn.toISOString().slice(0, 10), section: c.section, amount: c.amount }, decidedBy: req.user?._id, expectSurface: "tds-paper-ocr" }).catch(() => null);
     res.status(replay ? 200 : 201).json({ success: true, challan: c, register: await tds.register(c.month), ...(replay ? { replay: true } : {}) });
   } catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
 }));
@@ -270,6 +272,7 @@ router.post("/tds/certificates", isAdmin("admin", "accounts"), catchAsyncErrors(
     if (err instanceof ErrorHandler) return next(err);
     throw err;
   }
+  if (!out.replay && isId(b.tdsSuggestion)) require("../services/aiLedger").settle(b.tdsSuggestion, { accepted: { kind: "form16a", customer: String(party._id), fy: data.fy, quarter: data.quarter, certNo: data.certNo, amount: data.amount }, decidedBy: req.user?._id, expectSurface: "tds-paper-ocr" }).catch(() => null);
   res.status(out.replay ? 200 : 201).json({ success: true, certificate: out.doc, ...(out.replay ? { replay: true } : {}) });
 }));
 

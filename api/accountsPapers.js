@@ -10,6 +10,15 @@
 //    POST  /whatsapp-papers/:id/route      it is a … (sends it on)
 //    POST  /whatsapp-papers/:id/dismiss    not for the books
 //    GET   /bank/learned                   remembered payers, and which post themselves
+//    POST  /debit-notes/read               a customer's debit note → our credit note
+//    POST  /tds/read                       a TDS challan, Form 16A or Form 26AS
+//    POST  /price-lists/read               a supplier's price list or quotation
+//    POST  /price-lists                    its rates saved as the live ones
+//    GET   /price-lists?supplier=          a supplier's live rates
+//    POST  /price-lists/check              PO or bill lines above the live rate
+//    POST  /power-bills/read               the electricity bill
+//    POST  /power-bills                    its figures kept for the month
+//    GET   /power-bills/report             power cost per metre, month by month
 //
 //  A cheque read is a draft receipt (services/chequeIntake.js): nothing
 //  is saved until the receipt is posted, by the receipt route. A photo
@@ -113,6 +122,82 @@ router.post("/whatsapp-papers/:id/dismiss", catchAsyncErrors(async (req, res, ne
 // ══════════════════════════════════════════════════════════════════
 router.get("/bank/learned", catchAsyncErrors(async (_req, res) => {
   res.json({ success: true, ...(await require("../services/learnedPosting").progress()) });
+}));
+
+// ══════════════════════════════════════════════════════════════════
+//  PAPERS READ INTO DRAFTS (services/debitNoteIntake.js, tdsPapers.js,
+//  priceLists.js, powerCost.js). Each returns what was read, what the
+//  server checked, and the body its own save route takes.
+// ══════════════════════════════════════════════════════════════════
+const paperUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 12 * 1024 * 1024, files: 6 } });
+const pagesOf = (req) => (Array.isArray(req.files) ? req.files : []).map((f) => ({ buffer: f.buffer, mimetype: f.mimetype }));
+/** A reader's failure in words a person can act on. */
+function readFailure(err, what, next) {
+  if (err.code === "ANTHROPIC_KEY_MISSING") return next(new ErrorHandler(`Reading ${what} is not set up on this server: type the details in.`, 503));
+  if (err.status) return next(new ErrorHandler(err.message, err.status));
+  const f = require("../utils/docRead").failure(err, what);
+  return next(new ErrorHandler(f.message, f.status));
+}
+
+router.post("/debit-notes/read", keepRequestContext(paperUpload.array("files", 3)), catchAsyncErrors(async (req, res, next) => {
+  const pages = pagesOf(req);
+  if (!pages.length) return next(new ErrorHandler("Attach the customer's debit note or letter: a photo or a PDF", 400));
+  try { res.json({ success: true, ...(await require("../services/debitNoteIntake").fromPhoto({ pages, customer: isId(req.body?.customer) ? req.body.customer : null })) }); }
+  catch (err) { return readFailure(err, "debit notes", next); }
+}));
+
+router.post("/tds/read", keepRequestContext(paperUpload.array("files", 6)), catchAsyncErrors(async (req, res, next) => {
+  const pages = pagesOf(req);
+  const kind = String(req.body?.kind || "");
+  if (!["challan", "form16a", "26as"].includes(kind)) return next(new ErrorHandler("Say what it is: challan, form16a or 26as", 400));
+  if (!pages.length) return next(new ErrorHandler("Attach the paper: a photo or a PDF", 400));
+  const tdsPapers = require("../services/tdsPapers");
+  try {
+    if (kind === "challan") return res.json({ success: true, kind, ...(await tdsPapers.challan({ pages })) });
+    if (kind === "form16a") return res.json({ success: true, kind, ...(await tdsPapers.form16a({ pages })) });
+    const fy = /^\d{4}-\d{2}$/.test(String(req.body?.fy || "")) ? req.body.fy : null;
+    const out = await tdsPapers.as26({ pages, fy, by: req.user?._id });
+    res.json({ success: true, kind, ...out, receivable: out.stored ? await require("../services/tds").receivable(out.stored.fy) : null });
+  } catch (err) { return readFailure(err, kind === "26as" ? "Form 26AS" : kind === "form16a" ? "Form 16A" : "challans", next); }
+}));
+
+router.post("/price-lists/read", keepRequestContext(paperUpload.array("files", 4)), catchAsyncErrors(async (req, res, next) => {
+  const pages = pagesOf(req);
+  if (!pages.length) return next(new ErrorHandler("Attach the price list or quotation: a photo or a PDF", 400));
+  try { res.json({ success: true, ...(await require("../services/priceLists").fromPhoto({ pages, supplier: isId(req.body?.supplier) ? req.body.supplier : null })) }); }
+  catch (err) { return readFailure(err, "price lists", next); }
+}));
+
+router.post("/price-lists", catchAsyncErrors(async (req, res, next) => {
+  const b = req.body || {};
+  try { res.status(201).json({ success: true, ...(await require("../services/priceLists").save({ ...b, by: req.user?._id })) }); }
+  catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
+}));
+
+router.get("/price-lists", catchAsyncErrors(async (req, res, next) => {
+  if (!isId(req.query.supplier)) return next(new ErrorHandler("supplier is required", 400));
+  res.json({ success: true, rates: await require("../services/priceLists").list(req.query.supplier) });
+}));
+
+router.post("/price-lists/check", catchAsyncErrors(async (req, res) => {
+  res.json({ success: true, flags: await require("../services/priceLists").flags({ supplier: req.body?.supplier, lines: req.body?.lines }) });
+}));
+
+router.post("/power-bills/read", keepRequestContext(paperUpload.array("files", 3)), catchAsyncErrors(async (req, res, next) => {
+  const pages = pagesOf(req);
+  if (!pages.length) return next(new ErrorHandler("Attach the electricity bill: a photo or a PDF", 400));
+  try { res.json({ success: true, ...(await require("../services/powerCost").fromPhoto({ pages })) }); }
+  catch (err) { return readFailure(err, "electricity bills", next); }
+}));
+
+router.post("/power-bills", catchAsyncErrors(async (req, res, next) => {
+  try { res.status(201).json({ success: true, bill: await require("../services/powerCost").save(req.body || {}, { by: req.user?._id }) }); }
+  catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
+}));
+
+router.get("/power-bills/report", catchAsyncErrors(async (req, res) => {
+  const months = Math.min(36, Math.max(1, Number(req.query.months) || 12));
+  res.json({ success: true, ...(await require("../services/powerCost").report({ months })) });
 }));
 
 module.exports = router;

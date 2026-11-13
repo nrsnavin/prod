@@ -152,6 +152,18 @@ const AI_SURFACES = Object.freeze([
   // A photo sent to the WhatsApp number sorted: a production slip, a bill,
   // a receipt, a cheque, a challan, a PO, a payment advice, or other.
   'whatsapp-sort',
+  // A customer's debit note or short-payment letter read into our credit
+  // note against the invoice it names; the note issued from it settles it.
+  'debit-note-ocr',
+  // A TDS challan, a customer's Form 16A, or Form 26AS read into the TDS
+  // registers.
+  'tds-paper-ocr',
+  // A supplier's price list or quotation read into the rates expected of
+  // them; what is saved settles it.
+  'price-list-ocr',
+  // The month's electricity bill read: units and charges, for power cost
+  // per metre.
+  'power-bill-ocr',
 ]);
 
 /** How a suggestion ended up. */

@@ -287,6 +287,30 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'debit-note-ocr': {
+    version: 'v1.0',
+    notes: 'A customer\'s debit note or short-payment letter read into customer, their note number, the invoices it names, the reason and the amounts. The customer, the invoice, the amount before GST at the invoice\'s rate, what is still open to credit and the s.34(2) time limit are all worked in services/debitNoteIntake.js. Lives in utils/paperReaders.js.',
+    system: null,
+  },
+
+  'tds-paper-ocr': {
+    version: 'v1.0',
+    notes: 'A TDS challan receipt (BSR code, challan number, date, section, tax and interest), a customer\'s Form 16A (deductor, TAN, our PAN, certificate number, quarter, tax) or Form 26AS Part I lines, read into the TDS registers. The month a challan pays for, the PAN check and the customer match are in services/tdsPapers.js. Lives in utils/paperReaders.js.',
+    system: null,
+  },
+
+  'price-list-ocr': {
+    version: 'v1.0',
+    notes: 'A supplier\'s price list or quotation read into lines of description, rate, unit and GST; the supplier and each line\'s material are matched in services/priceLists.js, and a PO or bill line above the live rate is flagged. Lives in utils/paperReaders.js.',
+    system: null,
+  },
+
+  'power-bill-ocr': {
+    version: 'v1.0',
+    notes: 'The factory\'s electricity bill read into units, demand and energy charges, other charges, tax and total, for power cost per metre (services/powerCost.js, which checks the parts add up). Lives in utils/paperReaders.js.',
+    system: null,
+  },
+
   'cheque-ocr': {
     version: 'v1.0',
     notes: 'A cancelled cheque, passbook page or bank letter read into account number, IFSC, bank, branch and holder; the holder compared with the party\'s name. Lives in utils/kycOcr.js.',

@@ -98,6 +98,9 @@ async function anomalies(kind, b, user) {
     }
   }
 
+  // 3b. A rate above what the supplier quoted (services/priceLists.js).
+  if (kind === 'bill' && supplier) flags.push(...await require('./priceLists').flags({ supplier: supplier._id, lines: b.lines }).catch(() => []));
+
   // 4. The ITC window.
   if (kind === 'bill' && b.itcEligible !== false) {
     const deadline = itcDeadline(date);

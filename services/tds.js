@@ -270,7 +270,15 @@ async function parse26as(buffer, filename = '') {
 const normName = (s) => String(s || '').toUpperCase().replace(/\b(PVT|PRIVATE|LTD|LIMITED|CO|COMPANY|THE|M\/S|&|AND)\b/g, ' ').replace(/[^A-Z0-9]/g, '');
 
 async function upload26as({ fy, buffer, filename, by }) {
-  const rows = await parse26as(buffer, filename);
+  return store26as({ fy, rows: await parse26as(buffer, filename), by });
+}
+
+/**
+ * A year's Form 26AS lines, from a CSV or Excel file or read from the PDF
+ * (services/tdsPapers.js): each placed on a customer (by TAN, else name)
+ * and the year's lines replaced with these.
+ */
+async function store26as({ fy, rows, by }) {
   const customers = await Customer.find({}).select('name tan').lean();
   const byTan = new Map(customers.filter((c) => c.tan).map((c) => [c.tan.toUpperCase(), c]));
   const learnt = [];
@@ -339,4 +347,4 @@ async function apply194q(supplierId, billDate, taxable) {
   return { section: '194Q', rate: s.rate, before, limit: s.limit, over: r2(before + taxable - s.limit) };
 }
 
-module.exports = { register, addChallan, form26q, receivable, upload26as, parse26as, purchases194q, apply194q, dueDate, interestOn, fyOf, quarterOf, quarterRange, fyRange, sectionsOf, notDeducted };
+module.exports = { register, addChallan, form26q, receivable, upload26as, store26as, parse26as, purchases194q, apply194q, dueDate, interestOn, fyOf, quarterOf, quarterRange, fyRange, sectionsOf, notDeducted };
