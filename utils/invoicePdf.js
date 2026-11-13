@@ -2,23 +2,37 @@
 // ══════════════════════════════════════════════════════════════════
 //  TAX INVOICE (PDF)
 //
-//  Laid out the way the company's invoices have always looked: the
-//  letterhead with the logo top-left and TAX INVOICE top-right; the
-//  invoice number, date, P.O., place of supply and box count in a
-//  ruled grid; Bill To / Ship To; the lines with HSN, quantity, rate
-//  and the CGST / SGST (or IGST) split per line; the total in words,
-//  the notes and the bank with a scan-to-pay QR on the left, the
-//  totals and the signature on the right; and the HSN summary the
-//  auditor reads at the bottom.
+//  One ruled sheet, the way a neat spreadsheet looks: every cell has a
+//  thin border, header rows are lightly shaded, item rows are banded,
+//  and the figures sit right-aligned in digits of equal width. Top to
+//  bottom:
 //
-//  An e-invoice adds what the portal requires on the print: the IRN,
-//  the acknowledgement number and date, and the portal's signed QR,
-//  top right under the title.
+//    the title, across the sheet
+//    the letterhead: the logo left, the company centred, and once the
+//      invoice is registered, the portal's signed QR right
+//    the particulars: number, date, P.O., challans, order, place of
+//      supply, reverse charge, the tax, the boxes (an export adds the
+//      LUT, currency, port and shipping bill)
+//    the IRN and acknowledgement, once registered
+//    Bill To / Ship To
+//    the lines: HSN, boxes, quantity, rate, taxable value, the CGST and
+//      SGST (or IGST) rate and amount, and the line's total, with a
+//      totals row that sums each column
+//    the amount in words beside the tax totals and the grand total
+//    the HSN/SAC summary the auditor reads
+//    the bank with a scan-to-pay QR, the notes and declaration, and the
+//      signature
+//
+//  A long invoice carries on over pages: each new page repeats the
+//  title (marked "continued") and the table's header. A credit or debit
+//  note brings its own title and particulars (services/noteDocument.js).
+//  A cancelled one is stamped across every page.
 //
 //  Pure: buildInvoicePdf({ invoice, branding, settings }) → Buffer.
-//  Rendered in a worker (utils/renderPdf.js). The rupee sign needs a
-//  font that has it — DejaVu Sans is bundled in utils/fonts; if it
-//  cannot be loaded the sheet falls back to Helvetica and "Rs.".
+//  Rendered in a worker (utils/renderPdf.js). Set in Carlito, Calibri's
+//  metric twin (narrow enough for a dozen columns, with the rupee sign
+//  and tabular digits); DejaVu Sans if it cannot be loaded; Helvetica
+//  and "Rs." if neither can.
 // ══════════════════════════════════════════════════════════════════
 
 const path = require('path');
@@ -27,22 +41,29 @@ const PDFDocument = require('pdfkit');
 const QRCode = require('qrcode');
 const { stateName } = require('../services/gst');
 
-const INK = '#111111';
-const MUTED = '#555555';
-const RULE = '#8A8A8A';
-const BAND = '#E9E9E9';
+// ── A light spreadsheet ──────────────────────────────────────────
+const INK = '#1E2A36';
+const MUTED = '#5C6B7A';
+const ACCENT = '#1F4E79'; // the title, the company, section labels
+const GRID = '#C3CCD6';   // every cell's border
+const FRAME = '#8593A1';  // the sheet's outer border
+const HEAD = '#E6EDF5';   // header rows
+const LABEL = '#F3F6F9';  // label cells
+const BAND = '#F4F7FB';   // every other item row
+const TOTAL = '#DCE6F1';  // the grand total
 const ALERT = '#A02020';
 
 const FONT_DIR = path.join(__dirname, 'fonts');
-const FONTS = {
-  regular: path.join(FONT_DIR, 'DejaVuSans.ttf'),
-  bold: path.join(FONT_DIR, 'DejaVuSans-Bold.ttf'),
-};
-const hasFonts = () => { try { return fs.existsSync(FONTS.regular) && fs.existsSync(FONTS.bold); } catch { return false; } };
+const FACES = [
+  { regular: 'Carlito-Regular.ttf', bold: 'Carlito-Bold.ttf', tnum: true },
+  { regular: 'DejaVuSans.ttf', bold: 'DejaVuSans-Bold.ttf', tnum: false },
+];
 
 const money = (n) => (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const qty = (n) => (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
 const pct = (n) => `${Number(n) || 0}%`;
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
 const ddmmyyyy = (d) => {
   if (!d) return '—';
   const t = new Date(d);
@@ -57,6 +78,7 @@ const when = (d) => {
   const p = (x) => String(x).padStart(2, '0');
   return `${ddmmyyyy(t)} ${p(t.getHours())}:${p(t.getMinutes())}`;
 };
+const titleCase = (s) => String(s || '').toLowerCase().replace(/(^|\s)\S/g, (c) => c.toUpperCase());
 
 async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   const inv = invoice || {};
@@ -74,8 +96,10 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   const buyer = inv.buyer || {};
   const t = inv.totals || {};
   const company = seller.name || branding.company || 'Balu Elastics';
+  const title = inv.docTitle || 'TAX INVOICE';
 
-  const doc = new PDFDocument({ size: 'A4', margin: 30, bufferPages: true });
+  const M = 28;
+  const doc = new PDFDocument({ size: 'A4', margins: { top: M, left: M, right: M, bottom: 12 }, bufferPages: true });
   const chunks = [];
   doc.on('data', (c) => chunks.push(c));
   const done = new Promise((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
@@ -83,357 +107,521 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   // ── Fonts ─────────────────────────────────────────────────────
   let F = 'Helvetica';
   let FB = 'Helvetica-Bold';
-  let RS = 'Rs.';
-  if (hasFonts()) {
+  let RS = 'Rs. ';
+  let tnum = false;
+  for (const face of FACES) {
+    const reg = path.join(FONT_DIR, face.regular);
+    const bold = path.join(FONT_DIR, face.bold);
     try {
-      doc.registerFont('Body', FONTS.regular);
-      doc.registerFont('BodyBold', FONTS.bold);
-      F = 'Body'; FB = 'BodyBold'; RS = '₹';
-    } catch { /* Helvetica and "Rs." */ }
+      if (!fs.existsSync(reg) || !fs.existsSync(bold)) continue;
+      const name = face.regular.replace(/\W/g, '');
+      doc.registerFont(`${name}R`, reg);
+      doc.registerFont(`${name}B`, bold);
+      // Load both now: a file that will not parse falls through to the next face.
+      doc.font(`${name}R`);
+      doc.font(`${name}B`);
+      F = `${name}R`; FB = `${name}B`; RS = '₹'; tnum = face.tnum;
+      break;
+    } catch { /* the next face */ }
   }
 
-  const L = 30;
-  const W = doc.page.width - L * 2;
+  const L = M;
+  const W = doc.page.width - M * 2;
   const R = L + W;
-  const bottom = doc.page.height - 40;
-  let y = 30;
-  const text = (s, x, yy, opts = {}) => {
-    doc.font(opts.bold ? FB : F).fontSize(opts.size || 8.5).fillColor(opts.color || INK)
-      .text(String(s ?? ''), x, yy, { lineBreak: opts.lineBreak ?? false, width: opts.width, align: opts.align || 'left', height: opts.height });
+  const BOTTOM = doc.page.height - 32; // the sheet stops here; the page line sits below
+  const PAD = 5;
+  let y = M;
+
+  const setFont = (bold, size) => doc.font(bold ? FB : F).fontSize(size);
+  const features = (num) => (num && tnum ? { features: ['tnum'] } : {});
+  const lh = (size = 8.5, bold = false) => { setFont(bold, size); return doc.currentLineHeight(); };
+  const hOf = (s, w, size = 8.5, bold = false) => { setFont(bold, size); return doc.heightOfString(String(s ?? ''), { width: w }); };
+  const wOf = (s, size = 8.5, bold = false, num = false) => { setFont(bold, size); return doc.widthOfString(String(s ?? ''), features(num)); };
+  /**
+   * Text in a cell. One line unless `wrap`: a single line is held to its
+   * height, so a value too long for its cell ends in "…" rather than
+   * spilling into the row below (or opening a page of its own).
+   */
+  const txt = (s, x, yy, o = {}) => {
+    const size = o.size || 8.5;
+    setFont(o.bold, size);
+    doc.fillColor(o.color || INK).text(String(s ?? ''), x, yy, {
+      width: o.width,
+      align: o.align || 'left',
+      characterSpacing: o.spacing || 0,
+      ...(o.wrap ? {} : { height: lh(size, o.bold) + 1, ellipsis: true }),
+      ...features(o.num),
+    });
   };
-  const hline = (yy, x1 = L, x2 = R, w = 0.6) => doc.moveTo(x1, yy).lineTo(x2, yy).lineWidth(w).strokeColor(RULE).stroke();
-  const vline = (x, y1, y2, w = 0.6) => doc.moveTo(x, y1).lineTo(x, y2).lineWidth(w).strokeColor(RULE).stroke();
-  const box = (x, yy, w, h) => doc.rect(x, yy, w, h).lineWidth(0.6).strokeColor(RULE).stroke();
-  const band = (x, yy, w, h) => { doc.rect(x, yy, w, h).fillColor(BAND).fill(); doc.rect(x, yy, w, h).lineWidth(0.6).strokeColor(RULE).stroke(); };
-  const newPage = () => { doc.addPage(); y = 30; };
+  // Where one line of text sits to look centred in a cell of height h.
+  const mid = (yy, h, size = 8.5, bold = false) => yy + (h - lh(size, bold)) / 2 + 0.6;
+
+  const fillRect = (x, yy, w, h, color) => { doc.save(); doc.rect(x, yy, w, h).fillColor(color).fill(); doc.restore(); };
+  const strokeRect = (x, yy, w, h, color = GRID, lw = 0.5) => { doc.save(); doc.rect(x, yy, w, h).lineWidth(lw).strokeColor(color).stroke(); doc.restore(); };
+  const rule = (x1, y1, x2, y2, color = GRID, lw = 0.5) => { doc.save(); doc.moveTo(x1, y1).lineTo(x2, y2).lineWidth(lw).strokeColor(color).stroke(); doc.restore(); };
+  const cell = (x, yy, w, h, fill) => { if (fill) fillRect(x, yy, w, h, fill); strokeRect(x, yy, w, h); };
+  // A label cell and its value cell, as one row of a form.
+  const pair = (x, yy, labW, valW, h, label, value, o = {}) => {
+    cell(x, yy, labW, h, LABEL);
+    cell(x + labW, yy, valW, h);
+    txt(label, x + PAD, mid(yy, h, 8), { size: 8, color: MUTED, width: labW - 2 * PAD });
+    const size = o.size || 8.5;
+    if (o.wrap) {
+      const vh = hOf(value, valW - 2 * PAD, size, true);
+      txt(value, x + labW + PAD, yy + (h - vh) / 2 + 0.6, { bold: true, size, width: valW - 2 * PAD, wrap: true });
+    } else {
+      txt(value, x + labW + PAD, mid(yy, h, size, true), { bold: true, size, width: valW - 2 * PAD, align: o.align, num: o.num });
+    }
+  };
+
+  // ── Pages: one framed sheet each ──────────────────────────────
+  let frameTop = y;
+  const closeFrame = () => { if (y > frameTop) strokeRect(L, frameTop, W, y - frameTop, FRAME, 0.9); };
+  const titleBand = (continued) => {
+    const h = continued ? 20 : 28;
+    const size = continued ? 10 : 15;
+    cell(L, y, W, h, HEAD);
+    const label = continued ? `${title}  ·  ${inv.invoiceNumber || ''}  ·  continued` : title;
+    txt(label, L, mid(y, h, size, true), { bold: true, size, color: ACCENT, width: W, align: 'center', spacing: continued ? 0.5 : 2 });
+    if (cancelled) txt('CANCELLED', L + PAD, mid(y, h, 9, true), { bold: true, size: 9, color: ALERT, width: W - 2 * PAD, align: 'right', spacing: 0.8 });
+    y += h;
+  };
+  const newPage = () => { closeFrame(); doc.addPage(); y = M; frameTop = y; titleBand(true); };
+  const room = (h) => y + h <= BOTTOM;
 
   // ── QRs, made before drawing ──────────────────────────────────
   const signedQr = registered && inv.einvoice.signedQr
-    ? await QRCode.toBuffer(String(inv.einvoice.signedQr), { margin: 0, width: 400, errorCorrectionLevel: 'M' })
+    ? await QRCode.toBuffer(String(inv.einvoice.signedQr), { margin: 0, width: 480, errorCorrectionLevel: 'M' })
     : null;
-  // A credit note, or a note we send a supplier, asks for no payment.
-  const upi = bank.upiId && !inv.hideUpi
+  // A credit note, or a note we send a supplier, asks for no payment; a
+  // buyer abroad cannot pay by UPI.
+  const upi = bank.upiId && !inv.hideUpi && inv.supplyType !== 'export'
     ? await QRCode.toBuffer(
         `upi://pay?pa=${encodeURIComponent(bank.upiId)}&pn=${encodeURIComponent(company.slice(0, 40))}` +
         `&am=${(Number(t.grand) || 0).toFixed(2)}&cu=INR&tn=${encodeURIComponent(String(inv.invoiceNumber || 'Invoice').slice(0, 40))}`,
         { margin: 0, width: 300, errorCorrectionLevel: 'M' })
     : null;
+  let logo = null;
+  if (branding.logo) {
+    try { logo = doc.openImage(branding.logo); } catch { logo = null; } // a bad logo never blocks an invoice
+  }
+
+  titleBand(false);
 
   // ── Letterhead ────────────────────────────────────────────────
-  const logoW = 70;
-  let logoDrawn = false;
-  if (branding.logo) {
-    try { doc.image(branding.logo, L + 4, y + 2, { fit: [logoW, 60] }); logoDrawn = true; } catch { /* a bad logo never blocks an invoice */ }
+  {
+    const qrSize = 82;
+    // The same width each side, so the company stays centred on the sheet.
+    const side = logo || signedQr ? 100 : 0;
+    const cx = L + side + PAD;
+    const cw = W - side * 2 - PAD * 2;
+    const addressLines = Array.isArray(branding.addressLines) && branding.addressLines.length
+      ? branding.addressLines.filter(Boolean)
+      : (seller.address ? [seller.address] : []);
+    const cityPart = [[seller.city, seller.stateCode ? stateName(seller.stateCode) : ''].filter(Boolean).join(', '), seller.pincode].filter(Boolean).join(' - ');
+    const rows = [
+      [[...addressLines, cityPart].filter(Boolean).join(', '), false, INK],
+      [[seller.gstin && `GSTIN: ${seller.gstin}`, seller.stateCode && `State Code: ${seller.stateCode}`].filter(Boolean).join('     '), true, INK],
+      [[seller.phone && `Phone: ${seller.phone}`, seller.email && `Email: ${seller.email}`].filter(Boolean).join('     '), false, MUTED],
+    ].filter(([s]) => s);
+    const nameSize = 17;
+    const nameH = hOf(company, cw, nameSize, true);
+    const rowsH = rows.reduce((a, [s, b]) => a + hOf(s, cw, 8.5, b) + 2, 0);
+    const contentH = nameH + 3 + rowsH;
+    const h = Math.max(contentH + 20, signedQr ? qrSize + 26 : 0, logo ? 80 : 0, 66);
+    cell(L, y, W, h);
+    if (logo) {
+      const fitH = Math.min(64, h - 16);
+      doc.image(logo, L + 10, y + (h - fitH) / 2, { fit: [side - 20, fitH], align: 'center', valign: 'center' });
+    }
+    let cy = y + (h - contentH) / 2 + 1;
+    txt(company, cx, cy, { bold: true, size: nameSize, color: ACCENT, width: cw, align: 'center', wrap: true });
+    cy += nameH + 3;
+    for (const [s, b, color] of rows) {
+      txt(s, cx, cy, { bold: b, size: 8.5, color, width: cw, align: 'center', wrap: true });
+      cy += hOf(s, cw, 8.5, b) + 2;
+    }
+    if (signedQr) {
+      const qx = R - side + (side - qrSize) / 2;
+      const qy = y + (h - qrSize - 11) / 2;
+      doc.image(signedQr, qx, qy, { width: qrSize, height: qrSize });
+      txt('e-Invoice QR', R - side, qy + qrSize + 2, { size: 7, color: MUTED, width: side, align: 'center' });
+    }
+    y += h;
   }
-  const nameX = logoDrawn ? L + logoW + 16 : L;
-  const nameW = W - (logoDrawn ? logoW + 16 : 0) - 180;
-  text(company, nameX, y, { bold: true, size: 12, width: nameW });
-  let ly = y + 16;
-  const addressLines = Array.isArray(branding.addressLines) && branding.addressLines.length
-    ? branding.addressLines.filter(Boolean)
-    : (seller.address ? [seller.address] : []);
-  const cityLine = [seller.city, seller.stateCode ? stateName(seller.stateCode) : '', seller.pincode].filter(Boolean).join(' ');
-  const head = [...addressLines, cityLine, 'India', seller.gstin && `GSTIN ${seller.gstin}`, seller.email && `Email: ${seller.email}`, seller.phone && `Mobile: ${seller.phone}`].filter(Boolean);
-  for (const s of head) { text(s, nameX, ly, { size: 8.5, width: nameW }); ly += 11; }
 
-  // Title and, for an e-invoice, the portal's signed QR above it.
-  const titleW = 180;
-  let ty = y;
-  if (signedQr) {
-    doc.image(signedQr, R - 64, ty, { width: 64, height: 64 });
-    text('e-Invoice', R - titleW, ty + 24, { size: 7.5, color: MUTED, width: titleW - 70, align: 'right' });
-    text('signed QR', R - titleW, ty + 34, { size: 7.5, color: MUTED, width: titleW - 70, align: 'right' });
-    ty += 70;
-  }
-  text(inv.docTitle || 'TAX INVOICE', R - titleW, Math.max(ty, ly - 26), { bold: true, size: 22, width: titleW, align: 'right' });
-  if (cancelled) text('CANCELLED', R - titleW, Math.max(ty, ly - 26) + 26, { bold: true, size: 9, color: ALERT, width: titleW, align: 'right' });
-  y = Math.max(ly, Math.max(ty, ly - 26) + 30, logoDrawn ? y + 66 : 0) + 4;
-
-  // ── Invoice detail grid ───────────────────────────────────────
-  const rowH = 14;
+  // ── Particulars ───────────────────────────────────────────────
   const half = W / 2;
-  // A credit or debit note brings its own rows (the invoice it is against).
-  const leftRows = inv.detailRows?.left || [
-    ['#', inv.invoiceNumber || '—'],
-    ['Invoice Date', ddmmyyyy(inv.invoiceDate)],
-    ['P.O.#', inv.customerPo || (inv.orderNo != null ? `Order #${inv.orderNo}` : '—')],
-    ['Delivery Challan', (inv.dcs || []).map((d) => d.dcNumber).join(', ') || '—'],
-  ];
-  // Short enough for the grid's cell; the LUT number gets a row of its own.
+  const labW = 96;
+  const valW = half - labW;
+  // Short enough for its cell; the LUT number gets a row of its own.
   const taxLabel = zero ? 'Zero-rated under LUT, no IGST'
     : inv.supplyType === 'export' ? 'IGST (export, with payment)' : inv.supplyType === 'sez' ? 'IGST (SEZ, with payment)'
     : inter ? `IGST (inter-state)${exp?.kind === 'DEXP' ? ', deemed export' : ''}` : `CGST + SGST (intra-state)${exp?.kind === 'DEXP' ? ', deemed export' : ''}`;
+  // A credit or debit note brings its own rows (the invoice it is against).
+  const leftRows = inv.detailRows?.left || [
+    ['Invoice No.', inv.invoiceNumber || '—'],
+    ['Invoice Date', ddmmyyyy(inv.invoiceDate)],
+    ['Due Date', ddmmyyyy(inv.dueDate)],
+    ['P.O. No.', inv.customerPo || '—'],
+    ['Delivery Challan', (inv.dcs || []).map((d) => d.dcNumber).join(', ') || '—'],
+  ];
   const rightRows = inv.detailRows?.right || [
-    ['Place Of Supply', inv.supplyType === 'export' ? `Other Country (96)${exp?.countryCode ? ` — ${exp.countryCode}` : ''}` : inv.placeOfSupply ? `${stateName(inv.placeOfSupply)} (${inv.placeOfSupply})` : '—'],
-    ['Total Boxes', Number(inv.totalBoxes) > 0 ? String(inv.totalBoxes) : '—'],
+    ['Place of Supply', inv.supplyType === 'export' ? `Other Country (96)${exp?.countryCode ? ` — ${exp.countryCode}` : ''}` : inv.placeOfSupply ? `${stateName(inv.placeOfSupply)} (${inv.placeOfSupply})` : '—'],
+    ['Reverse Charge', 'No'],
     ['Tax', taxLabel],
-    ['Order', inv.orderNo != null ? `#${inv.orderNo}` : '—'],
+    ['Order No.', inv.orderNo != null ? `#${inv.orderNo}` : '—'],
+    ['Total Boxes', Number(inv.totalBoxes) > 0 ? String(inv.totalBoxes) : '—'],
     ...(zero && exp?.lut?.number ? [['LUT No.', exp.lut.number]] : []),
     ...(inv.supplyType === 'export' ? [
       ['Currency', exp?.currency && exp.currency !== 'INR' ? `${exp.currency} @ ₹${exp.exchangeRate} · ${exp.currency} ${(exportSupply.fxValue(exp, inv.totals?.grand) ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'INR'],
       ['Port / Ship. bill', [exp?.portCode, exp?.shippingBill?.number ? `${exp.shippingBill.number}${exp.shippingBill.date ? ` dt ${ddmmyyyy(exp.shippingBill.date)}` : ''}` : ''].filter(Boolean).join(' · ') || '—'],
     ] : []),
   ];
-  const gridH = rowH * Math.max(leftRows.length, rightRows.length) + 6;
-  hline(y, L, R, 0.8);
-  const grid = (rows, x, w) => {
-    let gy = y + 4;
-    for (const [k, v] of rows) {
-      text(k, x + 4, gy, { size: 8.5, width: 92 });
-      text(`: ${v}`, x + 96, gy, { bold: true, size: 8.5, width: w - 100 });
-      gy += rowH;
+  // A note's rows, in the invoice's words.
+  const SAME = { 'Place Of Supply': 'Place of Supply', Order: 'Order No.' };
+  const relabel = (k) => (k === '#' ? `${titleCase(title)} No.` : SAME[k] || k);
+  for (let i = 0; i < Math.max(leftRows.length, rightRows.length); i++) {
+    const a = leftRows[i];
+    const b = rightRows[i];
+    const need = (row) => (row ? hOf(row[1], valW - 2 * PAD, 8.5, true) + 8 : 0);
+    const h = Math.max(17, need(a), need(b));
+    for (const [row, x] of [[a, L], [b, L + half]]) {
+      if (row) pair(x, y, labW, valW, h, relabel(row[0]), row[1], { wrap: true });
+      else cell(x, y, half, h);
     }
-  };
-  grid(leftRows, L, half);
-  grid(rightRows, L + half, half);
-  vline(L + half, y, y + gridH);
-  y += gridH;
-  hline(y, L, R, 0.8);
+    y += h;
+  }
 
   // ── e-Invoice particulars ─────────────────────────────────────
   if (registered) {
-    const h = 30;
-    text('IRN', L + 4, y + 4, { size: 8.5, width: 60 });
-    text(`: ${inv.einvoice.irn}`, L + 40, y + 4, { bold: true, size: 7.5, width: W - 44 });
-    text('Ack No.', L + 4, y + 16, { size: 8.5, width: 60 });
-    text(`: ${inv.einvoice.ackNo || '—'}`, L + 40, y + 16, { bold: true, size: 8.5, width: 200 });
-    text('Ack Date', L + half + 4, y + 16, { size: 8.5, width: 92 });
-    text(`: ${when(inv.einvoice.ackDate)}`, L + half + 96, y + 16, { bold: true, size: 8.5, width: half - 100 });
+    const h = 17;
+    pair(L, y, labW, W - labW, h, 'IRN', inv.einvoice.irn);
     y += h;
-    hline(y, L, R, 0.8);
+    pair(L, y, labW, valW, h, 'Ack No.', inv.einvoice.ackNo || '—');
+    pair(L + half, y, labW, valW, h, 'Ack Date', when(inv.einvoice.ackDate));
+    y += h;
   }
 
   // ── Bill To / Ship To ─────────────────────────────────────────
-  band(L, y, half, 16); band(L + half, y, half, 16);
-  text('Bill To', L + 4, y + 4, { bold: true, size: 9 });
-  text('Ship To', L + half + 4, y + 4, { bold: true, size: 9 });
-  y += 16;
-  const billLines = [
-    buyer.address,
-    buyer.city,
-    [buyer.pincode, buyer.stateCode ? stateName(buyer.stateCode) : ''].filter(Boolean).join(' '),
-    'India',
-    buyer.gstin && `GSTIN ${buyer.gstin}`,
-  ].filter(Boolean);
-  const partyH = Math.max(14 + billLines.length * 11, 60) + 8;
-  text(buyer.name || '—', L + 4, y + 4, { bold: true, size: 10, width: half - 8 });
-  let by = y + 18;
-  for (const s of billLines) { text(s, L + 4, by, { size: 8.5, width: half - 8 }); by += 11; }
-  const ship = inv.shipTo || [buyer.address, buyer.city, buyer.pincode].filter(Boolean).join(', ');
-  doc.font(F).fontSize(8.5).fillColor(INK).text(ship || '—', L + half + 4, y + 4, { width: half - 8, height: partyH - 8 });
-  vline(L + half, y - 16, y + partyH);
-  y += partyH;
-  hline(y, L, R, 0.8);
-  y += 4;
+  {
+    const headH = 17;
+    cell(L, y, half, headH, HEAD);
+    cell(L + half, y, half, headH, HEAD);
+    txt('Bill To', L + PAD, mid(y, headH, 8.5, true), { bold: true, size: 8.5, color: ACCENT, width: half - 2 * PAD });
+    txt('Ship To', L + half + PAD, mid(y, headH, 8.5, true), { bold: true, size: 8.5, color: ACCENT, width: half - 2 * PAD });
+    y += headH;
+    const pw = half - 2 * PAD;
+    const name = buyer.name || '—';
+    const bill = [
+      [buyer.address, false],
+      [[buyer.city, buyer.pincode].filter(Boolean).join(' - '), false],
+      [buyer.stateCode ? `State: ${stateName(buyer.stateCode)} (${buyer.stateCode})` : exp?.countryCode ? `Country: ${exp.countryCode}` : '', false],
+      [buyer.gstin ? `GSTIN: ${buyer.gstin}` : '', true],
+    ].filter(([s]) => s);
+    const ship = inv.shipTo || [buyer.address, [buyer.city, buyer.pincode].filter(Boolean).join(' - ')].filter(Boolean).join(', ');
+    const nameH = hOf(name, pw, 10, true);
+    const billH = nameH + 3 + bill.reduce((a, [s, b]) => a + hOf(s, pw, 8.5, b) + 1.5, 0);
+    const shipH = nameH + 3 + hOf(ship || '—', pw, 8.5);
+    const h = Math.max(billH, shipH) + 14;
+    cell(L, y, half, h);
+    cell(L + half, y, half, h);
+    let by = y + 7;
+    txt(name, L + PAD, by, { bold: true, size: 10, width: pw, wrap: true });
+    by += nameH + 3;
+    for (const [s, b] of bill) { txt(s, L + PAD, by, { bold: b, size: 8.5, width: pw, wrap: true }); by += hOf(s, pw, 8.5, b) + 1.5; }
+    txt(name, L + half + PAD, y + 7, { bold: true, size: 10, width: pw, wrap: true });
+    txt(ship || '—', L + half + PAD, y + 7 + nameH + 3, { size: 8.5, width: pw, wrap: true });
+    y += h;
+  }
 
   // ── Lines ─────────────────────────────────────────────────────
   const showBoxes = lines.some((l) => Number(l.boxes) > 0);
-  const cols = [
-    { k: 'sno', h: '#', w: 18, a: 'right' },
-    { k: 'desc', h: 'Item & Description', w: 0, a: 'left' },
-    ...(showBoxes ? [{ k: 'boxes', h: 'Boxes', w: 36, a: 'right' }] : []),
-    { k: 'hsn', h: 'HSN/SAC', w: 46, a: 'left' },
-    { k: 'qty', h: 'Qty', w: 62, a: 'right' },
-    { k: 'rate', h: 'Rate', w: 48, a: 'right' },
-    ...(inter
-      ? [{ k: 'ipct', h: '%', w: 36, a: 'right', g: 'IGST' }, { k: 'iamt', h: 'Amt', w: 58, a: 'right', g: 'IGST' }]
-      : [{ k: 'cpct', h: '%', w: 32, a: 'right', g: 'CGST' }, { k: 'camt', h: 'Amt', w: 52, a: 'right', g: 'CGST' },
-         { k: 'spct', h: '%', w: 32, a: 'right', g: 'SGST' }, { k: 'samt', h: 'Amt', w: 52, a: 'right', g: 'SGST' }]),
-    { k: 'amount', h: 'Amount', w: 66, a: 'right' },
-  ];
-  const fixed = cols.reduce((a, c) => a + c.w, 0);
-  cols.find((c) => c.k === 'desc').w = W - fixed;
-  const xOf = (i) => L + cols.slice(0, i).reduce((a, c) => a + c.w, 0);
-
-  const tableHeader = () => {
-    const h = 28;
-    band(L, y, W, h);
-    cols.forEach((c, i) => {
-      const x = xOf(i);
-      if (i > 0) vline(x, y, y + h);
-      if (c.g) {
-        // Group label across the % and Amt pair, once per group.
-        const first = cols.findIndex((d) => d.g === c.g);
-        if (first === i) {
-          const gw = cols.filter((d) => d.g === c.g).reduce((a, d) => a + d.w, 0);
-          text(c.g, x, y + 2, { bold: true, size: 8, width: gw, align: 'center' });
-          hline(y + 13, x, x + gw);
-        }
-        text(c.h, x + 2, y + 17, { bold: true, size: 8, width: c.w - 4, align: c.a });
-      } else {
-        text(c.h, x + 2, y + 15, { bold: true, size: 8, width: c.w - 4, align: c.a });
-      }
-    });
-    y += h;
-  };
-
-  const cellsOf = (l, i) => ({
-    sno: String(i + 1), desc: l.name || '—', boxes: Number(l.boxes) > 0 ? String(l.boxes) : '',
-    hsn: l.hsn || '—', qty: `${qty(l.quantity)} ${l.unit || ''}`.trim(), rate: money(l.rate),
+  const units = [...new Set(lines.map((l) => l.unit || ''))];
+  const taxableOf = (l) => (l.taxable != null && l.taxable !== ''
+    ? Number(l.taxable) || 0
+    : r2((Number(l.amount) || 0) - (Number(l.cgst) || 0) - (Number(l.sgst) || 0) - (Number(l.igst) || 0)));
+  const rowsData = lines.map((l, i) => ({
+    sno: String(i + 1), desc: l.name || '—', hsn: l.hsn || '—', boxes: Number(l.boxes) > 0 ? String(l.boxes) : '',
+    qty: `${qty(l.quantity)} ${l.unit || ''}`.trim(), rate: money(l.rate), taxable: money(taxableOf(l)),
     ipct: pct(l.gstPercent), iamt: money(l.igst),
     cpct: pct((Number(l.gstPercent) || 0) / 2), camt: money(l.cgst), spct: pct((Number(l.gstPercent) || 0) / 2), samt: money(l.sgst),
-    amount: money(l.amount),
-  });
+    total: money(l.amount),
+  }));
+  const sumOf = (k) => r2(lines.reduce((a, l) => a + (Number(l[k]) || 0), 0));
+  const totalsRow = {
+    desc: 'Total',
+    boxes: showBoxes ? String(lines.reduce((a, l) => a + (Number(l.boxes) || 0), 0)) : '',
+    qty: units.length === 1 ? `${qty(r3(lines.reduce((a, l) => a + (Number(l.quantity) || 0), 0)))} ${units[0]}`.trim() : '',
+    taxable: money(r2(lines.reduce((a, l) => a + taxableOf(l), 0))),
+    iamt: money(sumOf('igst')), camt: money(sumOf('cgst')), samt: money(sumOf('sgst')),
+    total: money(sumOf('amount')),
+  };
+  const cols = [
+    { k: 'sno', h: ['#'], a: 'center', min: 18 },
+    { k: 'desc', h: ['Item & Description'], a: 'left', flex: true },
+    { k: 'hsn', h: ['HSN/SAC'], a: 'center', min: 40 },
+    ...(showBoxes ? [{ k: 'boxes', h: ['Boxes'], a: 'right', num: true, min: 30 }] : []),
+    { k: 'qty', h: ['Qty'], a: 'right', num: true, min: 44 },
+    { k: 'rate', h: ['Rate'], a: 'right', num: true, min: 36 },
+    { k: 'taxable', h: ['Taxable', 'Value'], a: 'right', num: true, min: 48 },
+    ...(inter
+      ? [{ k: 'ipct', h: ['%'], g: 'IGST', a: 'right', num: true, min: 28 }, { k: 'iamt', h: ['Amount'], g: 'IGST', a: 'right', num: true, min: 46 }]
+      : [{ k: 'cpct', h: ['%'], g: 'CGST', a: 'right', num: true, min: 26 }, { k: 'camt', h: ['Amount'], g: 'CGST', a: 'right', num: true, min: 42 },
+         { k: 'spct', h: ['%'], g: 'SGST', a: 'right', num: true, min: 26 }, { k: 'samt', h: ['Amount'], g: 'SGST', a: 'right', num: true, min: 42 }]),
+    { k: 'total', h: ['Total'], a: 'right', num: true, min: 50 },
+  ];
+  const headSize = 8;
+  let bodySize = 8.5;
+  // Each column as wide as its widest entry, like a spreadsheet's autofit;
+  // the description takes what is left.
+  const fit = () => {
+    for (const c of cols) {
+      if (c.flex) continue;
+      const head = Math.max(...c.h.map((s) => wOf(s, headSize, true)));
+      const body = Math.max(0, ...rowsData.map((r) => wOf(r[c.k], bodySize, false, c.num)), wOf(totalsRow[c.k] || '', bodySize, true, c.num));
+      c.w = Math.ceil(Math.max(c.min || 0, Math.max(head, body) + 2 * PAD + 1));
+    }
+    for (const g of ['CGST', 'SGST', 'IGST']) {
+      const gc = cols.filter((c) => c.g === g);
+      if (!gc.length) continue;
+      const need = wOf(g, headSize, true) + 2 * PAD;
+      const have = gc.reduce((a, c) => a + c.w, 0);
+      if (have < need) gc[gc.length - 1].w += Math.ceil(need - have);
+    }
+    cols.find((c) => c.flex).w = W - cols.reduce((a, c) => a + (c.flex ? 0 : c.w), 0);
+  };
+  fit();
+  while (cols.find((c) => c.flex).w < 120 && bodySize > 7.5) { bodySize -= 0.5; fit(); }
+  const xs = [];
+  cols.reduce((x, c) => { xs.push(x); return x + c.w; }, L);
+  const descW = cols.find((c) => c.flex).w - 2 * PAD;
 
-  tableHeader();
-  let tableTop = y - 28;
-  const closeTable = () => { box(L, tableTop, W, y - tableTop); cols.forEach((c, i) => { if (i > 0) vline(xOf(i), tableTop, y); }); };
-  lines.forEach((l, i) => {
-    const cells = cellsOf(l, i);
-    const descW = cols.find((c) => c.k === 'desc').w - 6;
-    doc.font(F).fontSize(8.5);
-    const h = Math.max(18, doc.heightOfString(cells.desc, { width: descW }) + 8);
-    if (y + h > bottom - 20) { closeTable(); newPage(); tableHeader(); tableTop = y - 28; }
-    cols.forEach((c, k) => {
-      const x = xOf(k);
-      if (c.k === 'desc') {
-        doc.font(F).fontSize(8.5).fillColor(INK).text(cells.desc, x + 3, y + 4, { width: descW });
+  const tier = 13;
+  const headH = tier * 2;
+  const tableHeader = () => {
+    fillRect(L, y, W, headH, HEAD);
+    cols.forEach((c, i) => {
+      const x = xs[i];
+      if (c.g) {
+        // The group's name over its two columns; the rule between them
+        // runs through the lower tier only, never through the name.
+        if (cols.findIndex((d) => d.g === c.g) === i) {
+          const gw = cols.filter((d) => d.g === c.g).reduce((a, d) => a + d.w, 0);
+          strokeRect(x, y, gw, tier);
+          txt(c.g, x, mid(y, tier, headSize, true), { bold: true, size: headSize, width: gw, align: 'center' });
+        }
+        strokeRect(x, y + tier, c.w, tier);
+        txt(c.h[0], x + PAD, mid(y + tier, tier, headSize, true), { bold: true, size: headSize, width: c.w - 2 * PAD, align: c.a });
       } else {
-        text(cells[c.k], x + 2, y + 4, { size: 8.5, width: c.w - 4, align: c.a });
+        strokeRect(x, y, c.w, headH);
+        const lineH = lh(headSize, true);
+        let ty = y + (headH - c.h.length * lineH) / 2 + 0.6;
+        for (const s of c.h) { txt(s, x + PAD, ty, { bold: true, size: headSize, width: c.w - 2 * PAD, align: c.a }); ty += lineH; }
       }
     });
+    y += headH;
+  };
+  // Rules are drawn once a page's rows are down, over the bands, so a
+  // shaded row never covers half of the line above it.
+  let bodyTop = 0;
+  let rowRules = [];
+  const closeBody = () => {
+    for (const ry of rowRules) rule(L, ry, R, ry);
+    cols.forEach((c, i) => rule(xs[i], bodyTop, xs[i], y));
+    rule(R, bodyTop, R, y);
+    rowRules = [];
+  };
+  const continueTable = () => { closeBody(); newPage(); tableHeader(); bodyTop = y; };
+
+  tableHeader();
+  bodyTop = y;
+  rowsData.forEach((r, i) => {
+    const textH = hOf(r.desc, descW, bodySize);
+    const h = Math.max(18, textH + 8);
+    if (!room(h)) continueTable();
+    if (i % 2 === 1) fillRect(L, y, W, h, BAND);
+    cols.forEach((c, k) => {
+      if (c.flex) txt(r.desc, xs[k] + PAD, y + (h - textH) / 2 + 0.6, { size: bodySize, width: descW, wrap: true });
+      else txt(r[c.k], xs[k] + PAD, mid(y, h, bodySize), { size: bodySize, width: c.w - 2 * PAD, align: c.a, num: c.num });
+    });
     y += h;
-    hline(y, L, R, 0.4);
+    rowRules.push(y);
   });
-  if (!lines.length) { text('No lines.', L + 4, y + 4, { color: MUTED }); y += 18; }
-  closeTable();
-  y += 6;
+  if (!lines.length) {
+    txt('No lines.', L + PAD, mid(y, 18), { color: MUTED, width: W - 2 * PAD });
+    y += 18;
+    rowRules.push(y);
+  }
+  {
+    const h = 18;
+    if (!room(h)) continueTable();
+    fillRect(L, y, W, h, HEAD);
+    cols.forEach((c, k) => {
+      const v = totalsRow[c.k];
+      if (v) txt(v, xs[k] + PAD, mid(y, h, bodySize, true), { bold: true, size: bodySize, width: c.w - 2 * PAD, align: c.flex ? 'right' : c.a, num: c.num });
+    });
+    y += h;
+    rowRules.push(y);
+  }
+  closeBody();
 
-  // ── Totals (right) and words / notes / bank (left) ────────────
-  const totalsW = 230;
-  const tx = R - totalsW;
-  const leftW = W - totalsW - 12;
-  const rates = [...new Set(lines.map((l) => Number(l.gstPercent) || 0))].sort((a, b) => a - b);
-  const sumBy = (rate, k) => Math.round(lines.filter((l) => (Number(l.gstPercent) || 0) === rate).reduce((a, l) => a + (Number(l[k]) || 0), 0) * 100) / 100;
-  const totalRows = [
-    ['Sub Total', money(t.taxable)],
-    ['Total Taxable Amount', money(t.taxable)],
-  ];
-  for (const r of rates) {
-    if (zero) totalRows.push(['IGST (zero-rated)', money(0)]);
-    else if (inter) totalRows.push([`IGST${r} (${r}%)`, money(sumBy(r, 'igst'))]);
-    else {
-      totalRows.push([`CGST${r / 2} (${r / 2}%)`, money(sumBy(r, 'cgst'))]);
-      totalRows.push([`SGST${r / 2} (${r / 2}%)`, money(sumBy(r, 'sgst'))]);
+  // ── Amount in words | tax totals and the grand total ──────────
+  {
+    const rates = [...new Set(lines.map((l) => Number(l.gstPercent) || 0))].sort((a, b) => a - b);
+    const sumBy = (rate, k) => r2(lines.filter((l) => (Number(l.gstPercent) || 0) === rate).reduce((a, l) => a + (Number(l[k]) || 0), 0));
+    const rows = [['Taxable Value', money(t.taxable)]];
+    for (const rate of rates) {
+      if (zero) rows.push(['IGST (zero-rated)', money(0)]);
+      else if (inter) rows.push([`IGST @ ${rate}%`, money(sumBy(rate, 'igst'))]);
+      else {
+        rows.push([`CGST @ ${rate / 2}%`, money(sumBy(rate, 'cgst'))]);
+        rows.push([`SGST @ ${rate / 2}%`, money(sumBy(rate, 'sgst'))]);
+      }
     }
+    if (Number(t.roundOff)) rows.push(['Round Off', money(t.roundOff)]);
+    const totW = 228;
+    const valT = 96;
+    const labT = totW - valT;
+    const lw = W - totW;
+    const lpw = lw - 2 * PAD;
+    const rowH = 16;
+    const grandH = 22;
+    const words = inv.amountInWords || '—';
+    const wordsH = 12 + hOf(words, lpw, 9.5, true);
+    const h = Math.max(rows.length * rowH + grandH, wordsH + 16);
+    if (!room(h)) newPage();
+    cell(L, y, lw, h);
+    txt('Amount in Words', L + PAD, y + 7, { bold: true, size: 8, color: ACCENT, width: lpw });
+    txt(words, L + PAD, y + 19, { bold: true, size: 9.5, width: lpw, wrap: true });
+    let ty = y;
+    for (const [k, v] of rows) { pair(L + lw, ty, labT, valT, rowH, k, v, { align: 'right', num: true }); ty += rowH; }
+    const gh = h - (ty - y);
+    cell(L + lw, ty, labT, gh, TOTAL);
+    cell(L + lw + labT, ty, valT, gh, TOTAL);
+    txt('Grand Total', L + lw + PAD, mid(ty, gh, 10, true), { bold: true, size: 10, color: ACCENT, width: labT - 2 * PAD });
+    txt(`${RS}${money(t.grand)}`, L + lw + labT + PAD, mid(ty, gh, 10.5, true), { bold: true, size: 10.5, width: valT - 2 * PAD, align: 'right', num: true });
+    y += h;
   }
-  if (Number(t.roundOff)) totalRows.push(['Round Off', money(t.roundOff)]);
-  const totalsH = totalRows.length * 13 + 24;
-  const totalQty = lines.reduce((a, l) => a + (Number(l.quantity) || 0), 0);
-  const leftNeeded = 150 + (upi ? 80 : 0);
-  if (y + Math.max(totalsH + 70, leftNeeded) > bottom) newPage();
-
-  // Right column.
-  let ry = y + 6;
-  for (const [k, v] of totalRows) {
-    text(k, tx, ry, { size: 8.5, width: totalsW - 90, align: 'right' });
-    text(v, tx + totalsW - 86, ry, { size: 8.5, width: 86, align: 'right' });
-    ry += 13;
-  }
-  hline(ry + 1, tx, R, 0.8);
-  text('Total', tx, ry + 6, { bold: true, size: 9.5, width: totalsW - 90, align: 'right' });
-  text(`${RS}${money(t.grand)}`, tx + totalsW - 96, ry + 6, { bold: true, size: 9.5, width: 96, align: 'right' });
-  ry += 24;
-  hline(ry, tx, R, 0.8);
-  const sigH = 70;
-  box(tx, ry, totalsW, sigH);
-  text(`For ${company}`, tx + 4, ry + 6, { size: 8, color: MUTED, width: totalsW - 8 });
-  text('Authorized Signature', tx, ry + sigH - 14, { size: 8.5, width: totalsW, align: 'center' });
-  vline(tx, y, ry + sigH);
-  const rightEnd = ry + sigH;
-
-  // Left column.
-  let lx = L;
-  let ly2 = y + 6;
-  text('Items in Total', lx, ly2, { size: 8, color: MUTED, width: 70 });
-  text(`${qty(totalQty)} ${lines[0]?.unit || 'm'}`, lx + 66, ly2 - 1, { size: 10, width: leftW - 66 });
-  ly2 += 16;
-  text('Total In Words', lx, ly2, { size: 9, color: MUTED, width: leftW });
-  ly2 += 11;
-  doc.font(FB).fontSize(9.5).fillColor(INK).text(inv.amountInWords || '—', lx, ly2, { width: leftW });
-  ly2 += doc.heightOfString(inv.amountInWords || '—', { width: leftW }) + 8;
-  const notes = [exportSupply.declaration(exp), inv.notes, invSettings.declaration].filter(Boolean);
-  if (notes.length) {
-    text('Notes', lx, ly2, { size: 9, color: MUTED, width: leftW });
-    ly2 += 11;
-    doc.font(F).fontSize(8).fillColor(INK).text(notes.join('\n'), lx, ly2, { width: leftW });
-    ly2 += doc.heightOfString(notes.join('\n'), { width: leftW }) + 8;
-  }
-  const bankLines = [
-    bank.name && `${bank.name}${bank.branch ? `, ${bank.branch}` : ''}`,
-    bank.account && `Ac.No: ${bank.account}`,
-    bank.ifsc && `IFSC ${bank.ifsc}`,
-    bank.upiId && `UPI ID: ${bank.upiId}`,
-  ].filter(Boolean);
-  for (const s of bankLines) { text(s, lx, ly2, { bold: true, size: 9, width: leftW }); ly2 += 11; }
-  if (upi) {
-    ly2 += 3;
-    doc.image(upi, lx, ly2, { width: 56, height: 56 });
-    text('Scan to', lx + 64, ly2 + 18, { size: 9, width: 80 });
-    text('Pay', lx + 64, ly2 + 30, { size: 9, width: 80 });
-    ly2 += 60;
-  }
-  y = Math.max(rightEnd, ly2) + 8;
 
   // ── HSN / SAC summary ─────────────────────────────────────────
-  const groups = new Map();
-  for (const l of lines) {
-    const key = `${l.hsn || '—'}|${Number(l.gstPercent) || 0}`;
-    const g = groups.get(key) || { hsn: l.hsn || '—', rate: Number(l.gstPercent) || 0, taxable: 0, cgst: 0, sgst: 0, igst: 0 };
-    g.taxable += Number(l.taxable) || 0; g.cgst += Number(l.cgst) || 0; g.sgst += Number(l.sgst) || 0; g.igst += Number(l.igst) || 0;
-    groups.set(key, g);
+  {
+    const groups = new Map();
+    for (const l of lines) {
+      const key = `${l.hsn || '—'}|${Number(l.gstPercent) || 0}`;
+      const g = groups.get(key) || { hsn: l.hsn || '—', rate: Number(l.gstPercent) || 0, taxable: 0, cgst: 0, sgst: 0, igst: 0 };
+      g.taxable += taxableOf(l); g.cgst += Number(l.cgst) || 0; g.sgst += Number(l.sgst) || 0; g.igst += Number(l.igst) || 0;
+      groups.set(key, g);
+    }
+    const rows = [...groups.values()];
+    const total = (k) => r2(rows.reduce((a, g) => a + g[k], 0));
+    const sCols = inter
+      ? [['HSN/SAC', 1.2, 'left'], ['Taxable Value', 1.4, 'right'], ['IGST %', 0.9, 'right'], ['IGST Amount', 1.3, 'right'], ['Total Tax', 1.3, 'right']]
+      : [['HSN/SAC', 1.1, 'left'], ['Taxable Value', 1.3, 'right'], ['CGST %', 0.8, 'right'], ['CGST Amount', 1.2, 'right'], ['SGST %', 0.8, 'right'], ['SGST Amount', 1.2, 'right'], ['Total Tax', 1.3, 'right']];
+    const unit = W / sCols.reduce((a, c) => a + c[1], 0);
+    const sw = sCols.map((c) => c[1] * unit);
+    const sx = sw.reduce((acc, w, i) => { acc.push(i ? acc[i - 1] + sw[i - 1] : L); return acc; }, []);
+    const rowH = 16;
+    const need = rowH * (rows.length + 3);
+    if (!room(need)) newPage();
+    cell(L, y, W, rowH, LABEL);
+    txt('HSN/SAC Summary', L + PAD, mid(y, rowH, 8, true), { bold: true, size: 8, color: ACCENT, width: W - 2 * PAD });
+    y += rowH;
+    const drawRow = (cells, { fill, bold } = {}) => {
+      cells.forEach((v, i) => {
+        cell(sx[i], y, sw[i], rowH, fill);
+        txt(v, sx[i] + PAD, mid(y, rowH, 8, bold), { bold, size: 8, width: sw[i] - 2 * PAD, align: sCols[i][2], num: i > 0 });
+      });
+      y += rowH;
+    };
+    drawRow(sCols.map((c) => c[0]), { fill: HEAD, bold: true });
+    for (const g of rows) {
+      drawRow(inter
+        ? [g.hsn, money(g.taxable), pct(g.rate), money(g.igst), money(g.igst)]
+        : [g.hsn, money(g.taxable), pct(g.rate / 2), money(g.cgst), pct(g.rate / 2), money(g.sgst), money(g.cgst + g.sgst)]);
+    }
+    drawRow(inter
+      ? ['Total', money(total('taxable')), '', money(total('igst')), money(total('igst'))]
+      : ['Total', money(total('taxable')), '', money(total('cgst')), '', money(total('sgst')), money(total('cgst') + total('sgst'))], { fill: HEAD, bold: true });
   }
-  const rows = [...groups.values()];
-  const sumRows = (k) => rows.reduce((a, g) => a + g[k], 0);
-  const sCols = inter
-    ? [['HSN/SAC', 80, 'left'], ['Taxable Amount', 0, 'right'], ['IGST Rate', 70, 'right'], ['Amount', 80, 'right'], ['Total Tax Amount', 90, 'right']]
-    : [['HSN/SAC', 80, 'left'], ['Taxable Amount', 0, 'right'], ['CGST Rate', 60, 'right'], ['Amount', 70, 'right'], ['SGST Rate', 60, 'right'], ['Amount', 70, 'right'], ['Total Tax Amount', 90, 'right']];
-  const sFixed = sCols.reduce((a, c) => a + c[1], 0);
-  sCols[1][1] = W - sFixed;
-  const sx = (i) => L + sCols.slice(0, i).reduce((a, c) => a + c[1], 0);
-  const summaryH = 16 + (rows.length + 1) * 16;
-  if (y + summaryH + 4 > bottom) newPage();
-  text('HSN/SAC Summary:', L, y, { size: 8.5, color: MUTED });
-  y += 12;
-  const sTop = y;
-  band(L, y, W, 16);
-  sCols.forEach((c, i) => text(c[0], sx(i) + 3, y + 4, { bold: true, size: 8, width: c[1] - 6, align: c[2] }));
-  y += 16;
-  const sRow = (cells, bold) => {
-    cells.forEach((v, i) => text(v, sx(i) + 3, y + 4, { bold, size: 8, width: sCols[i][1] - 6, align: sCols[i][2] }));
-    y += 16;
-    hline(y, L, R, 0.4);
-  };
-  for (const g of rows) {
-    sRow(inter
-      ? [g.hsn, money(g.taxable), pct(g.rate), money(g.igst), money(g.igst)]
-      : [g.hsn, money(g.taxable), pct(g.rate / 2), money(g.cgst), pct(g.rate / 2), money(g.sgst), money(g.cgst + g.sgst)]);
+
+  // ── Bank and notes | signature ────────────────────────────────
+  {
+    const sigW = 200;
+    const bw = W - sigW;
+    const bpw = bw - 2 * PAD;
+    const qr = upi ? 58 : 0;
+    const textW = bpw - (qr ? qr + 12 : 0);
+    const bankRows = [
+      ['Bank', [bank.name, bank.branch].filter(Boolean).join(', ')],
+      ['A/c No.', bank.account],
+      ['IFSC', bank.ifsc],
+      ['UPI ID', bank.upiId],
+    ].filter(([, v]) => v);
+    const declaration = [exportSupply.declaration(exp), invSettings.declaration].filter(Boolean).join('\n');
+    const notes = String(inv.notes || '').trim();
+    const sections = [
+      ...(notes ? [['Notes', notes]] : []),
+      ...(declaration ? [['Declaration', declaration]] : []),
+    ];
+    const bankH = bankRows.length ? 13 + bankRows.length * 12 : 0;
+    const bankBlockH = Math.max(bankH, qr ? qr + 12 : 0);
+    const sectionsH = sections.reduce((a, [, s]) => a + 13 + hOf(s, bpw, 7.5) + 6, 0);
+    const h = Math.max(8 + bankBlockH + (bankBlockH && sections.length ? 8 : 0) + sectionsH + 4, 86);
+    if (!room(h)) newPage();
+    cell(L, y, bw, h);
+    cell(L + bw, y, sigW, h);
+    let by = y + 7;
+    if (bankRows.length) {
+      txt('Bank Details', L + PAD, by, { bold: true, size: 8, color: ACCENT, width: textW });
+      by += 13;
+      for (const [k, v] of bankRows) {
+        txt(k, L + PAD, by, { size: 8, color: MUTED, width: 48 });
+        txt(v, L + PAD + 48, by, { bold: true, size: 8.5, width: textW - 48 });
+        by += 12;
+      }
+    }
+    if (upi) {
+      const qx = L + bw - PAD - qr;
+      doc.image(upi, qx, y + 7, { width: qr, height: qr });
+      txt('Scan to pay', qx - 6, y + 7 + qr + 1, { size: 7, color: MUTED, width: qr + 12, align: 'center' });
+    }
+    by = y + 7 + bankBlockH + (bankBlockH && sections.length ? 8 : 0);
+    sections.forEach(([label, s], i) => {
+      if (i || bankBlockH) rule(L, by - 5, L + bw, by - 5);
+      txt(label, L + PAD, by, { bold: true, size: 8, color: ACCENT, width: bpw });
+      by += 13;
+      txt(s, L + PAD, by, { size: 7.5, width: bpw, wrap: true });
+      by += hOf(s, bpw, 7.5) + 6;
+    });
+    txt(`For ${company}`, L + bw + PAD, y + 8, { bold: true, size: 9, width: sigW - 2 * PAD, align: 'center' });
+    rule(L + bw + 40, y + h - 20, R - 40, y + h - 20, MUTED, 0.5);
+    txt('Authorised Signatory', L + bw + PAD, y + h - 16, { size: 8, color: MUTED, width: sigW - 2 * PAD, align: 'center' });
+    y += h;
   }
-  sRow(inter
-    ? ['Total', money(sumRows('taxable')), '', money(sumRows('igst')), money(sumRows('igst'))]
-    : ['Total', money(sumRows('taxable')), '', money(sumRows('cgst')), '', money(sumRows('sgst')), money(sumRows('cgst') + sumRows('sgst'))], true);
-  box(L, sTop, W, y - sTop);
-  sCols.forEach((c, i) => { if (i > 0) vline(sx(i), sTop, y); });
-  y += 8;
 
   if (cancelled) {
-    text(`CANCELLED${inv.cancel?.reason ? ` — ${inv.cancel.reason}` : ''}`, L, y, { bold: true, size: 9, color: ALERT, width: W });
-    y += 14;
+    const reason = `Cancelled${inv.cancel?.reason ? `: ${inv.cancel.reason}` : ''}`;
+    const h = Math.max(18, hOf(reason, W - 2 * PAD, 8.5, true) + 8);
+    if (!room(h)) newPage();
+    cell(L, y, W, h);
+    txt(reason, L + PAD, y + (h - hOf(reason, W - 2 * PAD, 8.5, true)) / 2 + 0.6, { bold: true, size: 8.5, color: ALERT, width: W - 2 * PAD, wrap: true });
+    y += h;
   }
-  if (branding.footerNote && y + 12 < bottom) {
-    text(branding.footerNote, L, y, { size: 7.5, color: MUTED, width: W, align: 'center' });
-  }
+  closeFrame();
 
-  // ── Page numbers and the cancelled stamp ──────────────────────
+  // ── Page line, the footer note, the cancelled stamp ──────────
   const range = doc.bufferedPageRange();
   for (let i = range.start; i < range.start + range.count; i++) {
     doc.switchToPage(i);
-    // Above the bottom margin: a line that crosses it makes pdfkit open
-    // a new page for it, and the invoice gains a blank page.
-    text(`${inv.invoiceNumber || ''} · page ${i - range.start + 1} of ${range.count}`, L, doc.page.height - 42, { size: 7, color: MUTED, width: W, align: 'right' });
+    const fy = doc.page.height - 26;
+    txt(`${inv.invoiceNumber || ''}  ·  Page ${i - range.start + 1} of ${range.count}`, L, fy, { size: 7, color: MUTED, width: W, align: 'right' });
+    if (branding.footerNote && i === range.start + range.count - 1) {
+      txt(branding.footerNote, L, fy, { size: 7, color: MUTED, width: W - 150 });
+    }
     if (cancelled) {
       doc.save().rotate(-30, { origin: [doc.page.width / 2, doc.page.height / 2] })
-        .font(FB).fontSize(72).fillColor(ALERT).opacity(0.12)
+        .font(FB).fontSize(72).fillColor(ALERT).opacity(0.1)
         .text('CANCELLED', 0, doc.page.height / 2 - 40, { width: doc.page.width, align: 'center', lineBreak: false })
         .opacity(1).restore();
     }
