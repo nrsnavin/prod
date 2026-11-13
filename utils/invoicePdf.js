@@ -104,7 +104,7 @@ const when = (d) => {
 };
 const titleCase = (s) => String(s || '').toLowerCase().replace(/(^|\s)\S/g, (c) => c.toUpperCase());
 
-async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
+async function chooseLayout({ invoice, branding = {}, settings = {} } = {}) {
   const inv = invoice || {};
   const t = inv.totals || {};
   const bank = (settings.invoice || {}).bank || {};
@@ -127,9 +127,9 @@ async function buildInvoicePdf({ invoice, branding = {}, settings = {} } = {}) {
   const normal = render({ inv, branding, settings, qrs, D: DENSITY.normal });
   if (normal.pages > 1) {
     const compact = render({ inv, branding, settings, qrs, D: DENSITY.compact });
-    if (compact.pages === 1) return compact.done;
+    if (compact.pages === 1) return compact;
   }
-  return normal.done;
+  return normal;
 }
 
 /** One layout of the invoice at spacing D: { pages, done → Buffer }. */
@@ -473,45 +473,16 @@ function render({ inv, branding, settings, qrs, D }) {
     rule(R, bodyTop, R, y);
     rowRules = [];
   };
-  const continueTable = () => { closeBody(); newPage(); tableHeader(); bodyTop = y; };
-
-  tableHeader();
-  bodyTop = y;
-  rowsData.forEach((r, i) => {
-    const textH = hOf(r.desc, descW, bodySize);
-    const h = Math.max(D.item, textH + D.itemPad);
-    if (!room(h)) continueTable();
-    if (i % 2 === 1) fillRect(L, y, W, h, BAND);
-    cols.forEach((c, k) => {
-      if (c.flex) txt(r.desc, xs[k] + TP, y + (h - textH) / 2 + 0.6, { size: bodySize, width: descW, wrap: true });
-      else txt(r[c.k], xs[k] + TP, mid(y, h, bodySize), { size: bodySize, width: c.w - 2 * TP, align: c.a, num: c.num });
-    });
-    y += h;
-    rowRules.push(y);
-  });
-  if (!lines.length) {
-    txt('No lines.', L + PAD, mid(y, D.item), { color: MUTED, width: W - 2 * PAD });
-    y += D.item;
-    rowRules.push(y);
-  }
-  {
-    const h = D.item;
-    if (!room(h)) continueTable();
-    fillRect(L, y, W, h, HEAD);
-    cols.forEach((c, k) => {
-      const v = totalsRow[c.k];
-      if (v) txt(v, xs[k] + TP, mid(y, h, bodySize, true), { bold: true, size: bodySize, width: c.w - 2 * TP, align: c.flex ? 'right' : c.a, num: c.num });
-    });
-    y += h;
-    rowRules.push(y);
-  }
-  closeBody();
+  // A page the rows run off: the table goes down to the foot of the sheet
+  // (its column rules through the last sliver), then on over the page.
+  let rowsOnPage = 0; // rows drawn on the page the table is on
+  const continueTable = () => { y = BOTTOM; closeBody(); newPage(); tableHeader(); bodyTop = y; rowsOnPage = 0; };
 
   // ── The end of the invoice, kept together ────────────────────
   // The amount in words beside the totals, the HSN summary, the notes and
   // declaration, the bank and the two signatures (and a cancelled one's
-  // reason). When they do not all fit under the table they start the
-  // next page together, so the signatures never sit on a page alone.
+  // reason). They sit together at the foot of the sheet, and never on a
+  // page alone without the table's totals above them.
   const blocks = [];
 
   // Amount in words | tax totals and the grand total.
@@ -678,11 +649,91 @@ function render({ inv, branding, settings, qrs, D }) {
     } });
   }
 
-  if (!room(blocks.reduce((a, b) => a + b.h, 0))) newPage();
-  for (const b of blocks) {
-    if (!room(b.h)) newPage();
-    b.draw();
+  // ── Where the rows break ──────────────────────────────────────
+  // The end of the invoice (the table's totals and everything below)
+  // sits at the foot of the page the last row is on. When it does not
+  // fit there it goes over, and the last row or two go with it: a page
+  // of nothing but an empty table above the totals reads as a mistake.
+  // Worked out before drawing, with the same heights the rows will get.
+  const rowHeights = rowsData.map((r) => Math.max(D.item, hOf(r.desc, descW, bodySize) + D.itemPad));
+  const endH = D.item + blocks.reduce((a, b) => a + b.h, 0);
+  let breakBefore = -1;
+  {
+    const contTop = M + 20 + headH; // a continued page: its title band, then the table header
+    let sy = y + headH;   // the first row, under the header about to be drawn
+    let lastStart = 0;    // the first row on the page the rows end on
+    rowHeights.forEach((h, i) => { if (sy + h > BOTTOM) { sy = contTop; lastStart = i; } sy += h; });
+    const n = rowHeights.length;
+    if (n && sy + endH > BOTTOM && contTop + endH <= BOTTOM) {
+      const onLast = n - lastStart;
+      for (const k of [2, 1]) {
+        if (k > onLast) continue;
+        const moved = rowHeights.slice(n - k).reduce((a, h) => a + h, 0);
+        if (contTop + moved + endH <= BOTTOM) { breakBefore = n - k; break; }
+      }
+    }
   }
+
+  tableHeader();
+  bodyTop = y;
+  rowsData.forEach((r, i) => {
+    const textH = hOf(r.desc, descW, bodySize);
+    const h = Math.max(D.item, textH + D.itemPad);
+    if (i === breakBefore || !room(h)) continueTable();
+    if (i % 2 === 1) fillRect(L, y, W, h, BAND);
+    cols.forEach((c, k) => {
+      if (c.flex) txt(r.desc, xs[k] + TP, y + (h - textH) / 2 + 0.6, { size: bodySize, width: descW, wrap: true });
+      else txt(r[c.k], xs[k] + TP, mid(y, h, bodySize), { size: bodySize, width: c.w - 2 * TP, align: c.a, num: c.num });
+    });
+    y += h;
+    rowRules.push(y);
+    rowsOnPage += 1;
+  });
+  if (!lines.length) {
+    txt('No lines.', L + PAD, mid(y, D.item), { color: MUTED, width: W - 2 * PAD });
+    y += D.item;
+    rowRules.push(y);
+  }
+  // The table's totals row: drawn below, once the end of the invoice has
+  // been measured, because where it goes depends on it.
+  const totalsH = D.item;
+  const drawTotalsRow = () => {
+    fillRect(L, y, W, totalsH, HEAD);
+    cols.forEach((c, k) => {
+      const v = totalsRow[c.k];
+      if (v) txt(v, xs[k] + TP, mid(y, totalsH, bodySize, true), { bold: true, size: bodySize, width: c.w - 2 * TP, align: c.flex ? 'right' : c.a, num: c.num });
+    });
+    y += totalsH;
+    rowRules.push(y);
+  };
+
+  // ── The sheet filled ──────────────────────────────────────────
+  // The invoice takes the whole A4 sheet whatever its length. The rows
+  // run down from the top; the table's totals and the end of the invoice
+  // sit at the foot of the sheet; the table's column rules run on down
+  // the space between, so two lines fill the page as a dozen do. When
+  // there is no room for the end under the last row, the table runs to
+  // the foot of the page and on over the next, and the end sits at the
+  // foot of that one.
+  const tailH = blocks.reduce((a, b) => a + b.h, 0);
+  if (!room(totalsH + tailH)) continueTable();
+  if (room(totalsH + tailH)) {
+    const gap = BOTTOM - (totalsH + tailH) - y;
+    if (gap > 0.5) { y += gap; rowRules.push(y); }
+    drawTotalsRow();
+    closeBody();
+    for (const b of blocks) b.draw();
+  } else {
+    // An end taller than a page can hold (a long tax summary, long
+    // notes): a block at a time, each starting a page when it must.
+    drawTotalsRow();
+    closeBody();
+    for (const b of blocks) {
+      if (!room(b.h)) newPage();
+      b.draw();
+    }
+  }
+  const footEnd = y;
   closeFrame();
 
   // ── Page line, the footer note, the cancelled stamp ──────────
@@ -703,7 +754,21 @@ function render({ inv, branding, settings, qrs, D }) {
   }
 
   doc.end();
-  return { pages: range.count, done };
+  // Where the foot ended against the foot of the sheet, and how many rows
+  // share the last page with it: for the tests of the full-page layout.
+  return { pages: range.count, done, layout: { pages: range.count, footEnd, bottom: BOTTOM, rowsOnLastPage: rowsOnPage } };
 }
 
-module.exports = { buildInvoicePdf };
+/** The invoice as a PDF Buffer. */
+async function buildInvoicePdf(args) {
+  return (await chooseLayout(args)).done;
+}
+
+/** Where the layout put things (for tests): pages, the foot's end, the sheet's foot. */
+async function invoiceLayout(args) {
+  const chosen = await chooseLayout(args);
+  await chosen.done;
+  return chosen.layout;
+}
+
+module.exports = { buildInvoicePdf, invoiceLayout };

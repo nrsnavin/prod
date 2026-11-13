@@ -81,14 +81,26 @@ const ddmmyyyy = (d) => {
   return `${p(t.getDate())}/${p(t.getMonth() + 1)}/${t.getFullYear()}`;
 };
 
-async function buildChallanPdf({ dc, branding = {}, settings = {} } = {}) {
+function chooseLayout({ dc, branding = {}, settings = {} } = {}) {
   const args = { dc: dc || {}, branding, settings };
   const normal = render({ ...args, D: DENSITY.normal });
   if (normal.pages > 1) {
     const compact = render({ ...args, D: DENSITY.compact });
-    if (compact.pages === 1) return compact.done;
+    if (compact.pages === 1) return compact;
   }
-  return normal.done;
+  return normal;
+}
+
+/** The challan as a PDF Buffer. */
+async function buildChallanPdf(args) {
+  return chooseLayout(args).done;
+}
+
+/** Where the layout put things (for tests): pages, the foot's end, the sheet's foot. */
+async function challanLayout(args) {
+  const chosen = chooseLayout(args);
+  await chosen.done;
+  return chosen.layout;
 }
 
 /** One layout of the challan at spacing D: { pages, done → Buffer }. */
@@ -343,39 +355,10 @@ function render({ dc, branding, settings, D }) {
     rule(R, bodyTop, R, y);
     rowRules = [];
   };
-  const continueTable = () => { closeBody(); newPage(); tableHeader(); bodyTop = y; };
-
-  tableHeader();
-  bodyTop = y;
-  rows.forEach((r, i) => {
-    const textH = hOf(r.desc, descW, D.body);
-    const h = Math.max(D.item, textH + D.itemPad);
-    if (!room(h)) continueTable();
-    if (i % 2 === 1) fillRect(L, y, W, h, BAND);
-    cols.forEach((c, k) => {
-      if (c.flex) txt(r.desc, xs[k] + TP, y + (h - textH) / 2 + 0.6, { size: D.body, width: descW, wrap: true });
-      else txt(r[c.k], xs[k] + TP, mid(y, h, D.body), { size: D.body, width: c.w - 2 * TP, align: c.a, num: c.num });
-    });
-    y += h;
-    rowRules.push(y);
-  });
-  if (!rows.length) {
-    txt('No items.', L + PAD, mid(y, D.item), { color: MUTED, width: W - 2 * PAD });
-    y += D.item;
-    rowRules.push(y);
-  }
-  {
-    const h = D.item;
-    if (!room(h)) continueTable();
-    fillRect(L, y, W, h, HEAD);
-    cols.forEach((c, k) => {
-      const v = totalsRow[c.k];
-      if (v) txt(v, xs[k] + TP, mid(y, h, D.body, true), { bold: true, size: D.body, width: c.w - 2 * TP, align: c.flex ? 'right' : c.a, num: c.num });
-    });
-    y += h;
-    rowRules.push(y);
-  }
-  closeBody();
+  // A page the rows run off: the table goes down to the foot of the sheet
+  // (its column rules through the last sliver), then on over the page.
+  let rowsOnPage = 0; // rows drawn on the page the table is on
+  const continueTable = () => { y = BOTTOM; closeBody(); newPage(); tableHeader(); bodyTop = y; rowsOnPage = 0; };
 
   // ── The foot, kept together ──────────────────────────────────
   const blocks = [];
@@ -415,11 +398,88 @@ function render({ dc, branding, settings, D }) {
       y += h;
     } });
   }
-  if (!room(blocks.reduce((a, b) => a + b.h, 0))) newPage();
-  for (const b of blocks) {
-    if (!room(b.h)) newPage();
-    b.draw();
+  // ── Where the rows break ──────────────────────────────────────
+  // The foot sits at the bottom of the page the last row is on; when it
+  // does not fit there it goes over, and the last row or two go with it,
+  // so no page is an empty table above the totals (as on the invoice).
+  const rowHeights = rows.map((r) => Math.max(D.item, hOf(r.desc, descW, D.body) + D.itemPad));
+  const endH = D.item + blocks.reduce((a, b) => a + b.h, 0);
+  let breakBefore = -1;
+  {
+    const contTop = M + 20 + D.head; // a continued page: its title band, then the table header
+    let sy = y + D.head;
+    let lastStart = 0;
+    rowHeights.forEach((h, i) => { if (sy + h > BOTTOM) { sy = contTop; lastStart = i; } sy += h; });
+    const n = rowHeights.length;
+    if (n && sy + endH > BOTTOM && contTop + endH <= BOTTOM) {
+      const onLast = n - lastStart;
+      for (const k of [2, 1]) {
+        if (k > onLast) continue;
+        const moved = rowHeights.slice(n - k).reduce((a, h) => a + h, 0);
+        if (contTop + moved + endH <= BOTTOM) { breakBefore = n - k; break; }
+      }
+    }
   }
+
+  tableHeader();
+  bodyTop = y;
+  rows.forEach((r, i) => {
+    const textH = hOf(r.desc, descW, D.body);
+    const h = Math.max(D.item, textH + D.itemPad);
+    if (i === breakBefore || !room(h)) continueTable();
+    if (i % 2 === 1) fillRect(L, y, W, h, BAND);
+    cols.forEach((c, k) => {
+      if (c.flex) txt(r.desc, xs[k] + TP, y + (h - textH) / 2 + 0.6, { size: D.body, width: descW, wrap: true });
+      else txt(r[c.k], xs[k] + TP, mid(y, h, D.body), { size: D.body, width: c.w - 2 * TP, align: c.a, num: c.num });
+    });
+    y += h;
+    rowRules.push(y);
+    rowsOnPage += 1;
+  });
+  if (!rows.length) {
+    txt('No items.', L + PAD, mid(y, D.item), { color: MUTED, width: W - 2 * PAD });
+    y += D.item;
+    rowRules.push(y);
+  }
+  // The table's totals row: drawn below, once the foot has been
+  // measured, because where it goes depends on it.
+  const totalsH = D.item;
+  const drawTotalsRow = () => {
+    fillRect(L, y, W, totalsH, HEAD);
+    cols.forEach((c, k) => {
+      const v = totalsRow[c.k];
+      if (v) txt(v, xs[k] + TP, mid(y, totalsH, D.body, true), { bold: true, size: D.body, width: c.w - 2 * TP, align: c.flex ? 'right' : c.a, num: c.num });
+    });
+    y += totalsH;
+    rowRules.push(y);
+  };
+
+  // ── The sheet filled ──────────────────────────────────────────
+  // The challan takes the whole A4 sheet whatever its length, as the
+  // invoice does (utils/invoicePdf.js): the rows from the top, the
+  // table's totals, remarks, terms and the four signatures at the foot,
+  // and the table's column rules down the space between. With no room
+  // for the foot under the last row, the table runs to the foot of the
+  // page and on over the next, and the foot sits at the bottom of that.
+  const tailH = blocks.reduce((a, b) => a + b.h, 0);
+  if (!room(totalsH + tailH)) continueTable();
+  if (room(totalsH + tailH)) {
+    const gap = BOTTOM - (totalsH + tailH) - y;
+    if (gap > 0.5) { y += gap; rowRules.push(y); }
+    drawTotalsRow();
+    closeBody();
+    for (const b of blocks) b.draw();
+  } else {
+    // A foot taller than a page (very long remarks or terms): a block at
+    // a time, each starting a page when it must.
+    drawTotalsRow();
+    closeBody();
+    for (const b of blocks) {
+      if (!room(b.h)) newPage();
+      b.draw();
+    }
+  }
+  const footEnd = y;
   closeFrame();
 
   // ── Page line, footer note, the draft or cancelled stamp ─────
@@ -440,7 +500,9 @@ function render({ dc, branding, settings, D }) {
   }
 
   doc.end();
-  return { pages: range.count, done };
+  // Where the foot ended against the foot of the sheet, and how many rows
+  // share the last page with it: for the tests of the full-page layout.
+  return { pages: range.count, done, layout: { pages: range.count, footEnd, bottom: BOTTOM, rowsOnLastPage: rowsOnPage } };
 }
 
-module.exports = { buildChallanPdf };
+module.exports = { buildChallanPdf, challanLayout };
