@@ -56,12 +56,12 @@ const DENSITY = {
   normal: {
     title: 26, titleSize: 14, nameSize: 16, headPad: 14, headMin: 58, logoBox: 72,
     row: 15.5, partyHead: 16, partyPad: 10, partyName: 10,
-    head: 26, item: 16, itemPad: 6, sigBox: 32, text: 8.5, body: 8.5, headSize: 8, label: 8,
+    head: 26, item: 16, itemPad: 6, sigBox: 60, text: 8.5, body: 8.5, headSize: 8, label: 8,
   },
   compact: {
     title: 22, titleSize: 13, nameSize: 14.5, headPad: 9, headMin: 50, logoBox: 60,
     row: 13.5, partyHead: 14, partyPad: 6, partyName: 9.5,
-    head: 20, item: 13.5, itemPad: 4, sigBox: 24, text: 8, body: 8, headSize: 7.5, label: 7.5,
+    head: 20, item: 13.5, itemPad: 4, sigBox: 46, text: 8, body: 8, headSize: 7.5, label: 7.5,
   },
 };
 
@@ -376,7 +376,8 @@ function render({ dc, branding, settings, D }) {
     } });
   }
   // Four places to sign, each a dashed box: ours to prepare and check,
-  // the receiver's with their seal, and the authorised signatory's.
+  // the receiver's with their seal, and the authorised signatory's; tall
+  // enough for a seal with a signature over it.
   {
     const sw = W / 4;
     const h = 5 + 10 + 3 + D.sigBox + 3 + 10 + 4;
@@ -392,7 +393,7 @@ function render({ dc, branding, settings, D }) {
         cell(x, y, sw, h);
         if (top) txt(top, x + PAD, y + 5, { bold: strong, size: strong ? D.text : 7, color: strong ? INK : MUTED, width: sw - 2 * PAD, align: 'center' });
         const boxTop = y + 5 + 10 + 3;
-        doc.save().rect(x + 10, boxTop, sw - 20, D.sigBox).dash(2, { space: 2 }).lineWidth(0.5).strokeColor(GRID).stroke().undash().restore();
+        doc.save().rect(x + 8, boxTop, sw - 16, D.sigBox).dash(2, { space: 2 }).lineWidth(0.5).strokeColor(GRID).stroke().undash().restore();
         txt(bottom, x + PAD, y + h - 4 - 10, { size: D.label, color: MUTED, width: sw - 2 * PAD, align: 'center' });
       });
       y += h;

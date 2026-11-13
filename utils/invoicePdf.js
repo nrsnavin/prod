@@ -67,13 +67,13 @@ const DENSITY = {
     title: 26, titleSize: 14, nameSize: 16, headPad: 14, headMin: 58, logoBox: 72, qr: 80,
     row: 15.5, partyHead: 16, partyPad: 10, partyName: 10,
     tier: 12.5, item: 16, itemPad: 6, sumRow: 15, grand: 20, hsnRow: 15,
-    upi: 52, sigBox: 32, text: 8.5, body: 8.5, head: 8, label: 8,
+    upi: 52, sigBox: 60, text: 8.5, body: 8.5, head: 8, label: 8,
   },
   compact: {
     title: 22, titleSize: 13, nameSize: 14.5, headPad: 9, headMin: 50, logoBox: 60, qr: 74,
     row: 13.5, partyHead: 14, partyPad: 6, partyName: 9.5,
     tier: 11, item: 13.5, itemPad: 4, sumRow: 13, grand: 17, hsnRow: 13,
-    upi: 46, sigBox: 24, text: 8, body: 8, head: 7.5, label: 7.5,
+    upi: 46, sigBox: 46, text: 8, body: 8, head: 7.5, label: 7.5,
   },
 };
 
@@ -589,7 +589,8 @@ function render({ inv, branding, settings, qrs, D }) {
   }
 
   // The bank, with a scan-to-pay code | the receiver's signature and
-  // seal | ours. Each signature has a dashed box to sign (and stamp) in.
+  // seal | ours. Each signature has a dashed box to sign and stamp in,
+  // tall enough for the company's seal with a signature over it.
   {
     const sigW = 150;
     const bw = W - 2 * sigW;
@@ -611,7 +612,7 @@ function render({ inv, branding, settings, qrs, D }) {
       if (top) txt(top, x + PAD, y + 5, { bold: strong, size: strong ? D.text : 7, color: strong ? INK : MUTED, width: sigW - 2 * PAD, align: 'center' });
       const boxTop = y + 5 + 10 + 3;
       const boxH = h - (boxTop - y) - (3 + 10 + 4);
-      doc.save().rect(x + 12, boxTop, sigW - 24, boxH).dash(2, { space: 2 }).lineWidth(0.5).strokeColor(GRID).stroke().undash().restore();
+      doc.save().rect(x + 8, boxTop, sigW - 16, boxH).dash(2, { space: 2 }).lineWidth(0.5).strokeColor(GRID).stroke().undash().restore();
       txt(bottom, x + PAD, y + h - 4 - 10, { size: D.label, color: MUTED, width: sigW - 2 * PAD, align: 'center' });
     };
     blocks.push({ h, draw: () => {
