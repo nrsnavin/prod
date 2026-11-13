@@ -141,31 +141,18 @@ router.put("/categories/:id", isAdmin("admin"), catchAsyncErrors(async (req, res
 /** What a bill against this PO would hold: the receipts not yet billed. */
 router.get("/bills/po-info", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.query.id)) return next(new ErrorHandler("Purchase order not found", 404));
-  const po = await PurchaseOrder.findById(req.query.id).populate("supplier", "name gstin address").populate("items.rawMaterial", "name unit hsn").lean();
-  if (!po) return next(new ErrorHandler("Purchase order not found", 404));
-  const inwards = await MaterialInward.find({ purchaseOrder: po._id }).populate("rawMaterial", "name unit").sort({ inwardDate: 1 }).lean();
-  const billed = await SupplierBill.find({ purchaseOrder: po._id, status: { $ne: "cancelled" } }).select("billNo inwards supplierBillNo totals").lean();
-  const onBill = new Map();
-  for (const b of billed) for (const i of b.inwards || []) onBill.set(String(i), b.billNo);
-  const settings = await getDocumentSettings();
-  const defaultGst = settings.invoice?.defaultGstPercent ?? 5;
-  const price = new Map((po.items || []).map((it) => [String(it.rawMaterial?._id || it.rawMaterial), Number(it.price) || 0]));
-  const free = inwards.filter((i) => !onBill.has(String(i._id)));
-  // One line per material across the unbilled receipts, at the PO price.
-  const lines = new Map();
-  for (const i of free) {
-    const key = String(i.rawMaterial?._id || i.rawMaterial);
-    const row = lines.get(key) || { rawMaterial: key, description: i.rawMaterial?.name || "Material", unit: i.rawMaterial?.unit || "kg", quantity: 0, rate: price.get(key) || i.unitPrice || 0, gstPercent: defaultGst, hsn: "", inwards: [] };
-    row.quantity = Math.round((row.quantity + (i.quantity || 0)) * 1000) / 1000;
-    row.inwards.push(String(i._id));
-    lines.set(key, row);
-  }
+  // One line per material across the unbilled receipts, at the PO price
+  // (services/billMatch.js: a scanned bill is matched against the same lines).
+  const info = await require("../services/billMatch").poBillLines(req.query.id);
+  if (!info) return next(new ErrorHandler("Purchase order not found", 404));
+  const { po, inwards, billed, onBill } = info;
+  const lines = info.lines.map(({ receipts: _r, ...l }) => l);
   res.json({
     success: true,
     po: { _id: po._id, poNo: po.poNo, date: po.date, status: po.status, supplier: po.supplier },
     inwards: inwards.map((i) => ({ _id: i._id, date: i.inwardDate, material: i.rawMaterial?.name || "", quantity: i.quantity, unit: i.rawMaterial?.unit || "", lotNo: i.lotNo, unitPrice: i.unitPrice, billedOn: onBill.get(String(i._id)) || null })),
     bills: billed.map((b) => ({ _id: b._id, billNo: b.billNo, supplierBillNo: b.supplierBillNo, grand: b.totals?.grand || 0 })),
-    lines: [...lines.values()],
+    lines,
   });
 }));
 
@@ -235,7 +222,18 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     if (!po) return next(new ErrorHandler("Purchase order not found", 404));
     if (String(po.supplier) !== String(supplier._id)) return next(new ErrorHandler("That purchase order is on another supplier", 400));
   }
-  const inwardIds = Array.isArray(b.inwards) ? b.inwards.filter(isId) : [];
+  const inwardIds = Array.isArray(b.inwards) ? [...new Set(b.inwards.filter(isId).map(String))] : [];
+  // The supplier's e-invoice QR, as its text: read again here, never taken
+  // as the browser described it. The portal's GSTIN and number must be this
+  // bill's; its date and total are kept with the IRN.
+  let einvoice = null;
+  if (b.einvoiceQr) {
+    const qr = require("../utils/einvoiceQr").parseSignedQr(String(b.einvoiceQr).slice(0, 4000));
+    if (!qr || !qr.irn) return next(new ErrorHandler("That is not an e-invoice QR code", 400));
+    if (qr.sellerGstin && supplier.gstin && qr.sellerGstin !== String(supplier.gstin).toUpperCase()) return next(new ErrorHandler(`The e-invoice QR is GSTIN ${qr.sellerGstin}'s, not ${supplier.name}'s`, 400));
+    if (qr.docNo && qr.docNo !== supplierBillNo) return next(new ErrorHandler(`The bill number differs from its e-invoice QR (${qr.docNo})`, 400));
+    einvoice = { irn: qr.irn, signature: qr.signature, ...(qr.docDate ? { docDate: new Date(`${qr.docDate}T00:00:00Z`) } : {}), ...(qr.value != null ? { value: qr.value } : {}) };
+  }
   // One bill at a time for a supplier. Whether a goods receipt is already
   // on a bill is looked up and then the bill is entered: two requests
   // together both found the receipt free and both billed it. The second
@@ -243,9 +241,19 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
   await onceAtATime(`bill:supplier:${supplier._id}`, async () => {
   // What went wrong after the bill was safely in the books, to tell the person.
   const warnings = [];
+  if (einvoice) {
+    const same = await SupplierBill.findOne({ "einvoice.irn": einvoice.irn, status: { $ne: "cancelled" } }).select("billNo").lean();
+    if (same) return next(new ErrorHandler(`This e-invoice is already entered as ${same.billNo}`, 409));
+  }
   if (inwardIds.length) {
     const taken = await SupplierBill.findOne({ inwards: { $in: inwardIds }, status: { $ne: "cancelled" } }).select("billNo").lean();
     if (taken) return next(new ErrorHandler(`A receipt on this bill is already on ${taken.billNo}`, 409));
+    // The goods receipts a bill takes are the PO's own. A scanned bill now
+    // brings the receipts its lines were matched to (services/billMatch.js),
+    // so the ids come from a match, not from the PO picker: each is checked.
+    if (!po) return next(new ErrorHandler("Goods receipts go on a bill with their purchase order", 400));
+    const own = await MaterialInward.countDocuments({ _id: { $in: inwardIds }, purchaseOrder: po._id });
+    if (own !== inwardIds.length) return next(new ErrorHandler(`A goods receipt on this bill is not on PO #${po.poNo}`, 400));
   }
   const supplierState = stateCodeFromGstin(supplier.gstin);
   const p = priced(lines, await sellerStateCode(), supplierState);
@@ -306,8 +314,9 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     itc: { eligible: itcEligible, amount: gst.itcAmount },
     ...(variance.lines.length ? { variance: { ...variance, note: varianceNote.slice(0, 300) } } : {}),
     tds, notes: String(b.notes || "").trim().slice(0, 500), source: b.source === "scan" ? "scan" : "manual",
+    ...(einvoice ? { einvoice } : {}),
     aiSuggestion: isId(b.aiSuggestion) ? b.aiSuggestion : undefined, createdBy: req.user?._id,
-    fingerprints: [fp(ACTION_CODES.BILL_CREATED, { _id }, req, { billNo: number, supplierBillNo, supplier: supplier.name, grand: gst.totals.grand, ...(variance.lines.length ? { variance: variance.total, note: varianceNote } : {}), ...(reverseCharge ? { reverseCharge: true } : {}), ...(q194 ? { tds194q: q194 } : {}), ...(serviceBill ? { serviceBill: serviceBill._id } : {}) })],
+    fingerprints: [fp(ACTION_CODES.BILL_CREATED, { _id }, req, { billNo: number, supplierBillNo, supplier: supplier.name, grand: gst.totals.grand, ...(variance.lines.length ? { variance: variance.total, note: varianceNote } : {}), ...(reverseCharge ? { reverseCharge: true } : {}), ...(q194 ? { tds194q: q194 } : {}), ...(serviceBill ? { serviceBill: serviceBill._id } : {}), ...(einvoice ? { irn: einvoice.irn } : {}) })],
   };
   let doc;
   try {
@@ -345,6 +354,7 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     if (err?.code === 11000) {
       const dup = await replayAfter(err, SupplierBill, b.requestId, { select: "-attachments.data" });
       if (dup) return res.status(200).json({ success: true, bill: dup, replay: true });
+      if (err.keyPattern?.["einvoice.irn"]) return next(new ErrorHandler("This e-invoice is already entered", 409));
       return next(new ErrorHandler(`Bill ${supplierBillNo} from ${supplier.name} is already entered`, 409));
     }
     if (err instanceof ErrorHandler) return next(err);

@@ -134,6 +134,13 @@ async function handle(raw, c = config()) {
       await InboxBill.create({ ...doc, status: 'skipped', note: read.problem === 'not_a_bill' ? 'Not a bill' : 'Could not be read', read, aiSuggestion }).catch(() => null);
       continue;
     }
+    // The supplier's e-invoice QR, when the file carries one: what the
+    // portal signed replaces what was read (services/billQr.js).
+    const billQr = require('./billQr');
+    const found = await billQr.findEinvoice([{ buffer, mimetype: type }]).catch((err) => { console.warn(`[bills-mailbox] looking for an e-invoice QR failed: ${err.message}`); return null; });
+    const withQr = await billQr.withEinvoice(read, found);
+    read = withQr.read;
+    doc.einvoiceQr = withQr.einvoiceQr;
     const match = await matchRead(read);
     const senderKnown = !!(match.supplierEmail && String(match.supplierEmail).toLowerCase().split(/[,;\s]+/).includes(from));
     await InboxBill.create({

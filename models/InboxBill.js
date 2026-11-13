@@ -31,6 +31,8 @@ const InboxBillSchema = new mongoose.Schema(
 
     /** What was read (utils/billOcr.js readBill), as the scan returns it. */
     read: { type: mongoose.Schema.Types.Mixed, default: null },
+    /** The e-invoice QR code found in the file, as its text (utils/einvoiceQr.js reads it). */
+    einvoiceQr: { type: String, default: '' },
     supplier: { type: mongoose.Types.ObjectId, ref: 'Supplier', default: null },
     supplierName: { type: String, default: '' },
     matchedBy: { type: String, default: null },

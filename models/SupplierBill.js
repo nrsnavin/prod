@@ -138,6 +138,16 @@ const SupplierBillSchema = new mongoose.Schema(
     // "manual", or "scan" when the bill photo was read by the model.
     source:      { type: String, default: "manual" },
     aiSuggestion: { type: mongoose.Types.ObjectId, ref: "AiSuggestion" },
+    /** The supplier's e-invoice, read from the QR code on their bill and
+     *  checked again on the server (utils/einvoiceQr.js): the IRN, whether
+     *  an installed portal key verified the signature, the date and total
+     *  the portal holds. One live bill per IRN. */
+    einvoice: {
+      irn:       { type: String },
+      signature: { type: String, enum: ["verified", "unchecked"] },
+      docDate:   { type: Date },
+      value:     { type: Number },
+    },
 
     createdBy:    { type: mongoose.Types.ObjectId, ref: "User" },
     fingerprints: { type: [FingerprintSchema], default: [] },
@@ -153,6 +163,8 @@ SupplierBillSchema.index({ "costCentre.order": 1 });
 // The same supplier invoice entered twice is the commonest double payment.
 // ($in, not $ne: a partial index cannot say "not cancelled" directly.)
 SupplierBillSchema.index({ supplier: 1, supplierBillNo: 1 }, { unique: true, partialFilterExpression: { status: { $in: ["open", "part_paid", "paid"] } } });
+// One live bill per e-invoice: the same IRN entered twice is refused by the database too.
+SupplierBillSchema.index({ "einvoice.irn": 1 }, { unique: true, partialFilterExpression: { "einvoice.irn": { $type: "string" }, status: { $in: ["open", "part_paid", "paid"] } } });
 
 /** What is still owed on this bill. */
 SupplierBillSchema.methods.outstanding = function outstanding() {

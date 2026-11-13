@@ -54,7 +54,9 @@ const InboxBill = require("../models/InboxBill");
 const billMailbox = require("../services/billMailbox");
 // ── Customer mail (services/customerInbox.js) ─────────────────────
 const InboxMail = require("../models/InboxMail");
-const { upload, createVoucher } = require("./accountsCommon");
+const { upload, createVoucher, sellerStateCode } = require("./accountsCommon");
+const { checkRead } = require("../utils/billArithmetic");
+const { noted } = require("../utils/noted");
 const router = express.Router();
 
 const scanUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 4 } });
@@ -74,9 +76,14 @@ router.post("/scan", keepRequestContext(scanUpload.array("files", 4)), catchAsyn
   if (!files.length) return next(new ErrorHandler("Attach the bill — a photo (JPEG, PNG) or a PDF", 400));
   let read;
   const startedAt = Date.now();
+  // The e-invoice QR, looked for while the bill is read: the code the
+  // browser found in the photo (read again, never trusted), else the files.
+  const billQr = require("../services/billQr");
+  const qrFound = billQr.findEinvoice(files, req.body?.qr).catch(noted("looking for an e-invoice QR on a scanned bill"));
   try {
     read = await readBill(files.map((f) => ({ buffer: f.buffer, mimetype: f.mimetype })));
   } catch (err) {
+    await qrFound;
     if (err.code === "ANTHROPIC_KEY_MISSING") return next(new ErrorHandler("Bill scanning is not configured on this server (no AI key).", 503));
     if (err.code) return next(new ErrorHandler(err.message, 400));
     await aiLedger.record({ surface: "bill-ocr", model: "?", promptVersion: promptVersion("bill-ocr"), latencyMs: Date.now() - startedAt, error: err.message });
@@ -93,11 +100,23 @@ router.post("/scan", keepRequestContext(scanUpload.array("files", 4)), catchAsyn
   const samePhoto = await billImages.check(pages).catch(() => []);
   await billImages.remember(pages, suggestionId);
   if (read.problem) {
+    await qrFound;
     return res.json({ success: true, read, supplier: null, purchaseOrders: [], samePhoto, aiSuggestion: suggestionId });
   }
+  // What the portal signed wins over what was read: the GSTIN, number, date and total.
+  const qr = await billQr.withEinvoice(read, await qrFound);
+  read = qr.read;
   // Who it is on file, whether it is entered already, and what is still to bill (services/billMatch.js).
-  const match = await require("../services/billMatch").matchRead(read);
-  res.json({ success: true, read, supplier: match.supplier, alreadyEntered: match.alreadyEntered, purchaseOrders: match.purchaseOrders, samePhoto, aiSuggestion: suggestionId });
+  const billMatch = require("../services/billMatch");
+  const match = await billMatch.matchRead(read);
+  // Its lines on the goods received, and whether its figures add up.
+  const receiptMatch = await billMatch.matchReceipts(read, match.purchaseOrders).catch(noted("matching a scanned bill to its receipts"));
+  const checks = checkRead(read, { ourStateCode: await sellerStateCode() });
+  const irnEntered = qr.einvoice?.irn ? await require("../models/SupplierBill").findOne({ "einvoice.irn": qr.einvoice.irn, status: { $ne: "cancelled" } }).select("billNo").lean() : null;
+  res.json({
+    success: true, read, supplier: match.supplier, alreadyEntered: match.alreadyEntered || irnEntered?.billNo || null, purchaseOrders: match.purchaseOrders, receiptMatch, checks,
+    einvoice: qr.einvoice, einvoiceQr: qr.einvoiceQr, samePhoto, aiSuggestion: suggestionId,
+  });
 }));
 
 // ══════════════════════════════════════════════════════════════════
@@ -220,8 +239,15 @@ router.get("/bill-inbox/:id", catchAsyncErrors(async (req, res, next) => {
   const x = await InboxBill.findOne({ _id: req.params.id, part: { $gt: 0 } }).lean();
   if (!x || !x.read) return next(new ErrorHandler("Not found", 404));
   // Matched again now: a supplier added or a bill entered since it came in counts.
-  const match = await require("../services/billMatch").matchRead(x.read);
-  res.json({ success: true, item: inboxRow(x), read: x.read, supplier: match.supplier, alreadyEntered: match.alreadyEntered, purchaseOrders: match.purchaseOrders, aiSuggestion: x.aiSuggestion ? String(x.aiSuggestion) : null });
+  const billMatch = require("../services/billMatch");
+  const { parseSignedQr } = require("../utils/einvoiceQr");
+  const qrText = x.einvoiceQr || "";
+  const qr = await require("../services/billQr").withEinvoice(x.read, qrText ? { qr: parseSignedQr(qrText), text: qrText } : null);
+  const read = qr.read;
+  const match = await billMatch.matchRead(read);
+  const receiptMatch = await billMatch.matchReceipts(read, match.purchaseOrders).catch(noted("matching a mailed bill to its receipts"));
+  const checks = checkRead(read, { ourStateCode: await sellerStateCode() });
+  res.json({ success: true, item: inboxRow(x), read, supplier: match.supplier, alreadyEntered: match.alreadyEntered, purchaseOrders: match.purchaseOrders, receiptMatch, checks, einvoice: qr.einvoice, einvoiceQr: qr.einvoiceQr, aiSuggestion: x.aiSuggestion ? String(x.aiSuggestion) : null });
 }));
 router.get("/bill-inbox/:id/file", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));
