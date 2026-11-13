@@ -311,6 +311,12 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'lot-certificate-ocr': {
+    version: 'v1.0',
+    notes: 'A yarn lot\'s test certificate read into its tests (each as printed, with the spec range when printed), put on the lot so lots can be searched and compared (services/lotCertificates.js, which checks values against the printed range and the lots before). Lives in utils/paperReaders.js.',
+    system: null,
+  },
+
   'cheque-ocr': {
     version: 'v1.0',
     notes: 'A cancelled cheque, passbook page or bank letter read into account number, IFSC, bank, branch and holder; the holder compared with the party\'s name. Lives in utils/kycOcr.js.',

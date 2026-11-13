@@ -108,6 +108,34 @@ const YarnLotSchema = new mongoose.Schema(
     inwards: [{ type: mongoose.Types.ObjectId, ref: 'MaterialInward' }],
 
     /**
+     * The supplier's test certificate for this lot, read from its photo or
+     * PDF (services/lotCertificates.js) or typed: each property as printed,
+     * with the range the certificate itself gives, and a `key` (denier,
+     * tenacity, elongation …) so lots can be searched and compared.
+     * null until one is kept; a newer one replaces it.
+     */
+    certificate: {
+      type: new mongoose.Schema(
+        {
+          certNo: { type: String, default: '' },
+          date: { type: Date, default: null },
+          issuer: { type: String, default: '' },
+          product: { type: String, default: '' },
+          result: { type: String, enum: ['', 'pass', 'fail'], default: '' },
+          tests: [{ _id: false, key: String, label: String, value: Number, unit: String, min: Number, max: Number }],
+          /** What the server found when it was kept: out of its own range, a fail, far off the lots before. */
+          flags: [{ _id: false, code: String, severity: String, message: String }],
+          aiSuggestion: { type: String, default: '' },
+          by: { type: mongoose.Types.ObjectId, ref: 'User', default: null },
+          byName: { type: String, default: '' },
+          at: { type: Date, default: null },
+        },
+        { _id: false }
+      ),
+      default: null,
+    },
+
+    /**
      * This lot's own ledger.
      *
      * `receivedQty` and `consumedQty` are running totals, and a running
@@ -181,5 +209,7 @@ YarnLotSchema.index({ rawMaterial: 1, status: 1, receivedDate: -1 });
 // Tracing a shade complaint starts from a lot number alone, with no idea
 // which material it belonged to.
 YarnLotSchema.index({ lotNo: 1 });
+// "Lots of this yarn with tenacity over 4.5": the certificate's tests by key.
+YarnLotSchema.index({ rawMaterial: 1, 'certificate.tests.key': 1 });
 
 module.exports = mongoose.model('YarnLot', YarnLotSchema);

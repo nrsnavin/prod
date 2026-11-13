@@ -164,6 +164,8 @@ const AI_SURFACES = Object.freeze([
   // The month's electricity bill read: units and charges, for power cost
   // per metre.
   'power-bill-ocr',
+  // A yarn lot's test certificate read onto the lot, to search and compare lots.
+  'lot-certificate-ocr',
 ]);
 
 /** How a suggestion ended up. */

@@ -9,6 +9,7 @@
 //    read26as(pages)        Form 26AS Part I, as a PDF or photos
 //    readPriceList(pages)   a supplier's price list or quotation
 //    readPowerBill(pages)   the factory's electricity bill
+//    readTestCertificate(pages)  a yarn lot's test certificate
 //
 //  Each only copies what is printed: every check (does it add up, is
 //  the PAN ours, is this challan entered already) is the server's, in
@@ -200,7 +201,37 @@ async function readPowerBill(pages) {
   };
 }
 
+// ── A yarn lot's test certificate ────────────────────────────────
+const TEST_CERT_PROMPT = [
+  'This is a test certificate (certificate of analysis, test report) that a yarn supplier, spinner or dye house sent with a lot of yarn to an',
+  'elastic (narrow fabric) factory: nylon or polyester filament yarn, spandex / elastane, rubber (latex) thread, or covered yarn. Return ONLY JSON:',
+  '{"problem":null,"issuer":"Sri Yarn Traders","certNo":"TC/2611/044","date":"2026-11-02","lotNo":"L-4471","product":"Nylon 70D/24F SD",',
+  ' "tests":[{"name":"Denier","value":70.4,"unit":"den","min":68,"max":72},{"name":"Tenacity","value":4.6,"unit":"g/den","min":4.2,"max":null},',
+  '  {"name":"Elongation at break","value":28.5,"unit":"%","min":24,"max":32}],"result":"pass"}',
+  '- problem: "not_a_certificate" when it is not a test certificate or test report; "unreadable" when it cannot be read; else null.',
+  '- tests: every measured property, one each, its name as printed. value: the measured number (the mean when several readings are printed).',
+  '- min / max: the specification printed for it ("4.0-4.8" gives both; "min 4.2" or "≥ 4.2" gives min only); null when none is printed.',
+  '- result: "pass" or "fail" only when the certificate states it; else null. lotNo: the lot or batch number. Never guess a number.',
+].join('\n');
+
+async function readTestCertificate(pages) {
+  const r = await readJson({ pages, prompt: TEST_CERT_PROMPT, maxTokens: 2000, maxPages: 4 });
+  const raw = r.data;
+  const problem = problemOf(raw, 'not_a_certificate');
+  if (problem) return { problem, ...meta(r) };
+  const n = (v) => { const x = num(v); return x != null && Math.abs(x) < 1e7 ? Math.round(x * 10000) / 10000 : null; };
+  return {
+    problem: null,
+    issuer: str(raw.issuer, 120), certNo: str(raw.certNo, 40), date: isoDate(raw.date), lotNo: str(raw.lotNo, 40), product: str(raw.product, 120),
+    tests: (Array.isArray(raw.tests) ? raw.tests : []).slice(0, 40).map((t) => ({
+      name: str(t?.name, 60), value: n(t?.value), unit: str(t?.unit, 16), min: n(t?.min), max: n(t?.max),
+    })).filter((t) => t.name && t.value != null),
+    result: raw.result === 'pass' || raw.result === 'fail' ? raw.result : null,
+    ...meta(r),
+  };
+}
+
 module.exports = {
-  readDebitNote, readTdsChallan, readForm16a, read26as, readPriceList, readPowerBill,
-  PROMPTS: { DEBIT_NOTE_PROMPT, CHALLAN_PROMPT, FORM16A_PROMPT, AS26_PROMPT, PRICE_LIST_PROMPT, POWER_BILL_PROMPT },
+  readDebitNote, readTdsChallan, readForm16a, read26as, readPriceList, readPowerBill, readTestCertificate,
+  PROMPTS: { DEBIT_NOTE_PROMPT, CHALLAN_PROMPT, FORM16A_PROMPT, AS26_PROMPT, PRICE_LIST_PROMPT, POWER_BILL_PROMPT, TEST_CERT_PROMPT },
 };

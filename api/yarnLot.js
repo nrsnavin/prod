@@ -159,6 +159,35 @@ router.post("/create", isAdmin("admin", "production", "accounts"), catchAsyncErr
   res.status(201).json({ success: true, lot });
 }));
 
+// ── A LOT'S TEST CERTIFICATE (services/lotCertificates.js) ───────
+//   POST /yarn-lots/certificate/read        the certificate's photo or PDF
+//                                           read; the lot it is for; checks
+//   PUT  /yarn-lots/:id/certificate         kept on the lot
+//   GET  /yarn-lots/certificates/search     ?material=&key=&min=&max=
+//   GET  /yarn-lots/certificates/compare    ?material= or ?lots=a,b,c
+// Declared before the /:id routes, so their literal segments are not
+// taken for a lot id.
+const { paperUpload, pagesOf, readFailure } = require("../utils/paperUpload");
+const { keepRequestContext } = require("../middleware/userContext");
+router.post("/certificate/read", isAdmin("admin", "production", "accounts"), keepRequestContext(paperUpload.array("files", 4)), catchAsyncErrors(async (req, res, next) => {
+  const pages = pagesOf(req);
+  if (!pages.length) return next(new ErrorHandler("Attach the test certificate: a photo or a PDF", 400));
+  try { res.json({ success: true, ...(await require("../services/lotCertificates").fromPhoto({ pages, lot: oid(req.body?.lot) ? req.body.lot : null })) }); }
+  catch (err) { return readFailure(err, "test certificates", next); }
+}));
+router.get("/certificates/search", catchAsyncErrors(async (req, res, next) => {
+  try { res.json({ success: true, lots: await require("../services/lotCertificates").search({ material: req.query.material, key: req.query.key, min: req.query.min, max: req.query.max }) }); }
+  catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
+}));
+router.get("/certificates/compare", catchAsyncErrors(async (req, res, next) => {
+  try { res.json({ success: true, ...(await require("../services/lotCertificates").compare({ material: req.query.material, lots: req.query.lots, limit: req.query.limit })) }); }
+  catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
+}));
+router.put("/:id/certificate", isAdmin("admin", "production", "accounts"), catchAsyncErrors(async (req, res, next) => {
+  try { res.json({ success: true, certificate: await require("../services/lotCertificates").save(req.params.id, req.body || {}, { by: req.user?._id, byName: req.user?.name }) }); }
+  catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
+}));
+
 // ── PATCH /yarn-lots/:id/status ───────────────────────────────
 // Hold a lot back or release it. Quarantine is the one that matters:
 // it is how a shade complaint stops the rest of a bad lot reaching the
