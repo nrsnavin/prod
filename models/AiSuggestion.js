@@ -106,6 +106,9 @@ const AI_SURFACES = Object.freeze([
   // a bill photo fingerprinted against those already entered; cones
   // counted in a photo for the stock take.
   'stores-voice',
+  // A line of petty cash spent ("Paid 350 auto for yarn") read into a cash
+  // expense draft. Rules read most lines; the model only those they cannot.
+  'cash-line',
   'journal-narration',
   'cone-count',
   // The beam weights written by hand on a printed covering programme,

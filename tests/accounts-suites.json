@@ -18,6 +18,7 @@
   "tests/api/billReadChecks.test.js",
   "tests/api/billReady.test.js",
   "tests/api/booksAudit.test.js",
+  "tests/api/cashLine.test.js",
   "tests/api/collectionReplies.test.js",
   "tests/api/concurrency.audit.test.js",
   "tests/api/customerAssistant.test.js",

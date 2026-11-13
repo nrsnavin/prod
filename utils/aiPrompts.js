@@ -257,6 +257,12 @@ const PROMPTS = Object.freeze({
     system: null,
   },
 
+  'cash-line': {
+    version: 'v1.0',
+    notes: 'A line of petty cash spent ("Paid 350 auto for yarn", typed or spoken) read into amount, day, description and expense head. Rules first (the amount beside ₹ or Rs., today or yesterday, the head learned from past entries, named in the line, or of the kind its words point to); the model only when they cannot, with structured output and a head from the firm\'s own list. Lives in services/cashLine.js.',
+    system: null,
+  },
+
   'journal-narration': {
     version: 'v1.0',
     notes: 'A one-line narration for a journal, from the narrations already used for the same ledgers, else written by the model from the lines. Lives in services/journalNarration.js.',

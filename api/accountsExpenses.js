@@ -126,6 +126,19 @@ async function prepareExpensePayment(expense, { account, mode, reference, date, 
   }, req, { pending: pending ? [expense] : undefined });
 }
 
+// ══════════════════════════════════════════════════════════════════
+//  POST /expenses/from-line { text } — petty cash in one line ("Paid 350
+//  auto for yarn"), typed or spoken, read into a cash expense draft:
+//  amount, day, description, head (services/cashLine.js). Nothing is
+//  saved; the expense form opens filled in.
+// ══════════════════════════════════════════════════════════════════
+router.post("/expenses/from-line", catchAsyncErrors(async (req, res, next) => {
+  const text = String(req.body?.text || "").trim();
+  if (!text) return next(new ErrorHandler("Type or say what the cash was spent on, and how much", 400));
+  const r = await require("../services/cashLine").read(text, { by: req.user?._id });
+  res.json({ success: true, ...r });
+}));
+
 router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
   const b = req.body || {};
   const before = await replayOf(Expense, b.requestId, { select: "-attachments.data" });
@@ -173,7 +186,7 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
     status: needsApproval ? "pending" : "approved",
     approval: { required: needsApproval },
     submittedBy: req.user?._id, submittedByName: req.user?.name || "",
-    notes: String(b.notes || "").trim().slice(0, 500), source: b.source === "scan" ? "scan" : "manual",
+    notes: String(b.notes || "").trim().slice(0, 500), source: b.source === "scan" ? "scan" : b.source === "line" ? "line" : "manual",
     aiSuggestion: isId(b.aiSuggestion) ? b.aiSuggestion : undefined,
     fingerprints: [fp(ACTION_CODES.EXPENSE_SUBMITTED, { _id }, req, { expenseNo: number, category: category.name, grand: p.totals.grand, needsApproval })],
   };
@@ -204,7 +217,13 @@ router.post("/expenses", catchAsyncErrors(async (req, res, next) => {
     throw err;
   }
   const expense = await Expense.findById(_id).select("-attachments.data").lean();
-  if (data.aiSuggestion) {
+  // A petty cash line read into this expense: what the person kept of it.
+  if (data.aiSuggestion && data.source === "line") {
+    aiLedger.settle(data.aiSuggestion, {
+      accepted: { amount: data.totals.grand, date: date.toISOString().slice(0, 10), description: data.description, category: String(category._id) },
+      decidedBy: req.user?._id, expectSurface: "cash-line",
+    }).catch(noted(`scoring the cash line against ${expense.expenseNo}`));
+  } else if (data.aiSuggestion) {
     aiLedger.settle(data.aiSuggestion, {
       accepted: { supplierGstin: payeeGstin, billNo: data.refNo, billDate: date.toISOString().slice(0, 10), lines: data.lines.map((l) => ({ description: l.description, quantity: l.quantity, rate: l.rate, gstPercent: l.gstPercent })), totals: { taxable: data.totals.taxable, grand: data.totals.grand } },
       decidedBy: req.user?._id, expectSurface: "bill-ocr", ignoreMissing: true,
