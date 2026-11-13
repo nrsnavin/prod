@@ -1091,7 +1091,7 @@ router.get(
     }
 
     const dc = await DeliveryChallan.findById(id)
-      .populate("items.elastic", "name")
+      .populate("items.elastic", "name hsn")
       .lean();
     if (!dc) return next(new ErrorHandler("Delivery Challan not found", 404));
 
@@ -1259,7 +1259,7 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const { ids, error } = bulkIds(req.body);
     if (error) return next(error);
-    const dcs = await DeliveryChallan.find({ _id: { $in: ids } }).populate("items.elastic", "name").lean();
+    const dcs = await DeliveryChallan.find({ _id: { $in: ids } }).populate("items.elastic", "name hsn").lean();
     if (!dcs.length) return next(new ErrorHandler("None of those challans were found", 404));
     const order = new Map(ids.map((id, i) => [id, i]));
     dcs.sort((a, b) => order.get(String(a._id)) - order.get(String(b._id)));

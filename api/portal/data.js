@@ -316,7 +316,7 @@ async function myDc(req) {
   const mine = await ordersOf(req.customerId);
   if (!mine.match) throw notFound('Dispatch');
   const dc = await DeliveryChallan.findOne({ _id: req.params.id, $or: mine.match, status: { $in: LEFT }, type: { $ne: 'machine_part' } })
-    .populate('items.elastic', 'name').lean();
+    .populate('items.elastic', 'name hsn').lean();
   if (!dc) throw notFound('Dispatch');
   return { dc, order: orderOfDc(dc, mine) };
 }
