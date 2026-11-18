@@ -10,6 +10,13 @@
 //                      same: same GSTIN, same phone, or the same name
 //                      once "Pvt Ltd" and the like are set aside
 //    GET  /gstin/:gstin   state code, PAN and whether the check digit holds
+//    POST /gstin/:gstin/verify   "Verify" beside the GSTIN: checked with the
+//                      GST system through the connected provider — is it
+//                      registered, to whom, where, still active — and
+//                      what the form can take from it. { fresh: true }
+//                      asks again when a recent answer is kept.
+//    GET  /gstin/:gstin/check    the last answer kept for it (nobody is
+//                      asked), and whether Verify can reach the GST system
 // ══════════════════════════════════════════════════════════════════
 
 const multer = require("multer");
@@ -54,6 +61,20 @@ function mountPartyIntake(router, Model, { phoneField = "phoneNumber", kind }) {
 
   router.get("/gstin/:gstin", catchAsyncErrors(async (req, res) => {
     res.json({ success: true, ...gstinInfo(req.params.gstin) });
+  }));
+
+  // A POST: it calls out to a provider (a call somebody pays for) and
+  // keeps the answer, so it sits behind the module's write permission.
+  router.post("/gstin/:gstin/verify", catchAsyncErrors(async (req, res) => {
+    const gstinLookup = require("../services/gstinLookup");
+    const out = await gstinLookup.verify(req.params.gstin, { user: req.user, fresh: req.body?.fresh === true });
+    res.json({ success: true, ...out });
+  }));
+
+  router.get("/gstin/:gstin/check", catchAsyncErrors(async (req, res) => {
+    const gstinLookup = require("../services/gstinLookup");
+    const [check, lookup] = await Promise.all([gstinLookup.lastCheck(req.params.gstin), gstinLookup.availability()]);
+    res.json({ success: true, check, lookup });
   }));
 }
 

@@ -694,6 +694,75 @@ Get a single customer.
 
 ---
 
+### POST `/gstin/:gstin/verify`
+"Verify" beside the GSTIN on the customer form. **The same route is mounted on `/api/v2/supplier`** for the supplier form; each sits behind its own module's permission.
+
+The number is checked on the server first (15 characters in the GSTIN pattern, and the last one is the check character of the other fourteen). A number that fails its check character is a typo and is **not** sent anywhere. Otherwise the GST system is asked, through whoever is connected in Settings → Invoice:
+
+1. a GSTIN lookup service, when one is named there (`invoice.gstinLookup`: its address with `{gstin}` in it, and its key);
+2. else the e-invoice provider — ClearTax (`GET {host}/einv/v1/govt/api/Master/gstin/{gstin}`), or a GSP proxy (`GET {baseUrl}/gstin/{gstin}`);
+3. else nobody: the answer still carries what the number itself shows.
+
+The GST portal's own search page is behind a captcha and is not called.
+
+**Body:** `{ "fresh": true }` asks again even when an answer from the last 15 minutes is kept. Optional.
+
+**Limit:** 60 checks an hour per login (`429` beyond that).
+
+**Response `200`:**
+```json
+{
+  "success": true,
+  "gstin": "33AAECB1234F1ZC", "valid": true, "checksumOk": true,
+  "stateCode": "33", "stateName": "Tamil Nadu", "pan": "AAECB1234F",
+  "message": "Active on the GST portal: SUNRISE GARMENTS PRIVATE LIMITED (trade name Sunrise Garments).",
+  "portal": {
+    "checked": true, "found": true, "fromCache": false,
+    "checkedAt": "2026-11-18T10:12:00.000Z", "checkedByName": "Owner",
+    "source": "cleartax", "via": "ClearTax",
+    "status": "active", "statusText": "Active",
+    "legalName": "SUNRISE GARMENTS PRIVATE LIMITED", "tradeName": "Sunrise Garments",
+    "taxpayerType": "Regular", "composition": false, "sez": false,
+    "registeredOn": "2017-07-01", "cancelledOn": "", "einvoiceBlocked": false,
+    "address": { "line": "12/4, Avinashi Road", "locality": "", "city": "Tiruppur", "district": "", "state": "Tamil Nadu", "stateCode": "33", "pincode": "641603" }
+  },
+  "fill": {
+    "name": "Sunrise Garments", "legalName": "SUNRISE GARMENTS PRIVATE LIMITED", "tradeName": "Sunrise Garments",
+    "address": "12/4, Avinashi Road", "city": "Tiruppur", "pincode": "641603", "stateCode": "33",
+    "fullAddress": "12/4, Avinashi Road, Tiruppur, Tamil Nadu - 641603",
+    "pan": "AAECB1234F", "gstRegistration": "regular", "sez": false
+  }
+}
+```
+
+| `portal` | Meaning |
+|---|---|
+| `checked: false, reason: "checksum"` | The last character does not fit the rest: a typo. Nobody was asked. |
+| `checked: false, reason: "not_connected"` | No provider is connected. `message` says how to connect one. |
+| `checked: true, found: true` | A registration came back. `status` is `active`, `cancelled`, `suspended`, `inactive`, `provisional` or `unknown`; `fill` is what a form can take from it. |
+| `checked: true, found: false` | The provider's answer was about the number (no such registration, or not a live one). `said` holds its words; `fill` is `null`. |
+
+A refused token, a quota, a timeout or a reply that cannot be read is **not** "not found": it is a `502` (or `409` when the connection in Settings is incomplete) with the reason in `message`, and nothing is kept.
+
+**Errors:** `400` — not a GSTIN.
+
+---
+
+### GET `/gstin/:gstin/check`
+The last answer kept for a GSTIN, whatever its age. Nobody is asked. Also mounted on `/api/v2/supplier`.
+
+**Response `200`:**
+```json
+{
+  "success": true,
+  "check": { ...the answer above, with "portal.fromCache": true } ,
+  "lookup": { "available": true, "via": "ClearTax" }
+}
+```
+`check` is `null` when the number was never checked. `lookup` says whether Verify can reach the GST system as things stand, and through whom.
+
+---
+
 ## 6. Supplier & Purchase Orders
 
 **Base path:** `/api/v2/supplier`
@@ -702,6 +771,10 @@ Get a single customer.
 Create a new supplier.
 
 **Body:** Supplier fields (name, phoneNumber, gstin, email, address, contactPerson, etc.)
+
+**Errors:** `400` — `A supplier with this GSTIN is already on file.` when the GSTIN belongs to another supplier (also from `/edit-supplier`).
+
+`POST /gstin/:gstin/verify` and `GET /gstin/:gstin/check` are mounted here as on the customer router — see [Customer](#5-customer).
 
 **Response `201`:**
 ```json

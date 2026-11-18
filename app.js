@@ -53,8 +53,13 @@ function safeEqual(a, b) {
 // per signed-in user rather than per office IP, failed logins only, and
 // counters in MongoDB so they hold across every worker process.
 const {
-  apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter, sensorLimiter,
+  apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter, sensorLimiter, gstinLookupLimiter,
 } = require("./middleware/rateLimits.js").buildLimiters();
+
+// "Verify" beside the GSTIN on the customer and supplier forms: a call
+// to a provider each time, so counted per person (middleware/rateLimits.js).
+const limitGstinLookups = (req, res, next) =>
+  (req.method === 'POST' && /^\/gstin\/[^/]+\/verify$/.test(req.path) ? gstinLookupLimiter(req, res, next) : next());
 
 const user     = require("./api/user.js");
 const settings = require("./api/settings.js");
@@ -621,6 +626,7 @@ app.use("/api/v2/customer",    gate('accounts'),
     '/all-customers': ['/orders', '/elastic-groups', '/analytics'],
     '/credit': ['/orders', '/delivery-challans', '/invoices', '/accounts'],
   }),
+  limitGstinLookups,
   customer);
 // HR's Leave page reads an employee's record; only Employees itself writes.
 app.use("/api/v2/employee",    gate('accounts', 'production'),
@@ -669,6 +675,7 @@ app.use("/api/v2/supplier",    gate('accounts'),
   requireFeatureReadPaths(['/suppliers', '/purchase-orders'], {
     '/get-suppliers': ['/materials'],
   }),
+  limitGstinLookups,
   supplier);
 // Quotations: costing and a price offered to a customer, so the same
 // accounts gate the purchase orders sit behind.

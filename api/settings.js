@@ -36,8 +36,13 @@ const INVOICE_TEXT = {
   "invoice.bank.name": 80, "invoice.bank.account": 30, "invoice.bank.ifsc": 11, "invoice.bank.branch": 80, "invoice.bank.upiId": 60,
   "invoice.declaration": 500,
   "invoice.gsp.provider": 40, "invoice.gsp.baseUrl": 200, "invoice.gsp.username": 120, "invoice.gsp.clientId": 120,
+  "invoice.gstinLookup.url": 300, "invoice.gstinLookup.headerName": 60,
 };
-const INVOICE_SECRETS = { "invoice.gsp.clientSecret": 300, "invoice.gsp.password": 120 };
+const INVOICE_SECRETS = { "invoice.gsp.clientSecret": 300, "invoice.gsp.password": 120, "invoice.gstinLookup.key": 300 };
+
+// Headers a lookup key must not be sent as: they belong to the request
+// itself, and naming one would break or redirect it.
+const RESERVED_HEADERS = new Set(["host", "content-length", "content-type", "connection", "transfer-encoding", "cookie", "accept", "upgrade", "te", "trailer"]);
 
 function readInvoiceSettings(body) {
   const inv = body.invoice;
@@ -79,7 +84,62 @@ function readInvoiceSettings(body) {
     const problem = require("../utils/outboundUrl").outboundUrlProblem(set["invoice.gsp.baseUrl"]);
     if (problem) throw new ErrorHandler(`E-invoice provider address: ${problem}`, 400);
   }
+  // The GSTIN lookup service: an address with {gstin} where the number
+  // goes, called with its key — the same two rules, and the header that
+  // carries the key must be a header.
+  const lookupUrl = set["invoice.gstinLookup.url"];
+  if (lookupUrl) {
+    if (!lookupUrl.includes("{gstin}")) {
+      throw new ErrorHandler("GSTIN lookup address: put {gstin} where the number goes, e.g. https://api.example.com/gstin/{gstin}", 400);
+    }
+    const sample = lookupUrl.split("{gstin}").join("33AAAAA0000A1Z5").split("{key}").join("key");
+    const problem = require("../utils/outboundUrl").outboundUrlProblem(sample);
+    if (problem) throw new ErrorHandler(`GSTIN lookup address: ${problem}`, 400);
+  }
+  // The key travels in a header or in the address: one line of
+  // printable characters, or it is not a key.
+  const lookupKey = set["invoice.gstinLookup.key"];
+  if (lookupKey && /[\u0000-\u001f\u007f]/.test(lookupKey)) {
+    throw new ErrorHandler("GSTIN lookup key: one line, with no line breaks or control characters", 400);
+  }
+  // No address, no use for its key: clearing the one forgets the other.
+  if (lookupUrl === "") set["invoice.gstinLookup.key"] = "";
+  const lookupHeader = set["invoice.gstinLookup.headerName"];
+  if (lookupHeader && (!/^[A-Za-z][A-Za-z0-9-]*$/.test(lookupHeader) || RESERVED_HEADERS.has(lookupHeader.toLowerCase()))) {
+    throw new ErrorHandler("GSTIN lookup key header: a header name like x-api-key or Authorization", 400);
+  }
   return set;
+}
+
+/** Where a lookup address points, and no more: "https://api.example.com/…". */
+function hostOnly(url) {
+  try {
+    return `${new URL(String(url).split("{gstin}").join("x").split("{key}").join("x")).origin}/…`;
+  } catch (_) {
+    return "…";
+  }
+}
+
+/**
+ * The lookup service as the settings screen may see it: its address and
+ * header name, whether a key is kept (never the key), and who "Verify"
+ * will ask as things stand.
+ *
+ * The address in full is the admin's to see. Lookup services often take
+ * their key in the address ("…?api_key=…"), and one pasted that way —
+ * rather than with {key} and the key field — would otherwise be read by
+ * every login that can open Settings. Everyone else sees where it points.
+ */
+async function lookupForScreen(invoice, { admin = false } = {}) {
+  const row = await DocumentSettings.findOne({ key: "document" }).select("+invoice.gstinLookup.key invoice.gstinLookup.url").lean();
+  const kept = row?.invoice?.gstinLookup || {};
+  const shown = { ...((invoice || {}).gstinLookup || {}) };
+  delete shown.key;
+  shown.url = shown.url || "";
+  shown.headerName = shown.headerName || "";
+  if (!admin && shown.url) shown.url = hostOnly(shown.url);
+  shown.keySet = !!kept.key;
+  return { gstinLookup: shown, gstinCheck: await require("../services/gstinLookup").availability() };
 }
 
 /** Whether a GSP has credentials, without ever sending them. */
@@ -94,12 +154,13 @@ async function gspConfigured() {
 router.get(
   "/document",
   isAuthenticated,
-  catchAsyncErrors(async (_req, res) => {
+  catchAsyncErrors(async (req, res) => {
     const settings = await getDocumentSettings();
     const out = { ...settings, invoice: { ...(settings.invoice || {}), gsp: { ...((settings.invoice || {}).gsp || {}) } } };
     delete out.invoice.gsp.clientSecret;
     delete out.invoice.gsp.password;
     out.invoice.gsp.configured = await gspConfigured();
+    Object.assign(out.invoice, await lookupForScreen(out.invoice, { admin: req.user?.role === "admin" }));
     res.status(200).json({ success: true, settings: out });
   })
 );
@@ -148,6 +209,8 @@ router.put(
       delete settings.invoice.gsp.password;
       settings.invoice.gsp.configured = await gspConfigured();
     }
+    // Only an admin saves these, so the answer shows the address in full.
+    if (settings.invoice) Object.assign(settings.invoice, await lookupForScreen(settings.invoice, { admin: true }));
     res.status(200).json({ success: true, settings });
   })
 );

@@ -103,6 +103,19 @@ function deriveStatus(items) {
 // ─────────────────────────────────────────────────────────────────────────
 // POST /create-supplier
 // ─────────────────────────────────────────────────────────────────────────
+/**
+ * Why a supplier could not be saved, in words. A GSTIN is one supplier's
+ * only: a second with the same number was refused as "E11000 duplicate
+ * key error collection: … index: gstin_1 dup key: …" — the database's
+ * words, shown on the form as they came.
+ */
+function supplierSaveError(error) {
+  if (error?.code === 11000 && (error?.keyPattern?.gstin || error?.keyValue?.gstin !== undefined)) {
+    return new ErrorHandler("A supplier with this GSTIN is already on file.", 400);
+  }
+  return new ErrorHandler(error.message, 400);
+}
+
 router.post(
   "/create-supplier",
   catchAsyncErrors(async (req, res, next) => {
@@ -147,7 +160,7 @@ router.post(
       }
       res.status(201).json({ success: true, supplier });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 400));
+      return next(supplierSaveError(error));
     }
   })
 );
@@ -1181,7 +1194,7 @@ router.put(
         return next(new ErrorHandler("Supplier not found", 404));
       res.status(200).json({ success: true, supplier });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 400));
+      return next(supplierSaveError(error));
     }
   })
 );

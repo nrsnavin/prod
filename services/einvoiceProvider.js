@@ -12,6 +12,9 @@
 //      {
 //        register(payload, { invoice }) → { irn, ackNo, ackDate, signedQr, raw }
 //        cancel(irn, { reason, invoice }) → { cancelledAt, raw }
+//        gstinDetails(gstin) → { res, body }   what the GST system holds on
+//                              a GSTIN, as the provider sends it (read by
+//                              services/gstinLookup.js)
 //      }
 //
 //  built by a factory in PROVIDERS from the stored config. With no
@@ -88,31 +91,34 @@ const PROVIDER_TIMEOUT_MS = 30_000;
  * POST `body` to the provider at `path`, with its credentials.
  * @returns {{ res: Response, body: object }}
  */
-async function callProvider(cfg, path, body, { notConfigured = 'EINVOICE_NOT_CONFIGURED', rejected = 'EINVOICE_REJECTED' } = {}) {
+async function callProvider(cfg, path, body, { notConfigured = 'EINVOICE_NOT_CONFIGURED', rejected = 'EINVOICE_REJECTED', method = 'POST' } = {}) {
   if (!cfg.baseUrl) throw failure('The GSP has no URL in Settings → Invoice.', notConfigured);
   // Checked when it is saved too; this covers one stored before that.
   const problem = outboundUrlProblem(cfg.baseUrl);
   if (problem) throw failure(`The e-invoice provider's address in Settings → Invoice cannot be used: ${problem}.`, notConfigured);
+  const reads = method === 'GET';
   let res;
   try {
     res = await fetch(cfg.baseUrl.replace(/\/$/, '') + path, {
-      method: 'POST',
+      method,
       headers: {
-        'content-type': 'application/json',
+        ...(reads ? { accept: 'application/json' } : { 'content-type': 'application/json' }),
         'client-id': cfg.clientId || '',
         'client-secret': cfg.clientSecret || '',
         username: cfg.username || '',
         password: cfg.password || '',
         gstin: cfg.gstin || '',
       },
-      body: JSON.stringify(body),
+      ...(reads ? {} : { body: JSON.stringify(body) }),
       redirect: 'error', // the credentials go to the address in Settings, nowhere it points on to
       signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
     });
   } catch (err) {
     const slow = err?.name === 'TimeoutError' || err?.name === 'AbortError';
     throw failure(
-      slow ? 'The e-invoice provider did not answer in time. Check on the portal before trying again — it may have gone through.'
+      // A read changes nothing, so there is nothing to check on first.
+      slow ? (reads ? 'The e-invoice provider did not answer in time. Try again in a minute.'
+                    : 'The e-invoice provider did not answer in time. Check on the portal before trying again — it may have gone through.')
            : 'The e-invoice provider could not be reached. Try again in a minute.',
       rejected, 502
     );
@@ -129,6 +135,8 @@ async function callProvider(cfg, path, body, { notConfigured = 'EINVOICE_NOT_CON
 //    POST {host}/einv/v1/govt/api/Invoice/           the INV-01 JSON as it is
 //    POST {host}/einv/v1/govt/api/Cancel             { irn, CnlRsn, CnlRem }
 //    POST {host}/einv/v1/govt/api/einvewb/ewaybill   { Irn, Distance, TransMode, … }
+//    GET  {host}/einv/v1/govt/api/Master/gstin/{gstin}   the e-invoice system's
+//                                                    "Get GSTIN details"
 //
 // with the headers x-cleartax-auth-token (the workspace's token, made in
 // ClearTax), x-cleartax-product: EInvoice and gstin. The reply carries
@@ -149,7 +157,7 @@ function onClearTax(url) {
   return CLEARTAX_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
 }
 
-async function callClearTax(cfg, path, body, rejected = 'EINVOICE_REJECTED') {
+async function callClearTax(cfg, path, body, rejected = 'EINVOICE_REJECTED', method = 'POST') {
   const base = (cfg.baseUrl || CLEARTAX_HOST).replace(/\/$/, '');
   const problem = outboundUrlProblem(base);
   if (problem) throw failure(`ClearTax's address in Settings → Invoice cannot be used: ${problem}.`, 'EINVOICE_NOT_CONFIGURED');
@@ -158,24 +166,27 @@ async function callClearTax(cfg, path, body, rejected = 'EINVOICE_REJECTED') {
   }
   if (!cfg.clientSecret) throw failure('No ClearTax auth token in Settings → Invoice.', 'EINVOICE_NOT_CONFIGURED');
   if (!cfg.gstin) throw failure('Your GSTIN is missing (Settings → Documents): ClearTax needs it.', 'EINVOICE_NOT_CONFIGURED');
+  const reads = method === 'GET';
   let res;
   try {
     res = await fetch(base + path, {
-      method: 'POST',
+      method,
       headers: {
-        'content-type': 'application/json',
+        ...(reads ? { accept: 'application/json' } : { 'content-type': 'application/json' }),
         'x-cleartax-auth-token': cfg.clientSecret,
         'x-cleartax-product': 'EInvoice',
         gstin: cfg.gstin,
       },
-      body: JSON.stringify(body),
+      ...(reads ? {} : { body: JSON.stringify(body) }),
       redirect: 'error', // the token goes to ClearTax's address, nowhere it points on to
       signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
     });
   } catch (err) {
     const slow = err?.name === 'TimeoutError' || err?.name === 'AbortError';
     throw failure(
-      slow ? 'ClearTax did not answer in time. Check on ClearTax or the portal before trying again: it may have gone through.'
+      // A read changes nothing, so there is nothing to check on first.
+      slow ? (reads ? 'ClearTax did not answer in time. Try again in a minute.'
+                    : 'ClearTax did not answer in time. Check on ClearTax or the portal before trying again: it may have gone through.')
            : 'ClearTax could not be reached. Try again in a minute.',
       rejected, 502
     );
@@ -235,6 +246,10 @@ const PROVIDERS = {
       }
       throw refusal('did not generate the e-way bill', res, body, 'EWB_REJECTED');
     },
+    /** What the e-invoice system holds on a GSTIN: name, address, status. */
+    gstinDetails(gstin) {
+      return callClearTax(cfg, `/einv/v1/govt/api/Master/gstin/${encodeURIComponent(gstin)}`, null, 'GSTIN_LOOKUP_FAILED', 'GET');
+    },
     async cancel(irn, { reason } = {}) {
       // "4" is Others: the reason typed here goes with it as the remark.
       const { res, body } = await callClearTax(cfg, '/einv/v1/govt/api/Cancel', { irn, CnlRsn: '4', CnlRem: String(reason || 'Cancelled').slice(0, 100) });
@@ -258,6 +273,10 @@ const PROVIDERS = {
       const number = pick(data, 'EwbNo', 'ewbNo', 'ewayBillNo');
       if (!number) throw failure('The provider did not return an e-way bill number.', 'EWB_REJECTED', 502);
       return { number: String(number), generatedAt: readAckDate(pick(data, 'EwbDt', 'ewbDt')), validUpto: pick(data, 'EwbValidTill', 'ewbValidTill', 'validUpto') ? readAckDate(pick(data, 'EwbValidTill', 'ewbValidTill', 'validUpto')) : undefined, raw: data };
+    },
+    /** GET {url}/gstin/{gstin}: the proxy's pass-through of "Get GSTIN details". */
+    gstinDetails(gstin) {
+      return callProvider(cfg, `/gstin/${encodeURIComponent(gstin)}`, null, { rejected: 'GSTIN_LOOKUP_FAILED', method: 'GET' });
     },
     async cancel(irn, { reason }) {
       const { res, body } = await callProvider(cfg, '/cancel', { Irn: irn, CnlRsn: '1', CnlRem: String(reason || '').slice(0, 100) });
@@ -302,4 +321,4 @@ async function getProvider() {
   return { name: cfg.provider, ...factory(cfg) };
 }
 
-module.exports = { getProvider, loadGspConfig, readRegistration, readAckDate, PROVIDERS, providerNames: () => Object.keys(PROVIDERS) };
+module.exports = { getProvider, loadGspConfig, readRegistration, readAckDate, clearTaxErrors, PROVIDERS, providerNames: () => Object.keys(PROVIDERS) };

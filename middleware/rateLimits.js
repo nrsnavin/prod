@@ -76,6 +76,7 @@ function buildLimiters({
   photoOcrPerHour = 40,
   floorPinPerAddress = 8,
   sensorPerKey = 30,
+  gstinLookupsPerHour = 60,
   storeFor = (prefix) => new MongoRateLimitStore({ prefix }),
 } = {}) {
   const apiLimiter = rateLimit({
@@ -170,7 +171,20 @@ function buildLimiters({
     message: { success: false, message: 'Too many posts from this device — once a minute is plenty.' },
   });
 
-  return { apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter, sensorLimiter };
+  // "Verify" beside a GSTIN asks a provider, and each ask is one the
+  // provider counts (and may charge for). Per person: enough to add a
+  // morning's worth of customers, not enough for a script to run a list
+  // of numbers through somebody's account.
+  const gstinLookupLimiter = rateLimit({
+    ...common,
+    windowMs: 60 * 60 * 1000,
+    limit: gstinLookupsPerHour,
+    keyGenerator: userOrIpKey,
+    store: storeFor('rl:gstin-lookup:'),
+    message: { success: false, message: 'Too many GSTIN checks in the last hour. Type the details in, or try again later.' },
+  });
+
+  return { apiLimiter, loginAccountLimiter, loginAddressLimiter, otpLimiter, webhookLimiter, photoOcrLimiter, floorPinLimiter, sensorLimiter, gstinLookupLimiter };
 }
 
 module.exports = { buildLimiters, userOrIpKey, accountKey, ipKey };

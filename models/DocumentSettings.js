@@ -88,6 +88,17 @@ const documentSettingsSchema = new mongoose.Schema(
         clientSecret: { type: String, default: "", maxlength: 300, select: false },
         password:     { type: String, default: "", maxlength: 120, select: false },
       },
+      // A GSTIN lookup service, for "Verify" on the customer and supplier
+      // forms (services/gstinLookup.js). Blank: the e-invoice provider
+      // above is asked instead. `url` carries {gstin} where the number
+      // goes, and {key} where the key goes when the service wants it in
+      // the address; `headerName` names the header that carries the key
+      // when it wants it there. The key never leaves the server.
+      gstinLookup: {
+        url:        { type: String, trim: true, default: "", maxlength: 300 },
+        headerName: { type: String, trim: true, default: "", maxlength: 60 },
+        key:        { type: String, default: "", maxlength: 300, select: false },
+      },
     },
   },
   { timestamps: true }
