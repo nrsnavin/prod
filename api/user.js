@@ -663,7 +663,19 @@ router.get(
       // server's rule — the app opens a worker on the employee screens,
       // and re-checks here each time it opens, so a login given office
       // access since is not kept on them (nor the other way round).
-      const body = { success: true, user, selfService: isSelfServiceOnly(user) };
+      // `features`: the effective list, as every sign-in answers with.
+      // The app is signed in for months at a time, so this call is the
+      // only moment it can learn that a module was given to the login
+      // (or taken away) since: without it the menu stayed as it was on
+      // the day the person signed in.
+      const body = {
+        success: true,
+        user,
+        selfService: isSelfServiceOnly(user),
+        features: Array.isArray(user.features)
+          ? user.features
+          : featuresForDepartment(user.department || user.role),
+      };
       if (session.wantsLongSession(req)) {
         // (Someone who has left never reaches here: their session no
         // longer stands, so there is nothing to renew.)
@@ -1125,10 +1137,23 @@ router.put(
     if (typeof req.body.department === "string" && req.body.department) {
       if (!isDepartment(req.body.department))
         return next(new ErrorHandler(`Invalid department: ${req.body.department}`, 400));
-      // Guard: don't strip the last admin of their admin department.
-      if (user.department === "admin" && req.body.department !== "admin") {
-        const admins = await User.countDocuments({ department: "admin" });
+      // Guard: don't strip the last admin. An owner from before
+      // departments existed is an admin by role alone and has no
+      // department to compare — a form that opened them as "Production"
+      // and saved their name demoted them, and this guard looked only at
+      // the department, so it let the last one go. Counted as the delete
+      // route counts them: by department or by role.
+      const adminNow = user.department === "admin" || user.role === "admin";
+      if (adminNow && req.body.department !== "admin") {
+        const admins = await User.countDocuments({ $or: [{ department: "admin" }, { role: "admin" }] });
         if (admins <= 1) return next(new ErrorHandler("Cannot remove the last admin", 400));
+        // Nor your own: one Save and the screen that could undo it is
+        // closed to you. Another admin can make the change.
+        if (String(user._id) === String(req.user._id || req.user.id)) {
+          return next(new ErrorHandler(
+            "You cannot take admin access away from your own login. Ask another admin to change it.", 400
+          ));
+        }
       }
       user.department = req.body.department;
       user.role       = roleForDepartment(req.body.department);
