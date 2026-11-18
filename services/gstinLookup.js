@@ -171,15 +171,15 @@ const NAMES = {
   legalName: ['legalname', 'lgnm', 'legalnameofbusiness', 'lglnm'],
   tradeName: ['tradename', 'tradenam', 'tradenameofbusiness', 'trdnm'],
   status: ['status', 'sts', 'gstinstatus', 'taxpayerstatus'],
-  type: ['txptype', 'taxpayertype', 'dty'],
+  type: ['txptype', 'taxpayertype', 'dty', 'dealertype', 'registrationtype'],
   blocked: ['blkstatus', 'blockstatus', 'einvoiceblockstatus'],
   registered: ['dtreg', 'rgdt', 'dateofregistration', 'registrationdate'],
   cancelled: ['dtdreg', 'cxdt', 'dateofderegistration', 'deregistrationdate', 'dateofcancellation', 'cancellationdate'],
   // The address, wherever it sits: on the registration itself (the
   // e-invoice system) or in "pradr.addr" (the common portal).
   bno: ['addrbno', 'bno', 'buildingnumber', 'buildingno', 'doornumber', 'doorno'],
-  flno: ['addrflno', 'flno', 'floornumber', 'floorno'],
-  bnm: ['addrbnm', 'bnm', 'buildingname'],
+  flno: ['addrflno', 'flno', 'floornumber', 'floorno', 'floor'],
+  bnm: ['addrbnm', 'bnm', 'buildingname', 'bname'],
   st: ['addrst', 'st', 'street', 'road'],
   loc: ['addrloc', 'loc', 'location', 'locality'],
   dst: ['dst', 'district'],
@@ -187,8 +187,12 @@ const NAMES = {
   pncd: ['addrpncd', 'pncd', 'pincode', 'pin', 'postalcode'],
   stateName: ['stcd', 'statename', 'state'],
   // The whole address as one piece of text, where that is all there is.
-  whole: ['adr', 'fulladdress', 'principaladdress', 'principalplaceofbusiness', 'address'],
+  whole: ['adr', 'fulladdress', 'principaladdress', 'principalplaceofbusiness', 'principalplaceaddress', 'registeredaddress', 'address'],
 };
+
+// Where a reply keeps the address when it is a block of its own. "adress"
+// is one lookup service's own spelling.
+const ADDRESS_BLOCKS = ['address', 'adress', 'addr', 'principaladdress', 'registeredaddress'];
 
 /** It names who it is registered to: a registration, whatever else it holds. */
 const hasName = (f) => first(f, ...NAMES.legalName, ...NAMES.tradeName) !== undefined || (f.pradr && typeof f.pradr === 'object');
@@ -272,8 +276,9 @@ function normalise(body, asked = '') {
   const blk = str(first(f, ...NAMES.blocked), 12).toUpperCase();
   // The common portal nests the address; the e-invoice system does not.
   const pradr = f.pradr && typeof f.pradr === 'object' ? fields(f.pradr) : null;
+  const block = ADDRESS_BLOCKS.map((k) => f[k]).find((v) => v && typeof v === 'object' && !Array.isArray(v));
   const nested = pradr ? (pradr.addr && typeof pradr.addr === 'object' ? { ...pradr, ...fields(pradr.addr) } : pradr)
-    : (f.address && typeof f.address === 'object' ? fields(f.address) : null);
+    : (block ? fields(block) : null);
   return {
     gstin,
     legalName: str(first(f, ...NAMES.legalName), 160),

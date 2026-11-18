@@ -377,6 +377,35 @@ describe('through a GSTIN lookup service named in Settings', () => {
     expect(JSON.stringify(res.body)).not.toContain('lk-secret-9');
   });
 
+  it('a service that takes the GSTIN as a query and its key in a header of its own naming', async () => {
+    // As one such service documents its call: GET …/?gstin=…, header "passthrough".
+    await settings({
+      'invoice.gstinLookup.url': 'https://www.lookup.example.com/developers/gstincall/?gstin={gstin}',
+      'invoice.gstinLookup.headerName': 'passthrough', 'invoice.gstinLookup.key': 'kyg-key-1',
+    });
+    fetchMock.mockResolvedValue(reply({
+      status: 'Active', 'registration-date': '01/07/2017', gstin: GSTIN, 'dealer-type': 'Regular', 'trade-name': 'Sunrise Garments',
+      'legal-name': 'SUNRISE GARMENTS PRIVATE LIMITED',
+      adress: { bname: 'Sunrise Towers', street: 'Avinashi Road', bno: '12/4', location: 'Tiruppur', floor: '2nd Floor', state: 'Tamil Nadu', pincode: '641603' },
+    }));
+    const res = await verify();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`https://www.lookup.example.com/developers/gstincall/?gstin=${GSTIN}`);
+    expect(init.headers).toEqual({ accept: 'application/json', passthrough: 'kyg-key-1' });
+    expect(res.body.portal).toMatchObject({ found: true, status: 'active', taxpayerType: 'Regular', registeredOn: '2017-07-01' });
+    expect(res.body.fill).toMatchObject({
+      name: 'Sunrise Garments', address: '12/4, 2nd Floor, Sunrise Towers, Avinashi Road', city: 'Tiruppur', pincode: '641603',
+      fullAddress: '12/4, 2nd Floor, Sunrise Towers, Avinashi Road, Tiruppur, Tamil Nadu - 641603',
+    });
+  });
+
+  it('a bearer token goes in Authorization, as typed', async () => {
+    await settings({ 'invoice.gstinLookup.url': 'https://lookup.example.com/v1/gstin/{gstin}', 'invoice.gstinLookup.headerName': 'Authorization', 'invoice.gstinLookup.key': 'Bearer tok-123' });
+    fetchMock.mockResolvedValue(reply(PORTAL));
+    await verify();
+    expect(fetchMock.mock.calls[0][1].headers).toEqual({ accept: 'application/json', Authorization: 'Bearer tok-123' });
+  });
+
   it('puts the key in the address where the service wants it there', async () => {
     await settings({ 'invoice.gstinLookup.url': 'https://lookup.example.com/check/{key}/{gstin}', 'invoice.gstinLookup.key': 'k/1 2' });
     fetchMock.mockResolvedValue(reply(PORTAL));

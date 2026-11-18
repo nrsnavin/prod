@@ -207,6 +207,23 @@ describe('the same registration, spelled another way', () => {
     expect(flat.address).toMatchObject({ line: '12/4, Avinashi Road', city: 'Tiruppur', pincode: '641603' });
   });
 
+  it('a lookup service\'s own spelling: hyphenated keys, and the address in a block called "adress"', () => {
+    // The keys as one such service's page shows them (KnowYourGST).
+    const got = normalise({
+      status: 'Active', 'registration-date': '01/07/2017', business: ['Manufacturer'], gstin: GSTIN, 'dealer-type': 'Regular',
+      'trade-name': 'Sunrise Garments', 'entity-type': 'Private Limited Company', pan: 'AAECB1234F', 'legal-name': 'SUNRISE GARMENTS PRIVATE LIMITED',
+      adress: { lg: '', bname: 'Sunrise Towers', street: 'Avinashi Road', bno: '12/4', location: 'Tiruppur', lt: '', floor: '2nd Floor', state: 'Tamil Nadu', pincode: '641603' },
+    }, GSTIN);
+    // The same registration as the e-invoice system gives — bar the block flag, which only that system has.
+    expect(got).toEqual({ ...want(), einvoiceBlocked: null });
+    expect(fillFrom({ gstin: GSTIN, found: true, ...got })).toMatchObject({
+      name: 'Sunrise Garments', address: '12/4, 2nd Floor, Sunrise Towers, Avinashi Road', city: 'Tiruppur', pincode: '641603', stateCode: '33',
+      fullAddress: '12/4, 2nd Floor, Sunrise Towers, Avinashi Road, Tiruppur, Tamil Nadu - 641603', gstRegistration: 'regular',
+    });
+    const composition = normalise({ gstin: GSTIN, 'legal-name': 'X', status: 'Active', 'dealer-type': 'Composition' }, GSTIN);
+    expect(composition).toMatchObject({ taxpayerType: 'Composition', composition: true });
+  });
+
   it('a town repeated in the street is said once in the one-line address', () => {
     const got = normalise({ ...NIC, AddrSt: 'Avinashi Road, Tiruppur' }, GSTIN);
     expect(fillFrom({ gstin: GSTIN, found: true, ...got }).fullAddress).toBe('12/4, 2nd Floor, Sunrise Towers, Avinashi Road, Tiruppur, Tamil Nadu - 641603');
