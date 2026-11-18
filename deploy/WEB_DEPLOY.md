@@ -72,12 +72,20 @@ Re-copy and reload:
 
 ```sh
 cd ~/prod && git pull origin main
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
-sudo systemctl reload caddy
+caddy validate --config deploy/Caddyfile --adapter caddyfile \
+  && sudo cp deploy/Caddyfile /etc/caddy/Caddyfile \
+  && sudo systemctl reload caddy
 ```
+
+`caddy validate` must end with `Valid configuration`; if it does not,
+nothing is copied and the site carries on with the file it has.
 
 Caddy fetches a Let's Encrypt cert for `erp.baluelastics.com` on reload
 (ports 80/443 are already open from the API setup).
+
+The same three lines are how a **change** to `deploy/Caddyfile` reaches
+the box: Caddy reads `/etc/caddy/Caddyfile`, not the copy in this
+repository, so a rule that is only in git is not in force.
 
 ## 5. Verify
 
@@ -94,11 +102,33 @@ exactly, scheme included) and that the API was restarted.
 
 ## Redeploying the web later
 
+**Merging to `main` publishes nothing.** The site changes only when this
+is run on the box. It is one command on purpose: a build that fails
+stops there, before the site that is running is removed.
+
 ```sh
-cd ~/prod_web && git pull origin main && npm ci && npm run build
-sudo rm -rf /var/www/erp/* && sudo cp -r dist/* /var/www/erp/
-sudo chown -R caddy:caddy /var/www/erp
+cd ~/prod_web && git pull origin main && npm ci && npm run build \
+  && sudo rm -rf /var/www/erp/* && sudo cp -r dist/* /var/www/erp/ \
+  && sudo chown -R caddy:caddy /var/www/erp
 ```
 
 No Caddy reload needed — it serves whatever is in /var/www/erp.
-index.html is sent `no-cache`, so users get the new build on next load.
+
+### Did it land?
+
+From any machine:
+
+```sh
+curl -sI https://erp.baluelastics.com/ | grep -i -E 'last-modified|cache-control'
+```
+
+- `last-modified` is when the site was last published. If it is not a
+  minute ago, the copy did not happen — whatever `git log` says.
+- `cache-control` must read `no-cache`. If that line is missing, the
+  Caddyfile on the box is older than the one in this repository (step 4
+  puts the current one in place): the page is going out with no caching
+  rule, and a browser may go on showing the previous build for hours.
+
+A tab that was already open shows an **Update** button in the top bar
+within half an hour, or as soon as it is looked at again; pressing it
+moves that tab to the new build. Ctrl+F5 does the same at once.

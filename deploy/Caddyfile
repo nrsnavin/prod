@@ -47,20 +47,55 @@ api.baluelastics.com {
 #
 # Deploy: build prod_web (`npm run build`) and put the contents of dist/
 # into /var/www/erp on this box. See deploy/WEB_DEPLOY.md.
+#
+# What a browser may keep, and for how long. Three rules:
+#
+#   1. A file under /assets/ has a hash of its contents in its name, so
+#      the name never changes meaning: kept for a year. Only when the
+#      file is really there.
+#   2. A name under /assets/ that is NOT there is last build's file,
+#      asked for by a tab opened before the deploy. It gets a plain 404,
+#      which the app answers by reloading onto the new build. It used to
+#      get the app's page with a year's cache on it: HTML where a script
+#      was asked for, remembered for good.
+#   3. Everything else is the page that names this build's files,
+#      however it is asked for — /, /orders, /settings/… all answer with
+#      index.html — and the few unhashed files beside it (sw.js, the
+#      manifest, icons). The browser checks these with the server every
+#      time, so a deploy is on screen at the next page load. The rule
+#      used to be written for the address /index.html, which nobody
+#      opens, so the page went out with no rule at all and a browser
+#      could keep it for hours: the deploy that "did not appear".
+#
+# The two `handle` blocks are either/or: a request is answered by the
+# first one it fits. tests/deploy/webCaching.test.js holds both sites
+# to these rules.
 erp.baluelastics.com {
 	encode gzip
 	root * /var/www/erp
 
-	# Long-cache the fingerprinted assets; never cache index.html so a
-	# new deploy is picked up immediately.
-	@assets path /assets/*
-	header @assets Cache-Control "public, max-age=31536000, immutable"
-	header /index.html Cache-Control "no-cache"
+	# Rules 1 and 2 — hashed files. No fallback to the page in here.
+	handle /assets/* {
+		@there {
+			file
+			not path */
+		}
+		header @there Cache-Control "public, max-age=31536000, immutable"
 
-	# SPA fallback — client-side routes (/orders, /reports/...) resolve
-	# to index.html instead of 404ing.
-	try_files {path} /index.html
-	file_server
+		@gone not file
+		header @gone Cache-Control "no-store"
+
+		file_server
+	}
+
+	# Rule 3 — the page and the unhashed files beside it. Client-side
+	# routes (/orders, /reports/...) resolve to index.html instead of
+	# 404ing.
+	handle {
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
 }
 
 # ── Customer portal (prod_web: npm run build:portal) ───────────────
@@ -74,12 +109,26 @@ portal.baluelastics.com {
 	encode gzip
 	root * /var/www/portal
 
-	@assets path /assets/*
-	header @assets Cache-Control "public, max-age=31536000, immutable"
-	header /index.html Cache-Control "no-cache"
 	# Customers' pages are nobody's search result.
 	header X-Robots-Tag "noindex"
 
-	try_files {path} /index.html
-	file_server
+	# The same three caching rules as the web app above.
+	handle /assets/* {
+		@there {
+			file
+			not path */
+		}
+		header @there Cache-Control "public, max-age=31536000, immutable"
+
+		@gone not file
+		header @gone Cache-Control "no-store"
+
+		file_server
+	}
+
+	handle {
+		header Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
 }
