@@ -221,19 +221,25 @@ router.post(
 
     res.status(201).json({ success: true, inward, lot, lotError });
 
+    // Nothing waits on this: it catches whatever it meets
+    // (tests/architecture/fireAndForgetCaught.test.js).
     (async () => {
-      let supplierName = null;
       try {
-        const populated = await po.populate({ path: "supplier", select: "name" });
-        supplierName = populated?.supplier?.name || null;
-      } catch { /* supplier name is flavour */ }
-      await maybeFirePoReceivedForCritical({
-        material,
-        stockBefore: _stockBefore,
-        stockAfter:  Number(material.stock),
-        quantity:    qtyNum,
-        supplierName,
-      });
+        let supplierName = null;
+        try {
+          const populated = await po.populate({ path: "supplier", select: "name" });
+          supplierName = populated?.supplier?.name || null;
+        } catch { /* supplier name is flavour */ }
+        await maybeFirePoReceivedForCritical({
+          material,
+          stockBefore: _stockBefore,
+          stockAfter:  Number(material.stock),
+          quantity:    qtyNum,
+          supplierName,
+        });
+      } catch (err) {
+        console.warn(`[inward] alert for ${material?._id}: ${err?.message}`);
+      }
     })();
   })
 );

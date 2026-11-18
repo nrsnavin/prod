@@ -57,7 +57,10 @@ function itcDeadline(date) {
  */
 async function anomalies(kind, b, user) {
   const flags = [];
-  const date = new Date(b.billDate || b.date || Date.now());
+  // A check made while the form is being filled in: a date not yet a
+  // date is "today", not a crash (dmy of an invalid date throws).
+  const sent = new Date(b.billDate || b.date || Date.now());
+  const date = Number.isNaN(sent.getTime()) ? new Date() : sent;
   const grand = r2(b.grand ?? b.amount ?? (Array.isArray(b.lines) ? b.lines.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.rate) || 0) * (1 + (Number(l.gstPercent) || 0) / 100), 0) : 0));
   const supplier = mongoose.Types.ObjectId.isValid(String(b.supplier || '')) ? await Supplier.findById(b.supplier).select('name gstin pan gstRegistration').lean() : null;
 

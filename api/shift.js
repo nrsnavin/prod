@@ -293,7 +293,6 @@ router.get(
         draftedProduction: Math.round(draftedProduction * 100) / 100,
         pendingCount,
         verifiedCount,
-        status:          shiftPlan.status,
         finalized:       !!shiftPlan.finalized,
         // Whose plan it is, and — made from the floor — when every running
         // loom was entered and which looms stood free (see models/ShiftPlan.js).
@@ -352,8 +351,12 @@ router.post('/bulk-enter-production', async (req, res) => {
       surface: 'shift-sheet-ocr',
     });
 
+    // `skipped` is the rows that were not taken, each with why (closed,
+    // finalised, the loom was loading); `skippedCount` how many. The
+    // count used to be sent under `skipped` too, a key written twice
+    // whose second value won, so nothing ever read it as a number.
     return res.json({
-      success: true, saved: saved.length, skipped: skipped.length,
+      success: true, saved: saved.length, skippedCount: skipped.length,
       results: saved, skipped,
     });
 

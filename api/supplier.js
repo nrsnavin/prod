@@ -53,6 +53,8 @@ async function nextPoNumber() {
   });
 }
 const { requireReason } = require("../utils/auditReason");
+const { momentFrom } = require("../utils/requestDate");
+const { pageOf } = require("../utils/paging");
 
 // Every supplier / PO / material-inward route requires a logged-in
 // user. Auth was previously commented out, leaving these endpoints
@@ -391,9 +393,7 @@ router.get(
   "/get-pos",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const page  = Number(req.query.page)  || 1;
-      const limit = Number(req.query.limit) || 20;
-      const skip  = (page - 1) * limit;
+      const { page, limit, skip } = pageOf(req.query);
 
       const filter = {};
       if (req.query.status)     filter.status   = req.query.status;
@@ -535,21 +535,20 @@ router.post(
   "/clone-po",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const source = await PurchaseOrder.findById(req.body.id);
+      // These two were used below and never read from the request, so
+      // every clone stopped at "forOrder is not defined".
+      const { id, forOrder, forJob } = req.body || {};
+      if (!mongoose.Types.ObjectId.isValid(id)) return next(new ErrorHandler("Source PO not found", 404));
+      const source = await PurchaseOrder.findById(id);
       if (!source) return next(new ErrorHandler("Source PO not found", 404));
 
       // ── What this PO was raised for ──────────────────────────────
       //
-      // Accepted here because "Raise PO" on an order or a job now takes
-      // the buyer to THIS form with the lines filled in, rather than
-      // creating the PO behind their back. Without these the trip
-      // through the form would silently drop the linkage, and
-      // PurchaseOrder's own schema says why that matters: "it makes the
-      // purchase answerable — 'why did we buy this?' has an answer
-      // months later".
-      //
-      // Both optional: a routine replenishment PO is for nobody in
-      // particular, and that is a normal thing for a PO to be.
+      // A clone is the same purchase made again, and by default it is
+      // for nobody in particular: the order or job the first one was
+      // raised for has its cover already, and carrying the link over
+      // would count that cover twice. The caller may say what this one
+      // is for, as on /create-po.
       for (const [field, value, Model] of [
         ["forOrder", forOrder, Order],
         ["forJob",   forJob,   JobOrder],
@@ -814,7 +813,13 @@ router.post(
         );
         const unitPrice = Math.max(0, Number(poLine?.price) || 0);
 
-        stockCredits.push({ rawMaterial: inItem.rawMaterial, qty, unitPrice, inItem });
+        // When it came in. The phone app sends its clock with no zone,
+        // which `new Date` read as UTC: goods received after 18:30 were
+        // dated the next day (utils/factoryDay.js moment). Something that
+        // is not a date is refused here, before anything is written.
+        const receivedAt = momentFrom(inItem.inwardDate, "inwardDate", new Date());
+
+        stockCredits.push({ rawMaterial: inItem.rawMaterial, qty, unitPrice, inItem, receivedAt });
 
         // 3. Prepare MaterialInward document
         const over = excessByMaterial.get(String(inItem.rawMaterial));
@@ -822,9 +827,7 @@ router.post(
           rawMaterial:   inItem.rawMaterial,
           purchaseOrder: poId,
           quantity:      qty,
-          inwardDate:    inItem.inwardDate
-                           ? new Date(inItem.inwardDate)
-                           : new Date(),
+          inwardDate:    receivedAt,
           remarks:       inItem.remarks ? inItem.remarks.trim() : "",
           lotNo:         inItem.lotNo ? String(inItem.lotNo).trim() : "",
           excessQuantity: over?.excess || 0,
@@ -919,9 +922,7 @@ router.post(
               `Received on PO ${po.poNo != null ? `#${po.poNo}` : String(po._id)}`, session
             );
             await appendStockMovement(credit.rawMaterial, {
-              date: credit.inItem.inwardDate
-                ? new Date(credit.inItem.inwardDate)
-                : new Date(),
+              date:     credit.receivedAt,
               type:     "PO_INWARD",
               quantity: credit.qty,
               balance:  updated ? updated.stock : undefined,
@@ -1017,9 +1018,7 @@ router.get(
   "/get-suppliers",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const page  = Number(req.query.page)  || 1;
-      const limit = Number(req.query.limit) || 20;
-      const skip  = (page - 1) * limit;
+      const { page, limit, skip } = pageOf(req.query);
       const keyword = req.query.search
         ? { name: { $regex: escapeRegex(req.query.search), $options: "i" } }
         : {};

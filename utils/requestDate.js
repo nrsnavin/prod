@@ -11,6 +11,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const ErrorHandler = require('./ErrorHandler');
+const factoryDay = require('./factoryDay');
 
 /**
  * The date a request sent, as sent; `fallback` when it sent none.
@@ -29,4 +30,41 @@ function dateFrom(value, label, fallback = null) {
   return d;
 }
 
-module.exports = { dateFrom };
+const oneOf = (value) => (Array.isArray(value) ? value[0] : value);
+const refuse = (label) => new ErrorHandler(`${label} is not a date`, 400);
+
+/**
+ * A calendar date the request sent — an order date, a promised date —
+ * as that day in India, kept at its UTC midnight like every calendar
+ * date here. The web sends "2026-11-18"; the phone app sends its clock
+ * with no zone ("2026-11-18T21:15:30.123"), which `new Date` reads as
+ * UTC and so, after 18:30, as the next day.
+ *
+ * @throws {ErrorHandler} 400 when something was sent and it is not a date
+ */
+function dayFrom(value, label, fallback = null) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const sent = oneOf(value);
+  if (typeof sent === 'object' && !(sent instanceof Date)) throw refuse(label);
+  const d = factoryDay.calendarDay(sent);
+  if (!d) throw refuse(label);
+  return d;
+}
+
+/**
+ * A moment the request sent — when goods came in, when something left —
+ * as the instant it was. A time with no zone is the factory's clock
+ * (utils/factoryDay.js moment).
+ *
+ * @throws {ErrorHandler} 400 when something was sent and it is not a date
+ */
+function momentFrom(value, label, fallback = null) {
+  if (value === undefined || value === null || value === '') return fallback;
+  const sent = oneOf(value);
+  if (typeof sent === 'object' && !(sent instanceof Date)) throw refuse(label);
+  const d = factoryDay.moment(sent);
+  if (!d) throw refuse(label);
+  return d;
+}
+
+module.exports = { dateFrom, dayFrom, momentFrom };

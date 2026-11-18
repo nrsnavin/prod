@@ -111,8 +111,8 @@ router.post(
 router.get(
   '/jobs',
   catchAsyncErrors(async (req, res, next) => {
-    const page  = Math.max(1, parseInt(req.query.page)  || 1);
-    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
+    const page  = Math.max(1, parseInt(req.query.page, 10)  || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 10));
     const skip  = (page - 1) * limit;
     const { status, search, customer } = req.query;
     const filter = {};

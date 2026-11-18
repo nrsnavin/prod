@@ -5,6 +5,7 @@ const mongoose = require("mongoose");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
+const { pageOf } = require("../utils/paging");
 const { escapeRegex }  = require("../utils/escapeRegex");
 
 const Elastic       = require("../models/Elastic");
@@ -295,7 +296,8 @@ router.post(
 router.get(
   "/get-elastics",
   catchAsyncErrors(async (req, res) => {
-    const { search = "", page = 1, limit = 20, includeArchived } = req.query;
+    const { search = "", includeArchived } = req.query;
+    const { page, limit: safeLimit, skip } = pageOf(req.query);
     const filter = search ? { name: { $regex: escapeRegex(search), $options: "i" } } : {};
     // Soft-deleted SKUs hidden by default; `$ne: true` keeps legacy
     // docs without the key visible.
@@ -316,9 +318,8 @@ router.get(
         ],
       };
     }
-    const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 200);
     const elastics = await Elastic.find(filter)
-      .skip((page - 1) * safeLimit)
+      .skip(skip)
       .limit(safeLimit)
       .sort({ createdAt: -1 });
     const total = await Elastic.countDocuments(filter);

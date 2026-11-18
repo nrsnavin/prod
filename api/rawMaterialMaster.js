@@ -646,27 +646,36 @@ router.put(
 
     // Fire-and-forget alerts after the response — never blocks the
     // user-facing PUT.
+    //
+    // And never takes the server down: nothing waits on this, so a write
+    // that failed here (the outbox row, on a database hiccup) was a
+    // rejection nobody handled, and index.js closes the worker on one.
+    // The edit is already saved and answered; a missed alert is logged.
     (async () => {
-      const newPrice = Number(material.price);
-      const newStock = Number(material.stock);
-      if (newPrice !== _alertSnap.oldPrice) {
-        await maybeFirePriceChangeAlert({
-          material,
-          oldPrice: _alertSnap.oldPrice,
-          newPrice,
-          reason:   _alertSnap.reason,
-        });
-      }
-      if (newStock !== _alertSnap.oldStock) {
-        // Durable path: the dispatcher re-checks the skip rules and
-        // retries on WhatsApp hiccups (fire-and-forget lost the alert
-        // on any crash). No session — the update above was atomic.
-        await enqueue(null, "inventory.stockoutCheck", {
-          materialId: material._id.toString(),
-          oldStock:   _alertSnap.oldStock,
-          newStock,
-          reason:     `Manual edit: ${_alertSnap.reason}`,
-        });
+      try {
+        const newPrice = Number(material.price);
+        const newStock = Number(material.stock);
+        if (newPrice !== _alertSnap.oldPrice) {
+          await maybeFirePriceChangeAlert({
+            material,
+            oldPrice: _alertSnap.oldPrice,
+            newPrice,
+            reason:   _alertSnap.reason,
+          });
+        }
+        if (newStock !== _alertSnap.oldStock) {
+          // Durable path: the dispatcher re-checks the skip rules and
+          // retries on WhatsApp hiccups (fire-and-forget lost the alert
+          // on any crash). No session — the update above was atomic.
+          await enqueue(null, "inventory.stockoutCheck", {
+            materialId: material._id.toString(),
+            oldStock:   _alertSnap.oldStock,
+            newStock,
+            reason:     `Manual edit: ${_alertSnap.reason}`,
+          });
+        }
+      } catch (err) {
+        console.warn(`[edit-raw-material] alerts for ${material._id}: ${err?.message}`);
       }
     })();
   })

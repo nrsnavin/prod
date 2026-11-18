@@ -37,6 +37,8 @@ const {
 const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
 const { computeRawMaterialRequired } = require("./orderShared");
+const factoryDay = require("../utils/factoryDay");
+const { dayFrom } = require("../utils/requestDate");
 const router = express.Router();
 
 // A photographed PO is a phone camera image; 12 MB covers a multi-page
@@ -143,8 +145,13 @@ router.post(
   "/create-order",
   catchAsyncErrors(async (req, res, next) => {
     try {
-      const { date, po, customer, supplyDate, description, elasticOrdered } =
-        req.body;
+      const { po, customer, description, elasticOrdered } = req.body;
+      // The order's date and the date promised are calendar dates. The
+      // web sends "2026-11-18"; the phone app sends its clock with no
+      // zone, which went into the order as UTC: an order taken after
+      // 18:30 was dated the next day, and promised a day late.
+      const date = dayFrom(req.body.date, "date", undefined);
+      const supplyDate = dayFrom(req.body.supplyDate, "supplyDate", undefined);
 
       // Validated before anything is written. This route used to read
       // the body straight into Order.create, so a missing array was a
@@ -258,9 +265,11 @@ router.post(
     if (elasticError) return next(new ErrorHandler(elasticError, 400));
 
     const customer = await houseCustomer();
-    const today = new Date();
-    const supplyDate = req.body?.supplyDate ? new Date(req.body.supplyDate) : new Date(today.getTime() + 14 * 86_400_000);
-    if (Number.isNaN(supplyDate.getTime())) return next(new ErrorHandler("supplyDate is not a date", 400));
+    // Today in the factory: between midnight and 05:30 the server's own
+    // date (UTC) is still yesterday's, and so was the STOCK- number.
+    const today = factoryDay.calendarDay();
+    let supplyDate;
+    try { supplyDate = dayFrom(req.body?.supplyDate, "supplyDate", new Date(today.getTime() + 14 * 86_400_000)); } catch (err) { return next(err); }
 
     const rawMaterialRequired = await computeRawMaterialRequired(parsed.lines);
     const zeroes = parsed.lines.map((e) => ({ elastic: e.elastic, quantity: 0 }));

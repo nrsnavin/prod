@@ -11,6 +11,7 @@ const { escapeRegex } = require("../utils/escapeRegex");
 const Customer     = require("../models/Customer");
 const CustomerUser = require("../models/CustomerUser");
 const Order        = require("../models/Order");
+const { pageOf } = require("../utils/paging");
 
 // All customer management routes are admin-only.
 router.use(isAuthenticated, isAdmin('admin', 'accounts'));
@@ -98,10 +99,8 @@ router.get(
 router.get(
   "/all-customers",
   catchAsyncErrors(async (req, res) => {
-    const page   = Number(req.query.page)  || 1;
-    const limit  = Math.min(Number(req.query.limit) || 20, 200);
+    const { page, limit, skip } = pageOf(req.query);
     const search = req.query.search        || "";
-    const skip   = (page - 1) * limit;
 
     const query = search ? {
       $or: [
@@ -212,9 +211,7 @@ router.get(
     const { id } = req.query;
     if (!id) return next(new ErrorHandler("Customer id is required", 400));
 
-    const page  = Number(req.query.page)  || 1;
-    const limit = Number(req.query.limit) || 10;
-    const skip  = (page - 1) * limit;
+    const { page, limit, skip } = pageOf(req.query, { def: 10 });
 
     const RUNNING_STATUSES = ["Open", "Approved", "InProgress"];
     const PAST_STATUSES    = ["Completed", "Cancelled"];

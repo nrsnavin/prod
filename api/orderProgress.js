@@ -26,6 +26,7 @@ const { buildOrderStatusReport } = require("../services/orderStatusReport.js");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const mongoose        = require("mongoose");
 const { estimateOrderEta } = require("../utils/orderEta.js");
+const factoryDay = require("../utils/factoryDay");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient.js");
 // ETA forecast engine lives in its own service (Phase 4 god-file split).
 // The routes below and utils/digest.js both consume these; keeping them
@@ -155,7 +156,9 @@ router.post(
     const result = estimateOrderEta({
       lines: elasticOrdered,
       machines,
-      supplyDate,
+      // The promised date is a calendar date; the phone app sends its
+      // clock with no zone, which is that day, not five hours on.
+      supplyDate: supplyDate ? factoryDay.calendarDay(supplyDate) : null,
       today: now,
       aggregates,
     });

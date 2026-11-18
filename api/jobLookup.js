@@ -119,7 +119,6 @@ router.get('/by-number/:jobNo', async (req, res) => {
 router.get('/stale', async (req, res) => {
   try {
     const days = Math.max(1, parseInt(req.query.days, 10) || 14);
-    const cutoff = new Date(Date.now() - days * 86_400_000);
 
     const jobs = await JobOrder.find({
       status: liveJobStatus(),

@@ -283,15 +283,17 @@ router.put(
     }
 
     const { bonusDate, bonusLabel, yearlyWorkingDays, minDaysForEligibility, minBonusPercent } = req.body;
-    if (bonusDate    !== undefined) cfg.bonusDate         = bonusDate ? new Date(bonusDate) : null;
+    // A calendar date; something that is not one is refused here, not
+    // by the database at save time (utils/requestDate.js).
+    if (bonusDate    !== undefined) cfg.bonusDate         = dayFrom(bonusDate, "bonusDate", null);
     if (bonusLabel   !== undefined) cfg.bonusLabel        = bonusLabel;
     if (yearlyWorkingDays !== undefined) {
-      const wd = parseInt(yearlyWorkingDays);
+      const wd = parseInt(yearlyWorkingDays, 10);
       if (isNaN(wd) || wd < 1) return next(new ErrorHandler("yearlyWorkingDays must be ≥ 1", 400));
       cfg.yearlyWorkingDays = wd;
     }
     if (minDaysForEligibility !== undefined) {
-      const md = parseInt(minDaysForEligibility);
+      const md = parseInt(minDaysForEligibility, 10);
       if (isNaN(md) || md < 0) return next(new ErrorHandler("minDaysForEligibility must be ≥ 0", 400));
       cfg.minDaysForEligibility = md;
     }

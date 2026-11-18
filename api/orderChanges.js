@@ -15,6 +15,7 @@ const Order = require("../models/Order.js");
 const Job = require("../models/JobOrder.js");
 const Elastic = require("../models/Elastic.js");
 const ErrorHandler = require("../utils/ErrorHandler.js");
+const factoryDay = require("../utils/factoryDay");
 const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
 const { requireReason } = require("../utils/auditReason.js");
@@ -223,9 +224,14 @@ router.post(
         if (po !== undefined && po !== order.po) {
           previousValues.po = order.po;          order.po          = po;          changed.po          = po;
         }
-        if (supplyDate !== undefined && supplyDate !== "" && !isNaN(new Date(supplyDate).getTime())
-            && new Date(supplyDate).getTime() !== new Date(order.supplyDate).getTime()) {
-          previousValues.supplyDate = order.supplyDate; order.supplyDate = new Date(supplyDate); changed.supplyDate = supplyDate;
+        // The date promised is a calendar date: compared and kept as the
+        // day. Compared as moments, an order whose stored date carried a
+        // time of day (one taken on the phone) read as "changed" on every
+        // edit from the web, which sends the day alone.
+        const promised = supplyDate !== undefined && supplyDate !== "" ? factoryDay.calendarDay(supplyDate) : null;
+        const promisedWas = factoryDay.calendarDay(order.supplyDate);
+        if (promised && promised.getTime() !== promisedWas?.getTime()) {
+          previousValues.supplyDate = order.supplyDate; order.supplyDate = promised; changed.supplyDate = supplyDate;
         }
         if (description !== undefined && description !== order.description) {
           previousValues.description = order.description; order.description = description; changed.description = description;

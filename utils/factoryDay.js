@@ -15,6 +15,9 @@
 //    dayStart(v)      a moment — createdAt, inwardDate, dispatch times.
 //                     00:00 in India, which is 18:30 UTC the day before.
 //
+//    moment(v)        a moment the request sent, read as the instant it
+//                     was: a time with no zone is the factory's clock.
+//
 //    shiftDay(now)    the date of the shift running now. A night shift
 //                     (20:00–08:00) keeps the date it started on, so
 //                     until the day shift starts at 08:00 the floor is
@@ -92,6 +95,31 @@ function shiftDay(...a) {
   return calendarDay(new Date(t - DAY_SHIFT_STARTS * 3_600_000));
 }
 
+/**
+ * A moment (a receipt, a dispatch), as the instant it was; null if
+ * unreadable. A date and time with no zone — "2026-11-08T20:00:00.000",
+ * as the phone app sends its clock — is the wall clock in the factory.
+ * `new Date()` takes that as the server's own zone (UTC), five and a half
+ * hours late: anything entered after 18:30 landed on the next day.
+ * A date alone stays what it is everywhere here, that day's UTC midnight.
+ */
+function moment(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'string') {
+    const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?$/.exec(v.trim());
+    if (m) {
+      const [y, mo, d, h, mi, sec] = [m[1], m[2], m[3], m[4], m[5], m[6] || 0].map(Number);
+      const ms = m[7] ? Math.floor(Number(`0.${m[7]}`) * 1000) : 0;
+      const wall = new Date(Date.UTC(y, mo - 1, d, h, mi, sec, ms));
+      // 31 February or 25:00 would roll over into another day: not a time.
+      if (wall.getUTCMonth() !== mo - 1 || wall.getUTCDate() !== d || wall.getUTCHours() !== h || mi > 59 || sec > 59) return null;
+      return new Date(wall.getTime() - IST);
+    }
+  }
+  const t = new Date(typeof v === 'string' ? v.trim() : v).getTime();
+  return Number.isNaN(t) ? null : new Date(t);
+}
+
 /** "YYYY-MM-DD" of the India day. */
 function ymd(...a) {
   const v = a.length ? a[0] : new Date();
@@ -99,4 +127,4 @@ function ymd(...a) {
   return d ? d.toISOString().slice(0, 10) : null;
 }
 
-module.exports = { DAY, IST, calendarDay, calendarDayEnd, dayStart, dayEnd, shiftDay, ymd };
+module.exports = { DAY, IST, calendarDay, calendarDayEnd, dayStart, dayEnd, shiftDay, moment, ymd };
