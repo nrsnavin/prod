@@ -51,6 +51,11 @@ const ACTION_CODES = Object.freeze({
   // exceptional, always with a reason, and the line it left is frozen
   // at what was woven (services/jobMidRun.js).
   JOB_ELASTIC_CHANGED:      'JOB_ELASTIC_CHANGED',
+  // A job sent out to a vendor, brought back in-house, or moved to a
+  // different vendor. It decides where the job's output is read from
+  // (the looms, or the vendor record), and it was written with no line
+  // on the trail at all.
+  JOB_PRODUCTION_MODE_CHANGED: 'JOB_PRODUCTION_MODE_CHANGED',
   // Sub-stage / per-action events recorded on the parent JobOrder
   WARPING_STARTED:          'WARPING_STARTED',
   WARPING_COMPLETED:        'WARPING_COMPLETED',
@@ -185,6 +190,7 @@ const ACTION_LABELS = Object.freeze({
   JOB_CANCELLED:            'Job Cancelled',
   JOB_MACHINE_CHANGED:      'Machine Changed',
   JOB_ELASTIC_CHANGED:      'Elastic Changed Mid-run',
+  JOB_PRODUCTION_MODE_CHANGED: 'Production Mode Changed',
   WARPING_STARTED:          'Warping Started',
   WARPING_COMPLETED:        'Warping Completed',
   WARPING_CANCELLED:        'Warping Cancelled',

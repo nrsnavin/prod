@@ -35,6 +35,7 @@ const MaterialOutward = require('../models/MaterialOut.cjs');
 const ShiftDetail = require('../models/ShiftDetail');
 const { buildFingerprint, ACTION_CODES } = require('../utils/fingerprint');
 const { returnOutwardToStock } = require('./materialReturn');
+const { EXCESS_DRAW_REMARK } = require('./orderIssuance');
 
 const sum = (rows) => (rows || []).reduce((t, r) => t + (Number(r?.quantity) || 0), 0);
 
@@ -64,7 +65,7 @@ async function returnExcessDraw(job, { session = null, actor, userId = null } = 
     reversed: { $ne: true },
     // The raise's own draw: against the job alone, and named as such.
     order:    null,
-    remarks:  /^Excess planning on J-/,
+    remarks:  EXCESS_DRAW_REMARK,
   }).populate('rawMaterial', 'name').session(session);
   if (draws.length === 0) return out;
 

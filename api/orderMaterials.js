@@ -22,7 +22,7 @@ const ErrorHandler = require("../utils/ErrorHandler.js");
 const { onceAtATime } = require("../utils/onceAtATime");
 const PurchaseOrder = require("../models/PurchaseOrder.js");
 const { triageShortfall, createShortfallPos, skipReasons } = require("../services/shortfallPo.js");
-const { issuedForOrder } = require("../services/orderIssuance.js");
+const { heldForOrder } = require("../services/orderIssuance.js");
 const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
 const { assignableLots, LIVE_ORDER_STATUSES } = require("../services/lotAllocation");
@@ -62,9 +62,11 @@ router.get(
 
     // Approval already took this order's material out of stock, so the
     // sheet has to know what it drew — otherwise it reads the reduced
-    // balance as a shortage and offers to buy the same yarn again.
+    // balance as a shortage and offers to buy the same yarn again. What
+    // the stores have since issued to its jobs is out of stock for it
+    // too: that is how the rest of a forced approval reaches the floor.
     const materials = await computeMaterialRequirement(order.elasticOrdered || [], {
-      allocated: await issuedForOrder(order._id),
+      allocated: await heldForOrder(order._id),
     });
 
     res.json({
@@ -341,7 +343,7 @@ router.post(
       }
 
       const requirement = await computeMaterialRequirement(order.elasticOrdered || [], {
-        allocated: await issuedForOrder(order._id),
+        allocated: await heldForOrder(order._id),
       });
       const { orderable, noSupplier, unresolved, anyShort, awaitingDelivery } =
         triageShortfall(requirement, req.body?.materials);

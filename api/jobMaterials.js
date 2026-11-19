@@ -25,7 +25,7 @@ const PurchaseOrder = require('../models/PurchaseOrder');
 const { buildFingerprint, stampFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
 const { computeMaterialRequirement } = require('../utils/materialRequirement');
 const { triageShortfall, createShortfallPos, skipReasons } = require('../services/shortfallPo');
-const { issuedForOrder, shareForJob } = require('../services/orderIssuance');
+const { heldForJob } = require('../services/orderIssuance');
 const { plannedLotsForJob, distinctLots } = require('../services/yarnLotTrail');
 const { earmarksForJob } = require('../services/lotAllocation');
 const { getPdfBranding } = require('../services/documentSettings.js');
@@ -42,13 +42,19 @@ const router = express.Router();
 // ════════════════════════════════════════════════════════════════
 
 /**
- * This job's material requirement, net of what its order already drew.
+ * This job's material requirement, net of what has already left stock
+ * for it.
  *
  * A job only exists under an approved order, and approving that order
  * took its material out of stock. Comparing the job's full requirement
  * against the balance left behind reported every job as short of the
  * yarn standing on the floor for it, and the shortfall panel then
  * offered to buy it a second time.
+ *
+ * The same was still true of the two other ways yarn leaves stock for a
+ * job — what it drew itself for metres planned past the order, and what
+ * the stores issued to it — until they were counted too
+ * (services/orderIssuance.js, heldForJob).
  *
  * @param job  lean job with `order` populated (orderNo + rawMaterialRequired)
  */
@@ -64,13 +70,10 @@ async function jobRequirement(job) {
   const orderId = job.order?._id || job.order;
   if (!orderId) return materials;
 
-  const drawn = await issuedForOrder(orderId);
-  if (drawn.size === 0) return materials;
+  const held = await heldForJob(job, materials);
+  if (held.size === 0) return materials;
 
-  return computeMaterialRequirement(job.elastics || [], {
-    allocated: shareForJob(drawn, job.order?.rawMaterialRequired || [], materials),
-    committedLots,
-  });
+  return computeMaterialRequirement(job.elastics || [], { allocated: held, committedLots });
 }
 
 /**
@@ -269,32 +272,51 @@ router.patch('/:jobId/production-mode', async (req, res) => {
     if (!['in_house', 'outsource'].includes(mode))
       return res.status(400).json({ success: false, message: "productionMode must be 'in_house' or 'outsource'." });
 
-    const update = { productionMode: mode };
     // Vendor only applies to outsource; clear it when switching back.
-    if (mode === 'outsource') {
-      update.outsourceVendor = typeof req.body?.outsourceVendor === 'string'
-        ? req.body.outsourceVendor.trim() : '';
-    } else {
-      update.outsourceVendor = '';
-    }
+    const vendor = mode === 'outsource' && typeof req.body?.outsourceVendor === 'string'
+      ? req.body.outsourceVendor.trim() : '';
 
     // Once the job leaves the loom (finishing onward) how it was made is
     // history — flipping it to outsourced would rewrite the record of work
     // that is already done. Read the status BEFORE writing, so a locked
     // job is refused rather than updated and then complained about.
-    const existing = await JobOrder.findById(jobId).select('jobOrderNo status');
-    if (!existing) return res.status(404).json({ success: false, message: 'Job not found.' });
-    if (isProductionLocked(existing.status)) {
+    const job = await JobOrder.findById(jobId);
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
+    if (isProductionLocked(job.status)) {
       return res.status(409).json({
         success: false,
-        message: `Cannot change production mode — J-${existing.jobOrderNo} has moved to ${existing.status}. ` +
+        message: `Cannot change production mode — J-${job.jobOrderNo} has moved to ${job.status}. ` +
                  `Production closes once a job leaves the loom.`,
       });
     }
 
-    const job = await JobOrder.findByIdAndUpdate(jobId, update, { new: true })
-      .select('jobOrderNo productionMode outsourceVendor');
-    if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
+    // On the trail, with what it was before. This was a bare
+    // findByIdAndUpdate: who sent a job out to a vendor, who brought it
+    // back, and when, was written nowhere — while the vendor record it
+    // unlocks is stamped on every save, and the order's costing reads an
+    // outsourced job's output from that record instead of from the looms.
+    // Saying the same thing again changes nothing and writes nothing.
+    const before = { mode: job.productionMode || 'in_house', vendor: job.outsourceVendor || '' };
+    if (before.mode !== mode || before.vendor !== vendor) {
+      job.productionMode = mode;
+      job.outsourceVendor = vendor;
+      job.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_PRODUCTION_MODE_CHANGED, {
+        entityId: job._id,
+        actor: actorFromRequest(req),
+        meta: {
+          from: before.mode,
+          to: mode,
+          vendor,
+          ...(before.vendor && before.vendor !== vendor ? { previousVendor: before.vendor } : {}),
+          jobOrderNo: job.jobOrderNo,
+          // Where the job stood: sending out a job that is already on a
+          // loom is a different decision from sending out one still in
+          // preparation, and the trail should not need cross-reading to tell.
+          stage: job.status,
+        },
+      }));
+      await job.save();
+    }
 
     return res.json({ success: true, data: {
       jobOrderNo:      job.jobOrderNo,
@@ -491,10 +513,25 @@ router.post('/:jobId/raise-po', async (req, res) => {
     // order yet and each raised the purchase orders (utils/onceAtATime.js).
     return await onceAtATime(`raise-po:job:${jobId}`, async () => {
       const job = await JobOrder.findById(jobId)
-        .select('jobOrderNo order elastics')
+        .select('jobOrderNo order elastics status')
         .populate('order', 'rawMaterialRequired')
         .lean();
       if (!job) return res.status(404).json({ success: false, message: 'Job not found.' });
+
+      // Yarn is for the loom. A job that has left it — or was cancelled —
+      // has nothing left to weave, and whatever its sheet still calls
+      // short is not something to buy: the route raised purchase orders
+      // for cancelled and completed jobs as readily as for running ones.
+      if (isProductionLocked(job.status)) {
+        return res.status(409).json({
+          success: false,
+          code: 'JOB_OFF_THE_LOOM',
+          message: job.status === 'cancelled'
+            ? `J-${job.jobOrderNo} is cancelled — there is nothing to buy for it.`
+            : `J-${job.jobOrderNo} has moved to ${job.status} — its weaving is done, so there is no yarn to buy for it. ` +
+              `Raise the purchase order from the purchase orders page if the stock itself needs topping up.`,
+        });
+      }
 
       const requirement = await jobRequirement(job);
       const { orderable, noSupplier, unresolved, anyShort, awaitingDelivery } =

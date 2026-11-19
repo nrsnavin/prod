@@ -13,7 +13,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors.js");
 const Order = require("../models/Order.js");
 const Elastic = require("../models/Elastic.js");
 const ErrorHandler = require("../utils/ErrorHandler.js");
-const { issuedForOrder } = require("../services/orderIssuance.js");
+const { heldForOrder } = require("../services/orderIssuance.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const mongoose        = require("mongoose");
 const DeliveryChallan      = require("../models/DeliveryChallan.js");
@@ -231,11 +231,18 @@ router.get(
       ).map((m) => [String(m._id), m])
     );
 
-    // What approval already drew for this order. Without it every
-    // approved order's material panel turned red the moment it was
-    // approved: the requirement had come OUT of the stock figure it was
-    // then being compared against.
-    const drawn = await issuedForOrder(order._id);
+    // What has already left stock for this order. Without the approval
+    // draw every approved order's material panel turned red the moment
+    // it was approved: the requirement had come OUT of the stock figure
+    // it was then being compared against.
+    //
+    // `planned`: the requirement shown here is the stored one, which is
+    // restated for the larger plan when a job goes past the order — so
+    // the yarn that job drew for its extra metres is counted with it.
+    // Left out, every over-planned order read as "partial", as though
+    // its approval had been forced. What the stores issued to its jobs
+    // counts as well (services/orderIssuance.js).
+    const drawn = await heldForOrder(order._id, { planned: true });
 
     const liveRawMaterials = (order.rawMaterialRequired || []).map((rm) => {
       const mat = materialsById.get(String(rm.rawMaterial));
@@ -251,8 +258,10 @@ router.get(
         name:            mat?.name ?? rm.name ?? "—",
         unit:            mat?.unit ?? "kg",
         requiredWeight:  required,
-        // Taken out of stock and held for this order at approval; nil
-        // before it, and nil again after a cancel hands it back.
+        // Taken out of stock and held for this order — at approval, by
+        // a job for metres planned past it, or issued to its jobs by the
+        // stores; nil before approval, and nil again after a cancel
+        // hands it back.
         allocated:       Math.round(allocated * 1000) / 1000,
         outstanding,
         // full  — the whole requirement is held for this order
