@@ -33,11 +33,23 @@ const { checkHookFit, hookFitError } = require('../utils/machineFit');
 const { loadingAfter } = require("./jobShared");
 const router = express.Router();
 
+/**
+ * A job number as somebody types it: "12", "J-12", "j12", "J 12", "#12".
+ * null for anything that is not one.
+ */
+function readJobNo(text) {
+  const m = /^(?:j\s*-?\s*|#\s*)?(\d{1,9})$/i.exec(String(text).trim());
+  return m ? Number(m[1]) : null;
+}
+
 function fullJobPopulate(query) {
   return query
     .populate('order',    'orderNo po status')
-    .populate('customer', 'name phone')
-    .populate('machine',  'ID manufacturer NoOfHeads status')
+    // The fields as the models have them. This asked for `phone` and
+    // `NoOfHeads`, which neither model has, so the detail never carried
+    // the customer's number or how many heads the machine has.
+    .populate('customer', 'name phoneNumber')
+    .populate('machine',  'ID manufacturer NoOfHead NoOfHooks status')
     .populate('createdBy', 'name role')
     .populate('updatedBy', 'name role')
     .populate('weavingBy',   'name role')
@@ -132,9 +144,19 @@ router.get(
       }
       filter.customer = customer;
     }
-    if (search) {
-      const n = Number(search);
-      if (!isNaN(n) && Number.isInteger(n)) filter.jobOrderNo = n;
+    // By job number — bare ("12") or as the list itself prints it
+    // ("J-12"). Anything else is no job's number: it used to be dropped,
+    // and the whole list came back as though it had matched.
+    const wanted = String(search ?? '').trim();
+    if (wanted) {
+      const jobNo = readJobNo(wanted);
+      if (jobNo == null) {
+        return res.json({
+          success: true, jobs: [],
+          pagination: { total: 0, page, limit, pages: 0, hasMore: false },
+        });
+      }
+      filter.jobOrderNo = jobNo;
     }
     const [jobs, total] = await Promise.all([
       JobOrder.find(filter)
@@ -157,11 +179,23 @@ router.get(
   })
 );
 
+// The older list. Neither app calls it now (they use /jobs); kept for
+// whatever still does. Its page and size were used as sent: page 0 or a
+// size that is not a number was a server error, a size of 0 sent every
+// job there is, and the status went into the query unchecked.
 router.get('/', async (req, res) => {
   try {
-    const { status, page = 1, limit = 20 } = req.query;
+    const { status } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const asked = parseInt(req.query.limit, 10);
+    const limit = Math.min(100, asked >= 1 ? asked : 20);
     const filter = {};
-    if (status) filter.status = status;
+    if (status) {
+      if (!JOB_STATUSES.includes(status)) {
+        return res.status(400).json({ success: false, message: `Invalid status "${String(status)}"` });
+      }
+      filter.status = status;
+    }
     const [jobs, total] = await Promise.all([
       JobOrder.find(filter)
         .populate('customer', 'name')
@@ -169,11 +203,11 @@ router.get('/', async (req, res) => {
         .populate('createdBy', 'name role')
         .select('jobOrderNo date status customer elastics producedElastic createdBy createdAt')
         .sort({ jobOrderNo: -1 })
-        .skip((+page - 1) * +limit).limit(+limit).lean(),
+        .skip((page - 1) * limit).limit(limit).lean(),
       JobOrder.countDocuments(filter),
     ]);
     return res.json({
-      success: true, total, page: +page, pages: Math.ceil(total / +limit),
+      success: true, total, page, pages: Math.ceil(total / limit),
       data: jobs.map(j => ({
         id: j._id, jobOrderNo: j.jobOrderNo, jobNo: `J-${j.jobOrderNo}`,
         date: indiaDay(j.date, { day: '2-digit', month: 'short', year: 'numeric' }),

@@ -171,3 +171,113 @@ describe('GET /job/jobs — what the list shows of each job', () => {
     expect(row.shiftDetails).toBeUndefined();
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading api/jobPlanning.js line by line.
+//
+//  THE SEARCH BOX says "Search by job number", and the list beside it
+//  prints job numbers as "J-12". Only a bare whole number was read as a
+//  search; anything else — "J-12", "j12", "12abc" — was dropped, and the
+//  WHOLE list came back as though it had matched.
+// ══════════════════════════════════════════════════════════════════
+describe('GET /job/jobs?search=', () => {
+  const numbers = (res) => res.body.jobs.map((j) => j.jobOrderNo);
+  let first, second;
+  beforeEach(async () => {
+    first = await makeJob(alpha._id);
+    second = await makeJob(beta._id);
+  });
+
+  test('the bare number finds that job, as before', async () => {
+    const res = await list(`?search=${first.jobOrderNo}`);
+    expect(numbers(res)).toEqual([first.jobOrderNo]);
+    expect(res.body.pagination.total).toBe(1);
+  });
+
+  test.each([
+    ['J-12, as the list prints it', (n) => `J-${n}`],
+    ['j12', (n) => `j${n}`],
+    ['J 12', (n) => `J ${n}`],
+    ['#12', (n) => `%23${n}`],
+    ['with spaces round it', (n) => `%20${n}%20`],
+  ])('%s finds it too', async (_what, write) => {
+    const res = await list(`?search=${write(second.jobOrderNo)}`);
+    expect(res.status).toBe(200);
+    // Before: every job on the list.
+    expect(numbers(res)).toEqual([second.jobOrderNo]);
+  });
+
+  test.each([['12abc'], ['Alpha'], ['12.5'], ['J-']])('"%s" is no job\'s number: nothing, not everything', async (text) => {
+    const res = await list(`?search=${encodeURIComponent(text)}`);
+    expect(res.status).toBe(200);
+    expect(res.body.jobs).toEqual([]);
+    expect(res.body.pagination).toMatchObject({ total: 0, hasMore: false });
+  });
+
+  test('a number no job has finds nothing', async () => {
+    const res = await list('?search=999999');
+    expect(res.body.jobs).toEqual([]);
+  });
+
+  test('an empty box is no search', async () => {
+    expect((await list('?search=')).body.jobs).toHaveLength(2);
+    expect((await list('?search=%20')).body.jobs).toHaveLength(2);
+  });
+});
+
+describe('GET /job/ — the older list', () => {
+  const older = (query = '') => request(app).get(`/api/v2/job/${query}`).set('Cookie', cookieFor(admin));
+  beforeEach(async () => { await makeJob(alpha._id); await makeJob(beta._id, 'completed'); });
+
+  test('still lists', async () => {
+    const res = await older();
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ total: 2, page: 1, pages: 1 });
+    expect(res.body.data).toHaveLength(2);
+  });
+
+  test.each([
+    ['page 0', '?page=0'],
+    ['a page that is not a number', '?page=abc'],
+    ['a size that is not a number', '?limit=abc'],
+    ['a size of nothing', '?limit=0'],
+    ['a negative size', '?limit=-5'],
+  ])('%s is the first page at an ordinary size, not a server error', async (_what, query) => {
+    const res = await older(query);
+    // Before: 500 for most of these; limit=0 sent every job there is.
+    expect(res.status).toBe(200);
+    expect(res.body.page).toBe(1);
+    expect(res.body.pages).toBe(1);
+    expect(res.body.data).toHaveLength(2);
+  });
+
+  test('a page is at most 100 jobs however many are asked for', async () => {
+    const res = await older('?limit=100000');
+    expect(res.status).toBe(200);
+    expect(res.body.pages).toBe(1);
+  });
+
+  test('filters by a real status, and refuses one that is not', async () => {
+    expect((await older('?status=completed')).body.data.map((j) => j.status)).toEqual(['completed']);
+    const bad = await older('?status=nonsense');
+    expect(bad.status).toBe(400);
+  });
+});
+
+describe('GET /job/detail', () => {
+  test('carries the machine\'s heads and the customer\'s phone — it asked for fields that do not exist', async () => {
+    const Machine = require('../../models/Machine');
+    const machine = await Machine.create({
+      ID: `M-${seq++}`, manufacturer: 'Comez', DateOfPurchase: new Date('2020-01-01'), NoOfHead: 6, NoOfHooks: 8, status: 'running',
+    });
+    const job = await makeJob(alpha._id);
+    await JobOrder.updateOne({ _id: job._id }, { machine: machine._id });
+
+    const res = await request(app).get(`/api/v2/job/detail?id=${job._id}`).set('Cookie', cookieFor(admin));
+    expect(res.status).toBe(200);
+    // Before: undefined, both — "NoOfHeads" and "phone" are not fields.
+    expect(res.body.job.machine.NoOfHead).toBe(6);
+    expect(res.body.job.customer.phoneNumber).toBe(alpha.phoneNumber);
+    await Machine.deleteMany({});
+  });
+});
