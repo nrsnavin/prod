@@ -33,6 +33,7 @@ const EmployeeFeedback= require("../models/EmployeeFeedback.js");
 // been registered for model Customer", and the section was dropped.
 require("../models/Customer.js");
 const { STILL_OWED_EXPR } = require("../services/deliveryRisk.js");
+const { CONSUMPTION_TYPES } = require("../services/replenishment.js");
 
 // ── Pure formatter ───────────────────────────────────────────────
 function formatDigest(d) {
@@ -497,6 +498,7 @@ async function _stockouts(now, lookbackDays, horizonDays) {
   const mats = await RawMaterial.find({
     $expr: { $gt: ["$stock", "$minStock"] },
     stock: { $gt: 0 }, minStock: { $gt: 0 },
+    archived: { $ne: true },
   }).select("name stock minStock").lean();
   if (mats.length === 0) return [];
 
@@ -505,6 +507,9 @@ async function _stockouts(now, lookbackDays, horizonDays) {
         rawMaterial: { $in: mats.map((m) => m._id) },
         outwardDate: { $gte: since },
         reversed:    { $ne: true },
+        // Yarn that was used — not stock written off in a count
+        // (services/replenishment.js, CONSUMPTION_TYPES).
+        type:        { $in: CONSUMPTION_TYPES },
       } },
     { $group: { _id: "$rawMaterial", total: { $sum: "$quantity" } } },
   ]);

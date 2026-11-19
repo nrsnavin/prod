@@ -26,7 +26,11 @@ const {
   applyPurchaseRules,
   SERVICE_LEVELS,
   DEFAULT_SERVICE_LEVEL,
+  CONSUMPTION_TYPES,
 } = require("../services/replenishment");
+const { owedToLiveOrders } = require("../services/orderIssuance");
+const { onOrderByMaterial } = require("../utils/materialRequirement");
+const { round3 } = require("../utils/quantity");
 const {
   observationsFrom,
   buildIndex,
@@ -39,8 +43,11 @@ const DAY_MS = 86_400_000;
 router.get(
   "/get-low-stock-materials",
   catchAsyncErrors(async (req, res, next) => {
+    // The rule the material list's own red flag uses (stock at or under
+    // the minimum), on materials still in use: a retired one was listed.
     const materials = await RawMaterial.find({
       $expr: { $lte: ["$stock", "$minStock"] },
+      archived: { $ne: true },
     })
       .populate("supplier", "name")
       .sort({ stock: 1 });
@@ -71,6 +78,8 @@ router.get(
     const docs = await RawMaterial.find({
       $expr: { $lte: ["$stock", "$minStock"] },
       minStock: { $gt: 0 },
+      // Retired materials are out of every picker, and out of this.
+      archived: { $ne: true },
     })
       .populate("supplier", "name")
       .select("name stock minStock price supplier")
@@ -85,7 +94,7 @@ router.get(
         skippedNoSupplier += 1;
         continue;
       }
-      const suggestedQty = Math.max(m.minStock * 2 - m.stock, m.minStock);
+      const suggestedQty = round3(Math.max(m.minStock * 2 - m.stock, m.minStock));
       materials.push({
         _id:          m._id,
         name:         m.name,
@@ -189,7 +198,7 @@ router.get(
       // treating it as such would have the system buy yarn to replace
       // stock that was never consumed.
       MaterialOutward.find({
-        type: { $in: ["ORDER_APPROVAL", "JOB_CONSUMPTION"] },
+        type: { $in: CONSUMPTION_TYPES },
         reversed: { $ne: true },
         createdAt: { $gte: since },
       }).select("rawMaterial quantity createdAt outwardDate").lean(),
@@ -243,6 +252,15 @@ router.get(
         const id = String(rm.rawMaterial);
         committedById.set(id, (committedById.get(id) || 0) + (Number(rm.requiredWeight) || 0));
       }
+    }
+
+    // …and what orders ALREADY approved are still owed. An order forced
+    // through on part stock has left Open with yarn undrawn; so has a job
+    // forced past its order on short yarn. That demand was in no bucket,
+    // and the buying list forgot it the moment the order was approved
+    // (services/orderIssuance.js, owedToLiveOrders).
+    for (const [id, kg] of await owedToLiveOrders()) {
+      committedById.set(id, (committedById.get(id) || 0) + kg);
     }
 
     // ── On order: raised minus received, never negative ───────
@@ -510,8 +528,11 @@ router.get(
 router.get(
   "/projected-stockout",
   catchAsyncErrors(async (req, res) => {
-    const lookback  = Math.max(1, parseInt(req.query.lookbackDays, 10) || 30);
-    const horizon   = Math.max(1, parseInt(req.query.horizonDays,  10) || 7);
+    // Bounded. An enormous look-back was taken off today's date as it
+    // came, left no start date at all, and the answer was an empty list
+    // whatever was running out.
+    const lookback  = Math.min(365, Math.max(1, parseInt(req.query.lookbackDays, 10) || 30));
+    const horizon   = Math.min(120, Math.max(1, parseInt(req.query.horizonDays,  10) || 7));
 
     const since = new Date(Date.now() - lookback * 86_400_000);
 
@@ -521,6 +542,7 @@ router.get(
       $expr: { $gt: ["$stock", "$minStock"] },
       stock:    { $gt: 0 },
       minStock: { $gt: 0 },
+      archived: { $ne: true },
     })
       .populate("supplier", "name")
       .select("name stock minStock price supplier")
@@ -536,6 +558,10 @@ router.get(
           rawMaterial: { $in: mats.map((m) => m._id) },
           outwardDate: { $gte: since },
           reversed:    { $ne: true },
+          // Yarn that was USED. Every outward movement was added up, a
+          // write-off among them — so a material whose count had been
+          // corrected read as days from running out.
+          type:        { $in: CONSUMPTION_TYPES },
         } },
       { $group: { _id: '$rawMaterial', total: { $sum: '$quantity' } } },
     ]);
@@ -592,19 +618,29 @@ router.get(
 router.get(
   "/reorder-suggestions",
   catchAsyncErrors(async (req, res) => {
-    const low = await RawMaterial.find({ $expr: { $lte: ["$stock", "$minStock"] } })
+    const low = await RawMaterial.find({
+      $expr: { $lte: ["$stock", "$minStock"] },
+      minStock: { $gt: 0 },
+      // A retired material is not bought.
+      archived: { $ne: true },
+    })
       .populate("supplier", "name")
       .select("name category stock minStock price supplier")
       .sort({ stock: 1 })
       .lean();
 
+    // What is already on its way. This list did not look, so the same
+    // shortfall was offered — and could be ordered — again every time
+    // the page was opened, until the first purchase order arrived.
+    const onOrder = await onOrderByMaterial(low.map((m) => m._id));
+
     const groups = new Map();
     let suggestedCount = 0;
     for (const m of low) {
-      const suggestedQty = Math.max(0, m.minStock * 2 - m.stock);
-      // Skip items with nothing to reorder — happens when minStock is
-      // unset (0), which would otherwise put a zero-qty line into the PO
-      // draft and get rejected by /create-po.
+      const coming = round3(onOrder.get(String(m._id)) || 0);
+      const suggestedQty = round3(Math.max(0, m.minStock * 2 - m.stock - coming));
+      // Nothing to reorder: what is on order already brings it back to
+      // twice its minimum. (A zero line would be refused by /create-po.)
       if (suggestedQty <= 0) continue;
       suggestedCount += 1;
       const key = m.supplier?._id?.toString() ?? "none";
@@ -625,6 +661,8 @@ router.get(
         minStock: m.minStock,
         price: m.price,
         suggestedQty,
+        // Already taken off suggestedQty; shown so the figure can be read.
+        onOrder: coming,
       });
       g.estimatedValue += suggestedQty * (m.price || 0);
     }

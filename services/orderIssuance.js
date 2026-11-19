@@ -235,7 +235,73 @@ async function heldForJob(job, jobRequirement = [], session = undefined) {
   return sumOf(share, mine.excess, mine.issued);
 }
 
+/**
+ * What orders already approved are still owed out of stock, per material.
+ *
+ * For every Approved or InProgress order: its stored requirement, less
+ * everything that has left stock for it — the approval draw, what its
+ * jobs drew for metres planned past it, and what the stores issued to
+ * them. For an order approved in full that is nothing. For one forced
+ * through on part stock it is the part that was not there; for a job
+ * forced past the order on short yarn, the part its own draw could not
+ * take.
+ *
+ * This is demand the buying list has to know about, and it was in no
+ * bucket at all: "committed" there meant Open orders ("not yet
+ * approved, so not yet drawn"), and an order approved on part stock has
+ * left Open with yarn still undrawn.
+ *
+ * Three queries however many orders there are.
+ *
+ * @returns {Promise<Map<string, number>>} material id → kg still owed
+ */
+async function owedToLiveOrders() {
+  const Order = require('../models/Order');
+  const JobOrder = require('../models/JobOrder');
+
+  const owed = new Map();
+  const orders = await Order.find({ status: { $in: ['Approved', 'InProgress'] } })
+    .select('rawMaterialRequired')
+    .lean();
+  if (orders.length === 0) return owed;
+
+  const orderIds = orders.map((o) => o._id);
+  const jobs = await JobOrder.find({ order: { $in: orderIds }, status: { $ne: 'cancelled' } })
+    .select('_id order')
+    .lean();
+  const orderOfJob = new Map(jobs.map((j) => [String(j._id), String(j.order)]));
+
+  const rows = await MaterialOutward.find({
+    reversed: { $ne: true },
+    $or: [
+      { type: 'ORDER_APPROVAL', order: { $in: orderIds } },
+      ...(jobs.length ? [{ type: 'JOB_CONSUMPTION', job: { $in: jobs.map((j) => j._id) } }] : []),
+    ],
+  })
+    .select('rawMaterial quantity order job type')
+    .lean();
+
+  // order id → (material id → kg out of stock for it)
+  const held = new Map();
+  for (const r of rows) {
+    const orderId = r.type === 'ORDER_APPROVAL' ? String(r.order) : orderOfJob.get(String(r.job));
+    const key = String(r.rawMaterial ?? '');
+    if (!orderId || !key) continue;
+    if (!held.has(orderId)) held.set(orderId, new Map());
+    add(held.get(orderId), key, Number(r.quantity) || 0);
+  }
+
+  for (const o of orders) {
+    const need = new Map();
+    for (const rm of o.rawMaterialRequired || []) add(need, String(rm.rawMaterial ?? ''), Number(rm.requiredWeight) || 0);
+    const got = held.get(String(o._id)) || new Map();
+    for (const [key, kg] of need) add(owed, key, kg - (got.get(key) || 0));
+  }
+  for (const [key, kg] of owed) owed.set(key, Math.round(kg * 1000) / 1000);
+  return owed;
+}
+
 module.exports = {
-  issuedForOrder, shareForJob, drawnByJobs, heldForOrder, heldForJob,
+  issuedForOrder, shareForJob, drawnByJobs, heldForOrder, heldForJob, owedToLiveOrders,
   EXCESS_DRAW_REMARK, isExcessDraw,
 };

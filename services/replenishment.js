@@ -52,6 +52,14 @@
 //  words, not to choose the number. See the note in api/rawMaterial.js.
 // ══════════════════════════════════════════════════════════════════
 
+// The ways yarn leaves stock because it is being USED: drawn when an
+// order is approved, and drawn by or issued to a job. A STOCK_ADJUST is
+// left out on purpose — a write-off or a count correction is not demand,
+// and counting it would have the system buy yarn to replace stock that
+// was never consumed. One list, because the forecast held to this and
+// the two "running out" figures (the route and the digest) did not.
+const CONSUMPTION_TYPES = Object.freeze(['ORDER_APPROVAL', 'JOB_CONSUMPTION']);
+
 // Service level → z. A mill does not want a slider with 40 positions;
 // it wants "how often am I willing to run out?".
 const SERVICE_LEVELS = Object.freeze({
@@ -263,4 +271,5 @@ module.exports = {
   zFor,
   SERVICE_LEVELS,
   DEFAULT_SERVICE_LEVEL,
+  CONSUMPTION_TYPES,
 };
