@@ -43,6 +43,8 @@ const { starterTemplate }   = require("../services/pdf/docTypes");
 const { getPdfBranding }     = require("../services/documentSettings");
 const { poToContext }        = require("../services/pdf/poContext");
 const { assertVersion } = require("../utils/versioning");
+const { asCallerError } = require("../utils/routeError");
+const { parseMoney, MAX_RATE } = require("../utils/money");
 
 // Race-free PO number: atomic counter, seeded once from the current max.
 // (The old read-max-then-+1 could give two concurrent creates the same poNo.)
@@ -87,16 +89,70 @@ const MIN_EXCESS_REASON = 5;
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+// Quantities are kilograms (or pieces, or metres) to three places. Sums
+// of typed decimals are not: 227.69 + 168.85 is 396.53999999999996, a
+// hair short of the 396.54 that was ordered. Left as it fell, a PO
+// received in two lots stayed "Partial" for good with a pending quantity
+// nobody could see or receive — about one two-lot decimal PO in ten.
+const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
+
+/** What is still to come on a PO line; never less than nothing. */
+const pendingOf = (item) => Math.max(0, round3((Number(item?.quantity) || 0) - (Number(item?.receivedQuantity) || 0)));
+
 // ─────────────────────────────────────────────────────────────────────────
 // HELPER: derive PO status from its items
 // ─────────────────────────────────────────────────────────────────────────
 function deriveStatus(items) {
   if (!items || items.length === 0) return "Open";
-  const allDone = items.every((i) => (i.receivedQuantity || 0) >= (i.quantity || 0));
-  const anyDone = items.some( (i) => (i.receivedQuantity || 0) > 0);
+  const allDone = items.every((i) => round3(i.receivedQuantity) >= round3(i.quantity));
+  const anyDone = items.some( (i) => round3(i.receivedQuantity) > 0);
   if (allDone) return "Completed";
   if (anyDone) return "Partial";
   return "Open";
+}
+
+/**
+ * The lines of a purchase order as sent, checked: for /create-po and
+ * /edit-po alike, which each checked a different half.
+ *
+ *   • a material that is one, once. Two lines for one material cannot
+ *     be received: a receipt finds "the" line for its material, which is
+ *     always the first, so the second stays pending for good and the PO
+ *     never completes. The receipt already refuses two rows for one
+ *     material for the same reason;
+ *   • a quantity above zero, to three places;
+ *   • a price that is one. None is ₹0 ("not priced yet"); a negative
+ *     price, or text, used to be stored as sent.
+ *
+ * Returns the lines to store; throws ErrorHandler(400).
+ */
+async function readPoLines(items) {
+  if (!Array.isArray(items) || items.length === 0) throw new ErrorHandler("At least one item is required", 400);
+  const seen = new Set();
+  const lines = items.map((item, idx) => {
+    if (!item || !item.rawMaterial) throw new ErrorHandler(`items[${idx}].rawMaterial is required`, 400);
+    const id = String(item.rawMaterial?._id ?? item.rawMaterial);
+    if (!mongoose.Types.ObjectId.isValid(id)) throw new ErrorHandler(`items[${idx}].rawMaterial is not a valid id`, 400);
+    if (seen.has(id)) {
+      throw new ErrorHandler(
+        `Line ${idx + 1} is a material already on this purchase order. Put it on one line with the whole quantity — ` +
+        `a second line for the same material could never be received.`, 400);
+    }
+    seen.add(id);
+    const q = round3(item.quantity);
+    if (!Number.isFinite(Number(item.quantity)) || q <= 0) throw new ErrorHandler(`items[${idx}].quantity must be a positive number`, 400);
+    let price = 0;
+    if (!(item.price === undefined || item.price === null || item.price === "")) {
+      const read = parseMoney(item.price, { max: MAX_RATE, label: `Line ${idx + 1}: the price` });
+      if (!read.ok) throw new ErrorHandler(read.reason, 400);
+      price = read.value;
+    }
+    return { rawMaterial: id, price, quantity: q, receivedQuantity: 0 };
+  });
+  const known = new Set((await RawMaterial.find({ _id: { $in: [...seen] } }).select("_id").lean()).map((m) => String(m._id)));
+  const missing = lines.findIndex((l) => !known.has(l.rawMaterial));
+  if (missing !== -1) throw new ErrorHandler(`Line ${missing + 1}: that material does not exist`, 400);
+  return lines;
 }
 
 
@@ -113,7 +169,9 @@ function supplierSaveError(error) {
   if (error?.code === 11000 && (error?.keyPattern?.gstin || error?.keyValue?.gstin !== undefined)) {
     return new ErrorHandler("A supplier with this GSTIN is already on file.", 400);
   }
-  return new ErrorHandler(error.message, 400);
+  // What the caller got wrong stays a 400 in its own words; a fault of
+  // ours is not read out to the form (utils/routeError.js).
+  return asCallerError(error);
 }
 
 router.post(
@@ -177,22 +235,14 @@ router.post(
       const { supplier, items, expectedDate, notes, forOrder, forJob } = req.body;
       if (!supplier)
         return next(new ErrorHandler("Supplier is required", 400));
-      if (!Array.isArray(items) || items.length === 0)
-        return next(new ErrorHandler("At least one item is required", 400));
-
-      // Reject zero/negative line quantities so the PO doesn't carry
-      // dead rows that confuse receipt + status derivation.
-      for (const [idx, item] of items.entries()) {
-        if (!item || !item.rawMaterial) {
-          return next(new ErrorHandler(
-            `items[${idx}].rawMaterial is required`, 400));
-        }
-        const q = Number(item.quantity);
-        if (!Number.isFinite(q) || q <= 0) {
-          return next(new ErrorHandler(
-            `items[${idx}].quantity must be a positive number`, 400));
-        }
+      // A supplier that is one. An id of nothing used to make a PO from
+      // nobody: it listed with a blank supplier and could not be chased.
+      if (!mongoose.Types.ObjectId.isValid(String(supplier)) || !(await Supplier.exists({ _id: supplier }))) {
+        return next(new ErrorHandler("That supplier does not exist", 400));
       }
+      // Lines checked as a whole (see readPoLines): a material once, a
+      // quantity above zero, a price that is one.
+      const lines = await readPoLines(items);
 
       // ── What this PO was raised for ──────────────────────────────
       //
@@ -224,12 +274,7 @@ router.post(
       const parsedDate = expectedDate ? new Date(expectedDate) : undefined;
       const po = await PurchaseOrder.create({
         supplier,
-        items: items.map((i) => ({
-          rawMaterial:      i.rawMaterial,
-          price:            i.price    || 0,
-          quantity:         i.quantity || 0,
-          receivedQuantity: 0,
-        })),
+        items: lines,
         expectedDate: parsedDate && !isNaN(parsedDate.getTime()) ? parsedDate : undefined,
         notes:        typeof notes === "string" ? notes.trim() : "",
         poNo:   nextPoNo,
@@ -244,8 +289,7 @@ router.post(
 
       res.status(201).json({ success: true, po: populated });
     } catch (error) {
-      console.log(error.message);
-      return next(new ErrorHandler(error.message, 400));
+      return next(asCallerError(error));
     }
   })
 );
@@ -283,14 +327,8 @@ router.put(
     };
 
     if (Array.isArray(items) && items.length > 0) {
-      for (const [idx, item] of items.entries()) {
-        if (!item || !item.rawMaterial) return next(new ErrorHandler(`items[${idx}].rawMaterial is required`, 400));
-        const q = Number(item.quantity);
-        if (!Number.isFinite(q) || q <= 0) return next(new ErrorHandler(`items[${idx}].quantity must be a positive number`, 400));
-      }
-      po.items = items.map((i) => ({
-        rawMaterial: i.rawMaterial, price: Number(i.price) || 0, quantity: Number(i.quantity) || 0, receivedQuantity: 0,
-      }));
+      // The same check as a new PO's lines (readPoLines).
+      try { po.items = await readPoLines(items); } catch (err) { return next(err); }
     }
     if (expectedDate !== undefined) {
       const d = expectedDate ? new Date(expectedDate) : undefined;
@@ -357,7 +395,7 @@ router.delete(
 
 // ─────────────────────────────────────────────────────────────────────────
 // GET /get-pos
-// Query: page, limit, status, supplierId, search (poNo)
+// Query: page, limit, status, supplierId, search (a PO number, or a supplier's name)
 // ─────────────────────────────────────────────────────────────────────────
 // ── Late POs: the chaser list, sending one, the settings ──────────
 // services/poChaser.js. Placed before any "/po/:id" route.
@@ -412,9 +450,19 @@ router.get(
       if (req.query.status)     filter.status   = req.query.status;
       else                      filter.status   = { $ne: "Cancelled" }; // hide soft-deleted by default
       if (req.query.supplierId) filter.supplier  = req.query.supplierId;
-      if (req.query.search) {
-        const num = Number(req.query.search);
-        if (!isNaN(num)) filter.poNo = num;
+      const term = String(req.query.search || "").trim();
+      if (term) {
+        const num = Number(term);
+        if (!isNaN(num)) {
+          filter.poNo = num;
+        } else {
+          // Not a number: a supplier's name. It used to be ignored, and
+          // the whole list came back as if nothing had been typed.
+          const named = (await Supplier.find({ name: { $regex: escapeRegex(term), $options: "i" } }).distinct("_id")).map(String);
+          filter.supplier = req.query.supplierId
+            ? (named.includes(String(req.query.supplierId)) ? req.query.supplierId : { $in: [] })
+            : { $in: named };
+        }
       }
 
       const [pos, total] = await Promise.all([
@@ -476,14 +524,13 @@ router.get(
       // is computed once, here, so there is no third place for the same
       // subtraction to be written differently again.
       po.items = (po.items || []).map((it) => {
-        const ordered  = Number(it.quantity) || 0;
         const received = Number(it.receivedQuantity) || 0;
         return {
           ...it,
           received,
           // Floored at zero: over-delivery within tolerance is allowed,
           // and "-8 pending" is not a quantity anyone can act on.
-          pending: Math.max(0, ordered - received),
+          pending: pendingOf(it),
         };
       });
 
@@ -597,7 +644,7 @@ router.post(
 
       res.status(201).json({ success: true, po: populated });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 400));
+      return next(asCallerError(error));
     }
   })
 );
@@ -762,12 +809,12 @@ router.post(
 
         const ordered  = Number(poItem.quantity) || 0;
         const already  = Number(poItem.receivedQuantity) || 0;
-        const totalAfter = already + Number(inItem.quantity);
+        const totalAfter = round3(already + Number(inItem.quantity));
         // Measured against what was ORDERED, not what is still pending.
         // Against pending, a PO for 100 already 90 received would call a
         // 12-unit delivery a 20% overshoot when it is 2% over the order —
         // and the tolerance is about the delivery against the order.
-        const excess = Math.max(0, totalAfter - ordered);
+        const excess = Math.max(0, round3(totalAfter - ordered));
         const allowanceFree = ordered * OVER_RECEIPT_TOLERANCE;
 
         if (excess > 0) {
@@ -886,8 +933,10 @@ router.post(
                 `Material ${inItem.rawMaterial} is not part of PO #${po.poNo}`, 400
               );
             }
+            // To three places (see round3 above): the sum of what came in
+            // must be able to equal what was ordered.
             poItem.receivedQuantity =
-              (Number(poItem.receivedQuantity) || 0) + Number(inItem.quantity);
+              round3((Number(poItem.receivedQuantity) || 0) + Number(inItem.quantity));
           }
 
           po.status = deriveStatus(po.items);
@@ -999,8 +1048,9 @@ router.post(
     } catch (error) {
       console.error("[inward-stock]", error.message);
       // A refusal the route raised keeps its own status (409 for a PO
-      // cancelled meanwhile); anything else is reported as before.
-      return next(error instanceof ErrorHandler ? error : new ErrorHandler(error.message, 400));
+      // cancelled meanwhile); a mistake in what was sent is a 400 in its
+      // own words; a fault of ours is not read out (utils/routeError.js).
+      return next(asCallerError(error));
     }
   })
 );
@@ -1013,6 +1063,11 @@ router.get(
   "/get-inward-history",
   catchAsyncErrors(async (req, res, next) => {
     try {
+      // One PO's receipts. Asked without a PO, the filter was empty and
+      // every receipt ever made came back in one answer.
+      if (!mongoose.Types.ObjectId.isValid(String(req.query.poId || ""))) {
+        return next(new ErrorHandler("poId is required", 400));
+      }
       const records = await MaterialInward.find({ purchaseOrder: req.query.poId })
         .populate("rawMaterial", "name unit")
         .sort({ inwardDate: -1 });
@@ -1214,7 +1269,7 @@ router.delete(
       await supplier.save();
       res.status(200).json({ success: true, message: "Supplier deleted successfully" });
     } catch (error) {
-      return next(new ErrorHandler(error.message, 400));
+      return next(asCallerError(error));
     }
   })
 );
@@ -1255,10 +1310,7 @@ router.get(
           rawMaterialName: i.rawMaterial?.name ?? "—",
           ordered:         Number(i.quantity) || 0,
           received:        Number(i.receivedQuantity) || 0,
-          pending: Math.max(
-            0,
-            (Number(i.quantity) || 0) - (Number(i.receivedQuantity) || 0)
-          ),
+          pending: pendingOf(i),
         }))
         .filter((i) => i.pending > 0);
 
@@ -1274,7 +1326,7 @@ router.get(
         createdAt:     po.createdAt,
         ageDays,
         bucket:        bucketOf(ageDays),
-        totalPending:  pendingItems.reduce((s, i) => s + i.pending, 0),
+        totalPending:  round3(pendingItems.reduce((s, i) => s + i.pending, 0)),
         pendingItems,
       });
     }

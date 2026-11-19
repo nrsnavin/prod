@@ -56,6 +56,8 @@ const RawMaterial = require('../models/RawMaterial');
 
 /** Money per kg. Four places, because a rate can be ₹342.6875. */
 const COST_DP = 4;
+/** Quantity on the shelf: kilograms to the gram. */
+const QTY_DP = 3;
 
 const round = (v, dp = COST_DP) => {
   const f = 10 ** dp;
@@ -185,8 +187,9 @@ async function receiveAtCost(materialId, qty, unitCost, session) {
         },
       },
       // Second, so the average above was computed against the stock as
-      // it stood BEFORE this receipt.
-      { $set: { stock: { $add: [{ $ifNull: ['$stock', 0] }, inQty] } } },
+      // it stood BEFORE this receipt. To the gram: 250.7 + 100.1 is
+      // 350.8 on the shelf, not 350.79999999999995.
+      { $set: { stock: { $round: [{ $add: [{ $ifNull: ['$stock', 0] }, inQty] }, QTY_DP] } } },
     ],
     { new: true, ...(session ? { session } : {}) }
   );
