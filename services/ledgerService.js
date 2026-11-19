@@ -137,6 +137,9 @@ async function postDiwaliBonus(rec, diwaliDate, session, { postedBy = '' } = {})
   // Only the accrual is replaced. The bonus's payment row shares its
   // source; clearing all of it wiped a payment that had been made.
   await clearSource('bonus', rec._id, session, 'diwali_bonus');
+  // A bonus of nothing (under the minimum days) is not an entry: it put a
+  // "Diwali bonus ₹0" row on the ledger of everybody who did not get one.
+  if (!(r2(rec.bonusAmount) > 0)) return;
   await LedgerEntry.create([{
     employee: rec.employee,
     date:     diwaliDate || rec.createdAt || new Date(),

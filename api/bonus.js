@@ -30,6 +30,10 @@ const BonusRecord      = require("../models/BonusRecord");
 const Employee         = require("../models/Employee");
 const { employedFrom } = require("../utils/employeeStatus");
 const { factoryMonth, yearOf } = require("../utils/periods");
+// The bonus date is read with this. It was used below without being
+// imported, so saving the date threw "dayFrom is not defined"
+// (tests/architecture/noUndefinedNames.test.js now holds every file to it).
+const { dayFrom } = require("../utils/requestDate");
 const ShiftDetail      = require("../models/ShiftDetail");
 const Attendance       = require("../models/Attendence.js");
 const Payroll          = require("../models/Payroll");
@@ -61,6 +65,9 @@ router.use(require("../middleware/ownRecords").ownRecordsOr({
 const factoryNow = factoryMonth;
 const currentYear = () => factoryMonth().year;
 const NOT_A_YEAR = "year is not a valid year";
+
+/** A record there is nothing to pay on: generated at ₹0 (under the minimum days) and never paid. */
+const NOTHING_DUE = Object.freeze({ status: "pending", bonusAmount: { $not: { $gt: 0 } } });
 
 function attendanceTier(rate) {
   if (rate >= 90) return { tier: "S", multiplier: 1.00 };
@@ -238,6 +245,8 @@ router.get(
 
     const totalRecords  = await BonusRecord.countDocuments({ year });
     const paidRecords   = await BonusRecord.countDocuments({ year, status: "paid" });
+    // A record of ₹0 (under the minimum days) is not a payment waiting.
+    const nothingDueRecords = await BonusRecord.countDocuments({ year, ...NOTHING_DUE });
     const totalPayout   = await BonusRecord.aggregate([
       { $match: { year } },
       { $group: { _id: null, total: { $sum: "$bonusAmount" } } },
@@ -249,7 +258,8 @@ router.get(
       stats: {
         totalRecords,
         paidRecords,
-        pendingRecords: totalRecords - paidRecords,
+        pendingRecords: totalRecords - paidRecords - nothingDueRecords,
+        nothingDueRecords,
         totalPayout: totalPayout[0]?.total ?? 0,
       },
     });
@@ -285,9 +295,18 @@ router.put(
 
     const { bonusDate, bonusLabel, yearlyWorkingDays, minDaysForEligibility, minBonusPercent } = req.body;
     // A calendar date; something that is not one is refused here, not
-    // by the database at save time (utils/requestDate.js).
-    if (bonusDate    !== undefined) cfg.bonusDate         = dayFrom(bonusDate, "bonusDate", null);
-    if (bonusLabel   !== undefined) cfg.bonusLabel        = bonusLabel;
+    // by the database at save time (utils/requestDate.js). None clears it.
+    if (bonusDate !== undefined) {
+      const date = dayFrom(bonusDate, "bonusDate", null);
+      // The bonus year runs to the month of this date (diwaliWindow), so
+      // a date typed with another year's number made "2026" a window
+      // ending in 2025, and nothing said so.
+      if (date && date.getUTCFullYear() !== year) {
+        return next(new ErrorHandler(`The bonus date must be in ${year} — this is the ${year} bonus.`, 400));
+      }
+      cfg.bonusDate = date;
+    }
+    if (bonusLabel   !== undefined) cfg.bonusLabel        = String(bonusLabel ?? "").trim().slice(0, 120);
     if (yearlyWorkingDays !== undefined) {
       const wd = parseInt(yearlyWorkingDays, 10);
       if (isNaN(wd) || wd < 1) return next(new ErrorHandler("yearlyWorkingDays must be ≥ 1", 400));
@@ -505,7 +524,9 @@ router.get(
       summary: {
         total:   records.length,
         paid:    records.filter((r) => r.status === "paid").length,
-        pending: records.filter((r) => r.status === "pending").length,
+        // Waiting to be paid: a record of ₹0 is not.
+        pending: records.filter((r) => r.status === "pending" && r.bonusAmount > 0).length,
+        nothingDue: records.filter((r) => r.status === "pending" && !(r.bonusAmount > 0)).length,
         totalPayout,
         paidPayout,
         pendingPayout: totalPayout - paidPayout,
@@ -616,10 +637,16 @@ router.put(
   "/records/:id/pay",
   isAdmin('admin', 'accounts'),
   catchAsyncErrors(async (req, res, next) => {
-    const existing = await BonusRecord.findById(req.params.id).select("status").lean();
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) return next(new ErrorHandler("Bonus record not found", 404));
+    const existing = await BonusRecord.findById(req.params.id).select("status bonusAmount").lean();
     if (!existing) return next(new ErrorHandler("Bonus record not found", 404));
     if (existing.status === "paid") {
       return next(new ErrorHandler("Already marked as paid", 400));
+    }
+    // A bonus of nothing is not paid: it used to be, as a payment of −₹0
+    // on the employee's ledger, and had to be before the year would close.
+    if (!(existing.bonusAmount > 0)) {
+      return next(new ErrorHandler("Nothing is due on this record — there is no bonus to pay.", 400));
     }
 
     // Marking paid + the ledger payment row are one atomic step, and the
@@ -631,7 +658,7 @@ router.put(
     try {
       await session.withTransaction(async () => {
         record = await BonusRecord.findOneAndUpdate(
-          { _id: req.params.id, status: { $ne: "paid" } },
+          { _id: req.params.id, status: { $ne: "paid" }, bonusAmount: { $gt: 0 } },
           { $set: { status: "paid", paidAt: new Date() } },
           { new: true, session }
         );
@@ -640,7 +667,9 @@ router.put(
       });
     } finally { await session.endSession(); }
 
-    const pendingCount = await BonusRecord.countDocuments({ year: record.year, status: "pending" });
+    // Complete when nobody owed a bonus is still waiting for it — a
+    // record of ₹0 is waiting for nothing.
+    const pendingCount = await BonusRecord.countDocuments({ year: record.year, status: "pending", bonusAmount: { $gt: 0 } });
     if (pendingCount === 0) {
       await BonusConfig.updateOne({ year: record.year }, { status: "completed" });
     }
