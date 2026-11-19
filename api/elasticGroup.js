@@ -11,27 +11,49 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 
 const ElasticGroup = require("../models/ElasticGroup");
+const Customer     = require("../models/Customer");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 
 router.use(isAuthenticated);
 
+// `archived` with each elastic: a group names its elastics for good, and
+// one retired since is out of every picker — the order form has to be
+// able to leave it off a new order rather than put it back on one.
 const populate = (q) =>
   q
     .populate("customer", "name")
-    .populate("items.elastic", "name weaveType");
+    .populate("items.elastic", "name weaveType archived");
 
 // Validate + normalise an items array from the request body.
 function cleanItems(items) {
   if (!Array.isArray(items)) return { error: "items must be an array" };
   const out = [];
+  const seen = new Set();
   for (const [i, it] of items.entries()) {
     if (!it || !it.elastic || !mongoose.Types.ObjectId.isValid(it.elastic)) {
       return { error: `items[${i}].elastic is required and must be a valid id` };
     }
+    // Once each. An order refuses one elastic on two lines, so a bundle
+    // that named one twice filled the order form with a pair the order
+    // then would not save. (Adding from the elastic list's selection has
+    // always guarded this; making and editing a group did not.)
+    const id = String(it.elastic);
+    if (seen.has(id)) return { error: `items[${i}]: that elastic is already on the list — give it one line` };
+    seen.add(id);
     const qty = Number(it.defaultQuantity);
     out.push({ elastic: it.elastic, defaultQuantity: Number.isFinite(qty) && qty > 0 ? qty : 0 });
   }
   return { items: out };
+}
+
+/** The group's name as text, trimmed; "" when it is not text or is blank. */
+const cleanName = (name) => (typeof name === "string" ? name.trim() : "");
+
+/** A customer that is one — or none, for a bundle anyone may use. */
+async function customerProblem(customer) {
+  if (!customer) return null;
+  if (!mongoose.Types.ObjectId.isValid(String(customer))) return "Invalid customer id";
+  return (await Customer.exists({ _id: customer })) ? null : "Choose a customer that exists";
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -81,17 +103,17 @@ router.post(
   "/",
   isAdmin("admin"),
   catchAsyncErrors(async (req, res, next) => {
-    const { name, customer = null, items } = req.body;
-    if (!name?.trim()) return next(new ErrorHandler("name is required", 400));
-    if (customer && !mongoose.Types.ObjectId.isValid(customer)) {
-      return next(new ErrorHandler("Invalid customer id", 400));
-    }
+    const { customer = null, items } = req.body || {};
+    const name = cleanName(req.body?.name);
+    if (!name) return next(new ErrorHandler("name is required", 400));
+    const noCustomer = await customerProblem(customer);
+    if (noCustomer) return next(new ErrorHandler(noCustomer, 400));
     const parsed = cleanItems(items);
     if (parsed.error) return next(new ErrorHandler(parsed.error, 400));
     if (parsed.items.length === 0) return next(new ErrorHandler("Add at least one elastic", 400));
 
     const group = await ElasticGroup.create({
-      name: name.trim(),
+      name,
       customer: customer || null,
       items: parsed.items,
     });
@@ -147,16 +169,15 @@ router.put(
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return next(new ErrorHandler("Invalid group id", 400));
     }
-    const { name, customer, items, isActive } = req.body;
+    const { name, customer, items, isActive } = req.body || {};
     const update = {};
     if (name != null) {
-      if (!name.trim()) return next(new ErrorHandler("name cannot be empty", 400));
-      update.name = name.trim();
+      if (!cleanName(name)) return next(new ErrorHandler("name cannot be empty, and must be text", 400));
+      update.name = cleanName(name);
     }
     if (customer !== undefined) {
-      if (customer && !mongoose.Types.ObjectId.isValid(customer)) {
-        return next(new ErrorHandler("Invalid customer id", 400));
-      }
+      const noCustomer = await customerProblem(customer);
+      if (noCustomer) return next(new ErrorHandler(noCustomer, 400));
       update.customer = customer || null;
     }
     if (items !== undefined) {
