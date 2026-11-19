@@ -19,18 +19,40 @@
 //  with the same stock. Posting again replaces both.
 //
 //  What could not be valued is said, not valued at nothing.
+//
+//  AS AT A DAY means today's figure less everything that moved after
+//  the day ended — and four things about that were wrong:
+//
+//    • Finished goods were never worked back at all. Their movements
+//      were read off a list on the elastic that nothing has written to
+//      since movements got their own records (models/StockMovement.js),
+//      so "after the day" was always nothing: valued on 10 April as at
+//      31 March, finished goods were the shelf of 10 April.
+//    • Anything archived was skipped. Archiving takes a name out of the
+//      pickers, not goods off the shelf; the stock left the books.
+//    • The day ended at midnight by the server's clock — half past five
+//      the next morning in the factory. Yarn drawn on the night shift at
+//      2 a.m. on 1 April counted as gone on 31 March.
+//    • A material's list holds its newest 500 movements, and its oldest
+//      rows have approvals written as a positive quantity. Neither was
+//      allowed for: the first is now said, the second read the right
+//      way round (utils/stockLedger.js MOVEMENT_DIRECTION).
 // ══════════════════════════════════════════════════════════════════
 
 const RawMaterial = require('../models/RawMaterial');
 const Elastic = require('../models/Elastic');
+const StockMovement = require('../models/StockMovement');
 const Journal = require('../models/Journal');
 const ErrorHandler = require('../utils/ErrorHandler');
 const journals = require('./journals');
 const { getSettings } = require('./booksLock');
+const factoryDay = require('../utils/factoryDay');
+const { MOVEMENT_DIRECTION, MAX_EMBEDDED_MOVEMENTS } = require('../utils/stockLedger');
 
 const { r2 } = require('../utils/money');
 const DAY = 86_400_000;
 const ymd = (d) => new Date(d).toISOString().slice(0, 10);
+const inWords = (d) => new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'Asia/Kolkata' });
 
 const DEFAULT = { stockInHand: 'Stock-in-Hand', closingStock: 'Closing Stock' };
 async function ledgers() {
@@ -38,25 +60,78 @@ async function ledgers() {
   return Object.fromEntries(Object.entries(DEFAULT).map(([k, v]) => [k, String(t[k] || '').trim() || v]));
 }
 
-/** Stock as at the end of `asOf`: today's figure less every movement after it. */
-function asAt(Model, asOf, extra = {}) {
-  const end = new Date(new Date(asOf).getTime() + DAY - 1);
-  return Model.aggregate([
-    { $match: { archived: { $ne: true }, ...extra } },
+/** The last moment of the day in the factory. What moved after it had not moved yet. */
+const dayCloses = (asOf) => factoryDay.dayEnd(asOf) || new Date(new Date(asOf).getTime() + DAY - 1);
+
+/** What one row on a material's list did to stock: receipts in, draws out, an adjustment as written. */
+function delta(row) {
+  const quantity = Number(row?.quantity) || 0;
+  const direction = MOVEMENT_DIRECTION[row?.type];
+  return direction ? direction * Math.abs(quantity) : quantity;
+}
+
+/**
+ * Raw materials as at the end of `asOf`: today's stock less every
+ * movement after it. Archived ones too — retired from the pickers, not
+ * from the shelf.
+ *
+ * `shortBy` is set when the material's list cannot reach back to the
+ * day: it keeps the newest MAX_EMBEDDED_MOVEMENTS rows, and when it is
+ * full and every row on it is after the day, older movements — also
+ * after the day — have been dropped and the figure is as at the oldest
+ * row kept, not as at the day.
+ */
+async function rawAsAt(asOf) {
+  const end = dayCloses(asOf);
+  const rows = await RawMaterial.aggregate([
     { $project: {
-      name: 1, category: 1, unit: 1, stock: 1, avgCost: 1, price: 1, costing: 1,
-      after: { $sum: { $map: { input: { $filter: { input: { $ifNull: ['$stockMovements', []] }, as: 'm', cond: { $gt: ['$$m.date', end] } } }, as: 'm', in: { $ifNull: ['$$m.quantity', 0] } } } },
+      name: 1, category: 1, unit: 1, stock: 1, avgCost: 1, price: 1,
+      kept: { $size: { $ifNull: ['$stockMovements', []] } },
+      oldest: { $min: '$stockMovements.date' },
+      since: { $filter: { input: { $ifNull: ['$stockMovements', []] }, as: 'm', cond: { $gt: ['$$m.date', end] } } },
     } },
+    { $project: { name: 1, category: 1, unit: 1, stock: 1, avgCost: 1, price: 1, kept: 1, oldest: 1, 'since.type': 1, 'since.quantity': 1 } },
   ]);
+  return rows.map((m) => ({
+    ...m,
+    after: (m.since || []).reduce((sum, row) => sum + delta(row), 0),
+    shortBy: m.kept >= MAX_EMBEDDED_MOVEMENTS && m.oldest && new Date(m.oldest) > end ? new Date(m.oldest) : null,
+  }));
+}
+
+/**
+ * Finished goods as at the end of `asOf`, from the movement records
+ * (models/StockMovement.js — `applied` is what the shelf moved by; a
+ * reservation moves a promise and applies nothing). Every elastic with
+ * stock today OR a movement since the day: one that has all been sent
+ * since was on the shelf then.
+ */
+async function finishedAsAt(asOf) {
+  const end = dayCloses(asOf);
+  const since = await StockMovement.aggregate([
+    { $match: { date: { $gt: end } } },
+    { $group: { _id: '$elastic', after: { $sum: '$applied' } } },
+  ]);
+  const after = new Map(since.map((r) => [String(r._id), Number(r.after) || 0]));
+  const elastics = await Elastic.find({ $or: [{ stock: { $gt: 0 } }, { _id: { $in: since.map((r) => r._id) } }] })
+    .select('name stock costing')
+    .lean();
+  return elastics.map((e) => ({ ...e, after: after.get(String(e._id)) || 0 }));
 }
 
 async function value(asOf) {
   const warnings = [];
-  const raw = await asAt(RawMaterial, asOf);
+  const raw = await rawAsAt(asOf);
   const rawRows = [];
   const byCategory = new Map();
   for (const m of raw) {
     const qty = Math.max(0, r2((m.stock || 0) - (m.after || 0)));
+    if (m.shortBy) {
+      warnings.push(
+        `${m.name}: only its last ${MAX_EMBEDDED_MOVEMENTS} movements are kept and all of them are after ${inWords(asOf)} — ` +
+        `${qty} ${m.unit || 'kg'} is as at ${inWords(m.shortBy)}, the earliest on record. Check it against the material's ledger.`
+      );
+    }
     if (qty <= 0) continue;
     const rate = m.avgCost > 0 ? m.avgCost : (m.price || 0);
     if (!(rate > 0)) warnings.push(`${m.name}: ${qty} ${m.unit || 'kg'} on hand but no cost or price on the material — valued at ₹0`);
@@ -66,7 +141,7 @@ async function value(asOf) {
     c.quantity = r2(c.quantity + qty); c.value = r2(c.value + val); c.items += 1;
     byCategory.set(m.category || 'other', c);
   }
-  const fg = await asAt(Elastic, asOf, { $or: [{ stock: { $gt: 0 } }, { 'stockMovements.0': { $exists: true } }] });
+  const fg = await finishedAsAt(asOf);
   const costings = new Map();
   const ids = fg.map((e) => e.costing).filter(Boolean);
   if (ids.length) {
