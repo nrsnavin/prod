@@ -21,7 +21,7 @@
 
 const factoryDay = require("../utils/factoryDay");
 const express          = require("express");
-const { inStages, POST_PREP_STAGES } = require('../domain/jobStatus');
+const { liveJobStatus } = require('../domain/jobStatus');
 const router           = express.Router();
 const mongoose         = require("mongoose");
 
@@ -51,9 +51,6 @@ const C = require("../utils/etaConfig");
 const CHANGEOVER_DAYS = 0.5;
 const { DEFAULT_WEIGHTS } = require("../models/PlannerWeights");
 const plannerLearning = require("../services/plannerLearning");
-const W_LATE          = DEFAULT_WEIGHTS.late;
-const W_CHANGE        = DEFAULT_WEIGHTS.changeover;
-const W_BAL           = DEFAULT_WEIGHTS.balance;
 const W_BAL_SMALL     = 0.05;
 const MAX_ITER        = 6;
 const EPS             = 1e-6;
@@ -70,7 +67,7 @@ const _fmt = (d) => (d instanceof Date && !isNaN(d) ? d.toISOString().slice(0, 1
  * at midnight. A line that finished exactly ON its due date therefore
  * compared as `finish > dueDate` and was booked one working day late.
  *
- * That is not merely a misreport. W_LATE is 10 against a changeover's 1,
+ * That is not merely a misreport. A late day weighs 10 against a changeover's 1,
  * so lateness dominates the objective — a phantom day on every line
  * that lands on its date pushes the optimiser into genuinely different,
  * worse assignments while it chases the phantom.
@@ -130,11 +127,19 @@ async function _gatherLines(now, horizonDays) {
 // finish optimistic by however long the current run has left, and since
 // lateness drives the objective, the plan was confidently scheduling
 // into time that was already spoken for.
+//
+// EVERY live job that holds a loom, not only the ones weaving. A job can
+// claim its loom while it is still in preparation — the app offers that
+// on purpose, to hold capacity — and a job lets go of its loom the
+// moment it moves on to finishing or is cancelled (api/jobProgress.js
+// clears `machine`). So "live and pointing at a machine" is exactly
+// "that machine is spoken for". Asked as "past preparation", a reserved
+// loom had nothing on it and new work was proposed there from day zero.
 async function _machineBacklog(machineIds, rateFor) {
   const JobOrder = require("../models/JobOrder");
   const jobs = await JobOrder.find({
     machine: { $in: machineIds },
-    status: inStages(POST_PREP_STAGES),
+    status: liveJobStatus(),
   }).select("machine elastics producedElastic").lean();
 
   const backlog = new Map();       // machineId → committed working days
@@ -242,7 +247,13 @@ const _loadPlantRate = memoizeAsync(async function (now) {
 // Returns per-assignment detail plus the scalar objective. Each machine
 // runs its lines in due-date order; changeovers and finish dates are
 // walked along that order.
-function _evaluate(assignmentMap, ctx) {
+//
+// `keepOrder` is for a plan a PERSON arranged (POST /accept): each
+// machine's lines are then walked in the order they were put into the
+// map, which is the order of the rows on the screen. Without it the
+// sort below re-sequenced an accepted plan by due date — the queue the
+// planner had been moved away from — and stored finish dates for that.
+function _evaluate(assignmentMap, ctx, { keepOrder = false } = {}) {
   const { linesById, machinesById, rate, backlog } = ctx;
   // Floored here, not only at the caller. This is the pure core and the
   // place the finish-vs-due comparison actually happens, so it is where
@@ -264,11 +275,13 @@ function _evaluate(assignmentMap, ctx) {
 
   for (const [machineId, list] of perMachine) {
     const machine = machinesById.get(machineId);
-    list.sort((a, b) => {
-      const da = a.dueDate ? a.dueDate.getTime() : Infinity;
-      const db = b.dueDate ? b.dueDate.getTime() : Infinity;
-      return da - db || b.qtyMeters - a.qtyMeters;
-    });
+    if (!keepOrder) {
+      list.sort((a, b) => {
+        const da = a.dueDate ? a.dueDate.getTime() : Infinity;
+        const db = b.dueDate ? b.dueDate.getTime() : Infinity;
+        return da - db || b.qtyMeters - a.qtyMeters;
+      });
+    }
     // Starts where the machine actually becomes free, not at zero.
     let cursor = backlog?.get(machineId) || 0;
     let last = machine.currentElasticId;
@@ -357,6 +370,12 @@ function _greedy(lines, machines, ctx) {
   });
 
   const planDate = _startOfDay(ctx.planDate);
+  // The objective this plant has taught the planner, here too. This pass
+  // places EVERY line; the search after it makes a handful of moves. On
+  // the built-in weights it decided nearly the whole plan by itself, and
+  // what had been learned from the plans people accept steered almost
+  // nothing.
+  const w = ctx.weights || DEFAULT_WEIGHTS;
 
   for (const line of sorted) {
     let best = null, bestCost = Infinity;
@@ -372,7 +391,7 @@ function _greedy(lines, machines, ctx) {
       const finish = C.addWorkingDays(planDate, cursorAfter);
       const lateDays = due && finish > due
         ? C.workingDaysBetween(due, finish) : 0;
-      const cost = lateDays * W_LATE + (co ? W_CHANGE : 0) + cursorAfter * W_BAL_SMALL;
+      const cost = lateDays * w.late + (co ? w.changeover : 0) + cursorAfter * W_BAL_SMALL;
       if (cost < bestCost) { bestCost = cost; best = m; }
     }
     if (!best) { unplaceable.push(line); continue; }
@@ -485,6 +504,64 @@ async function _buildContext(now, horizonDays) {
   };
 }
 
+/** One evaluation as the plan screen shows it: the machines in use, each with its rows in sequence. */
+function _machinePlans(evalResult, machines, linesById, usedMachineIds) {
+  return machines
+    .filter((m) => usedMachineIds.has(m.id))
+    .map((m) => {
+      const rows = evalResult.results
+        .filter((r) => r.machineId === m.id)
+        .sort((a, b) => a.sequence - b.sequence)
+        .map((r) => {
+          const line = linesById.get(r.lineId);
+          return {
+            // The optimiser's own key for this line. Carried to the
+            // client so a row can be moved and the edit read back
+            // against the plan that was offered — without it, an
+            // edited plan cannot be compared to the proposal and
+            // there is nothing for the objective to learn from.
+            lineId: r.lineId,
+            orderId: line.orderId, orderNo: line.orderNo, customer: line.customer,
+            elasticId: line.elasticId, elasticName: line.elasticName,
+            qtyMeters: line.qtyMeters, heads: r.heads, sequence: r.sequence,
+            weavingDays: r.weavingDays, startWorkingDay: r.startWorkingDay,
+            projectedFinish: _fmt(r.projectedFinish), dueDate: _fmt(line.dueDate),
+            late: r.late, lateWorkingDays: r.lateWorkingDays,
+            changeover: r.changeover, rateSource: r.rateSource,
+          };
+        });
+      return {
+        machineId: m.id, machineID: m.ID, heads: m.heads,
+        changeovers: rows.filter((r) => r.changeover).length,
+        rows,
+      };
+    });
+}
+
+/**
+ * A plan as posted (machines, each with its rows) → lineId → machineId,
+ * in the order the rows were laid out. A row whose line or machine is no
+ * longer there to plan is left out, and named in `gone` when one is
+ * asked for.
+ */
+function _mapFromRows(mpList, built, gone = null) {
+  const m = new Map();
+  for (const mp of mpList || []) {
+    for (const r of mp?.rows || []) {
+      // Insertion order IS the sequence — with `keepOrder`, _evaluate
+      // walks each machine's lines in the order they were added, so
+      // building the map in the row order is what honours a manual
+      // reorder.
+      if (r?.lineId && built.linesById.has(r.lineId) && built.machinesById.has(mp.machineId)) {
+        m.set(r.lineId, mp.machineId);
+      } else if (gone) {
+        gone.push({ lineId: r?.lineId ?? null, orderNo: r?.orderNo ?? null, elasticName: r?.elasticName || "" });
+      }
+    }
+  }
+  return m;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  GET /planner/suggest-plan?horizonDays=7
 // ═══════════════════════════════════════════════════════════════════
@@ -510,36 +587,7 @@ router.get(
     // Assemble the response grouped by machine.
     const detailByLine = new Map(evalResult.results.map((r) => [r.lineId, r]));
     const usedMachineIds = new Set([...assignmentMap.values()]);
-    const machinePlans = machines
-      .filter((m) => usedMachineIds.has(m.id))
-      .map((m) => {
-        const rows = evalResult.results
-          .filter((r) => r.machineId === m.id)
-          .sort((a, b) => a.sequence - b.sequence)
-          .map((r) => {
-            const line = linesById.get(r.lineId);
-            return {
-              // The optimiser's own key for this line. Carried to the
-              // client so a row can be moved and the edit read back
-              // against the plan that was offered — without it, an
-              // edited plan cannot be compared to the proposal and
-              // there is nothing for the objective to learn from.
-              lineId: r.lineId,
-              orderId: line.orderId, orderNo: line.orderNo, customer: line.customer,
-              elasticId: line.elasticId, elasticName: line.elasticName,
-              qtyMeters: line.qtyMeters, heads: r.heads, sequence: r.sequence,
-              weavingDays: r.weavingDays, startWorkingDay: r.startWorkingDay,
-              projectedFinish: _fmt(r.projectedFinish), dueDate: _fmt(line.dueDate),
-              late: r.late, lateWorkingDays: r.lateWorkingDays,
-              changeover: r.changeover, rateSource: r.rateSource,
-            };
-          });
-        return {
-          machineId: m.id, machineID: m.ID, heads: m.heads,
-          changeovers: rows.filter((r) => r.changeover).length,
-          rows,
-        };
-      });
+    const machinePlans = _machinePlans(evalResult, machines, linesById, usedMachineIds);
 
     const placed = assignmentMap.size;
     let late = 0;
@@ -661,6 +709,63 @@ router.get(
 );
 
 // ═══════════════════════════════════════════════════════════════════
+//  POST /planner/score — what an arrangement comes to, before it is accepted
+//
+//  { horizonDays, machines: [{ machineId, rows: [{ lineId, … }] }] }
+//
+//  The plan screen lets a line be moved to another loom or up and down a
+//  loom's queue. It could not show what that did: a moved row kept the
+//  dates of the place it had left, and the "accept" dialog quoted the
+//  PROPOSAL's late lines for a plan that was no longer the proposal.
+//  This scores the arrangement exactly as accepting it will — same
+//  context, rows walked in the order given — and writes nothing.
+// ═══════════════════════════════════════════════════════════════════
+router.post(
+  "/score",
+  isAdmin("admin", "production"),
+  catchAsyncErrors(async (req, res) => {
+    const { machines: posted, horizonDays } = req.body || {};
+    if (!Array.isArray(posted)) {
+      return res.status(400).json({ success: false, message: "machines[] is required" });
+    }
+    const now = _startOfDay(new Date());
+    const hz = Math.min(Math.max(Number(horizonDays) || 7, 1), 60);
+    const built = await _buildContext(now, hz);
+
+    // Lines that have been planned, or orders that have moved on, since
+    // the proposal was drawn are not there to score — and are said.
+    const gone = [];
+    const map = _mapFromRows(posted, built, gone);
+    const evalResult = _evaluate(map, built.ctx, { keepOrder: true });
+    const used = new Set(map.values());
+    const late = evalResult.results.filter((r) => r.late).length;
+
+    res.json({
+      success: true,
+      horizonDays: hz,
+      machines: _machinePlans(evalResult, built.machines, built.linesById, used),
+      gone,
+      objective: {
+        lines: built.lines.length,
+        placed: map.size,
+        unplaceable: Math.max(0, built.lines.length - map.size),
+        beyondHorizon: built.beyondHorizon,
+        onTime: map.size - late,
+        late,
+        totalLateDays: Math.round(evalResult.totalLate),
+        changeovers: evalResult.changeovers,
+        machinesUsed: used.size,
+      },
+      objectiveTerms: {
+        late: evalResult.totalLate,
+        changeover: evalResult.changeovers,
+        balance: evalResult.imbalance,
+      },
+    });
+  })
+);
+
+// ═══════════════════════════════════════════════════════════════════
 //  POST /planner/accept — freeze a proposal as the plan of record
 // ═══════════════════════════════════════════════════════════════════
 router.post(
@@ -713,29 +818,18 @@ router.post(
       const hz = Math.min(Math.max(Number(horizonDays) || 7, 1), 60);
       const built = await _buildContext(now, hz);
 
-      const mapFrom = (mpList) => {
-        const m = new Map();
-        for (const mp of mpList || []) {
-          for (const r of mp.rows || []) {
-            // Insertion order IS the sequence — _evaluate walks each
-            // machine's lines in the order they were added, so building
-            // the map in the admin's row order is what honours a manual
-            // reorder.
-            if (r.lineId && built.linesById.has(r.lineId) && built.machinesById.has(mp.machineId)) {
-              m.set(r.lineId, mp.machineId);
-            }
-          }
-        }
-        return m;
-      };
-
-      const acceptedMap = mapFrom(machines);
-      const proposedMap = mapFrom(proposedMachines);
+      const acceptedMap = _mapFromRows(machines, built);
+      const proposedMap = _mapFromRows(proposedMachines, built);
 
       if (acceptedMap.size > 0) {
-        recomputed = _evaluate(acceptedMap, built.ctx);
+        // Both as they were laid out on the screen: the proposal in the
+        // order it was offered, the accepted plan in the order it was
+        // left. A reorder within a loom is then a difference the two
+        // scores can show — and the plan of record carries the sequence
+        // that was chosen.
+        recomputed = _evaluate(acceptedMap, built.ctx, { keepOrder: true });
         if (proposedMap.size > 0) {
-          const before = _evaluate(proposedMap, built.ctx);
+          const before = _evaluate(proposedMap, built.ctx, { keepOrder: true });
           proposedTerms = {
             late: before.totalLate,
             changeover: before.changeovers,
