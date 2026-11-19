@@ -36,6 +36,7 @@ const router   = express.Router();
 const Complaint = require("../models/Complaints");
 const { CATEGORIES, STATUSES } = require("../models/Complaints");
 const JobOrder  = require("../models/JobOrder");
+const Order     = require("../models/Order");
 
 const multer = require("multer");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -54,6 +55,28 @@ const { trace }  = require("../services/complaintTrace");
 const themes     = require("../services/complaintThemes");
 
 const isId = (v) => mongoose.Types.ObjectId.isValid(v);
+
+// ── The notes, added to where they are kept ──────────────────────
+//
+//  `feedback` is the complaint's running notes: what the customer sent,
+//  each reply, who settled it. Adding to it by reading the text, joining
+//  the new line on and writing the whole thing back keeps one of two
+//  additions made at the same moment. These are expressions for an
+//  update the database works out itself, from the text it holds.
+//
+//  Everything that came from a person is wrapped in $literal: to the
+//  database, a string beginning with "$" is a field's name.
+const lit = (v) => ({ $literal: v });
+const heldNotes = { $ifNull: ["$feedback", ""] };
+/** `notes`, a blank line, then `line` — or `line` alone when there are no notes yet. */
+const withLine = (notes, line) => ({
+  $concat: [
+    { $cond: [{ $gt: [{ $strLenCP: notes }, 0] }, { $concat: [notes, lit("\n\n")] }, lit("")] },
+    line,
+  ],
+});
+const today = () => indiaDay(new Date(), { day: "2-digit", month: "short", year: "numeric" });
+const byWhom = (req) => (req.user?.name ? ` by ${req.user.name}` : "");
 
 // ─────────────────────────────────────────────────────────────
 // GET /themes
@@ -90,14 +113,29 @@ router.post(
     if (!CATEGORIES.includes(category)) {
       return next(new ErrorHandler(`category must be one of: ${CATEGORIES.join(", ")}`, 400));
     }
-    if (!reason?.trim()) return next(new ErrorHandler("reason is required", 400));
+    if (typeof reason !== "string" || !reason.trim()) return next(new ErrorHandler("reason is required", 400));
     const complainedOn = dateFrom(date, "date", new Date());
 
     // The job is what the trail runs through, so a complaint against a
     // job that does not exist is worse than useless — it produces an
     // empty blast radius that reads as "nobody else is affected".
-    const jobDoc = await JobOrder.findById(job).select("customer").lean();
+    const jobDoc = await JobOrder.findById(job).select("customer order jobOrderNo elastics.elastic").lean();
     if (!jobDoc) return next(new ErrorHandler("Job not found", 404));
+
+    // The same goes for an elastic the job does not make: the trace is
+    // narrowed to it, and finds nothing. (A job that lists none of its
+    // own, as older ones do, is read off its order.)
+    if (elastic) {
+      let made = (jobDoc.elastics || []).map((e) => String(e.elastic));
+      if (!made.length && jobDoc.order) {
+        const order = await Order.findById(jobDoc.order).select("elasticOrdered.elastic").lean();
+        made = (order?.elasticOrdered || []).map((e) => String(e.elastic));
+      }
+      if (!made.includes(String(elastic))) {
+        return next(new ErrorHandler(
+          `That elastic is not made on this job (J-${jobDoc.jobOrderNo}) — leave it out if the customer did not say which.`, 400));
+      }
+    }
 
     // A complaint filed against another customer's job would put the
     // wrong name at the head of the trace and, worse, would send someone
@@ -230,12 +268,15 @@ router.post(
     if (!isId(req.params.id)) return next(new ErrorHandler("Invalid complaint id", 400));
     const text = String(req.body?.text || "").trim();
     if (text.length < 10) return next(new ErrorHandler("The reply is empty", 400));
-    const c = await Complaint.findById(req.params.id).select("feedback").lean();
+    const note = `Reply sent ${today()}${byWhom(req)}:\n${text.slice(0, 2000)}`;
+    // Added to the notes as they stand in the database (see withLine).
+    const c = await Complaint.findByIdAndUpdate(
+      req.params.id,
+      [{ $set: { feedback: withLine(heldNotes, lit(note)) } }],
+      { new: true }
+    ).select("feedback").lean();
     if (!c) return next(new ErrorHandler("Complaint not found", 404));
-    const stamp = indiaDay(new Date(), { day: "2-digit", month: "short", year: "numeric" });
-    const note = `Reply sent ${stamp}${req.user?.name ? ` by ${req.user.name}` : ""}:\n${text.slice(0, 2000)}`;
-    const feedback = c.feedback ? `${c.feedback}\n\n${note}` : note;
-    await Complaint.updateOne({ _id: c._id }, { $set: { feedback } });
+    const feedback = c.feedback;
     if (isId(req.body?.aiSuggestion)) {
       aiLedger.settle(req.body.aiSuggestion, { accepted: { text }, decidedBy: req.user?._id, expectSurface: "complaint-reply", ignoreMissing: true }).catch(() => {});
     }
@@ -282,19 +323,33 @@ router.put(
 
     // Only the fields actually sent are written. A PUT carrying just a
     // status must not blank the resolution somebody typed yesterday.
+    //
+    // Written as expressions (see the note on `withLine` above), so that
+    // a change of status can add its own line to the notes — who, when,
+    // and what it was before — in the same write that makes the change.
+    // A complaint could be marked Resolved, Rejected or Closed with
+    // nothing kept of who did it.
     const update = {};
-    if (status !== undefined)        update.status        = status;
-    if (resolution !== undefined)    update.resolution    = String(resolution || "");
-    if (feedback !== undefined)      update.feedback      = String(feedback || "").trim();
-    if (category !== undefined)      update.category      = category;
-    if (actionTakenBy !== undefined) update.actionTakenBy = actionTakenBy || null;
+    if (resolution !== undefined)    update.resolution    = lit(String(resolution || ""));
+    if (category !== undefined)      update.category      = lit(category);
+    if (actionTakenBy !== undefined) update.actionTakenBy = lit(actionTakenBy ? new mongoose.Types.ObjectId(String(actionTakenBy)) : null);
+
+    const notes = feedback !== undefined ? lit(String(feedback || "").trim()) : heldNotes;
+    if (status !== undefined) {
+      update.status = lit(status);
+      const moved = { $concat: [lit(`Marked ${status} (was `), "$status", lit(`) on ${today()}${byWhom(req)}`)] };
+      // Only when it really moves: saving the form again is not an event.
+      update.feedback = { $cond: [{ $ne: ["$status", lit(status)] }, withLine(notes, moved), notes] };
+    } else if (feedback !== undefined) {
+      update.feedback = notes;
+    }
 
     if (Object.keys(update).length === 0) {
       return next(new ErrorHandler("Nothing to update", 400));
     }
 
     const doc = await Complaint.findByIdAndUpdate(
-      req.params.id, { $set: update }, { new: true, runValidators: true }
+      req.params.id, [{ $set: update }], { new: true }
     ).populate("customer", "name").lean();
 
     if (!doc) return next(new ErrorHandler("Complaint not found", 404));
