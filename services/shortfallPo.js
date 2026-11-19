@@ -9,7 +9,6 @@
 // apart between the two.
 
 const PurchaseOrder = require('../models/PurchaseOrder');
-const { nextNumber } = require('../utils/sequence');
 
 /**
  * How much of a row still needs buying.
@@ -61,13 +60,11 @@ const skipReasons = (unresolved, noSupplier) => [
   })),
 ];
 
-async function nextPoNo() {
-  return nextNumber('poNo', async () => {
-    const last = await PurchaseOrder.findOne({ poNo: { $ne: null } })
-      .sort({ poNo: -1 }).select('poNo').lean();
-    return last?.poNo || 0;
-  });
-}
+// One counter, one seed, for every place a PO is raised
+// (services/purchaseOrderRules.js). This file had its own, seeded from 0
+// where the purchase order form's was seeded from 1000: on a new database
+// whichever was used first decided where the numbers began.
+const nextPoNo = () => require('./purchaseOrderRules').nextPoNumber();
 
 /**
  * Create one purchase order per supplier covering the orderable shortfall.

@@ -419,21 +419,44 @@ describe("POST /api/v2/materials/bulk-adjust-stock", () => {
 // ─── POST /raise-po ──────────────────────────────────────────────────────────
 
 describe("POST /api/v2/materials/raise-po", () => {
-  beforeEach(() => jest.clearAllMocks());
+  // The route is now held to what every purchase order is
+  // (services/purchaseOrderRules.js): a supplier that exists, lines that
+  // are checked, and a PO number. What it creates — and what it refuses of
+  // what it used to accept, a supplier id of "sup1" among them — is tested
+  // against a real database in tests/api/materialsPoAndStock.test.js. Here,
+  // only what is refused before anything is looked up or numbered.
+  const SUPPLIER = "000000000000000000000021";
+  const MATERIAL = "000000000000000000000022";
+  beforeEach(() => {
+    jest.clearAllMocks();
+    Supplier.exists = jest.fn().mockResolvedValue({ _id: SUPPLIER });
+    PurchaseOrder.create = jest.fn();
+  });
+  afterEach(() => expect(PurchaseOrder.create).not.toHaveBeenCalled());
 
   it("returns 400 when supplier is missing", async () => {
     const res = await request(app)
       .post("/api/v2/materials/raise-po")
-      .send({ items: [{ rawMaterial: "mat1", quantity: 10 }] });
+      .send({ items: [{ rawMaterial: MATERIAL, quantity: 10 }] });
 
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/supplier required/i);
+    expect(res.body.message).toMatch(/supplier is required/i);
+  });
+
+  it("returns 400 when the supplier is not on file", async () => {
+    Supplier.exists = jest.fn().mockResolvedValue(null);
+    const res = await request(app)
+      .post("/api/v2/materials/raise-po")
+      .send({ supplier: SUPPLIER, items: [{ rawMaterial: MATERIAL, quantity: 10 }] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/supplier does not exist/i);
   });
 
   it("returns 400 when items array is empty", async () => {
     const res = await request(app)
       .post("/api/v2/materials/raise-po")
-      .send({ supplier: "sup1", items: [] });
+      .send({ supplier: SUPPLIER, items: [] });
 
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/at least one item/i);
@@ -442,35 +465,18 @@ describe("POST /api/v2/materials/raise-po", () => {
   it("returns 400 when item has no rawMaterial", async () => {
     const res = await request(app)
       .post("/api/v2/materials/raise-po")
-      .send({ supplier: "sup1", items: [{ quantity: 5 }] });
+      .send({ supplier: SUPPLIER, items: [{ quantity: 5 }] });
 
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/rawMaterial required/i);
+    expect(res.body.message).toMatch(/rawMaterial is required/i);
   });
 
   it("returns 400 when item quantity is 0", async () => {
     const res = await request(app)
       .post("/api/v2/materials/raise-po")
-      .send({ supplier: "sup1", items: [{ rawMaterial: "mat1", quantity: 0 }] });
+      .send({ supplier: SUPPLIER, items: [{ rawMaterial: MATERIAL, quantity: 0 }] });
 
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/quantity must be > 0/i);
-  });
-
-  it("creates PO and returns 201", async () => {
-    const fakePO = {
-      _id: "po1",
-      supplier: "sup1",
-      items: [{ rawMaterial: "mat1", quantity: 10 }],
-      populate: jest.fn().mockResolvedValue({ _id: "po1" }),
-    };
-    PurchaseOrder.create = jest.fn().mockResolvedValue(fakePO);
-
-    const res = await request(app)
-      .post("/api/v2/materials/raise-po")
-      .send({ supplier: "sup1", items: [{ rawMaterial: "mat1", quantity: 10 }] });
-
-    expect(res.status).toBe(201);
-    expect(res.body.success).toBe(true);
+    expect(res.body.message).toMatch(/quantity must be a positive number/i);
   });
 });

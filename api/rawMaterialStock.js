@@ -33,6 +33,9 @@ const { maybeFirePoReceivedForCritical } = require("../utils/inventoryAlerts");
 const { enqueue } = require("../utils/outbox");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
 const { materialLedger, parseRange } = require("../services/materialLedger");
+const { nextPoNumber, readPoLines, assertSupplier, deriveStatus } = require("../services/purchaseOrderRules");
+const { round3 } = require("../utils/quantity");
+const { asCallerError } = require("../utils/routeError");
 const { getPdfBranding } = require("../services/documentSettings");
 const router = express.Router();
 
@@ -65,17 +68,17 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     const { supplier, items } = req.body;
 
-    if (!supplier)                   return next(new ErrorHandler("Supplier required", 400));
-    if (!items || items.length === 0) return next(new ErrorHandler("At least one item required", 400));
-
-    for (const item of items) {
-      if (!item.rawMaterial) return next(new ErrorHandler("rawMaterial required for each item", 400));
-      if (!item.quantity || item.quantity <= 0)
-        return next(new ErrorHandler("quantity must be > 0 for each item", 400));
-    }
+    // Held to what every purchase order is (services/purchaseOrderRules.js).
+    // This route made its own: the PO got NO NUMBER — only the purchase
+    // order form allocated one — and its lines were stored as sent, so a
+    // supplier that does not exist, a negative price, one material twice
+    // and a "receivedQuantity" of the caller's choosing all went in.
+    await assertSupplier(supplier);
+    const lines = await readPoLines(items);
 
     const po = await PurchaseOrder.create({
-      supplier, items, date: new Date(), status: "Open",
+      supplier, items: lines, date: new Date(), status: "Open",
+      poNo: await nextPoNumber(),
     });
 
     const populated = await po.populate([
@@ -101,8 +104,9 @@ router.post(
         new ErrorHandler("rawMaterialId, purchaseOrderId and quantity are required", 400)
       );
     }
-    const qtyNum = Number(quantity);
-    if (!Number.isFinite(qtyNum) || qtyNum <= 0) {
+    // To the gram, as the stock and the PO line are kept.
+    const qtyNum = round3(quantity);
+    if (!Number.isFinite(Number(quantity)) || qtyNum <= 0) {
       return next(
         new ErrorHandler("quantity must be a positive number", 400)
       );
@@ -139,6 +143,13 @@ router.post(
         const poLine = po.items.find(
           (i) => i.rawMaterial.toString() === String(rawMaterialId)
         );
+        // Against a PO means on it. A material that is not was received
+        // anyway: its stock went up, on a receipt naming a PO that never
+        // moved and could never be matched to a bill for it.
+        if (!poLine) {
+          throw new ErrorHandler(
+            `${material.name} is not on PO ${po.poNo != null ? `#${po.poNo}` : "that purchase order"} — receive it against the PO it was ordered on`, 400);
+        }
         // At the price it was bought at, so the weighted average moves
         // with what the yarn actually cost.
         unitPrice = Math.max(0, Number(poLine?.price ?? material.price) || 0);
@@ -174,15 +185,13 @@ router.post(
           unitPrice,
         }], { session });
 
-        if (poLine) {
-          poLine.receivedQuantity = (poLine.receivedQuantity || 0) + qtyNum;
-          const allFilled = po.items.every(
-            (i) => (i.receivedQuantity || 0) >= (i.quantity || 0)
-          );
-          po.status = allFilled ? "Completed" : "Partial";
-          po.increment(); // an edit opened before this receipt gets a 409, not an overwrite
-          await po.save({ session });
-        }
+        // To three places, and the status from the same rule the purchase
+        // order form's receipt uses: 227.69 + 168.85 kg against 396.54
+        // ordered was 396.53999999999996, and the PO stayed "Partial".
+        poLine.receivedQuantity = round3((Number(poLine.receivedQuantity) || 0) + qtyNum);
+        po.status = deriveStatus(po.items);
+        po.increment(); // an edit opened before this receipt gets a 409, not an overwrite
+        await po.save({ session });
       });
     } catch (err) {
       // A replay that raced the first past the fast path above.
@@ -272,20 +281,25 @@ router.post(
 router.post(
   "/bulk-adjust-stock",
   catchAsyncErrors(async (req, res, next) => {
-    const { adjustments = [], globalReason = "Stock adjustment" } = req.body;
-
-    if (adjustments.length > 500) {
-      return next(new ErrorHandler("adjustments exceeds the 500-item limit per request", 400));
-    }
+    const adjustments = req.body?.adjustments;
+    const globalReason = String(req.body?.globalReason ?? "").trim() || "Stock adjustment";
 
     if (!Array.isArray(adjustments) || adjustments.length === 0) {
       return next(new ErrorHandler("adjustments array is required", 400));
     }
+    if (adjustments.length > 500) {
+      return next(new ErrorHandler("adjustments exceeds the 500-item limit per request", 400));
+    }
 
-    // Only process items with a meaningful non-zero delta
-    const toProcess = adjustments.filter(
-      (a) => a._id && typeof a.adjustment === "number" && a.adjustment !== 0
-    );
+    // Only process items with a meaningful non-zero delta — to the gram,
+    // as stock is kept. Added to the stock as typed, 250.7 − 0.3 left
+    // 250.39999999999998; and because what was applied then differed from
+    // what was asked by a hair, the answer said the write-off had been
+    // cut short when it had not.
+    const toProcess = adjustments
+      .filter((a) => a && a._id && typeof a.adjustment === "number" && Number.isFinite(a.adjustment))
+      .map((a) => ({ ...a, adjustment: round3(a.adjustment) }))
+      .filter((a) => a.adjustment !== 0);
 
     if (toProcess.length === 0) {
       return res.status(200).json({
@@ -324,7 +338,7 @@ router.post(
             if (!material) throw new Error("Not found");
 
             const oldStock = Number(material.stock) || 0;
-            const newStock = Math.max(0, oldStock + item.adjustment);
+            const newStock = round3(Math.max(0, oldStock + item.adjustment));
             // What the stock actually moved by. Stock floors at zero, so
             // writing 50 off against 30 on hand moves 30 — and every row
             // below used to record the 50 anyway: the ledger's arithmetic
@@ -332,7 +346,7 @@ router.post(
             // straight into the order P&L, and the lot draw asked for
             // yarn the lot never held. The requested figure is still
             // recorded, beside the applied one, so the gap is visible.
-            const applied  = newStock - oldStock;
+            const applied  = round3(newStock - oldStock);
             // Nothing to take. Silently writing a zero-quantity outward
             // row and reporting success would tell the person their
             // write-off went through when no stock moved at all.
@@ -345,7 +359,7 @@ router.post(
 
             await material.save({ session });
             // Running balance log
-            const reason = item.reason?.trim() || globalReason;
+            const reason = String(item.reason ?? "").trim() || globalReason;
 
             await appendStockMovement(material._id, {
               type:     "STOCK_ADJUST",
@@ -449,7 +463,7 @@ router.post(
               await enqueue(session, "inventory.stockoutCheck", {
                 materialId: material._id.toString(),
                 oldStock, newStock,
-                reason: `Stock adjustment: ${item.reason?.trim() || globalReason}`,
+                reason: `Stock adjustment: ${reason}`,
               });
             }
 
@@ -471,7 +485,17 @@ router.post(
           });
           if (row) updated.push(row);
         } catch (err) {
-          errors.push({ id: item._id, error: err.message });
+          // What the caller can put right, in its own words; a fault of
+          // ours is logged and not read out (utils/routeError.js).
+          const shown = asCallerError(err);
+          if (shown?.name === "CastError") {
+            errors.push({ id: item._id, error: "A reference on this line (a purchase order, a lot or a job) is not a valid one" });
+          } else if (shown instanceof ErrorHandler || shown?.name === "ValidationError") {
+            errors.push({ id: item._id, error: shown.message });
+          } else {
+            console.error(`[bulk-adjust-stock] ${item._id}:`, err);
+            errors.push({ id: item._id, error: "This one could not be adjusted — try it again" });
+          }
         }
       }
     } finally {

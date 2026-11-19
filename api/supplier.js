@@ -32,7 +32,6 @@ const ErrorHandler     = require("../utils/ErrorHandler");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { isAuthenticated } = require("../middleware/auth");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
-const { nextNumber } = require("../utils/sequence");
 const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
 const { creditLot } = require("../services/yarnLotService");
@@ -46,14 +45,9 @@ const { assertVersion } = require("../utils/versioning");
 const { asCallerError } = require("../utils/routeError");
 const { parseMoney, MAX_RATE } = require("../utils/money");
 
-// Race-free PO number: atomic counter, seeded once from the current max.
-// (The old read-max-then-+1 could give two concurrent creates the same poNo.)
-async function nextPoNumber() {
-  return nextNumber("poNo", async () => {
-    const last = await PurchaseOrder.findOne({}, { poNo: 1 }).sort({ poNo: -1 });
-    return last?.poNo || 1000;
-  });
-}
+// PO numbering, the line checks and a PO's status are shared with the
+// other places a PO is raised or received (services/purchaseOrderRules.js).
+const { nextPoNumber, pendingOf, deriveStatus, readPoLines, assertSupplier, round3 } = require("../services/purchaseOrderRules");
 const { requireReason } = require("../utils/auditReason");
 const { momentFrom } = require("../utils/requestDate");
 const { pageOf } = require("../utils/paging");
@@ -88,73 +82,6 @@ const OVER_RECEIPT_TOLERANCE = 0.10;
 const MIN_EXCESS_REASON = 5;
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-
-// Quantities are kilograms (or pieces, or metres) to three places. Sums
-// of typed decimals are not: 227.69 + 168.85 is 396.53999999999996, a
-// hair short of the 396.54 that was ordered. Left as it fell, a PO
-// received in two lots stayed "Partial" for good with a pending quantity
-// nobody could see or receive — about one two-lot decimal PO in ten.
-const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
-
-/** What is still to come on a PO line; never less than nothing. */
-const pendingOf = (item) => Math.max(0, round3((Number(item?.quantity) || 0) - (Number(item?.receivedQuantity) || 0)));
-
-// ─────────────────────────────────────────────────────────────────────────
-// HELPER: derive PO status from its items
-// ─────────────────────────────────────────────────────────────────────────
-function deriveStatus(items) {
-  if (!items || items.length === 0) return "Open";
-  const allDone = items.every((i) => round3(i.receivedQuantity) >= round3(i.quantity));
-  const anyDone = items.some( (i) => round3(i.receivedQuantity) > 0);
-  if (allDone) return "Completed";
-  if (anyDone) return "Partial";
-  return "Open";
-}
-
-/**
- * The lines of a purchase order as sent, checked: for /create-po and
- * /edit-po alike, which each checked a different half.
- *
- *   • a material that is one, once. Two lines for one material cannot
- *     be received: a receipt finds "the" line for its material, which is
- *     always the first, so the second stays pending for good and the PO
- *     never completes. The receipt already refuses two rows for one
- *     material for the same reason;
- *   • a quantity above zero, to three places;
- *   • a price that is one. None is ₹0 ("not priced yet"); a negative
- *     price, or text, used to be stored as sent.
- *
- * Returns the lines to store; throws ErrorHandler(400).
- */
-async function readPoLines(items) {
-  if (!Array.isArray(items) || items.length === 0) throw new ErrorHandler("At least one item is required", 400);
-  const seen = new Set();
-  const lines = items.map((item, idx) => {
-    if (!item || !item.rawMaterial) throw new ErrorHandler(`items[${idx}].rawMaterial is required`, 400);
-    const id = String(item.rawMaterial?._id ?? item.rawMaterial);
-    if (!mongoose.Types.ObjectId.isValid(id)) throw new ErrorHandler(`items[${idx}].rawMaterial is not a valid id`, 400);
-    if (seen.has(id)) {
-      throw new ErrorHandler(
-        `Line ${idx + 1} is a material already on this purchase order. Put it on one line with the whole quantity — ` +
-        `a second line for the same material could never be received.`, 400);
-    }
-    seen.add(id);
-    const q = round3(item.quantity);
-    if (!Number.isFinite(Number(item.quantity)) || q <= 0) throw new ErrorHandler(`items[${idx}].quantity must be a positive number`, 400);
-    let price = 0;
-    if (!(item.price === undefined || item.price === null || item.price === "")) {
-      const read = parseMoney(item.price, { max: MAX_RATE, label: `Line ${idx + 1}: the price` });
-      if (!read.ok) throw new ErrorHandler(read.reason, 400);
-      price = read.value;
-    }
-    return { rawMaterial: id, price, quantity: q, receivedQuantity: 0 };
-  });
-  const known = new Set((await RawMaterial.find({ _id: { $in: [...seen] } }).select("_id").lean()).map((m) => String(m._id)));
-  const missing = lines.findIndex((l) => !known.has(l.rawMaterial));
-  if (missing !== -1) throw new ErrorHandler(`Line ${missing + 1}: that material does not exist`, 400);
-  return lines;
-}
-
 
 // ─────────────────────────────────────────────────────────────────────────
 // POST /create-supplier
@@ -233,13 +160,8 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     try {
       const { supplier, items, expectedDate, notes, forOrder, forJob } = req.body;
-      if (!supplier)
-        return next(new ErrorHandler("Supplier is required", 400));
-      // A supplier that is one. An id of nothing used to make a PO from
-      // nobody: it listed with a blank supplier and could not be chased.
-      if (!mongoose.Types.ObjectId.isValid(String(supplier)) || !(await Supplier.exists({ _id: supplier }))) {
-        return next(new ErrorHandler("That supplier does not exist", 400));
-      }
+      // A supplier that is one (services/purchaseOrderRules.js).
+      await assertSupplier(supplier);
       // Lines checked as a whole (see readPoLines): a material once, a
       // quantity above zero, a price that is one.
       const lines = await readPoLines(items);
