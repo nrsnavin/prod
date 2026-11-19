@@ -20,6 +20,7 @@ const { keepRequestContext } = require("../middleware/userContext.js");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const { dateFrom } = require("../utils/requestDate");
+const factoryDay = require("../utils/factoryDay");
 const { saveIf } = require("../utils/conditionalSave");
 const ShiftDetail      = require("../models/ShiftDetail");
 const MachineIssue     = require("../models/MachineIssue");
@@ -113,6 +114,28 @@ function resolveBillType(file) {
 
   const ext = String(file.originalname || "").split(".").pop().toLowerCase();
   return BILL_EXTENSION_TYPES[ext] ?? null;
+}
+
+/**
+ * Where a machine's next service stands against today.
+ *
+ * A service date is a day, and "now" is a moment. Comparing the two
+ * called a service due TODAY overdue from half past five in the morning
+ * — 20 points off the machine's health score, "0d overdue" on the list
+ * — while counting it as zero days away in the same row. Days are
+ * compared with days here, and they are the factory's
+ * (utils/factoryDay.js).
+ *
+ * @returns {{next: Date, daysUntil: number, overdue: boolean}|null}
+ *   null when there is no readable date. daysUntil is negative once the
+ *   day has passed; 0 is today, which is due and not overdue.
+ */
+function serviceStanding(nextServiceDate, now = new Date()) {
+  const next = factoryDay.calendarDay(nextServiceDate);
+  if (!next) return null;
+  const today = factoryDay.calendarDay(now);
+  const daysUntil = Math.round((next.getTime() - today.getTime()) / factoryDay.DAY);
+  return { next, daysUntil, overdue: daysUntil < 0 };
 }
 
 /** How many past shifts the machine detail page shows. */
@@ -965,7 +988,9 @@ router.post(
       technician:  technician?.trim() || "",
       cost:        Number(cost) || 0,
       nextServiceDate: nextService,
-      resolved:    Boolean(resolved),
+      // `setMaintenance` below takes "true" as well as true; this took
+      // "false" as true, since any non-empty string is.
+      resolved:    !(resolved === false || resolved === "false"),
     };
 
     machine.serviceLogs.push(log);
@@ -1293,7 +1318,6 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     const days = Math.min(Math.max(Number(req.query.days) || 14, 1), 90);
     const now = new Date();
-    const horizon = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
 
     const machines = await Machine.find()
       .select("ID manufacturer status serviceLogs")
@@ -1306,19 +1330,19 @@ router.get(
         .sort((a, b) => new Date(b.date) - new Date(a.date));
       if (dated.length === 0) continue;
 
-      const next = new Date(dated[0].nextServiceDate);
-      if (Number.isNaN(next.getTime()) || next > horizon) continue;
+      const standing = serviceStanding(dated[0].nextServiceDate, now);
+      if (!standing || standing.daysUntil > days) continue;
 
       due.push({
         machineId:       m._id,
         ID:              m.ID,
         manufacturer:    m.manufacturer,
         status:          m.status,
-        nextServiceDate: next,
+        nextServiceDate: standing.next,
         lastServiceType: dated[0].type,
         lastServiceDate: dated[0].date,
-        overdue:         next < now,
-        daysUntil: Math.ceil((next - now) / (24 * 60 * 60 * 1000)),
+        overdue:         standing.overdue,
+        daysUntil:       standing.daysUntil,
       });
     }
 
@@ -1402,10 +1426,10 @@ router.get(
       // Service recency from the most recent log carrying a next date.
       const logs = (m.serviceLogs || []).filter((l) => l.nextServiceDate)
         .sort((a, b) => new Date(b.date) - new Date(a.date));
-      const nextService = logs.length ? new Date(logs[0].nextServiceDate) : null;
-      const serviceOverdue = nextService && nextService < now;
-      const serviceDueSoon = nextService && !serviceOverdue &&
-        nextService < new Date(now.getTime() + 7 * 86_400_000);
+      const standing = logs.length ? serviceStanding(logs[0].nextServiceDate, now) : null;
+      const nextService = standing ? standing.next : null;
+      const serviceOverdue = !!standing && standing.overdue;
+      const serviceDueSoon = !!standing && !standing.overdue && standing.daysUntil <= 7;
 
       const reasons = [];
       let score = 100;
@@ -1491,7 +1515,7 @@ router.get(
     const d30 = new Date(now.getTime() - 30 * 86_400_000);
     const oid = new mongoose.Types.ObjectId(id);
 
-    const [machine, prod, issues] = await Promise.all([
+    const [machine, prod, issues, driftAll] = await Promise.all([
       Machine.findById(id).select("ID status serviceLogs manufacturer NoOfHead").lean(),
       ShiftDetail.aggregate([
         { $match: { machine: oid, status: "closed", date: { $gte: d28 } } },
@@ -1505,22 +1529,36 @@ router.get(
       ]),
       MachineIssue.find({ machine: oid, createdAt: { $gte: d30 } })
         .select("title severity status createdAt").sort({ createdAt: -1 }).limit(8).lean(),
+      machineHealth.driftByMachine({ recentDays: 7, baselineDays: 21, now }),
     ]);
     if (!machine) return next(new ErrorHandler("Machine not found", 404));
 
     const p = prod[0] || {};
     const recentAvg = p.recentCount ? Math.round(p.recentSum / p.recentCount) : null;
     const baseAvg   = p.baseCount   ? Math.round(p.baseSum   / p.baseCount)   : null;
-    const dropPct = baseAvg && recentAvg != null && baseAvg > 0
-      ? Math.max(0, Math.round(((baseAvg - recentAvg) / baseAvg) * 100)) : 0;
+    // The drop is the one the health score on the list is computed from
+    // (services/machineHealth.js): each shift against what its own
+    // product normally makes. This route still worked it out from raw
+    // metres, so a loom moved onto a slower product was "healthy, no
+    // output drop" on the list and "output is down 50%, urgency high" in
+    // the advice opened from that same row.
+    const drift = driftAll.get(String(id)) || { dropPct: 0, recentPctOfExpected: null, baselinePctOfExpected: null, recentShifts: 0 };
+    const dropPct = drift.recentShifts > 0 ? drift.dropPct : 0;
     const logs = (machine.serviceLogs || []).filter((l) => l.nextServiceDate)
       .sort((a, b) => new Date(b.date) - new Date(a.date));
-    const nextService = logs.length ? new Date(logs[0].nextServiceDate) : null;
-    const serviceOverdue = nextService && nextService < now;
+    const standing = logs.length ? serviceStanding(logs[0].nextServiceDate, now) : null;
+    const nextService = standing ? standing.next : null;
+    const serviceOverdue = !!standing && standing.overdue;
 
     const facts = [
       `Machine ${machine.ID} (${machine.manufacturer || "?"}, ${machine.NoOfHead || "?"} heads), status: ${machine.status}.`,
-      recentAvg != null ? `Recent 7d avg ${recentAvg} m/shift vs ${baseAvg} m baseline (${dropPct}% ${dropPct > 0 ? "drop" : "change"}).` : "No recent production data.",
+      recentAvg != null
+        ? `Recent 7d avg ${recentAvg} m/shift` + (baseAvg != null ? `, ${baseAvg} m over the three weeks before` : "") + "." +
+          (drift.recentPctOfExpected != null
+            ? ` Against what its own products normally make: ${drift.recentPctOfExpected}% now, ${drift.baselinePctOfExpected}% before` +
+              (dropPct > 0 ? ` (${dropPct}% drop).` : " (no drop).")
+            : " Too few shifts to say whether that is a change in the machine or in the product.")
+        : "No recent production data.",
       `Issues in last 30d: ${issues.length}${issues.length ? " — " + issues.map((i) => `${i.title} [${i.severity}/${i.status}]`).join("; ") : ""}.`,
       nextService ? `Next service ${indiaDay(nextService, {})}${serviceOverdue ? " (OVERDUE)" : ""}.` : "No scheduled service.",
     ].join("\n");
