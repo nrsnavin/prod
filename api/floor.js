@@ -109,7 +109,6 @@ router.post(
   })
 );
 
-/** The entry this photo is for has to be on the open shift. */
 router.post(
   '/remark-issue',
   validate({ body: z.object({ detailId: z.string() }) }),
@@ -118,6 +117,7 @@ router.post(
   })
 );
 
+/** The entry this photo is for has to be on the open shift. */
 async function detailOnShift(session, detailId) {
   if (!mongoose.isValidObjectId(String(detailId))) return null;
   const plan = await floor.findPlan(session.dateKey, session.shift);

@@ -69,6 +69,55 @@ async function closedBecauseLeft(user) {
   return err;
 }
 
+/**
+ * The login an address belongs to, however it was typed. Addresses are
+ * kept in lower case, and a phone keyboard starts a line with a capital:
+ * "Navin@…" looked up exactly as typed was "Invalid email or password",
+ * with the right password — while the code sign-in and the reset link
+ * have always matched whatever the case. The address exactly as typed is
+ * tried first, so two old accounts that differ only by case each still
+ * open their own.
+ */
+async function loginForEmail(email, select = "") {
+  const exact = await User.findOne({ email }).select(select);
+  if (exact) return exact;
+  const lower = email.toLowerCase();
+  if (lower !== email) {
+    const canonical = await User.findOne({ email: lower }).select(select);
+    if (canonical) return canonical;
+  }
+  // An account from before addresses were kept in lower case.
+  return User.findOne({ email: { $regex: `^${escapeRegex(email)}$`, $options: "i" } }).select(select);
+}
+
+/**
+ * What GET /user/me answers with — and PATCH /user/me, which the apps
+ * swap in for it. `user` is a lean login with `employee` populated.
+ */
+function meView(user) {
+  return {
+    id:         user._id,
+    name:       user.name,
+    // A worker login's placeholder is not an address; say there is none.
+    email:      isPlaceholderEmail(user.email) ? null : user.email,
+    role:       user.role,
+    department: user.department || null,
+    employee:   user.employee || null,
+    // A worker's login: the web app shows it the employee view. The
+    // server's rule, so the app never keeps a second copy of it.
+    selfService: isSelfServiceOnly(user),
+    // When this login was created — the profile page's "member since".
+    createdAt:  user.createdAt,
+    // Effective per-user feature set (falls back to the department
+    // default for legacy users with none stored) so the client can
+    // refresh access on load without re-login. NOTE: this is the one
+    // live GET /me — do not add a second, it would be shadowed.
+    features:   Array.isArray(user.features)
+      ? user.features
+      : featuresForDepartment(user.department || user.role),
+  };
+}
+
 /** The body every sign-in answers with (and the cookie beside it). */
 function sendSession(req, res, user) {
   const longLived = session.wantsLongSession(req);
@@ -134,14 +183,16 @@ router.post("/sign-up",
   await recordAccess(req, ACTION_CODES.LOGIN_CREATED, user, {
     department: user.department, features: user.features, via: "sign-up",
   });
-  try {
-    res.status(200).json({
-      success: true,
-      user,
-    });
-  } catch (error) {
-    return next(error);
-  }
+  // What was made, without what it is kept with: this used to send the
+  // stored record back as it was created — password hash included.
+  res.status(200).json({
+    success: true,
+    user: {
+      _id: user._id, id: user._id, name: user.name, email: user.email, role: user.role,
+      department: user.department || null, features: user.features, employee: user.employee || null,
+      selfService: isSelfServiceOnly(user), createdAt: user.createdAt,
+    },
+  });
 }))
 
 
@@ -161,7 +212,7 @@ router.post(
         return next(new ErrorHandler("Please provide the all fields!", 400));
       }
 
-      const user = await User.findOne({ email }).select("+password");
+      const user = await loginForEmail(email, "+password");
 
       // Unify the "user not found" and "bad password" paths into one
       // generic 401. Distinguishing them lets attackers enumerate
@@ -716,30 +767,7 @@ router.get(
       .lean();
     if (!user) return next(new ErrorHandler("User not found", 404));
 
-    res.status(200).json({
-      success: true,
-      user: {
-        id:         user._id,
-        name:       user.name,
-        // A worker login's placeholder is not an address; say there is none.
-        email:      isPlaceholderEmail(user.email) ? null : user.email,
-        role:       user.role,
-        department: user.department || null,
-        employee:   user.employee || null,
-        // A worker's login: the web app shows it the employee view. The
-        // server's rule, so the app never keeps a second copy of it.
-        selfService: isSelfServiceOnly(user),
-        // When this login was created — the profile page's "member since".
-        createdAt:  user.createdAt,
-        // Effective per-user feature set (falls back to the department
-        // default for legacy users with none stored) so the client can
-        // refresh access on load without re-login. NOTE: this is the one
-        // live GET /me — do not add a second, it would be shadowed.
-        features:   Array.isArray(user.features)
-          ? user.features
-          : featuresForDepartment(user.department || user.role),
-      },
-    });
+    res.status(200).json({ success: true, user: meView(user) });
   })
 );
 
@@ -865,21 +893,15 @@ router.patch(
       });
     }
 
-    // Return the canonical /me shape so the client can swap state.
+    // The same shape as GET /me, so the client can swap its state for
+    // it. It used to be a shorter one — no department, no feature list —
+    // and gave a worker's placeholder address as their email.
     const fresh = await User.findById(req.user.id)
       .populate("employee", EMPLOYEE_CARD_FIELDS)
       .lean();
+    if (!fresh) return next(new ErrorHandler("User not found", 404));
 
-    res.status(200).json({
-      success: true,
-      user: {
-        id:       fresh._id,
-        name:     fresh.name,
-        email:    fresh.email,
-        role:     fresh.role,
-        employee: fresh.employee || null,
-      },
-    });
+    res.status(200).json({ success: true, user: meView(fresh) });
   })
 );
 
@@ -1129,6 +1151,7 @@ router.put(
     const user = await User.findById(req.params.id).select("+password +pin");
     if (!user) return next(new ErrorHandler("User not found", 404));
     const before = accessSnapshot(user);
+    let movedDepartment = false;
 
     if (typeof req.body.name === "string" && req.body.name.trim())
       user.name = req.body.name.trim();
@@ -1155,6 +1178,7 @@ router.put(
           ));
         }
       }
+      movedDepartment = user.department !== req.body.department;
       user.department = req.body.department;
       user.role       = roleForDepartment(req.body.department);
     }
@@ -1183,6 +1207,21 @@ router.put(
         ));
       }
       user.features = scoped;
+    } else if (movedDepartment && Array.isArray(user.features)) {
+      // Moved, and the list was not sent with the move (both apps send
+      // it; a script or an older build may not). The old department's
+      // screens stayed on the list: shown as granted on the Users
+      // screen, refused at the door. What the new department can also
+      // open is kept. A login that had more than the screens every login
+      // has, and keeps none of it, gets the new department's own — a
+      // move is not "take everything away". A worker's login, and one
+      // granted nothing, stay exactly that.
+      const scope = new Set(featuresForDepartment(user.department));
+      const kept = user.features.filter((k) => scope.has(k));
+      const beyondEveryLogin = (list) => list.some((k) => !ALWAYS_ON.includes(k));
+      user.features = beyondEveryLogin(user.features) && !beyondEveryLogin(kept)
+        ? featuresForDepartment(user.department)
+        : kept;
     }
 
     const link = await resolveEmployeeLink(req.body.employee, user._id);
@@ -1293,8 +1332,12 @@ router.post(
       ));
     }
     // Only someone still here can clash: a leaver's number never signs in.
-    const shared = await Employee.findOne({ $and: [{ phoneNumber: employee.phoneNumber, _id: { $ne: employee._id } }, stillHere()] })
-      .select("name").lean();
+    // Compared as the ten digits each number means, not as it was typed:
+    // "+91 98765 43210" and "9876543210" are one phone, and looked up as
+    // they were stored the two were given a PIN each.
+    const others = await Employee.find({ $and: [{ _id: { $ne: employee._id }, phoneNumber: { $nin: [null, ""] } }, stillHere()] })
+      .select("name phoneNumber").lean();
+    const shared = others.find((e) => normalisePhone(e.phoneNumber) === phone);
     if (shared) {
       return next(new ErrorHandler(
         `${shared.name} has the same phone number. Each worker needs their own number to sign in.`, 409
@@ -1332,6 +1375,17 @@ router.post(
       // whatever sessions it has open end here.
       login.tokenVersion = (login.tokenVersion ?? 0) + 1;
     }
+    // Signing in looks for the ten digits exactly. A number kept from
+    // before that was the rule — "+91 98765 43210" — was read tolerantly
+    // here and never found there: the admin saw "phone sign-in is on",
+    // the worker "wrong phone number or PIN", for ever. It is kept as
+    // what they will sign in with (and the record's version moves, so a
+    // form opened before this cannot put the old shape back unnoticed).
+    const phoneWas = employee.phoneNumber;
+    if (phoneWas !== phone) {
+      await Employee.updateOne({ _id: employee._id }, { $set: { phoneNumber: phone }, $inc: { __v: 1 } });
+      employee.phoneNumber = phone;
+    }
     const hadPin = !!login.pin;
     login.pin = await hashPassword(pin);
     login.pinAttempts = 0;
@@ -1344,6 +1398,7 @@ router.post(
     }
     await recordAccess(req, hadPin ? ACTION_CODES.PHONE_SIGNIN_RESET : ACTION_CODES.PHONE_SIGNIN_SET, login, {
       employee: String(employee._id),
+      ...(phoneWas !== phone ? { phoneNumber: { from: phoneWas, to: phone } } : {}),
     });
 
     res.status(created ? 201 : 200).json({

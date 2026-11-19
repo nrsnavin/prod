@@ -33,6 +33,7 @@ const JobOrder = require("../models/JobOrder");
 const Machine = require("../models/Machine");
 const { assertShiftProductionOpen } = require("../utils/productionLock");
 const productionModel = require("../services/productionModel");
+const { isPlaceholderEmail } = require("../utils/workerLogin");
 
 const router = express.Router();
 
@@ -59,6 +60,9 @@ function employeeOf(req, next) {
 }
 
 const ELASTIC_WINDOW_DAYS = 60;
+/** Shifts on "today", and rows on the history list: what a phone can show. */
+const TODAY_MAX = 10;
+const HISTORY_MAX = 200;
 
 /** "HH:MM:SS" (or "H:MM") → hours, or null when there is nothing usable. */
 function hoursOf(timer) {
@@ -111,12 +115,16 @@ router.get(
     const employee = employeeOf(req, next);
     if (!employee) return;
 
-    const shifts = await ShiftDetail.find({
+    // The ten NEWEST of them, shown oldest first. Read oldest first with
+    // the same limit, ten shifts never entered — a loom planned and not
+    // run, a week away — were the whole page, and today's shift was not
+    // on the page that is named for it.
+    const newestFirst = await ShiftDetail.find({
       employee,
       status: { $in: ["open", "pending_verification"] },
     })
-      .sort({ date: 1, shift: 1 })
-      .limit(10)
+      .sort({ date: -1, shift: -1, _id: -1 })
+      .limit(TODAY_MAX)
       .populate({
         path: "machine",
         select: "ID NoOfHead status elastics manufacturer",
@@ -129,6 +137,7 @@ router.get(
         populate: { path: "order", select: "orderNo supplyDate" },
       })
       .lean();
+    const shifts = newestFirst.reverse();
 
     res.json({
       success: true,
@@ -185,6 +194,12 @@ router.get(
 //  Closed shifts in the window, newest first, and a summary: total and
 //  average metres, metres per hour, the plant's average per shift over
 //  the same window, and the change against the window before.
+//
+//  The list is the newest 200 rows; the summary is the whole window's.
+//  A row is one loom for one shift, and a weaver minds several looms:
+//  four looms fill 200 rows in under two months. The totals used to be
+//  added up from the rows listed — "the last 90 days" was the last 200
+//  rows — and set against a window before that was counted in full.
 router.get(
   "/shifts",
   catchAsyncErrors(async (req, res, next) => {
@@ -197,14 +212,17 @@ router.get(
     const before = new Date(since.getTime() - days * 86_400_000);
     const empId = new mongoose.Types.ObjectId(String(employee));
 
-    const [mine, previous, plant] = await Promise.all([
-      ShiftDetail.find({ employee: empId, status: "closed", date: { $gte: since } })
-        .sort({ date: -1 })
-        .limit(200)
+    const inWindow = { employee: empId, status: "closed", date: { $gte: since } };
+    const [mine, every, previous, plant] = await Promise.all([
+      ShiftDetail.find(inWindow)
+        .sort({ date: -1, _id: -1 })
+        .limit(HISTORY_MAX)
         .select("date shift productionMeters timer machine elastics feedback")
         .populate({ path: "machine", select: "ID" })
         .populate({ path: "elastics.elastic", select: "name" })
         .lean(),
+      // Every row of the window, for the figures: two fields of each.
+      ShiftDetail.find(inWindow).select("productionMeters timer").lean(),
       ShiftDetail.aggregate([
         { $match: { employee: empId, status: "closed", date: { $gte: before, $lt: since } } },
         { $group: { _id: null, metres: { $sum: "$productionMeters" }, n: { $sum: 1 } } },
@@ -217,12 +235,18 @@ router.get(
 
     let hours = 0;
     let metresTimed = 0;
-    const rows = mine.map((s) => {
+    let total = 0;
+    for (const s of every) {
+      const metres = s.productionMeters || 0;
+      total += metres;
       const h = hoursOf(s.timer);
       if (h) {
         hours += h;
-        metresTimed += s.productionMeters || 0;
+        metresTimed += metres;
       }
+    }
+    const rows = mine.map((s) => {
+      const h = hoursOf(s.timer);
       const names = [...new Set((s.elastics || []).map((e) => e.elastic?.name).filter(Boolean))];
       return {
         id: s._id,
@@ -236,8 +260,7 @@ router.get(
       };
     });
 
-    const total = rows.reduce((t, r) => t + r.metres, 0);
-    const avg = rows.length ? total / rows.length : null;
+    const avg = every.length ? total / every.length : null;
     const prev = previous[0];
     const prevAvg = prev && prev.n ? prev.metres / prev.n : null;
     const plantAvg = plant[0] && plant[0].n ? plant[0].metres / plant[0].n : null;
@@ -246,7 +269,9 @@ router.get(
       success: true,
       days,
       summary: {
-        shifts: rows.length,
+        shifts: every.length,
+        // How many of them are on the list below (the newest).
+        listed: rows.length,
         totalMetres: total,
         avgPerShift: round(avg),
         metresPerHour: hours ? round(metresTimed / hours) : null,
@@ -402,7 +427,9 @@ router.get(
         yearsOfExperience: emp.skillProfile?.yearsOfExperience ?? null,
         machineType: emp.skillProfile?.machineType || null,
         phoneNumber: emp.phoneNumber || null,
-        email: user?.email || null,
+        // A login that signs in by phone has a made-up address so the
+        // account can exist; it is nobody's email.
+        email: user?.email && !isPlaceholderEmail(user.email) ? user.email : null,
         since: emp.createdAt || null,
       },
     });

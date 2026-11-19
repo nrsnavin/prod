@@ -17,6 +17,7 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
 const DocumentSettings = require("../models/DocumentSettings");
 const { getDocumentSettings, invalidate } = require("../services/documentSettings");
+const { isGstin } = require("../services/gst");
 
 // Whitelist of client-editable fields — never trust req.body wholesale
 // (blocks setting `key`, timestamps, or arbitrary props).
@@ -188,6 +189,29 @@ router.put(
     }
     if (update.logo !== undefined && update.logo && !/^data:image\/(png|jpe?g|webp);base64,/.test(String(update.logo))) {
       return next(new ErrorHandler("logo must be a PNG/JPEG/WebP data URL", 400));
+    }
+    // The company's own GSTIN: printed on every invoice, sent with every
+    // e-invoice, and what the state of supply is read from. A customer's
+    // is checked when it is typed; this one was saved as typed — one
+    // character short, small letters — and the first anyone knew was the
+    // e-invoice portal refusing an invoice. Kept trimmed and in capitals.
+    // It is checked when it CHANGES: the form sends every field with each
+    // save, and a number on file from before this check must not stop the
+    // footer note being edited.
+    if (update.gstin !== undefined) {
+      const typed = typeof update.gstin === "string" ? update.gstin.trim() : update.gstin == null ? "" : String(update.gstin);
+      const gstin = typed.toUpperCase();
+      if (gstin === "" || isGstin(gstin)) {
+        update.gstin = gstin;
+      } else {
+        const onFile = await DocumentSettings.findOne({ key: "document" }).select("gstin").lean();
+        if (typed !== String(onFile?.gstin || "").trim()) {
+          return next(new ErrorHandler(
+            "That is not a GSTIN. It has 15 characters, like 33ABCDE1234F1Z5: two digits for the state, the ten of the PAN, then three more.", 400
+          ));
+        }
+        delete update.gstin;
+      }
     }
     let invoiceSet;
     try {
