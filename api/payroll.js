@@ -28,7 +28,8 @@ const { resolveEmployeeId } = require('../utils/resolveEmployee');
 // Re-exported below (router.computePayroll) so existing callers/tests
 // that reach it via the payroll router keep working.
 const { computePayroll, wastageOfMonth } = require('../services/payrollService');
-const { parseMoney, toPaise } = require('../utils/money');
+const { toPaise } = require('../utils/money');
+const { readHourlyRate, recordRateChange } = require('../utils/payRate');
 const ledger = require('../services/ledgerService');
 const { writePayslip, payslipFileName } = require('../services/payslipPdf');
 const { shiftHours } = require('../utils/shiftHours');
@@ -150,22 +151,24 @@ router.get('/employees', isAdmin('admin', 'accounts'), async (req, res) => {
 });
 
 // An hourly wage: a real number, 0 or more, and not more than anybody is
-// paid. `Number()` took a blank or a missing field as ₹0 (which drops the
-// employee out of payroll as "no rate set"), `true` as ₹1, and "Infinity"
-// as a rate — after which that employee's every payslip failed.
-const MAX_HOURLY_RATE = 100000;
-
+// paid (utils/payRate.js). `Number()` took a blank or a missing field as
+// ₹0 (which drops the employee out of payroll as "no rate set"), `true`
+// as ₹1, and "Infinity" as a rate — after which that employee's every
+// payslip failed. And the change is kept: who, whose, from what to what.
 router.post('/employees/:id/rate', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const read = parseMoney(req.body?.hourlyRate, { max: MAX_HOURLY_RATE, label: 'The hourly rate' });
+    const read = readHourlyRate(req.body?.hourlyRate);
     if (!read.ok) return res.status(400).json({ success: false, message: read.reason });
     const rate = read.value;
     if (!mongoose.isValidObjectId(req.params.id))
       return res.status(404).json({ success: false, message: 'Employee not found' });
-    const emp = await Employee.findByIdAndUpdate(
-      req.params.id, { $set: { hourlyRate: rate } }, { new: true }
+    // The record as it was, for the rate it had.
+    const before = await Employee.findByIdAndUpdate(
+      req.params.id, { $set: { hourlyRate: rate } }, { new: false }
     ).select('name department hourlyRate');
-    if (!emp) return res.status(404).json({ success: false, message: 'Employee not found' });
+    if (!before) return res.status(404).json({ success: false, message: 'Employee not found' });
+    await recordRateChange(req, before, before.hourlyRate, rate);
+    const emp = { _id: before._id, name: before.name, department: before.department, hourlyRate: rate };
     res.json({
       success: true,
       message: `Rate updated for ${emp.name}`,

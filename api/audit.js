@@ -33,6 +33,7 @@ const MaterialGroup   = require("../models/MaterialGroup");
 const AccessEvent     = require("../models/AccessEvent");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
+const { ABOUT_EMPLOYEE } = require("../services/auditWatch");
 
 // Pull the most recent fingerprints from one collection, tagged with
 // entity type + human number so the feed row is self-describing.
@@ -69,10 +70,12 @@ router.get(
     // neither collection was listed here, so the record existed and was
     // invisible. An audit trail that omits a whole document type is worse
     // than none — it reads as complete.
-    // One name per query below, in the same order. A query added here without a
-    // name shifts every later one and drops the last off the trail — which is
-    // exactly the "silently omitted document type" this route exists to avoid.
-    const [orders, jobs, pos, dcs, invoices, bills, expenses, notes, vouchers, contras, journals, openings, assets, confirmations, quotes, counts, groups] = await Promise.all([
+    // Every query's rows go into the feed, however many there are. They
+    // used to be taken out by name, one name per query in order — and when
+    // DepositSlip was added without a name, every later one shifted and the
+    // last (material groups) fell off the trail: exactly the "silently
+    // omitted document type" this route exists to avoid.
+    const lists = await Promise.all([
       recentFrom(Order,           "Order",           "orderNo",    limit),
       recentFrom(JobOrder,        "JobOrder",        "jobOrderNo", limit),
       recentFrom(PurchaseOrder,   "PurchaseOrder",   "poNo",       limit),
@@ -98,8 +101,9 @@ router.get(
     // Changes to logins live in their own collection (a deleted login
     // can't carry its own history); shaped like every other entry.
     const access = (await AccessEvent.find({}).sort({ at: -1 }).limit(limit).lean()).map((e) => ({
-      // An Aadhaar view or QR check is about an employee record, not a login.
-      entityType: e.code === "AADHAAR_VIEWED" || e.code === "AADHAAR_QR_CHECKED" ? "Employee" : "Login",
+      // An Aadhaar view or QR check, or a change of pay rate, is about an
+      // employee record, not a login.
+      entityType: ABOUT_EMPLOYEE.has(e.code) ? "Employee" : "Login",
       entityId: e.subject?.id ?? null,
       entityNo: e.subject?.name ?? null,
       code: e.code,
@@ -110,7 +114,7 @@ router.get(
       reason: null,
     }));
 
-    const entries = [...orders, ...jobs, ...pos, ...dcs, ...invoices, ...bills, ...expenses, ...notes, ...vouchers, ...contras, ...journals, ...openings, ...assets, ...confirmations, ...quotes, ...counts, ...groups, ...access]
+    const entries = [...lists.flat(), ...access]
       .filter((e) => e.at)
       .sort((a, b) => new Date(b.at) - new Date(a.at))
       .slice(0, limit);

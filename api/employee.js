@@ -35,6 +35,8 @@ const EMPLOYEE_FIELDS = {
 };
 const { recordAccess } = require("../utils/accessLog");
 const { ACTION_CODES } = require("../utils/fingerprint");
+const payRate = require("../utils/payRate");
+const periods = require("../utils/periods");
 
 /** The masked number for a stored value, or null when there is none. */
 function maskedAadhaar(stored) {
@@ -244,7 +246,15 @@ router.post(
       qrCheck = qr.checkRecord(read, qr.compare(read, { name, phoneNumber, aadhar }), req.user);
     }
 
-    const hourlyRate = Number(req.body.hourlyRate);
+    // The rate from the onboarding form: none given is ₹0 (set it later
+    // from Payroll); one that is not a rate is refused. It used to become
+    // ₹0 without a word, and the new employee was then left out of payroll.
+    let hourlyRate = 0;
+    if (!payRate.blank(req.body.hourlyRate)) {
+      const read = payRate.readHourlyRate(req.body.hourlyRate);
+      if (!read.ok) return next(new ErrorHandler(read.reason, 400));
+      hourlyRate = read.value;
+    }
     const employee = await Employee.create({
       name:        name.trim(),
       phoneNumber: phoneNumber?.trim() || undefined,
@@ -253,7 +263,7 @@ router.post(
       aadhar:      aadhaar.seal(aadhar?.trim()) || undefined,
       // Shift salary from the onboarding form (stored as ₹/hour; the
       // web form converts a DAY-shift salary ÷ 12h).
-      hourlyRate:  Number.isFinite(hourlyRate) && hourlyRate >= 0 ? hourlyRate : 0,
+      hourlyRate,
       // Skill & performance questionnaire — schema enums validate levels.
       skillProfile: req.body.skillProfile || undefined,
       ...Object.fromEntries(Object.entries(personal.values).filter(([, v]) => v !== "")),
@@ -468,6 +478,28 @@ router.put(
     if (personal.error) return next(new ErrorHandler(personal.error, 400));
     Object.assign(req.body, personal.values);
 
+    // The pay rate (utils/payRate.js). The edit form sends the rate it
+    // loaded with every save, so the SAME rate means "unchanged" whoever
+    // sends it, and a blank means "not touched". A different one is a pay
+    // change: a rate that is one, set by the admin or accounts, and kept.
+    const rateWas = Number(employee.hourlyRate) || 0;
+    let rateNow = rateWas;
+    if (payRate.blank(req.body.hourlyRate)) {
+      delete req.body.hourlyRate;
+    } else {
+      const read = payRate.readHourlyRate(req.body.hourlyRate);
+      if (!read.ok) return next(new ErrorHandler(read.reason, 400));
+      if (payRate.sameRate(read.value, rateWas)) {
+        // The rate the form loaded: what is stored stays, to its last digit.
+        delete req.body.hourlyRate;
+      } else if (!payRate.maySetPay(req.user)) {
+        return next(new ErrorHandler("Only the admin or accounts can change an employee's pay rate", 403));
+      } else {
+        rateNow = read.value;
+        req.body.hourlyRate = read.value;
+      }
+    }
+
     const allowed = ["name", "phoneNumber", "role", "department", "aadhar", "skill", "hourlyRate", "skillProfile", "dob", "gender", "address", "pincode"];
     for (const field of allowed) {
       if (req.body[field] !== undefined) {
@@ -477,6 +509,7 @@ router.put(
 
     employee.increment(); // bump __v so concurrent editors get a 409
     await employee.save();
+    await payRate.recordRateChange(req, employee, rateWas, rateNow);
 
     res.status(200).json({ success: true, employee: publicEmployee(employee) });
   })
@@ -537,9 +570,13 @@ router.get(
     const minShifts    = 3;     // per window — drops 1-shift outliers
     const minPrevAvg   = 40;    // ignore operators who were already low
 
-    const now      = new Date();
-    const curStart = new Date(now.getFullYear(), now.getMonth(),     1);
-    const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    // This month and last as the factory's calendar has them. Shift dates
+    // are calendar dates, so the months begin at their UTC midnight. They
+    // were taken from the server's clock, which is still on last month
+    // until 05:30 on the 1st: for those hours "this month" was last month.
+    const thisMonth = periods.factoryMonth();
+    const curStart  = periods.monthRange([thisMonth.year, thisMonth.month]).start;
+    const prevStart = periods.monthRange(periods.monthBefore([thisMonth.year, thisMonth.month])).start;
 
     // Pull every closed shift in the two-month window in one query,
     // then bucket per (employee, month) in memory. Cheaper than two

@@ -158,6 +158,10 @@ const ACTION_CODES = Object.freeze({
   PHONE_SIGNIN_OFF:         'PHONE_SIGNIN_OFF',
   AADHAAR_VIEWED:           'AADHAAR_VIEWED',
   AADHAAR_QR_CHECKED:       'AADHAAR_QR_CHECKED',
+  // An employee's hourly rate changed: who, whose, from what to what
+  // (utils/payRate.js). Kept beside the access records because an
+  // employee carries no audit trail of its own.
+  PAY_RATE_CHANGED:         'PAY_RATE_CHANGED',
 });
 
 const ACTION_LABELS = Object.freeze({
@@ -267,6 +271,7 @@ const ACTION_LABELS = Object.freeze({
   PHONE_SIGNIN_OFF:         'Phone Sign-in Turned Off',
   AADHAAR_VIEWED:           'Aadhaar Viewed',
   AADHAAR_QR_CHECKED:       'Aadhaar QR Checked',
+  PAY_RATE_CHANGED:         'Pay Rate Changed',
 });
 
 /**

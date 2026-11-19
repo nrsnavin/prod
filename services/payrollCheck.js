@@ -50,7 +50,10 @@ function flagsFor(slip, history) {
       add('overtime', 'check', `Overtime ${hours(slip.totalOvertimeMinutes)}, against ${hours(ot)} a month usually`);
     }
     const last = history[0];
-    if (last && (last.hourlyRate || 0) !== (slip.hourlyRate || 0)) {
+    // To the paisa: a rate stored as 85.34999999999998 against 85.35 is
+    // the same rate, and was announced as "changed from ₹85 to ₹85".
+    const paise = (r) => Math.round((Number(r) || 0) * 100);
+    if (last && paise(last.hourlyRate) !== paise(slip.hourlyRate)) {
       add('rate', 'info', `Hourly rate changed from ${inr(last.hourlyRate)} to ${inr(slip.hourlyRate)}`);
     }
   }

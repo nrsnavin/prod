@@ -15,6 +15,7 @@
 //    late night  changes made between 10 pm and 5 am in India
 //    stock       a stock count posted or elastic stock adjusted by hand
 //    access      logins created, changed or removed; Aadhaar numbers viewed
+//    pay         an employee's hourly rate changed (from what to what)
 //
 //  It reads only. Each item says who, when, and which document, so it
 //  can be opened and asked about. Sent to the owner each Monday morning
@@ -41,8 +42,10 @@ const DELETED = new Set(['ORDER_DELETED', 'PO_DELETED', 'DC_DELETED', 'PACKING_D
 const EDITED = new Set(['SHIFT_PRODUCTION_EDITED']);
 const STOCK = new Set(['STOCK_COUNT_POSTED', 'ELASTIC_STOCK_ADJUST']);
 const ACCESS = new Set(['LOGIN_CREATED', 'LOGIN_UPDATED', 'LOGIN_DELETED', 'PHONE_SIGNIN_RESET', 'AADHAAR_VIEWED', 'AADHAAR_QR_CHECKED']);
-// Access entries about an employee record rather than a login.
-const ABOUT_EMPLOYEE = new Set(['AADHAAR_VIEWED', 'AADHAAR_QR_CHECKED']);
+// Entries about an employee record rather than a login.
+const ABOUT_EMPLOYEE = new Set(['AADHAAR_VIEWED', 'AADHAAR_QR_CHECKED', 'PAY_RATE_CHANGED']);
+const PAY = new Set(['PAY_RATE_CHANGED']);
+const perHour = (n) => `₹${(Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}/h`;
 
 // Money documents and their own date, for back-dating.
 const DATED = [
@@ -91,6 +94,12 @@ async function watch({ days = 7, now = new Date() } = {}) {
     else if (STOCK.has(e.code)) push('stock', 'info', e, `${e.label || e.code}${e.entityNo != null ? ` (${doc})` : ''}`, e.meta?.valueVariance != null ? `Variance ${inr(e.meta.valueVariance)}` : '');
   }
   for (const a of access) {
+    if (PAY.has(a.code)) {
+      // Always worth a look: it is somebody's pay.
+      const e = { ...a, entityType: 'Employee', entityId: a.subject?.id, entityNo: a.subject?.name };
+      push('pay', 'check', e, `Pay rate changed: ${a.subject?.name || ''}`.trim(), `${perHour(a.meta?.from)} to ${perHour(a.meta?.to)}`);
+      continue;
+    }
     if (!ACCESS.has(a.code)) continue;
     const e = { ...a, entityType: ABOUT_EMPLOYEE.has(a.code) ? 'Employee' : 'Login', entityId: a.subject?.id, entityNo: a.subject?.name };
     push('access', ABOUT_EMPLOYEE.has(a.code) || a.code === 'LOGIN_UPDATED' ? 'info' : 'check', e, `${a.label || a.code}: ${a.subject?.name || a.subject?.email || ''}`.trim(), a.meta?.changes ? `Changed: ${[].concat(a.meta.changes).join(', ')}` : '');
@@ -131,7 +140,7 @@ async function watch({ days = 7, now = new Date() } = {}) {
   return { from, to, counts, total: items.length, toLookAt: items.filter((i) => i.severity === 'check').length, items };
 }
 
-const KIND_WORDS = { cancelled: 'cancelled', deleted: 'deleted', edited: 'production edited after verifying', backdated: 'back-dated', 'late-night': 'people working late at night', stock: 'stock adjusted', access: 'login changes' };
+const KIND_WORDS = { cancelled: 'cancelled', deleted: 'deleted', edited: 'production edited after verifying', backdated: 'back-dated', 'late-night': 'people working late at night', stock: 'stock adjusted', access: 'login changes', pay: 'pay rates changed' };
 
 /** The WhatsApp summary for the owner. */
 function message(w) {
@@ -150,4 +159,4 @@ async function runWeekly({ now = new Date() } = {}) {
   return { total: w.total, toLookAt: w.toLookAt, result };
 }
 
-module.exports = { watch, message, runWeekly, KIND_WORDS };
+module.exports = { watch, message, runWeekly, KIND_WORDS, ABOUT_EMPLOYEE };
