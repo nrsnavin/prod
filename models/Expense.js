@@ -94,6 +94,8 @@ ExpenseSchema.index({ status: 1, date: -1 });
 ExpenseSchema.index({ category: 1, date: -1 });
 ExpenseSchema.index({ supplier: 1, date: -1 });
 ExpenseSchema.index({ "costCentre.order": 1 });
+// A person's own claims: their list, what they are owed, the day's cap.
+ExpenseSchema.index({ "claimant.user": 1, date: -1 });
 
 ExpenseSchema.methods.outstanding = function outstanding() {
   return Math.round(((this.totals?.grand || 0) - this.paidAmount) * 100) / 100;

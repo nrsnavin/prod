@@ -51,16 +51,27 @@ router.get("/categories", catchAsyncErrors(async (_req, res) => {
   res.json({ success: true, categories });
 }));
 
+// What a replay, a lookup or a total is kept to: this person's own claims.
+const own = (req) => ({ "claimant.user": req.user._id });
+
 router.get("/", catchAsyncErrors(async (req, res) => {
-  const claims = await Expense.find({ "claimant.user": req.user._id }).select(PUBLIC).sort({ date: -1, createdAt: -1 }).limit(60).lean();
-  const owed = r2(claims.filter((c) => c.status === "approved").reduce((s, c) => s + ((c.totals?.grand || 0) - (c.paidAmount || 0)), 0));
-  const waiting = r2(claims.filter((c) => c.status === "pending").reduce((s, c) => s + (c.totals?.grand || 0), 0));
+  const claims = await Expense.find(own(req)).select(PUBLIC).sort({ date: -1, createdAt: -1 }).limit(60).lean();
+  // What is owed and what is waiting, over every claim — the list above
+  // is the newest 60, and these used to be added up from those rows, so
+  // an approved claim further back than that was not money owed.
+  const sums = await Expense.aggregate([
+    { $match: { "claimant.user": new mongoose.Types.ObjectId(String(req.user._id)), status: { $in: ["approved", "pending"] } } },
+    { $group: { _id: "$status", grand: { $sum: { $ifNull: ["$totals.grand", 0] } }, paid: { $sum: { $ifNull: ["$paidAmount", 0] } } } },
+  ]);
+  const of = (status) => sums.find((s) => s._id === status) || { grand: 0, paid: 0 };
+  const owed = r2(of("approved").grand - of("approved").paid);
+  const waiting = r2(of("pending").grand);
   res.json({ success: true, claims, owed, waiting });
 }));
 
 async function mine(req, next) {
   if (!isId(req.params.id)) { next(new ErrorHandler("Claim not found", 404)); return null; }
-  const claim = await Expense.findOne({ _id: req.params.id, "claimant.user": req.user._id }).select(PUBLIC).lean();
+  const claim = await Expense.findOne({ _id: req.params.id, ...own(req) }).select(PUBLIC).lean();
   if (!claim) { next(new ErrorHandler("Claim not found", 404)); return null; }
   return claim;
 }
@@ -69,7 +80,6 @@ async function mine(req, next) {
 // The bill reader does the reading; the head comes from what this payee's
 // expenses were before. Nothing is saved: the form opens filled in, the
 // claimant checks it, and what they send settles the AI ledger row.
-const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 router.post("/scan", keepRequestContext(upload.single("file")), catchAsyncErrors(async (req, res, next) => {
   if (!req.file) return next(new ErrorHandler("Photograph the receipt", 400));
   const startedAt = Date.now();
@@ -99,13 +109,17 @@ router.post("/scan", keepRequestContext(upload.single("file")), catchAsyncErrors
     category: usable ? String(usable._id) : null,
   };
   // The same receipt claimed before, by its number or its amount that day.
-  const already = await Expense.findOne({
-    "claimant.user": req.user._id, status: { $nin: ["rejected", "cancelled"] },
-    $or: [
-      ...(draft.refNo ? [{ refNo: draft.refNo }] : []),
-      ...(draft.amount && draft.date ? [{ "totals.grand": { $gte: draft.amount - 0.5, $lte: draft.amount + 0.5 }, date: { $gte: new Date(`${draft.date}T00:00:00`), $lt: new Date(new Date(`${draft.date}T00:00:00`).getTime() + DAY) } }] : []),
-    ],
-  }).select("expenseNo").lean();
+  // With neither to go on there is nothing to recognise it by — and an
+  // empty $or is dropped, not refused: every earlier claim then matched,
+  // and a toll slip was "already claimed" as last month's diesel.
+  const day = draft.date ? factoryDay.calendarDay(draft.date) : null;
+  const ways = [
+    ...(draft.refNo ? [{ refNo: draft.refNo }] : []),
+    ...(draft.amount && day ? [{ "totals.grand": { $gte: draft.amount - 0.5, $lte: draft.amount + 0.5 }, date: { $gte: day, $lt: new Date(day.getTime() + DAY) } }] : []),
+  ];
+  const already = ways.length
+    ? await Expense.findOne({ ...own(req), status: { $nin: ["rejected", "cancelled"] }, $or: ways }).select("expenseNo").lean()
+    : null;
   const aiSuggestion = await aiLedger.record({
     surface: "claim-receipt-ocr", model: read.model, promptVersion: promptVersion("claim-receipt-ocr"),
     proposed: draft, latencyMs: read.latencyMs, usage: read.usage,
@@ -114,7 +128,7 @@ router.post("/scan", keepRequestContext(upload.single("file")), catchAsyncErrors
     success: true, problem: null, draft,
     categoryName: usable?.name || null, categoryReason: usable ? suggestion.reason : null,
     payee: read.supplierName || "", confidence: read.confidence,
-    alreadyClaimed: already && (draft.refNo || draft.amount) ? already.expenseNo : null,
+    alreadyClaimed: already ? already.expenseNo : null,
     aiSuggestion,
   });
 }));
@@ -127,8 +141,8 @@ router.get("/:id", catchAsyncErrors(async (req, res, next) => {
 router.post("/", catchAsyncErrors(async (req, res, next) => {
   const b = req.body || {};
   // Only this person's own claim is a replay.
-  const mine = { select: PUBLIC, filter: { "claimant.user": req.user._id } };
-  const before = await replayOf(Expense, b.requestId, mine);
+  const replay = { select: PUBLIC, filter: own(req) };
+  const before = await replayOf(Expense, b.requestId, replay);
   if (before) return res.json({ success: true, claim: before, replay: true });
   if (!isId(b.category)) return next(new ErrorHandler("Pick what it was for", 400));
   const category = await ExpenseCategory.findOne({ _id: b.category, active: { $ne: false } }).lean();
@@ -140,14 +154,16 @@ router.post("/", catchAsyncErrors(async (req, res, next) => {
   if (amount > 200000) return next(new ErrorHandler("A claim this large goes through Accounts as a bill", 400));
   let date;
   try { date = readDate(b.date, "date", new Date()); await assertOpen(date, req); } catch (err) { return next(err); }
-  if (date > new Date(Date.now() + DAY)) return next(new ErrorHandler("The date is in the future", 400));
+  // A day against a day. It was the clock plus 24 hours, so a claim dated
+  // tomorrow always went in — and against tomorrow's cap.
+  if (factoryDay.daysBetween(factoryDay.calendarDay(), date) > 0) return next(new ErrorHandler("The date is in the future", 400));
   // One claim at a time for a person: the day's cap below is added up
   // and then the claim is made, so two sent together each found room
   // under the cap and both went in.
-  return onceAtATime(`claim:${req.user._id}`, () => fileClaim(req, res, next, { b, category, description, amount, date }), { what: "Your claim" });
+  return onceAtATime(`claim:${req.user._id}`, () => fileClaim(req, res, next, { b, category, description, amount, date, replay }), { what: "Your claim" });
 }));
 
-async function fileClaim(req, res, next, { b, category, description, amount, date }) {
+async function fileClaim(req, res, next, { b, category, description, amount, date, replay }) {
   // A head may cap what one person claims in a day.
   if (category.claimDailyLimit > 0) {
     const dayStart = factoryDay.calendarDay(date);
@@ -178,8 +194,12 @@ async function fileClaim(req, res, next, { b, category, description, amount, dat
     });
   } catch (err) {
     if (err?.code === 11000 && b.requestId) {
-      // Only this person's own claim is a replay; another's with the same id is a clash.
-      const dup = await replayAfter(err, Expense, b.requestId, mine);
+      // Only this person's own claim is a replay; another's with the same id
+      // is a clash. (`replay` is handed in: this used to name the options a
+      // route-local held — and found the helper `mine` instead, a function.
+      // With no filter and no field list in it, somebody else's expense
+      // came back whole, as "yours, sent already".)
+      const dup = await replayAfter(err, Expense, b.requestId, replay);
       if (dup) return res.json({ success: true, claim: dup, replay: true });
       return next(new ErrorHandler("That request id is already used", 409));
     }
@@ -188,7 +208,7 @@ async function fileClaim(req, res, next, { b, category, description, amount, dat
   // Filled in from the receipt: what was sent is how the read is scored.
   if (isId(b.aiSuggestion)) {
     aiLedger.settle(b.aiSuggestion, {
-      accepted: { amount, date: ymd(date), description: description.slice(0, 200), refNo: String(b.refNo || "").trim().slice(0, 40), category: String(category._id) },
+      accepted: { amount, date: factoryDay.ymd(date), description: description.slice(0, 200), refNo: String(b.refNo || "").trim().slice(0, 40), category: String(category._id) },
       decidedBy: req.user._id, expectSurface: "claim-receipt-ocr", ignoreMissing: true,
     }).catch(() => {});
   }
