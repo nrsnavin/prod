@@ -95,17 +95,29 @@ router.post(
   })
 );
 
+// How many answered and closed notices one page carries, and how many
+// open ones (more than that waiting at once is not a list any more).
+const PAST_MAX = 200;
+const OPEN_MAX = 1000;
+
 router.get(
   "/notices",
   catchAsyncErrors(async (req, res) => {
     const status = StatutoryNotice.STATUSES.includes(req.query.status) ? req.query.status : undefined;
-    const rows = await StatutoryNotice.find(status ? { status } : {}).select("-attachments.data").sort({ status: 1, replyBy: 1, createdAt: -1 }).limit(200).lean();
+    // What is open is read on its own, all of it. The register used to be
+    // ONE query — sorted by status, cut at 200 rows, the counts added up
+    // from what was listed — and "closed" sorts before "open": with two
+    // hundred notices closed over the years the list held no open notice
+    // at all, under a count of "0 open". The rest are the newest of the
+    // answered and closed ones (it kept the oldest when they did not fit).
+    const [openRows, past] = await Promise.all([
+      StatutoryNotice.find({ status: "open" }).select("-attachments.data").sort({ replyBy: 1, createdAt: -1 }).limit(OPEN_MAX).lean(),
+      status === "open" ? [] : StatutoryNotice.find({ status: status || { $ne: "open" } }).select("-attachments.data").sort({ replyBy: -1, createdAt: -1 }).limit(PAST_MAX).lean(),
+    ]);
     const now = new Date();
-    const data = rows.map((r) => shape(r, now));
-    // Open first, those without a deadline after the dated ones.
-    data.sort((a, b) => (a.status === "open") !== (b.status === "open") ? (a.status === "open" ? -1 : 1)
-      : (a.daysLeft ?? 1e9) - (b.daysLeft ?? 1e9));
-    const open = data.filter((d) => d.status === "open");
+    // Soonest first, those without a deadline after the dated ones.
+    const open = openRows.map((r) => shape(r, now)).sort((a, b) => (a.daysLeft ?? 1e9) - (b.daysLeft ?? 1e9));
+    const data = [...(status && status !== "open" ? [] : open), ...past.map((r) => shape(r, now))];
     res.json({ success: true, data, counts: { open: open.length, overdue: open.filter((d) => d.urgency === "overdue").length, dueThisWeek: open.filter((d) => d.daysLeft != null && d.daysLeft >= 0 && d.daysLeft <= 7).length } });
   })
 );

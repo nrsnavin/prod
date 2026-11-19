@@ -206,6 +206,9 @@ describe('downloads and saved queries', () => {
     // A shared money query is not shown to production.
     const theirs = await request(app).get('/api/v2/reports/catalog').set('Cookie', cookie(prodUser));
     expect(theirs.body.saved).toEqual([]);
+    // …on either list. (/saved gave it to them: its name, and the query itself.)
+    expect((await request(app).get('/api/v2/reports/saved').set('Cookie', cookie(prodUser))).body.saved).toEqual([]);
+    expect((await request(app).get('/api/v2/reports/saved').set('Cookie', cookie(admin))).body.saved.map((s) => s.name)).toEqual(['Innerwear sales']);
     expect((await request(app).delete(`/api/v2/reports/saved/${ok.body.saved._id}`).set('Cookie', cookie(prodUser))).status).toBe(403);
     expect((await request(app).delete(`/api/v2/reports/saved/${ok.body.saved._id}`).set('Cookie', cookie(admin))).status).toBe(200);
   });

@@ -31,6 +31,8 @@ const { stockPurchasesReport } = require("../services/reports/stockPurchasesRepo
 const { stockMovementsReport } = require("../services/reports/stockMovementsReport.js");
 
 const asBool = (v) => v === true || v === "true" || v === "1";
+/** The day in India a moment falls on, "YYYY-MM-DD" — what a window's bounds are days of. */
+const indiaDay = (d) => new Date(new Date(d).getTime() + 330 * 60_000).toISOString().slice(0, 10);
 const n = (x) => (Number(x) || 0).toLocaleString("en-IN");
 const inr = (x) => "₹" + Math.round(Number(x) || 0).toLocaleString("en-IN");
 
@@ -52,8 +54,13 @@ function reportRoute(build, { csvName, title, summaryLine }) {
       compare: asBool(req.query.compare),
     });
 
-    const format = (req.query.format || "").toLowerCase();
-    const stamp = `${range.from.toISOString().slice(0, 10)}_${new Date(range.to.getTime() - 1).toISOString().slice(0, 10)}`;
+    // (A query value sent twice arrives as a list; it is not a format.)
+    const format = typeof req.query.format === "string" ? req.query.format.toLowerCase() : "";
+    // Named for the days it covers, as they are in India. A window starts
+    // at 00:00 there — 18:30 the evening before on the server's clock —
+    // and the stamp was read off the server's date: November's report was
+    // "…_2026-10-31_2026-11-19".
+    const stamp = `${indiaDay(range.from)}_${indiaDay(range.to.getTime() - 1)}`;
 
     if (format === "csv") {
       const csv = toCsv(report.columns, report.rows);
@@ -126,6 +133,8 @@ const engine = {
 const SavedReport = require("../models/SavedReport.js");
 
 const roleOf = (req) => (req.user?.role === "admin" ? "admin" : req.user?.role);
+/** A query's title as sent: a line of text (it heads the page and names the file). */
+const titleOf = (v) => (typeof v === "string" && v.trim() ? v.trim().slice(0, 120) : "Query");
 const canRead = (role, datasetId) => !!engine.datasets.DATASETS[datasetId]?.access.includes(role);
 const OP_WORDS = { "=": "is", "!=": "is not", "<": "under", "<=": "at most", ">": "over", ">=": "at least", contains: "contains", "not contains": "does not contain", starts: "starts with", in: "is one of", "not in": "is not one of", between: "between", empty: "is empty", "not empty": "is not empty" };
 
@@ -163,9 +172,9 @@ const runReport = catchAsyncErrors(async (req, res, next) => {
     query = JSON.parse(JSON.stringify(r.query)); title = r.title;
   } else if (typeof b.sql === "string" && b.sql.trim()) {
     if (b.sql.length > 4000) return next(new ErrorHandler("The query is too long", 400));
-    query = engine.sql.parse(b.sql); title = b.title || "Query";
+    query = engine.sql.parse(b.sql); title = titleOf(b.title);
   } else if (b.query && typeof b.query === "object") {
-    query = b.query; title = b.title || "Query";
+    query = b.query; title = titleOf(b.title);
   } else return next(new ErrorHandler("Pick a report, build a query or type one", 400));
   if (Array.isArray(b.filters) && b.filters.length) query.where = [...(query.where || []), ...b.filters.slice(0, 20)];
 
@@ -202,8 +211,11 @@ router.get("/run", runReport);
 router.post("/run", runReport);
 
 router.get("/saved", catchAsyncErrors(async (req, res) => {
+  const role = roleOf(req);
   const saved = await SavedReport.find({ $or: [{ createdBy: req.user?._id }, { shared: true }] }).sort({ updatedAt: -1 }).limit(200).lean();
-  res.json({ success: true, saved });
+  // The same list the catalogue gives: not the shared ones over data
+  // this person cannot read (they could not be run, only read about).
+  res.json({ success: true, saved: saved.filter((s) => !s.query?.dataset || canRead(role, s.query.dataset)) });
 }));
 
 router.post("/saved", catchAsyncErrors(async (req, res, next) => {

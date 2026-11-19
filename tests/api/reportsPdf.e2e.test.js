@@ -93,6 +93,49 @@ describe("GET /api/v2/reports/dispatch (through the app)", () => {
   });
 });
 
+// Found reading api/reports.js line by line.
+describe("a downloaded report (through the app)", () => {
+  const name = (res) => /filename="([^"]+)"/.exec(res.headers["content-disposition"] || "")?.[1];
+
+  test("is named for the days it covers, as they are in India", async () => {
+    // A report's window starts at 00:00 in India — 18:30 the evening
+    // before on the server's clock — and the file was stamped from the
+    // server's date: November's report was "…_2026-10-31_2026-11-19".
+    for (const format of ["csv", "pdf"]) {
+      const res = await request(app)
+        .get(`/api/v2/reports/dispatch?from=2026-11-01&to=2026-11-19&groupBy=customer&format=${format}`)
+        .set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      expect(name(res)).toBe(`dispatch-sales-report_2026-11-01_2026-11-19.${format}`);
+    }
+    const oneDay = await request(app).get("/api/v2/reports/production?from=2026-11-05&to=2026-11-05&format=csv").set("Cookie", cookie);
+    expect(name(oneDay)).toBe("production-report_2026-11-05_2026-11-05.csv");
+  });
+
+  test("the materials and elastics workbook carries the day it was taken, in India", async () => {
+    // 02:00 on the 20th in the factory; the server's clock still says the 19th.
+    jest.useFakeTimers({
+      now: new Date("2026-11-19T20:30:00Z"),
+      doNotFake: ["nextTick", "setImmediate", "clearImmediate", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "queueMicrotask", "hrtime", "performance"],
+    });
+    try {
+      const res = await request(app).get("/api/v2/io/export").set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      // Before: "…_2026-11-19.xlsx".
+      expect(name(res)).toBe("material_elastic_export_2026-11-20.xlsx");
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("answers a format sent twice as it answers one it does not know: the report itself", async () => {
+    // Before: a 500 — the two values arrive as a list.
+    const res = await request(app).get("/api/v2/reports/dispatch?preset=month&format=csv&format=pdf").set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+  });
+});
+
 describe("health probes", () => {
   test("liveness /health is public and 200", async () => {
     const res = await request(app).get("/api/v2/health");

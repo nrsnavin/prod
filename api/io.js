@@ -18,6 +18,7 @@ const multer  = require('multer');
 const ExcelJS = require('exceljs');
 
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
+const factoryDay = require('../utils/factoryDay');
 const { keepRequestContext } = require('../middleware/userContext');
 const {
   buildTemplateWorkbook,
@@ -51,7 +52,9 @@ router.get('/template', isAuthenticated, isAdmin('admin'), async (_req, res, nex
 router.get('/export', isAuthenticated, isAdmin('admin'), async (_req, res, next) => {
   try {
     const { workbook } = await buildExportWorkbook();
-    const stamp = new Date().toISOString().slice(0, 10);
+    // The day it was taken, in the factory: the server's own date is
+    // still yesterday's until 05:30 there.
+    const stamp = factoryDay.calendarDay().toISOString().slice(0, 10);
     res.setHeader('Content-Type', XLSX_MIME);
     res.setHeader('Content-Disposition',
       `attachment; filename="material_elastic_export_${stamp}.xlsx"`);

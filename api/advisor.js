@@ -14,19 +14,23 @@ const ledger = require('../services/aiLedger');
 // Override via ANTHROPIC_MODEL if you want to A/B test a larger model.
 const MODEL = TEXT_MODEL;
 
+/** A card's field as one line of text, cut to `max`; anything else is nothing. */
+const line = (v, max) => (typeof v === 'string' || typeof v === 'number' ? String(v).replace(/\s+/g, ' ').trim().slice(0, max) : '');
+
 // ═════════════════════════════════════════════════════════════════
 //  POST /api/v2/advisor/briefing
 //
 //  Body: { cards: [{ id, title, subtitle, priority }, ...] }
 //
-//  Returns a 2–3 sentence morning-briefing summary written by
-//  ChatGPT, with the most-urgent phrase wrapped in **double
+//  Returns a 2–3 sentence morning-briefing summary written by the
+//  model, with the most-urgent phrase wrapped in **double
 //  asterisks** so the Flutter widget can bold it.
 //
 //  Cost guards (in order of importance):
 //    1. max_tokens = 220 caps output cost at fractions of a cent.
-//    2. cards array is sliced to the top 8 — input cost is capped
-//       regardless of client behaviour.
+//    2. the cards are cut to the top 8, and each to a line of text —
+//       input cost is capped regardless of client behaviour. (It was
+//       the number alone: eight cards could carry megabytes.)
 //    3. isAdmin gate — only authenticated admins can spend tokens. The
 //       advisor aggregates across every router (shift, job, materials,
 //       payroll…), which only admin can reach, so it stays admin-only.
@@ -52,9 +56,16 @@ router.post(
     // Even if a buggy client sends 100 cards we only ever send the
     // most-actionable 8 to the LLM. Caller is expected to already
     // sort by priority, but we don't trust that.
-    const cards = (req.body && Array.isArray(req.body.cards))
-      ? req.body.cards.slice(0, 8)
-      : [];
+    //
+    // What is not a card is set aside here. A null in the list used to
+    // throw while the prompt was being built — inside the try below, so
+    // it was answered as the model's failure (502) and written to the AI
+    // ledger as a failed call that was never made.
+    const cards = (req.body && Array.isArray(req.body.cards) ? req.body.cards : [])
+      .filter((c) => c && typeof c === 'object' && !Array.isArray(c))
+      .map((c) => ({ priority: line(c.priority, 12) || 'med', title: line(c.title, 160), subtitle: line(c.subtitle, 240) }))
+      .filter((c) => c.title || c.subtitle)
+      .slice(0, 8);
 
     if (cards.length === 0) {
       return res.json({
@@ -82,8 +93,7 @@ router.post(
         messages: [
           { role: 'user', content:
               `Today's advisor signals:\n${cards.map((c) =>
-                `- [${c.priority || 'med'}] ${c.title || ''} `
-                + `(${c.subtitle || ''})`
+                `- [${c.priority}] ${c.title} (${c.subtitle})`
               ).join('\n')}\n\nWrite the morning briefing.` },
         ],
       });

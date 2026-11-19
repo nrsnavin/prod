@@ -36,15 +36,31 @@ const BankStatement = require("../models/BankStatement");
 const Payment = require("../models/Payment");
 const Contra = require("../models/Contra");
 
+// The newest statements — and, however old, every one that still has a
+// line to place. The list was its newest thirty and nothing else: with
+// the bank's statement arriving by mail each day that is a month, and a
+// line left to place on an older statement ("post them from Past
+// statements") sat on one that was no longer listed, with no other way
+// to reach it.
+const RECENT_STATEMENTS = 30;
+const OLDER_WITH_WORK = 100;
+const TO_PLACE = ["matched", "unmatched"];
+
 router.get("/bank/statements", catchAsyncErrors(async (req, res) => {
   const q = isId(req.query.account) ? { account: req.query.account } : {};
-  const rows = await BankStatement.find(q).select("account accountName file source from to openingBalance closingBalance uploadedByName createdAt lines.status").sort({ createdAt: -1 }).limit(30).lean();
+  const fields = "account accountName file source from to openingBalance closingBalance uploadedByName createdAt lines.status";
+  const recent = await BankStatement.find(q).select(fields).sort({ createdAt: -1 }).limit(RECENT_STATEMENTS).lean();
+  const older = recent.length < RECENT_STATEMENTS ? [] : await BankStatement.find({
+    ...q, _id: { $nin: recent.map((s) => s._id) }, "lines.status": { $in: TO_PLACE },
+  }).select(fields).sort({ createdAt: -1 }).limit(OLDER_WITH_WORK).lean();
   res.json({
     success: true,
-    statements: rows.map((s) => {
+    statements: [...recent, ...older].map((s) => {
       const counts = {};
       for (const l of s.lines) counts[l.status] = (counts[l.status] || 0) + 1;
-      return { _id: s._id, account: s.account, accountName: s.accountName, file: s.file, source: s.source || "upload", from: s.from, to: s.to, openingBalance: s.openingBalance ?? null, closingBalance: s.closingBalance, uploadedByName: s.uploadedByName, createdAt: s.createdAt, lines: s.lines.length, counts };
+      // Still to place: nothing suggested, or suggested and not posted.
+      const toPlace = TO_PLACE.reduce((n, k) => n + (counts[k] || 0), 0);
+      return { _id: s._id, account: s.account, accountName: s.accountName, file: s.file, source: s.source || "upload", from: s.from, to: s.to, openingBalance: s.openingBalance ?? null, closingBalance: s.closingBalance, uploadedByName: s.uploadedByName, createdAt: s.createdAt, lines: s.lines.length, counts, toPlace };
     }),
   });
 }));
@@ -158,7 +174,7 @@ router.get("/bank/reconciliation", catchAsyncErrors(async (req, res, next) => {
 // meanwhile is left as it is (each write is conditional on the line
 // still being unplaced).
 const bankStatement = require("../services/bankStatement");
-const UNPLACED = ["matched", "unmatched"];
+const UNPLACED = TO_PLACE;
 
 router.post("/bank/statements/:id/rematch", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Statement not found", 404));
