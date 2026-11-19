@@ -1,11 +1,10 @@
 'use strict';
 // ══════════════════════════════════════════════════════════════════
-//  JOB ORDERS — STATUS, WEAVING READINESS, CANCEL, WASTAGE  (part of /api/v2/job)
+//  JOB ORDERS — STATUS, WEAVING READINESS, CANCEL  (part of /api/v2/job)
 //
 //    POST  /update-status
 //    GET   /:jobId/weaving-readiness
 //    POST  /cancel
-//    POST  /create-wastage
 //
 //  api/job.js mounts this file; see there for why the order matters.
 // ══════════════════════════════════════════════════════════════════
@@ -16,7 +15,6 @@ const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const ErrorHandler     = require('../utils/ErrorHandler');
 const JobOrder    = require('../models/JobOrder');
 const Order       = require('../models/Order');
-const Wastage     = require('../models/Wastage');
 const Machine     = require('../models/Machine');
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
 const { checkWeavingReadiness } = require('../services/weavingReadiness');
@@ -313,67 +311,15 @@ router.post(
 );
 
 // ─────────────────────────────────────────────────────────────
-//  7. CREATE WASTAGE ENTRY
+//  7. WASTAGE is not recorded here.
+//
+//  POST /create-wastage used to be: a second way to record a wastage
+//  that no screen of either app called any more, and that had none of
+//  the rules of the one they do call (POST /wastage/add-wastage). It
+//  asked for the Jobs permission instead of the Wastage one, took any
+//  employee — one who does not exist, too — and any penalty, which
+//  payroll then deducts, kept nothing of who entered it, and raised no
+//  high-wastage alert. Wastage has one way in.
 // ─────────────────────────────────────────────────────────────
-router.post(
-  '/create-wastage',
-  catchAsyncErrors(async (req, res, next) => {
-    const { jobId, elasticId, employeeId, quantity, penalty, reason } = req.body;
-    if (!jobId)      return next(new ErrorHandler('jobId is required', 400));
-    if (!elasticId)  return next(new ErrorHandler('elasticId is required', 400));
-    if (!employeeId) return next(new ErrorHandler('employeeId is required', 400));
-    if (!reason?.trim()) return next(new ErrorHandler('reason is required', 400));
-    if (typeof quantity !== 'number' || quantity <= 0)
-      return next(new ErrorHandler('quantity must be a positive number', 400));
-
-    const session = await mongoose.startSession();
-    try {
-      let resp;
-      await session.withTransaction(async () => {
-        const job = await JobOrder.findById(jobId).session(session);
-        if (!job) throw new ErrorHandler('Job not found', 404);
-        if (!['weaving', 'finishing', 'checking'].includes(job.status))
-          throw new ErrorHandler(`Wastage can only be recorded during weaving, finishing, or checking`, 400);
-        if (!job.elastics.find(e => e.elastic.toString() === elasticId.toString()))
-          throw new ErrorHandler('Elastic is not part of this job', 400);
-
-        // Wastage.create with a session expects array-form input
-        const [wastage] = await Wastage.create([{
-          job: job._id, elastic: elasticId, employee: employeeId,
-          quantity, penalty: penalty || 0, reason: reason.trim(),
-        }], { session });
-
-        const idx = job.wastageElastic.findIndex(e => e.elastic.toString() === elasticId.toString());
-        if (idx >= 0) job.wastageElastic[idx].quantity += quantity;
-        job.wastages.push(wastage._id);
-
-        // 🪪 Fingerprint per wastage entry on the job's timeline.
-        //    Job-only — granular events don't fan out to the order.
-        const fp = buildFingerprint(ACTION_CODES.WASTAGE_RECORDED, {
-          entityId: job._id,
-          actor:    actorFromRequest(req),
-          meta: {
-            wastageId:  wastage._id.toString(),
-            elasticId:  elasticId.toString(),
-            employeeId: employeeId.toString(),
-            quantity,
-            penalty:    penalty || 0,
-            reason:     reason.trim(),
-            jobStage:   job.status,
-          },
-        });
-        job.fingerprints.push(fp);
-        await job.save({ session });
-
-        resp = { wastage, fingerprint: fp };
-      });
-      res.status(201).json({ success: true, ...resp });
-    } catch (err) {
-      return next(err);
-    } finally {
-      session.endSession();
-    }
-  })
-);
 
 module.exports = router;

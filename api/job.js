@@ -8,7 +8,7 @@
 //
 //    jobPlanning.js   raise a job, the lists, its detail, plan weaving
 //    jobElastics.js   the elastics a job makes, and changing one mid-run
-//    jobProgress.js   status, weaving readiness, cancel, wastage
+//    jobProgress.js   status, weaving readiness, cancel
 //    jobMachines.js   summary, operators, checking, assigning a machine
 //    jobLookup.js     a scanned number, stale jobs, wastage outliers,
 //                     and the phone's detail at /:jobId

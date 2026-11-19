@@ -348,3 +348,35 @@ describe('the wastage summary', () => {
     expect(range).toEqual([{ date: `${d}-${m}-${y}`, quantity: 12 }]);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading api/jobProgress.js line by line.
+//
+//  THERE WAS A SECOND WAY IN. POST /job/create-wastage — a route no
+//  screen of the web app or the phone app calls any more — recorded a
+//  wastage with none of the rules above: it asked for the Jobs tick
+//  rather than the Wastage one, took any employee (one who does not
+//  exist, too), any penalty, kept nothing of who entered it or which
+//  machine it came off, and raised no high-wastage alert.
+// ══════════════════════════════════════════════════════════════════
+describe('wastage has one way in', () => {
+  it('the old job-side route is gone: a login with Jobs but not Wastage cannot dock anybody\'s pay', async () => {
+    const s = await scene();
+    const jobsOnly = await M.User.create({
+      name: 'Planner', email: 'waste-jobs-only@t.co', password: 'pass1234', role: 'production', department: 'production',
+      features: ['/', '/jobs'],
+    });
+    const viaJobs = await request(app).post('/api/v2/job/create-wastage').set('Cookie', cookieOf(jobsOnly)).send({
+      jobId: String(s.job._id), elasticId: String(s.elastic._id), employeeId: String(new mongoose.Types.ObjectId()),
+      quantity: 40, penalty: 99999999, reason: 'Selvedge torn',
+    });
+    // Before: 201 — ₹9,99,99,999 against an employee who does not exist.
+    expect(viaJobs.status).toBe(404);
+    expect(await M.Wastage.countDocuments({})).toBe(0);
+
+    // And the real route still asks for the Wastage tick.
+    const viaWastage = await as(jobsOnly).post('/add-wastage', entry(s));
+    expect(viaWastage.status).toBe(403);
+    expect(await M.Wastage.countDocuments({})).toBe(0);
+  });
+});
