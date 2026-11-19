@@ -28,6 +28,7 @@ const { validateTransition, stampStage } = require('../domain/jobStatus');
 // cancelling a job on a CANCELLED order set it back to Approved.
 const orderLifecycle = require('../services/orderLifecycle');
 const dispatchQueue = require('../services/dispatchQueue');
+const { stopPreparatory } = require('../services/jobPreparatory');
 const { outsourcingBlockers } = require('../utils/outsourcingRecord');
 const router = express.Router();
 
@@ -250,6 +251,7 @@ router.post(
     // inside the transaction; anything colliding with it is retried.
     let job;
     let fp;
+    let stopped;
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
@@ -284,6 +286,12 @@ router.post(
           },
         });
         job.fingerprints.push(fp);
+
+        // The warping and covering that were preparing it stop with it:
+        // left open, they stayed on the floor's lists as work to do for a
+        // job nobody will weave (services/jobPreparatory.js). On the
+        // job's trail, so saved with it.
+        stopped = await stopPreparatory(job, { session, actor: actorFromRequest(req) });
         await job.save({ session });
 
         // Nothing left to deliver: off the dispatch queue, if it was on it.
@@ -301,11 +309,20 @@ router.post(
       await session.endSession();
     }
 
+    // A warping with yarn out on it could not be cancelled here: only
+    // cancelling the batch puts that yarn back on the rack. Said in the
+    // message, which is what both apps show.
+    const held = stopped.warpingBatches;
     res.json({
       success: true,
-      message: 'Job cancelled and quantities restored to order',
+      message: held.length
+        ? `Job cancelled and quantities restored to order. Its warping is still open: yarn has been issued on ${held.join(', ')} — `
+          + `cancel ${held.length === 1 ? 'that batch' : 'those batches'} to put the yarn back, then cancel the warping.`
+        : 'Job cancelled and quantities restored to order',
       data: { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
       fingerprint: fp,
+      programmes: stopped.programmes,
+      warpingBatches: held,
     });
   })
 );
