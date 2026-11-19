@@ -15,7 +15,7 @@ const Costing       = require("../models/Costing");
 const StockMovement = require("../models/StockMovement");
 const { calculateElasticCosting } = require("../utils/elasticCosting.js");
 const { isAuthenticated, isAdmin } = require("../middleware/auth");
-const { applyMovement } = require("../utils/elasticStock");
+const { applyMovement, round3 } = require("../utils/elasticStock");
 const { renderPdf } = require("../utils/renderPdf");
 const { getPdfBranding } = require("../services/documentSettings");
 const { saveIf } = require("../utils/conditionalSave");
@@ -432,8 +432,10 @@ router.get(
       const ledgerSum    = l ? Number(l.sum) || 0 : 0;
       const reservedLedgerSum = l ? Number(l.reservedSum) || 0 : 0;
       const moveCount    = l ? l.count : 0;
-      const drift        = stock - ledgerSum;
-      const reservedDrift = reserved - reservedLedgerSum;
+      // To the millimetre: the database adds the column its own way, and
+      // a difference in the thirteenth decimal place is not stock.
+      const drift        = round3(stock - ledgerSum);
+      const reservedDrift = round3(reserved - reservedLedgerSum);
 
       if (drift !== 0 || reservedDrift !== 0) {
         drifts.push({

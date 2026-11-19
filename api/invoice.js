@@ -101,7 +101,8 @@ async function invoiceableDcs(order) {
   const match = [{ order: order._id }];
   if (order.orderNo != null) match.push({ orderNo: order.orderNo });
   const dcs = await DeliveryChallan.find({ $or: match, type: "elastic" })
-    .select("dcNumber status dispatchDate items totalQuantity totalBoxes customerAddress")
+    // updatedAt: the stamp /create holds each chosen challan to.
+    .select("dcNumber status dispatchDate items totalQuantity totalBoxes customerAddress updatedAt")
     .sort({ dispatchDate: 1, createdAt: 1 })
     .lean();
   const onInvoices = await Invoice.find({ order: order._id, status: "issued" })
@@ -360,6 +361,28 @@ router.post(
       let doc;
       try {
         await withTxn(async (session) => {
+          // The challans, held as they were read. Each is written to
+          // here, and only if it is still despatched and has not changed
+          // since its lines were added up above. One cancelled or edited
+          // in that moment stops the invoice. One being cancelled or
+          // edited at this very moment meets this write, is run again,
+          // and is then refused because the invoice exists
+          // (api/deliveryChallan.js assertNotOnInvoice).
+          for (const d of chosen) {
+            const held = await DeliveryChallan.updateOne(
+              {
+                _id: d._id,
+                status: { $in: ["dispatched", "delivered"] },
+                ...(d.updatedAt ? { updatedAt: d.updatedAt } : { updatedAt: { $exists: false } }),
+              },
+              { $set: { updatedAt: new Date() } },
+              { session, timestamps: false }
+            );
+            if (held.matchedCount !== 1) {
+              throw new ErrorHandler(
+                `${d.dcNumber} changed while the invoice was being raised — look at it again, and raise the invoice once more.`, 409);
+            }
+          }
           [doc] = await Invoice.create([data], { session });
           await partyLedger.post({
             partyType: "customer", party: data.customer, date: data.invoiceDate, docType: "Invoice", doc: _id,

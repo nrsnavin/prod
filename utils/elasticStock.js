@@ -45,6 +45,17 @@
 //  Magnitude guard: |quantity| > MAX_ABS_QUANTITY is rejected so a
 //  rogue caller (UI typo, malformed payload) can't blow up the
 //  ledger.
+//
+//  TO THE MILLIMETRE
+//
+//  Quantities are metres and the forms take two decimal places. Plain
+//  floating-point sums do not keep them: 2224.3 − 36.1 is
+//  2188.2000000000003, and the difference read back is
+//  36.09999999999991 — less than the 36.1 that was asked for, which a
+//  challan took for a shortfall. Both balances and both applied figures
+//  are therefore rounded to three places, and the balance is WRITTEN
+//  (under the same observed-values filter) rather than incremented, so
+//  what is stored is the rounded figure and not the database's own sum.
 // ─────────────────────────────────────────────────────────────
 "use strict";
 
@@ -74,6 +85,9 @@ const RESERVATION_TYPES = { RESERVATION_HOLD: +1, RESERVATION_RELEASE: -1 };
 
 const MAX_RETRIES      = 5;
 const MAX_ABS_QUANTITY = 1e7;
+
+/** A quantity to three decimal places (see TO THE MILLIMETRE above). */
+const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
 
 async function applyMovement(session, opts) {
   const {
@@ -144,28 +158,36 @@ async function applyMovement(session, opts) {
     }
 
     const currentStock = Number(current.stock) || 0;
-    const newStock     = Math.max(0, currentStock + requested);
-    const applied      = newStock - currentStock;
+    const newStock     = round3(Math.max(0, currentStock + requested));
+    const applied      = round3(newStock - currentStock);
 
     // Reserved has no ceiling of its own: an order approved before the
     // goods exist promises more than is on the shelf, and that gap is a
     // production requirement, not a data error. Available reads as zero
     // and the shortfall is visible where it belongs.
     const currentReserved = Number(current.reservedStock) || 0;
-    const newReserved     = Math.max(0, currentReserved + reservedRequested);
-    const reservedApplied = newReserved - currentReserved;
+    const newReserved     = round3(Math.max(0, currentReserved + reservedRequested));
+    const reservedApplied = round3(newReserved - currentReserved);
 
-    const inc = {};
-    if (applied) inc.stock = applied;
-    if (reservedApplied) inc.reservedStock = reservedApplied;
-    if (alsoIncProduced && applied) inc.quantityProduced = applied;
+    // The balances are set to the rounded figures worked out above. The
+    // filter below only matches while both are still what was read, so
+    // setting them is as safe as incrementing — and leaves no stray
+    // 0.0000000000003 on the shelf.
+    const update = {};
+    if (applied || reservedApplied) {
+      update.$set = {};
+      if (applied) update.$set.stock = newStock;
+      if (reservedApplied) update.$set.reservedStock = newReserved;
+    }
+    // Not in the filter, so it stays an increment.
+    if (alsoIncProduced && applied) update.$inc = { quantityProduced: applied };
 
-    const updated = Object.keys(inc).length
+    const updated = Object.keys(update).length
       ? await Elastic.findOneAndUpdate(
           // Both observed values in the filter: a concurrent writer that
           // moved either one invalidates the arithmetic above.
           { _id: elasticId, stock: currentStock, reservedStock: currentReserved },
-          { $inc: inc },
+          update,
           { new: true, session }
         )
       : current;
@@ -204,4 +226,4 @@ async function applyMovement(session, opts) {
   );
 }
 
-module.exports = { applyMovement, VALID_TYPES, MAX_ABS_QUANTITY };
+module.exports = { applyMovement, round3, VALID_TYPES, MAX_ABS_QUANTITY };

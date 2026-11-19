@@ -12,12 +12,14 @@ const { requireReason } = require("../utils/auditReason");
 const { escapeRegex } = require("../utils/escapeRegex");
 
 const DeliveryChallan = require("../models/DeliveryChallan");
+const Invoice         = require("../models/Invoice");
 const { syncInvoiceBoxes } = require("../services/invoiceBoxes");
 const Order           = require("../models/Order");
 const JobOrder        = require("../models/JobOrder");
 const StockMovement   = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
-const { applyMovement } = require("../utils/elasticStock");
+const { applyMovement, round3 } = require("../utils/elasticStock");
+const { r2 }            = require("../utils/money");
 const Customer          = require("../models/Customer");
 const Elastic           = require("../models/Elastic");
 const { enqueue }       = require("../utils/outbox");
@@ -142,7 +144,9 @@ function readDcItems(raw, type) {
       }
     }
 
-    const quantity = Number(item?.quantity);
+    // To the millimetre, like the stock it comes out of (utils/elasticStock.js).
+    const asked = Number(item?.quantity);
+    const quantity = Number.isFinite(asked) ? round3(asked) : NaN;
     if (!Number.isFinite(quantity) || quantity <= 0) {
       throw new ErrorHandler(
         `Line ${i + 1}: quantity must be a positive number`, 400
@@ -175,7 +179,8 @@ function readDcItems(raw, type) {
       unit:        item.unit || "m",
       quantity,
       rate,
-      amount:      quantity * rate,
+      // To the paisa: 1234.5 × 0.07 is 86.42, not 86.41500000000001.
+      amount:      r2(quantity * rate),
       boxes,
       // Populated by _applyDcItems. Zeroed here on every path: a stale
       // split would make the NEXT reversal put back the wrong figure.
@@ -187,6 +192,13 @@ function readDcItems(raw, type) {
 
 /** Every line's boxes added up: the challan's total boxes. */
 const sumBoxes = (items) => (items || []).reduce((s, i) => s + (Number(i.boxes) || 0), 0);
+
+/** The challan's totals over its lines: quantity, value (internal), boxes. */
+const totalsOf = (items) => ({
+  totalQuantity: round3((items || []).reduce((s, i) => s + (Number(i.quantity) || 0), 0)),
+  totalAmount:   r2((items || []).reduce((s, i) => s + (Number(i.amount) || 0), 0)),
+  totalBoxes:    sumBoxes(items),
+});
 
 /**
  * The new lines are the old ones with only their boxes changed: the same
@@ -248,15 +260,17 @@ function readDate(value, label) {
 async function previewShortfalls(items, shortfallReason) {
   const ids = [...new Set(items.map((i) => String(i.elastic)))];
   const stocks = new Map((await Elastic.find({ _id: { $in: ids } }).select("stock").lean())
-    .map((e) => [String(e._id), Number(e.stock) || 0]));
+    .map((e) => [String(e._id), round3(e.stock)]));
   const wanted = new Map();
-  for (const i of items) wanted.set(String(i.elastic), (wanted.get(String(i.elastic)) || 0) + i.quantity);
+  for (const i of items) wanted.set(String(i.elastic), round3((wanted.get(String(i.elastic)) || 0) + i.quantity));
   const shortfalls = [];
   for (const item of items) {
     const onHand = stocks.get(String(item.elastic)) ?? 0;
     const shipping = wanted.get(String(item.elastic));
-    if (shipping > onHand && !shortfalls.some((s) => String(s.elastic) === String(item.elastic))) {
-      shortfalls.push({ elastic: item.elastic, name: item.elasticName || "", shipping, onHand, short: Math.round((shipping - onHand) * 1000) / 1000 });
+    // To the millimetre: 0.1 + 0.2 on two lines is not more than 0.3 on the shelf.
+    const short = round3(shipping - onHand);
+    if (short > 0 && !shortfalls.some((s) => String(s.elastic) === String(item.elastic))) {
+      shortfalls.push({ elastic: item.elastic, name: item.elasticName || "", shipping, onHand, short });
     }
   }
   if (shortfalls.length && String(shortfallReason || "").trim().length < MIN_SHORTFALL_REASON) {
@@ -318,18 +332,23 @@ async function _reverseDcItem(session, dc, item, reasonContext, userId) {
   const outs = rows.filter((m) => m.type === "DC_OUT");
   if (outs.length === 0) return { skipped: "no source DC_OUT" };
 
-  const refund = -rows.reduce((s, m) => s + Number(m.applied || 0), 0);
+  const refund = round3(-rows.reduce((s, m) => s + Number(m.applied || 0), 0));
 
   // A despatch made before DC_OUT carried a reserved figure recorded
   // the split on the item instead. Fall back to it rather than reading
   // an absent field as "no reservation was consumed" — that would
   // strand the promise on every DC cut before this change.
-  const ledgerReserved = rows.reduce(
+  //
+  // The fallback is every line of this elastic, not this one line: the
+  // rows above are per elastic, and this runs once per elastic
+  // (_reverseDcLines).
+  const ledgerReserved = round3(rows.reduce(
     (s, m) => s + Number(m.reservedApplied || 0), 0
-  );
-  const reReserve = ledgerReserved !== 0
-    ? -ledgerReserved
-    : Number(item.consumedFromReservation || 0);
+  ));
+  const notedOnLines = round3((dc.items || [])
+    .filter((i) => i.elastic && String(i.elastic) === String(item.elastic))
+    .reduce((s, i) => s + Number(i.consumedFromReservation || 0), 0));
+  const reReserve = ledgerReserved !== 0 ? -ledgerReserved : notedOnLines;
 
   // Whether the order can take the promise back.
   let order = null;
@@ -361,7 +380,7 @@ async function _reverseDcItem(session, dc, item, reasonContext, userId) {
       (r) => r.elastic.toString() === item.elastic.toString()
     );
     if (entry) {
-      entry.quantity = (Number(entry.quantity) || 0) + restoring;
+      entry.quantity = round3((Number(entry.quantity) || 0) + restoring);
     } else {
       // Pruned when it hit zero on despatch; it is owed again now.
       order.reservations.push({ elastic: item.elastic, quantity: restoring });
@@ -377,6 +396,65 @@ async function _reverseDcItem(session, dc, item, reasonContext, userId) {
   }
 
   return { refund, restored: restoring, strandedReservation };
+}
+
+/**
+ * Undo every line of a challan — once per ELASTIC, not once per line.
+ *
+ * The ledger rows a reversal reads are the challan's rows for an
+ * elastic, whichever of its lines wrote them. A challan with one
+ * elastic on two lines (the same product in two box sizes) was undone
+ * twice for it: the first pass gave everything back and left the ledger
+ * square; the second read "nothing recorded against the reservation",
+ * took that for a challan from before the ledger kept the figure, and
+ * gave back the second line's share of the order's reservation again.
+ * An order for 1,000 came out holding 1,300.
+ */
+async function _reverseDcLines(session, dc, reasonContext, userId) {
+  const done = new Set();
+  const results = [];
+  for (const item of dc.items || []) {
+    if (!item.elastic) continue;
+    const key = String(item.elastic);
+    if (done.has(key)) continue;
+    done.add(key);
+    results.push(await _reverseDcItem(session, dc, item, reasonContext, userId));
+  }
+  return results;
+}
+
+/**
+ * The issued invoice a challan is on, if there is one.
+ *
+ * An invoice is raised for the challans that carried the goods out, its
+ * lines are their lines, and "nothing on an issued invoice is edited:
+ * cancel and raise again" (api/invoice.js). The challan under it was not
+ * held to that: it could be cancelled — the goods back on the shelf, the
+ * invoice and the customer's account as they were — or have its quantity
+ * changed, which only its boxes followed onto the invoice.
+ *
+ * So while an issued invoice carries it, a challan keeps its goods. Its
+ * boxes, vehicle, driver, LR and remarks can still be corrected; they
+ * change nothing that is billed. Cancelling the invoice frees it.
+ */
+const invoiceCarrying = (dcId, session = null) => Invoice
+  .findOne({ "dcs.dc": dcId, status: "issued" })
+  .select("invoiceNumber")
+  .session(session)
+  .lean();
+
+async function assertNotOnInvoice(dc, session, doing) {
+  const inv = await invoiceCarrying(dc._id, session);
+  if (!inv) return;
+  const err = new ErrorHandler(
+    `DC ${dc.dcNumber} is on invoice ${inv.invoiceNumber}, which bills the customer for what it carried. ` +
+    `Cancel the invoice first — that frees the challan — and then ${doing}. ` +
+    `If the invoice has to stand, raise a credit note for the difference instead.`,
+    409
+  );
+  err.code = "DC_ON_INVOICE";
+  err.details = { invoice: String(inv._id), invoiceNumber: inv.invoiceNumber };
+  throw err;
 }
 
 /**
@@ -621,13 +699,13 @@ async function _applyDcItems(session, dc, userId, { shortfallReason } = {}) {
           (r) => r.elastic.toString() === item.elastic.toString()
         );
         const reservedQty = entry ? Number(entry.quantity) || 0 : 0;
-        consumeFromReservation = Math.min(
+        consumeFromReservation = round3(Math.min(
           Number(item.quantity) || 0,
           reservedQty
-        );
+        ));
       }
-      const shipped = Number(item.quantity) || 0;
-      const consumeFromStock = Math.max(0, shipped - consumeFromReservation);
+      const shipped = round3(item.quantity);
+      const consumeFromStock = round3(Math.max(0, shipped - consumeFromReservation));
 
       // ONE movement for the whole despatch.
       //
@@ -655,14 +733,17 @@ async function _applyDcItems(session, dc, userId, { shortfallReason } = {}) {
             : `DC ${dc.dcNumber}`,
           by:               userId,
         });
-        const moved = Math.abs(Number(movement?.applied) || 0);
-        if (moved < shipped) {
+        // Compared to the millimetre: a difference in the thirteenth
+        // decimal place is arithmetic, not a shortfall.
+        const moved = round3(Math.abs(Number(movement?.applied) || 0));
+        const short = round3(shipped - moved);
+        if (short > 0) {
           shortfalls.push({
             elastic: item.elastic,
             name: item.elasticName || "",
             shipping: shipped,
             onHand: moved,
-            short: Math.round((shipped - moved) * 1000) / 1000,
+            short,
           });
         }
       }
@@ -675,7 +756,7 @@ async function _applyDcItems(session, dc, userId, { shortfallReason } = {}) {
           (r) => r.elastic.toString() === item.elastic.toString()
         );
         if (entry) {
-          entry.quantity = Math.max(0, (Number(entry.quantity) || 0) - consumeFromReservation);
+          entry.quantity = round3(Math.max(0, (Number(entry.quantity) || 0) - consumeFromReservation));
         }
       }
 
@@ -708,7 +789,7 @@ async function _applyDcItems(session, dc, userId, { shortfallReason } = {}) {
     if (orderDoc) {
       // Prune zero-quantity reservation entries.
       orderDoc.reservations = (orderDoc.reservations || []).filter(
-        (r) => Number(r.quantity || 0) > 0
+        (r) => round3(r.quantity) > 0
       );
       await orderDoc.save({ session });
     }
@@ -758,9 +839,7 @@ router.post(
     } catch (err) {
       return next(err);
     }
-    const totalQuantity = processedItems.reduce((s, i) => s + i.quantity, 0);
-    const totalAmount   = processedItems.reduce((s, i) => s + i.amount,   0);
-    const totalBoxes    = sumBoxes(processedItems);
+    const { totalQuantity, totalAmount, totalBoxes } = totalsOf(processedItems);
 
     // The order number is READ off the order, not taken on trust.
     //
@@ -979,19 +1058,17 @@ router.put(
             dc.items.forEach((item, i) => { item.boxes = nextItems[i].boxes; });
             dc.totalBoxes = sumBoxes(dc.items);
           } else {
+            // The goods are changing. An issued invoice bills the customer
+            // for what this challan carried, and nothing on it is edited.
+            await assertNotOnInvoice(dc, session, "change what it carried");
+
             // 1. Put back everything this challan took. Same reversal the
             //    cancel path uses, so the two cannot disagree.
-            for (const item of dc.items || []) {
-              await _reverseDcItem(
-                session, dc, item, `DC ${dc.dcNumber} edited`, req.user?._id
-              );
-            }
+            await _reverseDcLines(session, dc, `DC ${dc.dcNumber} edited`, req.user?._id);
 
             // 2. Replace the lines.
             dc.items = nextItems;
-            dc.totalQuantity = dc.items.reduce((s, i) => s + i.quantity, 0);
-            dc.totalAmount   = dc.items.reduce((s, i) => s + i.amount,   0);
-            dc.totalBoxes    = sumBoxes(dc.items);
+            Object.assign(dc, totalsOf(dc.items));
 
             // 3. Take the new lines out again, through the same helper
             //    /create uses.
@@ -1074,12 +1151,14 @@ router.get(
       }
       filter.status = status;
     }
-    if (search.trim()) {
+    // Trimmed: a number pasted with a space after it matched nothing.
+    const term = String(search).trim();
+    if (term) {
       const or = [
-        { dcNumber:     { $regex: escapeRegex(search), $options: "i" } },
-        { customerName: { $regex: escapeRegex(search), $options: "i" } },
+        { dcNumber:     { $regex: escapeRegex(term), $options: "i" } },
+        { customerName: { $regex: escapeRegex(term), $options: "i" } },
       ];
-      const asNum = Number(search);
+      const asNum = Number(term);
       if (Number.isFinite(asNum)) {
         or.push({ orderNo: asNum });
       }
@@ -1123,7 +1202,18 @@ router.get(
       .slice()
       .sort((a, b) => new Date(b.at) - new Date(a.at));
 
-    res.json({ success: true, dc: { ...dc, fingerprints } });
+    // The invoice it is on, so the page can say so and offer what is
+    // still open to it (see assertNotOnInvoice).
+    const onInvoice = await invoiceCarrying(dc._id);
+
+    res.json({
+      success: true,
+      dc: {
+        ...dc,
+        fingerprints,
+        invoice: onInvoice ? { _id: onInvoice._id, invoiceNumber: onInvoice.invoiceNumber } : null,
+      },
+    });
   })
 );
 
@@ -1206,6 +1296,10 @@ async function changeDcStatus(id, status, req) {
         throw err;
       }
 
+      // Cancelling puts the goods back on the shelf. An issued invoice
+      // still bills the customer for them: the invoice goes first.
+      if (status === "cancelled") await assertNotOnInvoice(dc, session, "cancel it");
+
       dc.status = status;
 
       const fp = buildFingerprint(actionCode, {
@@ -1225,17 +1319,9 @@ async function changeDcStatus(id, status, req) {
         previousStatus !== "cancelled" &&
         dc.type === "elastic"
       ) {
-        for (const item of (dc.items || [])) {
-          // Goods back on the shelf and the order's promise with
-          // them, off the DC_OUT rows this challan wrote.
-          await _reverseDcItem(
-            session,
-            dc,
-            item,
-            `DC ${dc.dcNumber} cancelled`,
-            req.user?._id
-          );
-        }
+        // Goods back on the shelf and the order's promise with them,
+        // off the DC_OUT rows this challan wrote.
+        await _reverseDcLines(session, dc, `DC ${dc.dcNumber} cancelled`, req.user?._id);
       }
 
       resp = { dc, fingerprint: fp };
@@ -1346,15 +1432,7 @@ router.delete(
         }
 
         if (dc.type === "elastic") {
-          for (const item of (dc.items || [])) {
-            await _reverseDcItem(
-              session,
-              dc,
-              item,
-              `Draft DC ${dc.dcNumber} deleted`,
-              req.user?._id
-            );
-          }
+          await _reverseDcLines(session, dc, `Draft DC ${dc.dcNumber} deleted`, req.user?._id);
         }
 
         const fp = buildFingerprint(ACTION_CODES.DC_DELETED, {
