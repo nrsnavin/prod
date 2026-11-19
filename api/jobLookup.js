@@ -23,6 +23,9 @@ const { shiftFigures, clockToMinutes } = require('../utils/shiftFigures');
 // source of truth (was previously re-encoded three times in this file).
 const { enteredAtField, liveJobStatus } = require('../domain/jobStatus');
 const { outsourcingBlockers, outsourcingDerived } = require('../utils/outsourcingRecord');
+const { machineOfWastage } = require('../utils/wastageMachine');
+const factoryDay = require('../utils/factoryDay');
+const { round3 } = require('../utils/quantity');
 const router = express.Router();
 
 // ══════════════════════════════════════════════════════════════
@@ -165,71 +168,106 @@ router.get('/stale', async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════
 //  GET /wastage-outliers?lookbackDays=30&sigmaThreshold=2
-//  Machines whose recent (last 7 days) wastage total is more than
-//  `sigmaThreshold` standard deviations above their own trailing
-//  baseline. Joins Wastage → JobOrder.machine so the per-machine
-//  signal works even though Wastage rows carry only `job`.
+//  Machines whose wastage over the last 7 days is more than
+//  `sigmaThreshold` standard deviations above what a week normally
+//  is on that machine. The phone's advisor shows the count.
 //
-//  Guard: a machine needs at least 5 wastage events in the
-//  baseline window before we'll trip an alert. New machines or
-//  ones with sparse data don't fire on their first dirty shift.
+//  ── Like with like ──────────────────────────────────────────────
+//  The baseline is the machine's own DAILY totals over the days
+//  before the last seven — quiet days counted as nothing — and the
+//  last seven days are held against a week of that:
+//
+//      a normal week   = 7 × the daily average
+//      its spread      = √7 × the daily standard deviation
+//      high            = this week > normal + threshold × spread
+//
+//  This used to take the average size (and spread) of ONE wastage
+//  entry as the baseline and compare the seven-day TOTAL with it. A
+//  loom wasting a steady 20 m a day had entries averaging 20 m and a
+//  week's total of 140 m, so it was "high" every day — as was any
+//  loom with two entries in a week.
+//
+//  ── Which machine ───────────────────────────────────────────────
+//  The entry's own (utils/wastageMachine.js): kept on the record,
+//  else the loom its operator ran the job on, else the job's. Read
+//  off the job alone, a loom's wastage vanished from here the moment
+//  the job went to finishing and stopped pointing at it.
+//
+//  Guard: a machine needs at least 5 wastage entries in the baseline
+//  days before it is judged at all. New machines, or ones with
+//  sparse data, don't fire on their first dirty shift.
 // ══════════════════════════════════════════════════════════════
 router.get('/wastage-outliers', async (req, res) => {
   try {
-    const lookback   = Math.max(7, parseInt(req.query.lookbackDays,   10) || 30);
-    const threshold  = Math.max(1, parseFloat(req.query.sigmaThreshold) || 2);
     const recentDays = 7;
     const minSamples = 5;
+    // At least a week of baseline behind the week being judged.
+    const asked      = parseInt(req.query.lookbackDays, 10);
+    const lookback   = Math.min(365, Math.max(2 * recentDays, asked > 0 ? asked : 30));
+    const sigma      = parseFloat(req.query.sigmaThreshold);
+    const threshold  = Math.max(1, Number.isFinite(sigma) ? sigma : 2);
+    const baselineDays = lookback - recentDays;
 
-    const now        = Date.now();
-    const lookbackAt = new Date(now - lookback   * 86_400_000);
-    const recentAt   = new Date(now - recentDays * 86_400_000);
+    // Days are India's: an entry at one in the morning is that day's.
+    const today      = factoryDay.calendarDay(new Date());
+    const recentFrom = new Date(today.getTime() - (recentDays - 1) * factoryDay.DAY);
+    const baseFrom   = new Date(today.getTime() - (lookback - 1) * factoryDay.DAY);
 
     const rows = await Wastage.aggregate([
-      { $match: { createdAt: { $gte: lookbackAt } } },
+      { $match: { createdAt: { $gte: factoryDay.dayStart(baseFrom) } } },
       { $lookup: {
-          from:         'joborders',
+          from:         JobOrder.collection.collectionName,
           localField:   'job',
           foreignField: '_id',
-          as:           'jo',
+          as:           'jobDoc',
         } },
-      { $unwind: '$jo' },
-      { $match: { 'jo.machine': { $ne: null } } },
-      { $project: {
-          machine:   '$jo.machine',
-          quantity:  1,
-          createdAt: 1,
-        } },
+      { $unwind: { path: '$jobDoc', preserveNullAndEmptyArrays: true } },
+      ...machineOfWastage(),
+      { $match: { machineRef: { $ne: null } } },
+      { $project: { machine: '$machineRef', quantity: 1, createdAt: 1 } },
     ]);
 
-    // Bucket per machine: trailing baseline samples + recent window total.
+    // Per machine: each baseline day's total, and the last week's.
     const buckets = new Map();
     for (const r of rows) {
       const key = String(r.machine);
-      if (!buckets.has(key)) buckets.set(key, { samples: [], recent: 0 });
+      if (!buckets.has(key)) buckets.set(key, { byDay: new Map(), entries: 0, recent: 0 });
       const b = buckets.get(key);
-      b.samples.push(r.quantity);
-      if (r.createdAt >= recentAt) b.recent += r.quantity;
+      const day = factoryDay.calendarDay(r.createdAt);
+      const quantity = Number(r.quantity) || 0;
+      if (day && day >= recentFrom) { b.recent += quantity; continue; }
+      const dayKey = day ? day.getTime() : 0;
+      b.byDay.set(dayKey, (b.byDay.get(dayKey) || 0) + quantity);
+      b.entries += 1;
     }
 
+    const r2 = (x) => Math.round(x * 100) / 100;
     const candidateIds = [];
     const meta         = new Map();
-    for (const [mid, { samples, recent }] of buckets) {
-      if (samples.length < minSamples) continue;
-      const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
-      const variance = samples.reduce(
-        (acc, x) => acc + (x - mean) ** 2,
-        0
-      ) / samples.length;
+    for (const [mid, { byDay, entries, recent }] of buckets) {
+      if (entries < minSamples) continue;
+      const totals = [...byDay.values()];
+      const mean = totals.reduce((a, x) => a + x, 0) / baselineDays;
+      // Over every baseline day: the quiet ones are zeros, not missing.
+      const variance = (
+        totals.reduce((acc, x) => acc + (x - mean) ** 2, 0)
+        + (baselineDays - totals.length) * mean ** 2
+      ) / baselineDays;
       const stddev = Math.sqrt(variance);
       if (stddev <= 0) continue;
-      const ceiling = mean + threshold * stddev;
+      const expectedTotal = recentDays * mean;
+      const ceiling = expectedTotal + threshold * Math.sqrt(recentDays) * stddev;
       if (recent > ceiling) {
         candidateIds.push(mid);
         meta.set(mid, {
-          recentTotal: Math.round(recent * 100) / 100,
-          mean:        Math.round(mean * 100)   / 100,
-          stddev:      Math.round(stddev * 100) / 100,
+          recentTotal:   r2(recent),
+          // What a week normally is on this machine, and the line crossed.
+          expectedTotal: r2(expectedTotal),
+          ceiling:       r2(ceiling),
+          // Per day, over the baseline days.
+          mean:          r2(mean),
+          stddev:        r2(stddev),
+          baselineDays,
         });
       }
     }
@@ -268,7 +306,9 @@ router.get('/:jobId', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid job ID.' });
 
     const job = await JobOrder.findById(jobId)
-      .populate('customer', 'name phone')
+      // `phoneNumber`: this asked for `phone`, which a customer does not
+      // have, so the phone on the job page was always blank.
+      .populate('customer', 'name phoneNumber')
       .populate('order',    'orderNo status')
       .populate('machine',  'ID manufacturer NoOfHead NoOfHooks status elastics loading')
       .populate('createdBy',   'name role')
@@ -405,14 +445,51 @@ router.get('/:jobId', async (req, res) => {
     // Both shifts run 12h, so this is output per hour actually worked —
     // not per hour rostered, which would flatter a machine that stood
     // idle for half of it.
+    // Sums of decimals: 1000.2 + 2000.4 is 3000.6000000000004.
+    shiftSummary.produced = round3(shiftSummary.produced);
+    shiftSummary.byShift = { DAY: round3(shiftSummary.byShift.DAY), NIGHT: round3(shiftSummary.byShift.NIGHT) };
     shiftSummary.metresPerHour = shiftSummary.workedMinutes > 0
       ? Math.round((shiftSummary.produced / (shiftSummary.workedMinutes / 60)) * 10) / 10
       : 0;
     shiftSummary.firstDateLabel = fmtDate(shiftSummary.firstDate);
     shiftSummary.lastDateLabel  = fmtDate(shiftSummary.lastDate);
 
-    const wastages = (job.wastages || []).map(wst => ({ id: wst._id, elasticName: wst.elastic?.name || '-', employeeName: wst.employee?.name || '-', quantity: wst.quantity || 0, penalty: wst.penalty || 0, reason: wst.reason || '', date: fmtDate(wst.createdAt) }));
-    const packingDetails = (job.packingDetails || []).map(pk => ({ id: pk._id, elasticName: pk.elastic?.name || '-', quantity: pk.quantity || 0, rolls: pk.rolls || 0, metersPerRoll: pk.metersPerRoll || 0, total: pk.total || 0, batch: pk.batch || '-', status: pk.status || 'open', date: fmtDate(pk.createdAt) }));
+    const wastages = (job.wastages || []).map(wst => ({
+      id: wst._id, elasticName: wst.elastic?.name || '-', employeeName: wst.employee?.name || '-',
+      quantity: wst.quantity || 0, penalty: wst.penalty || 0, reason: wst.reason || '', date: fmtDate(wst.createdAt),
+      // Who entered it — not always the person it is recorded against.
+      recordedByName: wst.recordedByName || '',
+    }));
+    // ── The boxes packed ─────────────────────────────────────────────
+    // A packing record is one box: its metres, joints, three weights, a
+    // size and a stretch, who packed it and who checked it.
+    //
+    // This row used to be mapped from `quantity`, `rolls`,
+    // `metersPerRoll`, `total`, `batch` and `status` — fields a packing
+    // record has never had — so every box went out as 0 m, 0 rolls,
+    // batch "-", status "open", and the phone's Packing tab on a job read
+    // "Packed 0m" whatever had been packed.
+    //
+    // The first block is the box as it is. The second repeats it under
+    // the names the phone app already reads, so an installed app shows
+    // the metres too: one box is one roll, and a box has no dispatch
+    // state of its own (a challan ships metres, not boxes), so its
+    // status is simply "packed".
+    const packingDetails = (job.packingDetails || []).map(pk => {
+      const meter = Number(pk.meter) || 0;
+      const packedBy = pk.packedBy?.name || '-';
+      return {
+        id: pk._id, elasticName: pk.elastic?.name || '-', date: fmtDate(pk.createdAt),
+        meter, joints: Number(pk.joints) || 0,
+        netWeight: Number(pk.netWeight) || 0, tareWeight: Number(pk.tareWeight) || 0, grossWeight: Number(pk.grossWeight) || 0,
+        size: pk.size || '', stretch: pk.stretch || '',
+        packedBy, checkedBy: pk.checkedBy?.name || '-',
+
+        quantity: meter, total: meter, rolls: 1, metersPerRoll: meter,
+        employeeName: packedBy, weight: Number(pk.netWeight) || 0,
+        batch: '-', status: 'packed',
+      };
+    });
 
     // 🪪 Newest-first fingerprint feed for the timeline UI
     const fingerprints = (job.fingerprints || [])
@@ -435,7 +512,7 @@ router.get('/:jobId', async (req, res) => {
         // The version an edit sends back as expectedVersion (utils/versioning.js).
         __v: job.__v ?? 0,
         date: fmtDate(job.date), status: job.status,
-        customerName: job.customer?.name || '-', customerPhone: job.customer?.phone || '',
+        customerName: job.customer?.name || '-', customerPhone: job.customer?.phoneNumber || '',
         orderNo: job.order?.orderNo || '',
         machine: job.machine ? {
           machineId: job.machine._id, machineName: job.machine.ID || '-', machineNoOfHead: job.machine.NoOfHead || 0,

@@ -225,3 +225,79 @@ describe('the collection routes that /:jobId was swallowing', () => {
     expect(res.body.message).toMatch(/invalid job id/i);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading api/jobLookup.js line by line: the job detail both
+//  apps load (GET /job/:jobId).
+//
+//  THE CUSTOMER'S PHONE was always blank: the route asked the customer
+//  for `phone`, and the field is `phoneNumber`.
+//
+//  THE BOXES PACKED. Each packing row was mapped from `quantity`,
+//  `rolls`, `metersPerRoll`, `total`, `batch` and `status` — none of
+//  which a packing record has (it has metres, joints, three weights, a
+//  size, a stretch, who packed and who checked). Every row went out as
+//  0 m, 0 rolls, batch "-", status "open": the phone's Packing tab on a
+//  job read "Packed 0m · Rolls 0" whatever had been packed.
+// ══════════════════════════════════════════════════════════════════
+describe('GET /job/:jobId — the detail', () => {
+  const Packing  = () => require('../../models/Packing');
+  const Employee = () => require('../../models/Employee');
+  const detail = (id) => request(app).get(`/api/v2/job/${id}`).set('Cookie', adminCookie());
+
+  async function jobWithBoxes() {
+    const customer = await Customer.create({ name: 'Sri Textiles', contactName: 'S', phoneNumber: '9876543210' });
+    const elastic = await Elastic.create({ name: `25mm ${Date.now()}`, weaveType: '8', spandexEnds: 40, yarnEnds: 120, pick: 12, noOfHook: 8, weight: 2.4 });
+    const order = await Order.create({
+      customer: customer._id, status: 'InProgress', po: 'PO-9', date: new Date(), supplyDate: new Date(),
+      elasticOrdered: [{ elastic: elastic._id, quantity: 1000 }],
+    });
+    const job = await JobOrder.create({
+      date: new Date(), order: order._id, customer: customer._id, status: 'packing',
+      elastics: [{ elastic: elastic._id, quantity: 1000 }],
+    });
+    const packer = await Employee().create({ name: 'Mani', department: 'packing' });
+    const checker = await Employee().create({ name: 'Ravi', department: 'checking' });
+    const boxes = await Packing().create([
+      { job: job._id, elastic: elastic._id, meter: 250.5, joints: 2, tareWeight: 1.5, netWeight: 12.4, grossWeight: 13.9, size: '25mm', stretch: '120%', checkedBy: checker._id, packedBy: packer._id },
+      { job: job._id, elastic: elastic._id, meter: 300, joints: 0, tareWeight: 1.5, netWeight: 14.8, grossWeight: 16.3, checkedBy: checker._id, packedBy: packer._id },
+    ]);
+    await JobOrder.updateOne({ _id: job._id }, { packingDetails: boxes.map((b) => b._id) });
+    return { job, elastic };
+  }
+
+  it('carries the customer\'s phone number', async () => {
+    const { job } = await jobWithBoxes();
+    const res = await detail(job._id);
+    expect(res.status).toBe(200);
+    // Before: "".
+    expect(res.body.data.customerPhone).toBe('9876543210');
+    await Employee().deleteMany({});
+    await Packing().deleteMany({});
+  });
+
+  it('gives each box as it was packed', async () => {
+    const { job, elastic } = await jobWithBoxes();
+    const res = await detail(job._id);
+    const [first, second] = res.body.data.packingDetails;
+    expect(first).toMatchObject({
+      elasticName: elastic.name, meter: 250.5, joints: 2,
+      netWeight: 12.4, tareWeight: 1.5, grossWeight: 13.9,
+      size: '25mm', stretch: '120%', packedBy: 'Mani', checkedBy: 'Ravi',
+    });
+    expect(second).toMatchObject({ meter: 300, joints: 0, size: '', stretch: '' });
+    expect(typeof first.date).toBe('string');
+    await Employee().deleteMany({});
+    await Packing().deleteMany({});
+  });
+
+  it('and under the names the installed phone app reads, so it shows metres and not 0', async () => {
+    const { job } = await jobWithBoxes();
+    const res = await detail(job._id);
+    const [first] = res.body.data.packingDetails;
+    // Before: quantity 0, total 0, rolls 0, employeeName undefined, status "open".
+    expect(first).toMatchObject({ quantity: 250.5, total: 250.5, rolls: 1, employeeName: 'Mani', weight: 12.4, status: 'packed' });
+    await Employee().deleteMany({});
+    await Packing().deleteMany({});
+  });
+});
