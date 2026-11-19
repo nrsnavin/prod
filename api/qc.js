@@ -22,6 +22,7 @@ const router = express.Router();
 
 const QcRecord = require("../models/QcRecord");
 const JobOrder = require("../models/JobOrder");
+const Order    = require("../models/Order");
 const Elastic  = require("../models/Elastic");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -249,27 +250,64 @@ router.get(
 );
 
 // ── Export a fine-tuning dataset: image + label pairs. ─────────────
+//
+//  Written a record at a time. Each sample carries its photo — megabytes
+//  of text — and this used to read up to 2,000 of them into memory and
+//  hand the lot to res.json() as one string. The dataset is "ready" at
+//  200 photos, which is about where one string stops being possible
+//  (and where reading them all at once is most of the server's memory,
+//  for everybody using it). What arrives is the same document:
+//  { success, exportedAt, samples: [...], count }.
+/** Room in the socket again — or the reader gone, which is also an answer. */
+const roomToWrite = (res) => new Promise((resolve) => {
+  const done = () => { res.off("drain", done); res.off("close", done); resolve(); };
+  res.once("drain", done);
+  res.once("close", done);
+});
+
+const exportSample = (r) => ({
+  image: r.image,
+  label: r.overallResult === "fail" ? (r.defectCode || "defect") : "pass",
+  overallResult: r.overallResult,
+  elastic: r.elastic?.name || null,
+  parameters: (r.results || []).map((x) => ({ parameter: x.parameter, measured: x.measured, pass: x.pass })),
+  capturedAt: r.createdAt,
+});
+
 router.get(
   "/export-dataset",
   catchAsyncErrors(async (req, res) => {
-    const limit = Math.min(Number(req.query.limit) || 500, 2000);
-    const records = await QcRecord.find({ image: { $ne: "" } })
+    const limit = Math.min(Math.max(Math.floor(Number(req.query.limit)) || 500, 1), 2000);
+    // Newest first, by creation. `createdAt` then `_id`: the photos make
+    // these documents large, and the two together are a stable order.
+    const cursor = QcRecord.find({ image: { $ne: "" } })
       .select("image overallResult defectCode results elastic createdAt")
       .populate("elastic", "name")
-      .sort({ createdAt: -1 })
+      .sort({ createdAt: -1, _id: -1 })
       .limit(limit)
-      .lean();
+      .lean()
+      .cursor({ batchSize: 5 });
 
-    const samples = records.map((r) => ({
-      image: r.image,
-      label: r.overallResult === "fail" ? (r.defectCode || "defect") : "pass",
-      overallResult: r.overallResult,
-      elastic: r.elastic?.name || null,
-      parameters: (r.results || []).map((x) => ({ parameter: x.parameter, measured: x.measured, pass: x.pass })),
-      capturedAt: r.createdAt,
-    }));
-
-    res.json({ success: true, count: samples.length, exportedAt: new Date().toISOString(), samples });
+    res.status(200).set("Content-Type", "application/json; charset=utf-8");
+    let count = 0;
+    try {
+      res.write(`{"success":true,"exportedAt":${JSON.stringify(new Date().toISOString())},"samples":[`);
+      for await (const r of cursor) {
+        if (res.destroyed) break;          // whoever asked has gone
+        // Wait for the socket when it is full, so a slow download holds one
+        // record in memory and not all of them.
+        if (!res.write((count ? "," : "") + JSON.stringify(exportSample(r)))) await roomToWrite(res);
+        count += 1;
+      }
+      if (!res.destroyed) res.end(`],"count":${count}}`);
+    } catch (err) {
+      // Half a document has gone: there is no status left to send. Cut the
+      // download so it fails, rather than end it as if it were whole.
+      console.error(`[qc:export-dataset] failed after ${count} samples: ${err?.message}`);
+      res.destroy(err);
+    } finally {
+      await cursor.close().catch(() => {});
+    }
   })
 );
 
@@ -294,14 +332,32 @@ router.post(
     if (!Array.isArray(results) || results.length === 0)
       return next(new ErrorHandler("At least one measured result is required", 400));
 
-    const job = await JobOrder.findById(jobId).select("jobOrderNo status");
+    if (!mongoose.Types.ObjectId.isValid(String(jobId))) return next(new ErrorHandler("Job not found", 404));
+    if (!mongoose.Types.ObjectId.isValid(String(elasticId))) return next(new ErrorHandler("elasticId is not a valid id", 400));
+
+    const job = await JobOrder.findById(jobId).select("jobOrderNo status order elastics.elastic").lean();
     if (!job) return next(new ErrorHandler("Job not found", 404));
 
+    // The elastic is one this job makes. The job's certificate is built
+    // from its checks, so a check filed against the wrong job put an
+    // elastic on that certificate the job never made. A job that lists
+    // none of its own (older ones) is read off its order.
+    let made = (job.elastics || []).map((e) => String(e.elastic));
+    if (!made.length && job.order) {
+      const order = await Order.findById(job.order).select("elasticOrdered.elastic").lean();
+      made = (order?.elasticOrdered || []).map((e) => String(e.elastic));
+    }
+    if (!made.includes(String(elasticId))) {
+      return next(new ErrorHandler(`That elastic is not made on this job (J-${job.jobOrderNo}).`, 400));
+    }
+
     const cleanResults = results.map((r) => ({
-      parameter: String(r.parameter || "").trim(),
-      expected: String(r.expected ?? "").trim(),
-      measured: String(r.measured ?? "").trim(),
-      pass: Boolean(r.pass),
+      parameter: String(r?.parameter || "").trim(),
+      expected: String(r?.expected ?? "").trim(),
+      measured: String(r?.measured ?? "").trim(),
+      // A yes, and nothing else. Boolean("false") is true: any text sent
+      // for it was a pass.
+      pass: r?.pass === true || r?.pass === "true",
     }));
     if (cleanResults.some((r) => !r.parameter || r.measured === ""))
       return next(new ErrorHandler("Every result needs a parameter and a measured value", 400));
@@ -376,18 +432,31 @@ router.get(
       .lean();
     if (!job) return next(new ErrorHandler("Job not found", 404));
 
-    const records = await QcRecord.find({ job: jobId, overallResult: "pass" })
+    // Every check, newest first, without the photos.
+    const records = await QcRecord.find({ job: jobId })
+      .select("-image")
       .populate("elastic", "name")
       .populate("checkedBy", "name")
-      .sort({ createdAt: -1 })
+      .sort({ createdAt: -1, _id: -1 })
       .lean();
 
     // Latest passing record per elastic — that's what the COA certifies.
+    //
+    // And the newest check of that elastic, when it is a FAILURE that came
+    // after the pass: the sheet reads PASS, and whoever is about to print
+    // and sign it should know the last word on this elastic was not that.
     const latestByElastic = new Map();
+    const newestByElastic = new Map();
     for (const r of records) {
       const key = r.elastic?._id?.toString() ?? String(r.elastic);
-      if (!latestByElastic.has(key)) latestByElastic.set(key, r);
+      if (!newestByElastic.has(key)) newestByElastic.set(key, r);
+      if (r.overallResult === "pass" && !latestByElastic.has(key)) latestByElastic.set(key, r);
     }
+    const laterFail = (key, pass) => {
+      const newest = newestByElastic.get(key);
+      if (!newest || newest.overallResult !== "fail" || String(newest._id) === String(pass._id)) return null;
+      return { at: newest.createdAt, defectCode: newest.defectCode || "", rejectedMeters: newest.rejectedMeters || 0 };
+    };
 
     res.json({
       success: true,
@@ -396,11 +465,12 @@ router.get(
         orderNo: job.order?.orderNo ?? null,
         customerPo: job.order?.po ?? "",
         customerName: job.customer?.name ?? "",
-        items: [...latestByElastic.values()].map((r) => ({
+        items: [...latestByElastic.entries()].map(([key, r]) => ({
           elasticName: r.elastic?.name ?? "",
           checkedBy: r.checkedBy?.name ?? "",
           checkedAt: r.createdAt,
           results: r.results,
+          laterFail: laterFail(key, r),
         })),
       },
     });
