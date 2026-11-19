@@ -31,6 +31,9 @@ const ErrorHandler     = require('../utils/ErrorHandler');
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
 const { requireReason } = require('../utils/auditReason');
 const { escapeRegex }   = require('../utils/escapeRegex');
+const { dayFrom }       = require('../utils/requestDate');
+const factoryDay        = require('../utils/factoryDay');
+const { QUOTE_STATUSES, lapsedFilter } = require('../domain/quoteStatus');
 
 const Quote    = require('../models/Quote');
 const Customer = require('../models/Customer');
@@ -62,6 +65,11 @@ async function nextSeq(financialYear) {
 }
 
 const buildQuoteNo = (fy, seq) => `QT-${fy}-${String(seq).padStart(4, '0')}`;
+
+/** The customer's billing address on one line, as an invoice prints it. */
+const masterAddress = (c) =>
+  [c?.address, [c?.city, c?.pincode].map((v) => String(v ?? '').trim()).filter(Boolean).join(' - ')]
+    .map((v) => String(v ?? '').trim()).filter(Boolean).join(', ');
 
 /**
  * Read one product line off the request and validate it.
@@ -239,7 +247,7 @@ router.post(
     let customerId;
     if (mongoose.Types.ObjectId.isValid(customer)) {
       const master = await Customer.findById(customer)
-        .select('name gstin phoneNumber email').lean();
+        .select('name gstin phoneNumber email address city pincode').lean();
       if (!master) return next(new ErrorHandler('Customer not found', 404));
       customerId = master._id;
       // The master fills the blanks; anything typed on the quote wins,
@@ -248,11 +256,13 @@ router.post(
       snapshot.customerName  = snapshot.customerName  || master.name        || '';
       snapshot.customerGstin = snapshot.customerGstin || master.gstin       || '';
       snapshot.customerPhone = snapshot.customerPhone || master.phoneNumber || '';
-      // The customer master holds no address — it never has. So the
-      // delivery address is typed on the quote, which is right anyway:
-      // a quotation often goes to a buying office rather than the mill.
-      // Left as whatever was typed, never blanked from a field that
-      // does not exist.
+      // The billing address, city and pin code the challans and invoices
+      // print. (This once read "the customer master holds no address —
+      // it never has", from before it did; a quotation for a customer on
+      // the books went out with a blank address unless it was typed
+      // again.) A typed one still wins: a quotation often goes to a
+      // buying office rather than the mill.
+      snapshot.customerAddress = snapshot.customerAddress || masterAddress(master);
     }
 
     if (!snapshot.customerName) {
@@ -262,17 +272,17 @@ router.post(
     const costing = costingFromBody(req.body);
     if (costing.error) return next(new ErrorHandler(costing.error, 400));
 
-    const quoteDate = date ? new Date(date) : new Date();
-    if (isNaN(quoteDate.getTime())) {
-      return next(new ErrorHandler('Quote date is not a valid date', 400));
-    }
+    // A quote is dated to a DAY, like a challan or an invoice — today in
+    // India when none is sent. It was "now": a moment, off which the
+    // financial year and the number were then read by the server's own
+    // clock, so a quote raised at half past midnight on 1 April was
+    // numbered in the year that had just ended.
+    const quoteDate = dayFrom(date, 'Quote date', factoryDay.calendarDay());
 
-    let till = validTill ? new Date(validTill) : null;
-    if (till && isNaN(till.getTime())) till = null;
-    if (!till) {
-      till = new Date(quoteDate);
-      till.setDate(till.getDate() + DEFAULT_VALIDITY_DAYS);
-    }
+    // Good THROUGH this day. One that is not a date is refused; it used
+    // to become thirty days without a word.
+    const till = dayFrom(validTill, 'Valid until')
+      || new Date(quoteDate.getTime() + DEFAULT_VALIDITY_DAYS * factoryDay.DAY);
     if (till < quoteDate) {
       return next(new ErrorHandler(
         'The valid-until date is before the quote date — a price cannot expire before it is offered.',
@@ -390,16 +400,18 @@ router.put(
                      'customerPhone', 'customerRef', 'remarks']) {
       if (req.body[f] !== undefined) quote[f] = String(req.body[f]).trim();
     }
-    if (req.body.validTill !== undefined) {
-      const d = new Date(req.body.validTill);
-      if (!isNaN(d.getTime())) {
-        if (d < quote.date) {
-          return next(new ErrorHandler(
-            'The valid-until date is before the quote date.', 400
-          ));
-        }
-        quote.validTill = d;
+    // Refused when it is not a date. It used to be dropped, and the save
+    // reported success with the old date still in place.
+    const till = dayFrom(req.body.validTill, 'Valid until');
+    if (till) {
+      // By the day: an older quote is dated to the minute it was raised,
+      // and the same day must not read as "before" it.
+      if (factoryDay.daysBetween(quote.date, till) < 0) {
+        return next(new ErrorHandler(
+          'The valid-until date is before the quote date.', 400
+        ));
       }
+      quote.validTill = till;
     }
 
     stamp(quote, ACTION_CODES.QUOTE_UPDATED, req, {
@@ -427,9 +439,8 @@ router.patch(
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return next(new ErrorHandler('A valid quote id is required', 400));
     }
-    const allowed = ['draft', 'sent', 'accepted', 'declined', 'expired', 'cancelled'];
-    if (!allowed.includes(status)) {
-      return next(new ErrorHandler(`status must be one of: ${allowed.join(', ')}`, 400));
+    if (!QUOTE_STATUSES.includes(status)) {
+      return next(new ErrorHandler(`status must be one of: ${QUOTE_STATUSES.join(', ')}`, 400));
     }
 
     const quote = await Quote.findById(id);
@@ -460,17 +471,27 @@ router.get(
     const page  = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
     const filter = {};
-    if (req.query.status && req.query.status !== 'all') filter.status = req.query.status;
+    const every = [];
+    const status = String(req.query.status ?? '');
+    if (status === 'expired') {
+      // Nobody sets "expired" — it is read off the valid-until day
+      // (domain/quoteStatus.js). Taken as the status, this filter found
+      // nothing, ever: the phone's Expired chip was an empty list.
+      every.push(lapsedFilter());
+    } else if (status && status !== 'all') {
+      filter.status = status;
+    }
     if (req.query.search) {
       const rx = new RegExp(escapeRegex(String(req.query.search)), 'i');
       // The product name lives on the lines now, so searching the top
       // level found quotes by customer and never by what was quoted.
-      filter.$or = [
+      every.push({ $or: [
         { quoteNo: rx },
         { customerName: rx },
         { 'lines.productName': rx },
-      ];
+      ] });
     }
+    if (every.length) filter.$and = every;
 
     const [quotes, total] = await Promise.all([
       Quote.find(filter).sort({ date: -1, sequence: -1 })
@@ -478,7 +499,9 @@ router.get(
       Quote.countDocuments(filter),
     ]);
 
-    res.json({ success: true, quotes, total, page });
+    // `pages`, because the phone pages by it: with none sent it took 1,
+    // and nothing past the first twenty quotes could be reached there.
+    res.json({ success: true, quotes, total, page, pages: Math.max(1, Math.ceil(total / limit)) });
   })
 );
 

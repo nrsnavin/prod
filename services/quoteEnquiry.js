@@ -101,7 +101,13 @@ async function suggestMargin(elasticId, customerId) {
   if (margin == null) { const won = rows.filter((r) => r.won); if (won.length >= 3) margin = pick(won, (m, l) => `${r1(m)}% is the middle of ${l.length} quotes accepted this year.`); }
   if (margin == null) { margin = DEFAULT_MARGIN; reasons.push(`No decided quotes to learn from yet — ${DEFAULT_MARGIN}% to start.`); }
   const lost = rows.filter((r) => !r.won && (r.same || r.mine) && r.margin <= margin + 0.5);
-  if (lost.length) reasons.push(`Declined at ${r1(Math.min(...lost.map((l) => l.margin)))}% before (${lost[0].quoteNo}) — they may push back.`);
+  if (lost.length) {
+    // The quote named is the one declined at that margin. (It was the
+    // lowest margin beside the number of the LATEST decline, which may
+    // have been at a higher one.)
+    const lowest = lost.reduce((a, b) => (b.margin < a.margin ? b : a));
+    reasons.push(`Declined at ${r1(lowest.margin)}% before (${lowest.quoteNo}) — they may push back.`);
+  }
   return { margin: r1(Math.max(0, margin)), reasons };
 }
 
@@ -127,7 +133,9 @@ async function draft({ text, pages, customer }) {
   let cust = null; let custCandidates = [];
   if (customer) cust = await Customer.findById(customer).select('name').lean();
   if (!cust && read.customerName) {
-    const all = await Customer.find({}).select('name').limit(5000).lean();
+    // Not the archived: no picker offers one, so the form would open on
+    // a customer it cannot show.
+    const all = await Customer.find({ archived: { $ne: true } }).select('name').limit(5000).lean();
     const r = rank(read.customerName, all.map((c) => ({ id: String(c._id), label: c.name })), { limit: 3, floor: 0.5 });
     custCandidates = r.candidates.map((c) => ({ _id: c.id, name: c.label, score: Math.round(c.score * 100) / 100 }));
     if (r.confident) cust = { _id: r.best.id, name: r.best.label };

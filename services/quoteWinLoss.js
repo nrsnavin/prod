@@ -41,6 +41,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Quote = require('../models/Quote');
+const { unansweredFilter } = require('../domain/quoteStatus');
 
 // ── What counts as evidence ──────────────────────────────────────
 //
@@ -51,6 +52,10 @@ const Quote = require('../models/Quote');
 // rather than with whether the pricing works.
 const WON  = new Set(['accepted']);
 const LOST = new Set(['declined', 'expired']);
+
+/** A product name as typed, matched anywhere in a line's name. */
+const productRx = (productName) =>
+  new RegExp(String(productName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 
 /** Below this, a fitted curve is decoration. */
 const MIN_FOR_LOGISTIC = 25;
@@ -138,9 +143,7 @@ async function loadRows({ since, customerId, productName } = {}) {
   if (since) filter.date = { $gte: since };
   if (customerId) filter.customer = customerId;
   if (productName) {
-    filter['lines.productName'] = new RegExp(
-      String(productName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'
-    );
+    filter['lines.productName'] = productRx(productName);
   }
 
   const quotes = await Quote.find(filter)
@@ -173,6 +176,29 @@ async function loadRows({ since, customerId, productName } = {}) {
     });
   }
   return rows;
+}
+
+/**
+ * Quotes sent, run out, and never answered — in the same window and for
+ * the same customer or product as the picture beside them.
+ *
+ * They are NOT evidence, and stay out of every rate here: silence is not
+ * the customer declining a price. But they are the reason a rate can
+ * flatter. A desk records its wins — an order follows — and seldom goes
+ * back to mark the quotes nobody replied to, so "nine of ten won" may be
+ * nine of fifty sent. The count is reported so the reader can tell, and
+ * can go and put an answer on them (the list's Expired filter finds them).
+ *
+ * The "expired" status itself is set by no screen and no job
+ * (domain/quoteStatus.js), which is why the loss breakdown's `expired`
+ * reads nought however many quotes have run out.
+ */
+async function countUnanswered({ since, customerId, productName } = {}) {
+  const filter = unansweredFilter();
+  if (since) filter.date = { $gte: since };
+  if (customerId) filter.customer = customerId;
+  if (productName) filter['lines.productName'] = productRx(productName);
+  return Quote.countDocuments(filter);
 }
 
 // ── The empirical estimator ──────────────────────────────────────
@@ -301,7 +327,10 @@ function buildFeatures(rows) {
  */
 async function analyse({ since, customerId, productName, days } = {}) {
   const from = since || (days ? new Date(Date.now() - days * 86_400_000) : undefined);
-  const rows = await loadRows({ since: from, customerId, productName });
+  const [rows, unanswered] = await Promise.all([
+    loadRows({ since: from, customerId, productName }),
+    countUnanswered({ since: from, customerId, productName }),
+  ]);
 
   const wins   = rows.filter((r) => r.won).length;
   const losses = rows.length - wins;
@@ -317,6 +346,8 @@ async function analyse({ since, customerId, productName, days } = {}) {
     // nobody chased. Somebody reading a poor win rate deserves to know
     // which of the two it is made of.
     lossBreakdown: { declined, expired },
+    // Sent, run out, no answer recorded. In neither count above.
+    unanswered,
     baselineWinRatePct: rows.length > 0 ? Math.round((wins / rows.length) * 100) : null,
     windowFrom: from ? from.toISOString().slice(0, 10) : null,
     filters: { customerId: customerId || null, productName: productName || null },
@@ -439,7 +470,7 @@ module.exports = {
   // tested directly rather than only through a route.
   _internals: {
     priceRatio, validityDays, customerPriorWinRate, empiricalBands,
-    fitLogistic, standardise, buildFeatures, loadRows,
+    fitLogistic, standardise, buildFeatures, loadRows, countUnanswered,
     WON, LOST, MIN_FOR_LOGISTIC, MIN_PER_CLASS, BANDS,
   },
 };

@@ -90,4 +90,30 @@ describe('an enquiry drafted into a quote', () => {
     expect((await request(app).post('/api/v2/quote/from-enquiry').set('Cookie', cookie()).field('text', 'hello')).body.read.problem).toBe('not_an_enquiry');
     expect((await request(app).post('/api/v2/quote/from-enquiry').set('Cookie', cookie())).status).toBe(400);
   });
+
+  // ── Found reading services/quoteEnquiry.js line by line ───────────
+  it('names the quote that was declined at the margin it quotes', async () => {
+    // A later decline, at a higher margin than the 12% of Q/2.
+    await mongoose.connection.collection('quotes').insertOne({
+      quoteNo: 'Q/3', customer: cust, customerName: 'Sunrise Garments', status: 'declined', date: new Date(Date.now() - 2 * 86_400_000),
+      lines: [{ elastic: e25, productName: '25mm', materials: [], totalCost: 3.25, rateBeforeTax: 3.7375, quantityMetres: 1000 }],   // 15%
+    });
+    mockReply = { problem: null, customerName: 'Sunrise Garments', items: [{ description: 'knitted elastic black', widthMm: 25, colour: 'Black', quantityMetres: 20000 }] };
+    const res = await request(app).post('/api/v2/quote/from-enquiry').set('Cookie', cookie()).field('text', '25mm black 20000m');
+    // Before: "Declined at 12% before (Q/3)" — the lowest margin, beside
+    // the number of the latest quote, which was declined at 15%.
+    expect(res.body.lines[0].reasons).toContain('Declined at 12% before (Q/2) — they may push back.');
+  });
+
+  it('does not match the enquiry to a customer who has been archived', async () => {
+    await mongoose.connection.collection('customers').insertOne({ name: 'Moonlight Apparels', archived: true });
+    mockReply = { problem: null, customerName: 'Moonlight Apparels', items: [{ description: 'knitted elastic black', widthMm: 25, quantityMetres: 1000 }] };
+    const res = await request(app).post('/api/v2/quote/from-enquiry').set('Cookie', cookie()).field('text', 'from Moonlight Apparels: 25mm black 1000m');
+    expect(res.status).toBe(200);
+    // Before: matched, and the form opened on a customer no picker offers.
+    expect(res.body.customer).toBe(null);
+    expect(res.body.customerCandidates).toEqual([]);
+    // The name as it was read is still carried, to be typed against.
+    expect(res.body.customerName).toBe('Moonlight Apparels');
+  });
 });
