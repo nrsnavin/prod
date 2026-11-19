@@ -271,4 +271,53 @@ describe('GET /conflicts', () => {
     expect(res.body.count).toBe(1);
     expect(String(res.body.conflicts[0].employeeId)).toBe(String(emp._id));
   });
+
+  // ── Found reading api/leave.js line by line ───────────────────────
+  //  Leave is for a shift. The match was on the day alone, so somebody
+  //  on leave for the day shift and working that night was a "conflict".
+  describe('which shift', () => {
+    const ShiftDetail = require('../../models/ShiftDetail.js');
+    const day = () => { const d = new Date(Date.now() + 5 * 86_400_000); d.setHours(0, 0, 0, 0); return d; };
+    const leaveFor = (emp, shift) => LeaveRequest.create({
+      employee: emp._id, date: day(), shift, leaveType: 'casual', reason: 'x', status: 'approved',
+    });
+    const openShift = (emp, shift) => ShiftDetail.create({
+      employee: emp._id, date: day(), shift, status: 'open',
+      machine: new mongoose.Types.ObjectId(), shiftPlan: new mongoose.Types.ObjectId(),
+    });
+    const conflicts = async () =>
+      (await request(app).get('/api/v2/leave/conflicts').set('Cookie', adminCookie())).body.conflicts;
+
+    test('leave for the day shift is not at odds with working that night', async () => {
+      const { emp } = await makeWorker('Night', 'night@t.co');
+      await leaveFor(emp, 'DAY');
+      await openShift(emp, 'NIGHT');
+      // Before: one conflict.
+      expect(await conflicts()).toEqual([]);
+    });
+
+    test('leave for the whole day is at odds with either shift', async () => {
+      const { emp } = await makeWorker('Whole', 'whole@t.co');
+      await leaveFor(emp, 'BOTH');
+      await openShift(emp, 'NIGHT');
+      expect(await conflicts()).toEqual([expect.objectContaining({ leaveShift: 'BOTH', shiftType: 'NIGHT' })]);
+    });
+
+    test('with both shifts planned, the one named is the one the leave is for', async () => {
+      // Whichever was planned first: it used to be whichever shift the
+      // database happened to return first.
+      const [{ emp: a }, { emp: b }] = [await makeWorker('Both A', 'both-a@t.co'), await makeWorker('Both B', 'both-b@t.co')];
+      await leaveFor(a, 'NIGHT');
+      await openShift(a, 'DAY');
+      const nightA = await openShift(a, 'NIGHT');
+      await leaveFor(b, 'NIGHT');
+      const nightB = await openShift(b, 'NIGHT');
+      await openShift(b, 'DAY');
+
+      const found = await conflicts();
+      expect(found).toHaveLength(2);
+      expect(found.map((c) => String(c.shiftId)).sort()).toEqual([String(nightA._id), String(nightB._id)].sort());
+      expect(found.every((c) => c.shiftType === 'NIGHT')).toBe(true);
+    });
+  });
 });

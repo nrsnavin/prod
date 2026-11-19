@@ -174,6 +174,18 @@ async function writeRequests(doc, days, afterEach = null) {
   return written;
 }
 
+/**
+ * "Leave approved." — and, when a shift it covers had already been
+ * marked as worked, that the shift was left so. The approval stands; the
+ * sheet is somebody's word that they came (services/attendanceMarks.js).
+ */
+function approvedMessage(base, attendance) {
+  const worked = attendance?.worked || [];
+  if (!worked.length) return base;
+  const which = worked.length > 1 ? 'Both shifts were' : `The ${worked[0].toLowerCase()} shift was`;
+  return `${base} ${which} already marked as worked and ${worked.length > 1 ? 'stay' : 'stays'} a worked shift.`;
+}
+
 /** What the reviewer wrote, under whichever name the screen sends it. */
 const reviewNoteOf = (body) =>
   String(body?.reviewNotes ?? body?.note ?? body?.adminRemarks ?? '').trim().slice(0, 500);
@@ -249,7 +261,10 @@ router.post('/admin-request', isAuthenticated, isAdmin('admin', 'accounts'), asy
       shift: String(shift).toUpperCase(),
       leaveType, reason, documentUrl,
     };
-    if (autoApprove) {
+    // A yes, not anything that is not nothing: "false" sent as text by a
+    // form is text, and text was true.
+    const approveNow = autoApprove === true || autoApprove === 'true';
+    if (approveNow) {
       doc.status      = 'approved';
       doc.reviewedBy  = req.user?._id || null;
       doc.reviewedAt  = new Date();
@@ -258,16 +273,18 @@ router.post('/admin-request', isAuthenticated, isAdmin('admin', 'accounts'), asy
 
     // Approved on the spot: the request and the attendance it marks are
     // written together, or neither is (as PUT /:id/approve does).
+    let attendance = null;
     const [leave] = await writeRequests(
       doc, [dateObj],
-      autoApprove ? (made, session) => markLeaveApproved(made, { session }) : null
+      approveNow ? async (made, session) => { attendance = await markLeaveApproved(made, { session }); } : null
     );
 
     return res.status(201).json({
       success: true,
-      message: autoApprove
-        ? 'Leave created and approved.'
+      message: approveNow
+        ? approvedMessage('Leave created and approved.', attendance)
         : 'Leave request created. Pending approval.',
+      ...(approveNow ? { attendance, payslipFinal: await payslipClosed(employeeId, dateObj) } : {}),
       data: fmtLeave({ ...leave.toObject(), employee: emp }),
     });
   } catch(err) {
@@ -409,7 +426,7 @@ router.put('/:id/approve', isAuthenticated, isAdmin('admin', 'accounts'), async 
     // The decision and the attendance it marks, together: a leave
     // approved with its attendance left unmarked (or the reverse) is the
     // kind of half-state a payroll run trips over.
-    let leave;
+    let leave, attendance;
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
@@ -418,15 +435,23 @@ router.put('/:id/approve', isAuthenticated, isAdmin('admin', 'accounts'), async 
         if (!leave) return;
 
         // The shifts it covers are marked as this leave — whether or not
-        // the day has been marked yet (services/attendanceMarks.js).
-        await markLeaveApproved(leave, { session });
+        // the day has been marked yet. One already marked as worked is
+        // left as worked, and the answer says so (services/attendanceMarks.js).
+        attendance = await markLeaveApproved(leave, { session });
       });
     } finally {
       await session.endSession();
     }
     if (!leave) return notPending(req.params.id, res);
 
-    return res.json({ success:true, message:'Leave approved.', data:fmtLeave(leave) });
+    return res.json({
+      success: true,
+      message: approvedMessage('Leave approved.', attendance),
+      attendance,
+      // The month's payslip is already finalised: the sheet changes, the pay on it does not.
+      payslipFinal: await payslipClosed(leave.employee, leave.date),
+      data: fmtLeave(leave),
+    });
   } catch(err) {
     console.error('[PUT /approve]', err);
     return sendError(req, res, err);
@@ -575,17 +600,23 @@ router.get('/conflicts', isAuthenticated, isAdmin('admin', 'accounts'), async (r
       status:   { $in: ['open', 'running', 'pending_verification', 'loading'] },
     }).select('_id employee date shift status').lean();
 
-    const shiftKey = (emp, date) => `${String(emp)}|${new Date(date).toISOString().slice(0, 10)}`;
+    // By person, day AND shift. Leave is for a shift: matched on the day
+    // alone, somebody on leave for the day shift and working that night
+    // was a conflict — and with both shifts planned, the one named was
+    // whichever the database returned first.
+    const shiftKey = (emp, date, shift) => `${String(emp)}|${new Date(date).toISOString().slice(0, 10)}|${shift}`;
     const shiftsByKey = new Map();
     for (const s of openShifts) {
-      const k = shiftKey(s.employee, s.date);
+      const k = shiftKey(s.employee, s.date, s.shift);
       if (!shiftsByKey.has(k)) shiftsByKey.set(k, s);
     }
 
     const conflicts = [];
     for (const lv of leaves) {
       if (!lv.employee) continue;
-      const shift = shiftsByKey.get(shiftKey(lv.employee._id, lv.date));
+      // A whole-day leave is at odds with either shift; the day shift first.
+      const covered = lv.shift === 'BOTH' ? ['DAY', 'NIGHT'] : [lv.shift];
+      const shift = covered.map((s) => shiftsByKey.get(shiftKey(lv.employee._id, lv.date, s))).find(Boolean);
       if (shift) {
         conflicts.push({
           leaveId:      lv._id,

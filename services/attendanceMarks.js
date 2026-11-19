@@ -43,6 +43,8 @@ const { STATUSES, LEAVE_TYPES, minutesBetween, hoursFor } = Attendance;
 const DAY_MINUTES = 24 * 60;
 /** Who a row is marked by when approving leave created it. */
 const BY_LEAVE_APPROVAL = 'leave_approval';
+/** Marks that say the person came, for the shift or part of it. */
+const WORKED_STATUSES = Object.freeze(['present', 'late', 'half_day']);
 
 const oneOf = (values, what) =>
   z.enum(values, { error: () => `must be ${what}` });
@@ -234,20 +236,34 @@ async function approvedLeaveByEmployee({ employeeIds, date, shift, session = nul
  * An approved request, written onto the shifts it covers — creating the
  * row when the day has not been marked yet, which is the usual case.
  *
- * A shift the person clocked in for is left as it is: the clock is
- * evidence they worked, and a leave day written over it would replace
- * the hours they are owed with nothing (approved leave is unpaid).
+ * A shift the person WORKED is left as it is: a leave day written over
+ * it would replace the hours they are owed with nothing (approved leave
+ * is unpaid). Worked means clocked in — or marked present, late or half
+ * a day by hand. Only the clock used to count: a request that sat
+ * waiting while its worker came in after all, approved once the day had
+ * been marked present, turned that day into unpaid leave without a word.
+ * A shift marked absent, or on leave, or not marked at all, becomes the
+ * leave. (Marked "on leave" afterwards, a worked shift is that leave —
+ * nextMark, above.)
  *
  * Call it inside the transaction that approves the request.
+ *
+ * @returns {{marked: number, worked: string[]}} shifts written as leave,
+ *          and the shifts left as worked ('DAY' / 'NIGHT')
  */
 async function markLeaveApproved(leave, { session = null } = {}) {
   const shifts = leave.shift === 'BOTH' ? ['DAY', 'NIGHT'] : [leave.shift];
   const employee = leave.employee?._id ?? leave.employee;
   const date = factoryDay.calendarDay(leave.date);
+  const became = { marked: 0, worked: [] };
   for (const shift of shifts) {
     const row = await Attendance.findOne({ employee, date, shift })
-      .select('clockInAt').session(session).lean();
-    if (row?.clockInAt) continue;
+      .select('clockInAt status').session(session).lean();
+    if (row && (row.clockInAt || WORKED_STATUSES.includes(row.status))) {
+      became.worked.push(shift);
+      continue;
+    }
+    became.marked++;
     await Attendance.updateOne(
       { employee, date, shift },
       {
@@ -263,6 +279,7 @@ async function markLeaveApproved(leave, { session = null } = {}) {
       { upsert: true, session, setDefaultsOnInsert: true }
     );
   }
+  return became;
 }
 
 /**
@@ -389,7 +406,7 @@ function workingDayKeys(rows) {
 module.exports = {
   dayKeyOf, workingDayKeys,
   MARK_DAY, EDIT_MARK, CLOCK,
-  BY_LEAVE_APPROVAL, WORKED_AFTER_ALL,
+  BY_LEAVE_APPROVAL, WORKED_AFTER_ALL, WORKED_STATUSES,
   nextMark, timerMinutes, stampsFor, timerDayFor,
   approvedLeaveByEmployee, markLeaveApproved, unmarkLeaveWithdrawn,
   payslipClosed,

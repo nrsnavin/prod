@@ -393,6 +393,98 @@ describe('somebody on approved leave who came in after all', () => {
     expect(await rowOf(emp, 5)).toMatchObject({ status: 'present' });
     expect((await rowOf(emp, 5)).isApprovedLeave).toBeFalsy();
   });
+
+  // ── Found reading services/attendanceMarks.js line by line ────────
+  //  The clock protected a worked shift from a late approval; a mark made
+  //  by hand did not. A request sits waiting, the worker comes in after
+  //  all, the day is marked present — and when the office clears its
+  //  pending requests two days later, approving this one wrote "on leave"
+  //  over the mark. Approved leave is unpaid: a day's pay, gone on a
+  //  late click, with nothing said.
+  describe('leave approved after the shift was marked by hand', () => {
+    const ask = (emp, over = {}) => post('/leave/admin-request', {
+      employeeId: emp._id, date: dstr(5), shift: 'DAY', leaveType: 'casual', reason: 'family function', ...over,
+    });
+
+    it('marked present: it stays a worked shift, and the approval says so', async () => {
+      const emp = await makeEmp();
+      const asked = await ask(emp);
+      await mark(5, [{ employeeId: emp._id, status: 'present' }]);
+
+      const ok = await put(`/leave/${asked.body.data.id}/approve`, {});
+      expect(ok.status).toBe(200);
+      // Before: on_leave, approved, 0 hours.
+      expect(await rowOf(emp, 5)).toMatchObject({ status: 'present', hoursWorked: 12 });
+      expect((await rowOf(emp, 5)).isApprovedLeave).toBeFalsy();
+      expect(ok.body.attendance).toEqual({ marked: 0, worked: ['DAY'] });
+      expect(ok.body.message).toMatch(/already marked as worked/);
+
+      const pay = await computePayroll(emp._id, YEAR, MONTH);
+      expect(pay.presentShifts).toBe(1);
+      expect(pay.approvedLeaveShifts).toBe(0);
+      expect(pay.grossEarnings).toBe(1200);
+    });
+
+    it('late or half a day is worked too', async () => {
+      for (const status of ['late', 'half_day']) {
+        const emp = await makeEmp({ name: status });
+        const asked = await ask(emp);
+        await mark(5, [{ employeeId: emp._id, status }]);
+        await put(`/leave/${asked.body.data.id}/approve`, {});
+        expect((await rowOf(emp, 5)).status).toBe(status);
+      }
+    });
+
+    it('marked absent: it becomes the leave, as before', async () => {
+      const emp = await makeEmp();
+      const asked = await ask(emp);
+      await mark(5, [{ employeeId: emp._id, status: 'absent' }]);
+      const ok = await put(`/leave/${asked.body.data.id}/approve`, {});
+      expect(await rowOf(emp, 5)).toMatchObject({ status: 'on_leave', isApprovedLeave: true, leaveType: 'casual' });
+      expect(ok.body.attendance).toEqual({ marked: 1, worked: [] });
+      expect(ok.body.message).toBe('Leave approved.');
+    });
+
+    it('a whole-day request over one worked shift marks only the other', async () => {
+      const emp = await makeEmp();
+      const asked = await ask(emp, { shift: 'BOTH' });
+      await mark(5, [{ employeeId: emp._id, status: 'present' }], 'DAY');
+      const ok = await put(`/leave/${asked.body.data.id}/approve`, {});
+      expect(ok.body.attendance).toEqual({ marked: 1, worked: ['DAY'] });
+      expect((await rowOf(emp, 5, 'DAY')).status).toBe('present');
+      expect(await rowOf(emp, 5, 'NIGHT')).toMatchObject({ status: 'on_leave', isApprovedLeave: true });
+    });
+
+    it('created already approved, it says the same', async () => {
+      const emp = await makeEmp();
+      await mark(5, [{ employeeId: emp._id, status: 'present' }]);
+      const made = await ask(emp, { autoApprove: true });
+      expect(made.status).toBe(201);
+      expect((await rowOf(emp, 5)).status).toBe('present');
+      expect(made.body.attendance).toEqual({ marked: 0, worked: ['DAY'] });
+      expect(made.body.message).toMatch(/already marked as worked/);
+    });
+
+    it('marked back as on leave afterwards, it is that leave (unchanged)', async () => {
+      const emp = await makeEmp();
+      const asked = await ask(emp);
+      await mark(5, [{ employeeId: emp._id, status: 'present' }]);
+      await put(`/leave/${asked.body.data.id}/approve`, {});
+      await mark(5, [{ employeeId: emp._id, status: 'on_leave' }]);
+      expect(await rowOf(emp, 5)).toMatchObject({ status: 'on_leave', isApprovedLeave: true, leaveType: 'casual' });
+    });
+  });
+
+  it('"autoApprove" sent as the text "false" does not approve', async () => {
+    const emp = await makeEmp();
+    const made = await post('/leave/admin-request', {
+      employeeId: emp._id, date: dstr(5), shift: 'DAY', leaveType: 'casual', reason: 'x', autoApprove: 'false',
+    });
+    expect(made.status).toBe(201);
+    // Before: any text is "true" to an if — approved, and on the sheet.
+    expect(made.body.data.status).toBe('pending');
+    expect(await rowOf(emp, 5)).toBeNull();
+  });
 });
 
 describe('production verified for somebody on approved leave', () => {
