@@ -39,6 +39,7 @@ const { keepRequestContext } = require("../middleware/userContext.js");
 const { shortCode } = require("../utils/shiftSheetPdf");
 const { floorSheetNo } = require("../utils/floorSheetPdf");
 const { headsInUse } = require("../utils/machineHeads");
+const { round3 } = require("../utils/quantity");
 const { pinFor, rotatePin, shapePin, previousReadingFor } = require("../services/floorEntry");
 
 /**
@@ -620,7 +621,9 @@ async function verifyShiftProduction({ shiftId, productionMeters, timer, feedbac
         shift.elastics = runningHeads.map((h) => ({ head: h.head, elastic: h.elastic }));
       }
       shift.headsRun         = headsInUse(machine);
-      shift.productionMeters = prodValue * shift.headsRun;
+      // To the millimetre: 1000.2 m a head on six heads is 6001.2, not
+      // 6001.200000000001 (utils/quantity.js).
+      shift.productionMeters = round3(prodValue * shift.headsRun);
       shift.timer            = finalTimer;
       shift.feedback         = finalFeedback;
       shift.status           = "closed";
@@ -1801,8 +1804,9 @@ router.put(
     const auditReason = requireReason(req);
     if (!auditReason) return next(new ErrorHandler("A reason (min 3 chars) is required to edit", 400));
 
-    const newTotal = Number(req.body.productionMeters);
-    if (!Number.isFinite(newTotal) || newTotal < 0) return next(new ErrorHandler("productionMeters must be ≥ 0", 400));
+    const typed = Number(req.body.productionMeters);
+    if (!Number.isFinite(typed) || typed < 0) return next(new ErrorHandler("productionMeters must be ≥ 0", 400));
+    const newTotal = round3(typed);
 
     const session = await mongoose.startSession();
     try {

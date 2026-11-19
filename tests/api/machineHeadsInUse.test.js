@@ -138,6 +138,31 @@ describe('production is counted by the heads running', () => {
   });
 });
 
+describe('metres with a decimal', () => {
+  it('are kept to the millimetre on the shift, the job and the plan — and through a correction', async () => {
+    const s = await seed();
+    await plan(s, 6);
+    const shift = await shiftFor(s);
+
+    // 1000.2 × 6 is 6001.200000000001 in floating point.
+    const res = await post('/shift/verify-production', { shiftId: String(shift._id), productionMeters: 1000.2 });
+    expect(res.status).toBe(200);
+    const after = await M.ShiftDetail.findById(shift._id).lean();
+    expect(after.productionMeters).toBe(6001.2);
+    expect((await M.JobOrder.findById(s.job._id).lean()).producedElastic[0].quantity).toBe(6001.2);
+    expect((await M.ShiftPlan.findById(after.shiftPlan).lean()).totalProduction).toBe(6001.2);
+
+    // Corrected by 91.8 m: (new ÷ 6) − (old ÷ 6), added back up over six
+    // heads, came to 91.79999999999973.
+    const fix = await request(app).put(`/api/v2/shift/production-entry/${shift._id}`).set('Cookie', cookie())
+      .send({ productionMeters: 6093, auditReason: 'counter misread' });
+    expect(fix.status).toBe(200);
+    expect((await M.ShiftDetail.findById(shift._id).lean()).productionMeters).toBe(6093);
+    expect((await M.JobOrder.findById(s.job._id).lean()).producedElastic[0].quantity).toBe(6093);
+    expect((await M.ShiftPlan.findById(after.shiftPlan).lean()).totalProduction).toBe(6093);
+  });
+});
+
 describe('a head marked free', () => {
   it('can sit anywhere in the plan; nothing is counted for it', async () => {
     const s = await seed();

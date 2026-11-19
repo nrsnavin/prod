@@ -24,6 +24,7 @@ const { updatePairPosterior } = require("../utils/etaPosterior.js");
 const { recomputePending } = require("../services/orderPending.js");
 const { notify } = require("../utils/notify");
 const { enqueue } = require("../utils/outbox");
+const { round3 } = require("../utils/quantity");
 
 // The heads a verified shift's metres were multiplied by, inside an
 // aggregation over ShiftDetail with its machine looked up as "m": the
@@ -89,9 +90,14 @@ async function applyProductionCascade(
     elasticProductionMap[eid] = (elasticProductionMap[eid] || 0) + prodValue;
   }
 
-  for (const [elasticId, qty] of Object.entries(elasticProductionMap)) {
+  // To the millimetre where it is written (utils/quantity.js): a per-head
+  // figure with a decimal, times the heads, is not exact — 1000.2 m on
+  // three heads is 3000.6000000000004 — and the job's, the order's and
+  // the plan's totals all carried that on.
+  for (const [elasticId, sum] of Object.entries(elasticProductionMap)) {
+    const qty = round3(sum);
     const idx = job.producedElastic.findIndex((e) => e.elastic.toString() === elasticId);
-    if (idx >= 0) job.producedElastic[idx].quantity += qty;
+    if (idx >= 0) job.producedElastic[idx].quantity = round3((job.producedElastic[idx].quantity || 0) + qty);
     else job.producedElastic.push({ elastic: elasticId, quantity: qty });
   }
 
@@ -117,7 +123,7 @@ async function applyProductionCascade(
       jobStage: job.status,
       shiftId: shift._id.toString(),
       shiftLabel: shift.shift || null,
-      productionMeters: prodValue * heads,
+      productionMeters: round3(prodValue * heads),
       production: prodValue,
       heads,
       timer: timer || null,
@@ -145,7 +151,7 @@ async function applyProductionCascade(
       }
     }
     for (const row of order.producedElastic) {
-      row.quantity = producedSum[row.elastic.toString()] || 0;
+      row.quantity = round3(producedSum[row.elastic.toString()] || 0);
     }
     // Pending is ordered MINUS PLANNED, not minus produced — production
     // must not move it (see services/orderPending.js). Recomputing it from
@@ -157,7 +163,7 @@ async function applyProductionCascade(
 
   const sp = await ShiftPlan.findById(shift.shiftPlan).session(session);
   if (sp) {
-    sp.totalProduction = (sp.totalProduction || 0) + prodValue * heads;
+    sp.totalProduction = round3((sp.totalProduction || 0) + prodValue * heads);
     await sp.save({ session });
   }
 
@@ -291,9 +297,11 @@ async function _rederiveShiftProduction(session, { shift, newTotalMeters, req, a
     ? Number(shift.headsRun)
     : (Array.isArray(shift.elastics) && shift.elastics.length > 0 ? shift.elastics.length : 1);
   const oldTotal = Number(shift.productionMeters) || 0;
-  const oldPerHead = oldTotal / heads;
-  const newPerHead = Number(newTotalMeters) / heads;
-  const deltaPerHead = newPerHead - oldPerHead;
+  // The change for the whole shift, and each head's share of it. Kept as
+  // the difference of the two totals: (new ÷ heads) − (old ÷ heads), added
+  // back up head by head, came to 91.79999999999973 for a change of 91.8.
+  const deltaTotal = round3(Number(newTotalMeters) - oldTotal);
+  const deltaPerHead = deltaTotal / heads;
 
   // shift.job is captured at row creation from the machine's running job.
   // In rare cases (a shift row created for a machine with no running job) it
@@ -313,9 +321,10 @@ async function _rederiveShiftProduction(session, { shift, newTotalMeters, req, a
 
   const before = { productionMeters: oldTotal };
 
-  for (const [eid, d] of Object.entries(deltaByElastic)) {
+  for (const [eid, sum] of Object.entries(deltaByElastic)) {
+    const d = round3(sum);
     const idx = job.producedElastic.findIndex((e) => e.elastic.toString() === eid);
-    if (idx >= 0) job.producedElastic[idx].quantity = Math.max(0, (job.producedElastic[idx].quantity || 0) + d);
+    if (idx >= 0) job.producedElastic[idx].quantity = Math.max(0, round3((job.producedElastic[idx].quantity || 0) + d));
     else if (d > 0) job.producedElastic.push({ elastic: eid, quantity: d });
   }
   // Clamp each produced elastic to its planned quantity.
@@ -344,7 +353,7 @@ async function _rederiveShiftProduction(session, { shift, newTotalMeters, req, a
       }
     }
     for (const row of order.producedElastic) {
-      row.quantity = producedSum[row.elastic.toString()] || 0;
+      row.quantity = round3(producedSum[row.elastic.toString()] || 0);
     }
     // Pending is ordered MINUS PLANNED, not minus produced — production
     // must not move it (see services/orderPending.js). Recomputing it from
@@ -355,7 +364,7 @@ async function _rederiveShiftProduction(session, { shift, newTotalMeters, req, a
 
   const sp = await ShiftPlan.findById(shift.shiftPlan).session(session);
   if (sp) {
-    sp.totalProduction = Math.max(0, (sp.totalProduction || 0) + deltaPerHead * heads);
+    sp.totalProduction = Math.max(0, round3((sp.totalProduction || 0) + deltaTotal));
     await sp.save({ session });
   }
 }

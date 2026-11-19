@@ -87,7 +87,7 @@ const MAX_RETRIES      = 5;
 const MAX_ABS_QUANTITY = 1e7;
 
 /** A quantity to three decimal places (see TO THE MILLIMETRE above). */
-const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
+const { round3 } = require("./quantity");
 
 async function applyMovement(session, opts) {
   const {
