@@ -26,6 +26,20 @@ const ExcelJS = require("exceljs");
 const { keepRequestContext } = require("../middleware/userContext");
 const { buildElasticTemplateWorkbook, importWorkbook } = require("../utils/excelIo.js");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
+const { asCallerError } = require("../utils/routeError");
+
+/**
+ * The unique index on the name, when it is what refused a save.
+ *
+ * nameClash() below answers the ordinary case first and names the
+ * elastic in the way. This is the same answer for the one it cannot
+ * see: two people saving the same name at the same moment, where the
+ * index is what stops the second — and would otherwise say only
+ * "Duplicate key nameKey Entered".
+ */
+const duplicateName = (err, name) => (err?.code === 11000
+  ? new ErrorHandler(`An elastic called "${String(name ?? "").trim()}" already exists.`, 409)
+  : null);
 
 router.use(isAuthenticated);
 
@@ -191,7 +205,6 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     try {
       const elasticData = req.body;
-      console.log("Received elastic data:", JSON.stringify(elasticData, null, 2));
 
       // Before anything is written. A clash discovered after the
       // Costing row exists would leave an orphan behind every refusal.
@@ -286,8 +299,7 @@ router.post(
       }
       res.status(201).json({ success: true, elastic, costing });
     } catch (err) {
-      console.error(err);
-      return next(new ErrorHandler(err.message, 400));
+      return next(duplicateName(err, req.body?.name) || asCallerError(err));
     }
   })
 );
@@ -1195,6 +1207,18 @@ router.put(
       for (const field of fieldsToCopy) {
         if (elasticData[field] !== undefined) elastic[field] = elasticData[field];
       }
+      // Yarn ends is on the form, on the detail page, the compare page,
+      // the spec sheet and the operator's own sheet — and was not in the
+      // list above. Creating an elastic kept it (the whole body is saved
+      // there); editing one answered "saved" and left the old figure.
+      if (elasticData.yarnEnds !== undefined) {
+        const blank = elasticData.yarnEnds === null || elasticData.yarnEnds === "";
+        const n = Number(elasticData.yarnEnds);
+        if (!blank && !(Number.isFinite(n) && n >= 0)) {
+          return next(new ErrorHandler("Yarn ends must be a number, 0 or more", 400));
+        }
+        elastic.yarnEnds = blank ? undefined : n;
+      }
       // null / "" clears the override back to the Settings default.
       if (elasticData.gstPercent !== undefined) {
         elastic.gstPercent = elasticData.gstPercent === null || elasticData.gstPercent === ""
@@ -1215,6 +1239,19 @@ router.put(
           elastic.warpingPlanTemplate = _normalisePlan(tpl);
         } else {
           elastic.warpingPlanTemplate = undefined;
+        }
+      } else if (elasticData.warpYarn !== undefined && elastic.warpingPlanTemplate?.beams?.length) {
+        // The warp yarns were edited and the template was not sent with
+        // them (the phone's form has no template; a script may send only
+        // what it changes). The template the elastic already has must
+        // still stand on the yarns as edited — the rule above, which
+        // otherwise only ran when a template arrived in the same request,
+        // so dropping a yarn left beams programmed on one the elastic no
+        // longer lists, and every job's auto-made plan was built from it.
+        const stray = await templateYarnProblem(elastic.warpingPlanTemplate, elastic.warpYarn);
+        if (stray) {
+          stray.message = `This edit takes a warp yarn off the elastic that its warping template still uses. ${stray.message}`;
+          return next(stray);
         }
       }
 
@@ -1260,9 +1297,7 @@ router.put(
       // An error that already says what it is — the 409 from a stale
       // version, a 404 — keeps its status. Rewrapping it as a 400 made a
       // conflict indistinguishable from bad input.
-      if (err instanceof ErrorHandler && err.statusCode) return next(err);
-      console.error("update-elastic error:", err);
-      return next(new ErrorHandler(err.message, 400));
+      return next(duplicateName(err, req.body?.name) || asCallerError(err));
     }
   })
 );
@@ -1449,8 +1484,7 @@ router.post(
       const updatedCosting = await recostElastic(elastic, convCostOverride);
       res.json({ success: true, costing: updatedCosting, before });
     } catch (err) {
-      console.error("[recalculate-elastic-cost]", err.message);
-      return next(new ErrorHandler(err.message, 400));
+      return next(asCallerError(err));
     }
   })
 );
@@ -1531,7 +1565,7 @@ router.post(
     try {
       costing = await recostElastic(elastic, conv);
     } catch (err) {
-      return next(new ErrorHandler(err.message, 400));
+      return next(asCallerError(err));
     }
 
     // The other elastics on a changed material, if asked.
