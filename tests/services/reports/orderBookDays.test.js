@@ -136,6 +136,6 @@ describe("pending", () => {
     expect(of.Completed.pendingQty).toBe(0);
 
     const byMonth = await report({ groupBy: "supplyMonth" });
-    expect(byMonth.rows).toEqual([{ key: "2026-11", label: "2026-11", orders: 3, pendingQty: 400 }]);
+    expect(byMonth.rows).toEqual([{ key: "2026-11", label: "2026-11", orders: 3, pendingQty: 400, toDeliverQty: 1000 }]);
   });
 });

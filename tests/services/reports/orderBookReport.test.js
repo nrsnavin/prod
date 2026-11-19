@@ -88,7 +88,8 @@ describe("orderBookReport group-by", () => {
 
   test("by supply month", async () => {
     const r = await orderBookReport({ from: FROM, to: TO, groupBy: "supplyMonth", now: NOW });
-    expect(r.rows).toEqual([{ key: "2026-07", label: "2026-07", orders: 3, pendingQty: 900 }]);
+    // Nothing is packed: the two open orders are owed in full (1,000 + 500).
+    expect(r.rows).toEqual([{ key: "2026-07", label: "2026-07", orders: 3, pendingQty: 900, toDeliverQty: 1500 }]);
   });
 });
 

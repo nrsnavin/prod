@@ -73,11 +73,12 @@ describe('digest.formatDigest', () => {
   test('renders the commercial glance (dispatch, backlog, low stock)', () => {
     const t = formatDigest({
       ...base,
-      commercial: { dispatchDcs: 3, dispatchValue: 125000, openOrders: 12, overdueOrders: 2, pendingMeters: 34000, lowStock: 4 },
+      commercial: { dispatchDcs: 3, dispatchValue: 125000, openOrders: 12, overdueOrders: 2, pendingMeters: 34000, toDeliverMeters: 96000, lowStock: 4 },
     });
     expect(t).toMatch(/Commercial/);
     expect(t).toMatch(/Dispatched: ₹1,25,000 · 3 DC/);
-    expect(t).toMatch(/12 open · 34,000 m pending · 2 overdue/);
+    // What is owed leads; what has no job yet is said as that, not as "pending".
+    expect(t).toMatch(/12 open · 96,000 m still to deliver \(34,000 m not yet planned\) · 2 overdue/);
     expect(t).toMatch(/4 material\(s\) at\/below reorder/);
     // Overdue + low-stock lines are conditional.
     const clean = formatDigest({

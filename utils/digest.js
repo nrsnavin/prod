@@ -26,6 +26,13 @@ const DeliveryChallan = require("../models/DeliveryChallan.js");
 const Attendance      = require("../models/Attendence.js");
 const LeaveRequest    = require("../models/LeaveRequest.js");
 const EmployeeFeedback= require("../models/EmployeeFeedback.js");
+// For its side effect: _predictedLate reads each order's customer, and
+// that needs the model registered. It was only ever registered by
+// whatever else the server happened to load first — a digest built with
+// orders on the book and nothing else loaded failed on "Schema hasn't
+// been registered for model Customer", and the section was dropped.
+require("../models/Customer.js");
+const { STILL_OWED_EXPR } = require("../services/deliveryRisk.js");
 
 // ── Pure formatter ───────────────────────────────────────────────
 function formatDigest(d) {
@@ -70,7 +77,15 @@ function formatDigest(d) {
     const c = d.commercial;
     lines.push("", "🧾 *Commercial*");
     lines.push(`  Dispatched: ₹${_num(c.dispatchValue)} · ${c.dispatchDcs} DC(s)`);
-    lines.push(`  Order book: ${c.openOrders} open · ${_num(c.pendingMeters)} m pending` +
+    // "Pending" was the metres no job had been raised for — read as the
+    // backlog, which it is not. What is still owed leads; what of the
+    // book is not yet planned follows it. (A digest built before the
+    // owed figure existed has only the second.)
+    const book = c.toDeliverMeters == null
+      ? `${_num(c.pendingMeters)} m not yet planned`
+      : `${_num(c.toDeliverMeters)} m still to deliver` +
+        (c.pendingMeters > 0 ? ` (${_num(c.pendingMeters)} m not yet planned)` : "");
+    lines.push(`  Order book: ${c.openOrders} open · ${book}` +
       (c.overdueOrders > 0 ? ` · ${c.overdueOrders} overdue` : ""));
     if (c.lowStock > 0) lines.push(`  ⚠️ ${c.lowStock} material(s) at/below reorder`);
   }
@@ -357,7 +372,7 @@ async function _predictedLate(now) {
   // than reaching through the order router. Kept as a local require so a
   // load-order hiccup here degrades to "skip section" instead of crashing
   // digest generation.
-  const { _computeRunningEtaForOrder, _loadPlantMetersPerMachineDay } =
+  const { _computeRunningEtaForOrder, _loadPlantMetersPerMachineDay, _loadFreeMachineCount } =
     require("../services/etaService.js") || {};
   if (!_computeRunningEtaForOrder) return []; // helpers not exposed → skip section
 
@@ -371,10 +386,15 @@ async function _predictedLate(now) {
   if (orders.length === 0) return [];
 
   const plantRate = await _loadPlantMetersPerMachineDay(now);
+  // The looms that are free, as the order's own page and the risk list
+  // count them. Left out, an order with no job yet was estimated on ONE
+  // loom here and on every free loom there — so the digest called orders
+  // late that the app, opened a minute later, said were on time.
+  const freeMachines = _loadFreeMachineCount ? await _loadFreeMachineCount() : 1;
   const out = [];
   for (const order of orders) {
     try {
-      const r = await _computeRunningEtaForOrder(order, plantRate, now);
+      const r = await _computeRunningEtaForOrder(order, plantRate, now, freeMachines);
       if (!r?.ok || !r.risk?.late) continue;
       out.push({
         orderNo:         order.orderNo,
@@ -395,6 +415,11 @@ async function _predictedLate(now) {
 // numbers the on-demand reports show so the morning digest and the
 // Reports section agree.
 async function _commercial(startYday, startToday, now) {
+  // A promised date is a day, kept at its first moment: compared with
+  // the moment the digest runs, an order due today was overdue from
+  // 05:30 that morning. Overdue is once the day has passed — as the
+  // order book report counts it.
+  const today = factoryDay.calendarDay(now) || now;
   const [dcAgg, orderAgg, lowAgg] = await Promise.all([
     DeliveryChallan.aggregate([
       { $match: { status: { $in: ["dispatched", "delivered"] }, dispatchDate: { $gte: startYday, $lt: startToday } } },
@@ -405,8 +430,11 @@ async function _commercial(startYday, startToday, now) {
       { $group: {
           _id: null,
           open: { $sum: 1 },
-          overdue: { $sum: { $cond: [{ $lt: ["$supplyDate", now] }, 1, 0] } },
+          overdue: { $sum: { $cond: [{ $lt: ["$supplyDate", today] }, 1, 0] } },
+          // Not yet on a job…
           pending: { $sum: { $sum: "$pendingElastic.quantity" } },
+          // …and what the customers are still owed (services/deliveryRisk.js).
+          owed: { $sum: STILL_OWED_EXPR },
       } },
     ]),
     RawMaterial.aggregate([
@@ -419,6 +447,7 @@ async function _commercial(startYday, startToday, now) {
     openOrders:    orderAgg[0]?.open || 0,
     overdueOrders: orderAgg[0]?.overdue || 0,
     pendingMeters: Math.round(orderAgg[0]?.pending || 0),
+    toDeliverMeters: Math.round(orderAgg[0]?.owed || 0),
     lowStock:      lowAgg[0]?.low || 0,
   };
 }

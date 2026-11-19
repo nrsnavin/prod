@@ -24,12 +24,21 @@
 //  PENDING is what is still to plan on orders that are still open. A
 //  cancelled or completed order keeps its old figure on the record, but
 //  none of it is open book.
+//
+//  …AND THAT IS NOT WHAT IS STILL TO DELIVER. `pendingQty` is the
+//  orders' pendingElastic: what no job has been raised for. Shown as
+//  "Pending", it read as the backlog — and a book planned onto jobs in
+//  full, with nothing made, said "0 m pending". It keeps its key and is
+//  now headed "Not yet planned"; `toDeliverQty` beside it is what the
+//  customers are still owed: ordered less packed, line by line, on open
+//  orders (services/deliveryRisk.js — the delivery-risk list's figure).
 // ═════════════════════════════════════════════════════════════════
 
 const Order = require("../../models/Order.js");
 const DeliveryChallan = require("../../models/DeliveryChallan.js");
 const { previousWindow } = require("./range.js");
 const factoryDay = require("../../utils/factoryDay");
+const { STILL_OWED_EXPR } = require("../deliveryRisk.js");
 
 const GROUP_BYS = ["customer", "status", "supplyMonth"];
 const OPEN_STATUSES = ["Open", "Approved", "InProgress"];
@@ -47,6 +56,11 @@ const PENDING_IF_OPEN = {
   $cond: [{ $in: ["$status", OPEN_STATUSES] }, { $sum: "$pendingElastic.quantity" }, 0],
 };
 
+// What the customer is still owed on an order — nothing, once it is closed.
+const OWED_IF_OPEN = {
+  $cond: [{ $in: ["$status", OPEN_STATUSES] }, STILL_OWED_EXPR, 0],
+};
+
 async function _summary(from, to, now) {
   // Today, as a calendar date: what a supply date is compared with.
   const today = factoryDay.calendarDay(now) || now;
@@ -57,6 +71,7 @@ async function _summary(from, to, now) {
         orders: { $sum: 1 },
         orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } },
         pendingQty: { $sum: PENDING_IF_OPEN },
+        toDeliverQty: { $sum: OWED_IF_OPEN },
         open: { $sum: { $cond: [{ $in: ["$status", OPEN_STATUSES] }, 1, 0] } },
         completed: { $sum: { $cond: [{ $eq: ["$status", "Completed"] }, 1, 0] } },
         overdue: { $sum: { $cond: [
@@ -72,6 +87,7 @@ async function _summary(from, to, now) {
     orders: r.orders || 0,
     orderedQty: round(r.orderedQty || 0),
     pendingQty: round(r.pendingQty || 0),
+    toDeliverQty: round(r.toDeliverQty || 0, 3),
     openOrders: r.open || 0,
     completedOrders: r.completed || 0,
     overdueOrders: r.overdue || 0,
@@ -117,33 +133,34 @@ async function _rows(from, to, groupBy) {
   if (groupBy === "status") {
     const rows = await Order.aggregate([
       { $match: match },
-      { $group: { _id: "$status", orders: { $sum: 1 }, orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } }, pendingQty: { $sum: PENDING_IF_OPEN } } },
-      { $project: { _id: 0, key: "$_id", label: "$_id", orders: 1, orderedQty: 1, pendingQty: 1 } },
+      { $group: { _id: "$status", orders: { $sum: 1 }, orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } }, pendingQty: { $sum: PENDING_IF_OPEN }, toDeliverQty: { $sum: OWED_IF_OPEN } } },
+      { $project: { _id: 0, key: "$_id", label: "$_id", orders: 1, orderedQty: 1, pendingQty: 1, toDeliverQty: 1 } },
       { $sort: { orders: -1 } },
     ]);
-    return rows.map((r) => ({ ...r, orderedQty: round(r.orderedQty), pendingQty: round(r.pendingQty) }));
+    return rows.map((r) => ({ ...r, orderedQty: round(r.orderedQty), pendingQty: round(r.pendingQty), toDeliverQty: round(r.toDeliverQty, 3) }));
   }
 
   if (groupBy === "supplyMonth") {
     const rows = await Order.aggregate([
       { $match: match },
-      { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$supplyDate", timezone: "Asia/Kolkata" } }, orders: { $sum: 1 }, pendingQty: { $sum: PENDING_IF_OPEN } } },
-      { $project: { _id: 0, key: "$_id", label: "$_id", orders: 1, pendingQty: 1 } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$supplyDate", timezone: "Asia/Kolkata" } }, orders: { $sum: 1 }, pendingQty: { $sum: PENDING_IF_OPEN }, toDeliverQty: { $sum: OWED_IF_OPEN } } },
+      { $project: { _id: 0, key: "$_id", label: "$_id", orders: 1, pendingQty: 1, toDeliverQty: 1 } },
       { $sort: { label: 1 } },
     ]);
-    return rows.map((r) => ({ ...r, pendingQty: round(r.pendingQty) }));
+    return rows.map((r) => ({ ...r, pendingQty: round(r.pendingQty), toDeliverQty: round(r.toDeliverQty, 3) }));
   }
 
   // customer (default)
   const rows = await Order.aggregate([
     { $match: match },
-    { $group: { _id: "$customer", orders: { $sum: 1 }, orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } }, pendingQty: { $sum: PENDING_IF_OPEN } } },
+    { $group: { _id: "$customer", orders: { $sum: 1 }, orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } }, pendingQty: { $sum: PENDING_IF_OPEN }, toDeliverQty: { $sum: OWED_IF_OPEN } } },
     { $lookup: { from: "customers", localField: "_id", foreignField: "_id", as: "c" } },
     { $unwind: { path: "$c", preserveNullAndEmptyArrays: true } },
-    { $project: { _id: 0, key: "$_id", label: { $ifNull: ["$c.name", "—"] }, orders: 1, orderedQty: 1, pendingQty: 1 } },
-    { $sort: { pendingQty: -1 } },
+    { $project: { _id: 0, key: "$_id", label: { $ifNull: ["$c.name", "—"] }, orders: 1, orderedQty: 1, pendingQty: 1, toDeliverQty: 1 } },
+    // Who is owed the most first (it was who had the most left to plan).
+    { $sort: { toDeliverQty: -1, pendingQty: -1 } },
   ]);
-  return rows.map((r) => ({ ...r, orderedQty: round(r.orderedQty), pendingQty: round(r.pendingQty) }));
+  return rows.map((r) => ({ ...r, orderedQty: round(r.orderedQty), pendingQty: round(r.pendingQty), toDeliverQty: round(r.toDeliverQty, 3) }));
 }
 
 async function _series(from, to) {
@@ -161,14 +178,16 @@ function _columns(groupBy) {
     return [
       { key: "label", header: "Supply month", format: "text" },
       { key: "orders", header: "Orders", format: "number" },
-      { key: "pendingQty", header: "Pending", format: "number" },
+      { key: "toDeliverQty", header: "Still to deliver", format: "number" },
+      { key: "pendingQty", header: "Not yet planned", format: "number" },
     ];
   }
   return [
     { key: "label", header: groupBy === "status" ? "Status" : "Customer", format: "text" },
     { key: "orders", header: "Orders", format: "number" },
     { key: "orderedQty", header: "Ordered", format: "number" },
-    { key: "pendingQty", header: "Pending", format: "number" },
+    { key: "toDeliverQty", header: "Still to deliver", format: "number" },
+    { key: "pendingQty", header: "Not yet planned", format: "number" },
   ];
 }
 

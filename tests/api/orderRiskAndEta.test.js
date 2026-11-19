@@ -213,6 +213,24 @@ describe('when an order will be done', () => {
     expect(await single(s)).toMatchObject({ ok: false, reason: 'NOTHING_REMAINING' });
   });
 
+  it('the morning digest calls the same orders late, by the same number of days, as the risk list', async () => {
+    const Machine = require('../../models/Machine.js');
+    for (let i = 0; i < 4; i += 1) {
+      await Machine.create({ ID: `L-${i}`, manufacturer: 'Comez', DateOfPurchase: new Date('2020-01-01'), NoOfHead: 4, NoOfHooks: 8, status: 'free' });
+    }
+    // Far more than can be woven in five days: late on any count of looms.
+    const s = await makeOrder({ status: 'Approved', ordered: 5_000_000, dueIn: 5 });
+
+    const list = (await get('/order/eta-risks')).body.risks.find((r) => String(r.orderId) === String(s.order._id));
+    expect(list).toBeTruthy();
+
+    const { buildDigestData } = require('../../utils/digest.js');
+    const inDigest = (await buildDigestData(new Date())).predictedLate.find((r) => r.orderNo === s.order.orderNo);
+    expect(inDigest).toBeTruthy();
+    // Before: the digest estimated on one loom where the list used the four that are free.
+    expect(inDigest.lateWorkingDays).toBe(list.lateWorkingDays);
+  });
+
   it('an order that is not running is told apart (unchanged)', async () => {
     const s = await makeOrder({ status: 'Open' });
     expect(await inList(s)).toMatchObject({ ok: false, reason: 'NOT_RUNNING' });

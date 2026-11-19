@@ -61,6 +61,44 @@ function stillOwed(order) {
   return round3(total);
 }
 
+/**
+ * The same figure worked out in the database, for the reports that add
+ * it up over many orders (the order book report, the morning digest):
+ * each ordered line less what is packed of that elastic, never below
+ * nothing, added together. Tested against `stillOwed` so the list and
+ * the totals cannot come to mean different things.
+ */
+const STILL_OWED_EXPR = Object.freeze({
+  $sum: {
+    $map: {
+      input: { $ifNull: ['$elasticOrdered', []] },
+      as: 'line',
+      in: {
+        $max: [0, {
+          $subtract: [
+            { $ifNull: ['$$line.quantity', 0] },
+            {
+              $sum: {
+                $map: {
+                  input: {
+                    $filter: {
+                      input: { $ifNull: ['$packedElastic', []] },
+                      as: 'box',
+                      cond: { $eq: ['$$box.elastic', '$$line.elastic'] },
+                    },
+                  },
+                  as: 'box',
+                  in: { $ifNull: ['$$box.quantity', 0] },
+                },
+              },
+            },
+          ],
+        }],
+      },
+    },
+  },
+});
+
 /** Of what was ordered, what no job has been raised for. */
 function notPlanned(order) {
   let total = 0;
@@ -110,4 +148,7 @@ function deliveryRisk(orders, { now = new Date(), horizonDays = 7 } = {}) {
   return rows;
 }
 
-module.exports = { OPEN_STATUSES, MAX_HORIZON_DAYS, readHorizon, stillOwed, notPlanned, fetchBefore, deliveryRisk };
+module.exports = {
+  OPEN_STATUSES, MAX_HORIZON_DAYS, readHorizon, stillOwed, notPlanned, fetchBefore, deliveryRisk,
+  STILL_OWED_EXPR,
+};
