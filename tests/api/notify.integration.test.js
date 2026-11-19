@@ -91,6 +91,27 @@ describe("PUT /api/v2/notify/settings", () => {
       .send({ quietHours: { start: 25, end: 7 } });
     expect(r.status).toBe(400);
   });
+
+  // Found reading api/notify.js line by line: any text was stored as
+  // the timezone, and quiet hours are worked out in it — a name that is
+  // not a timezone made every later quiet-hours check throw.
+  test("rejects a timezone that is not one", async () => {
+    const r = await request(app)
+      .put("/api/v2/notify/settings")
+      .send({ timezone: "Chennai time" });
+    expect(r.status).toBe(400);
+    expect(r.body.message).toMatch(/timezone/i);
+    const kept = (await request(app).get("/api/v2/notify/settings")).body.settings.timezone;
+    expect(kept).toBe("Asia/Kolkata");
+  });
+
+  test("takes a real one", async () => {
+    const r = await request(app)
+      .put("/api/v2/notify/settings")
+      .send({ timezone: "Asia/Dubai" });
+    expect(r.status).toBe(200);
+    expect(r.body.settings.timezone).toBe("Asia/Dubai");
+  });
 });
 
 describe("POST /api/v2/notify/test", () => {

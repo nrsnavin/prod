@@ -132,7 +132,15 @@ router.put(
       s.quietHours = { start: quietHours.start ?? null, end: quietHours.end ?? null };
     }
 
-    if (typeof timezone === "string" && timezone) s.timezone = timezone;
+    // A name the runtime knows. Any text used to be stored, and quiet
+    // hours are worked out in it.
+    if (timezone !== undefined && timezone !== null && timezone !== "") {
+      const zone = typeof timezone === "string" ? timezone.trim() : timezone;
+      if (!NotificationSettings.isTimezone(zone)) {
+        return next(new ErrorHandler('timezone must be a timezone name, like "Asia/Kolkata"', 400));
+      }
+      s.timezone = zone;
+    }
 
     await s.save();
     res.json({

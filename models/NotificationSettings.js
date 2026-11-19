@@ -91,6 +91,19 @@ function normalizeEventConfig(value, eventName) {
   };
 }
 
+const DEFAULT_TIMEZONE = "Asia/Kolkata";
+
+/** Is this a timezone the runtime knows ("Asia/Kolkata", "UTC")? */
+function isTimezone(name) {
+  if (typeof name !== "string" || !name.trim()) return false;
+  try {
+    new Intl.DateTimeFormat("en-GB", { timeZone: name });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const NotificationSettingsSchema = new mongoose.Schema(
   {
     singleton: { type: String, default: "owner", unique: true },
@@ -198,7 +211,7 @@ const NotificationSettingsSchema = new mongoose.Schema(
       start: { type: Number, default: null }, // 0-23
       end:   { type: Number, default: null }, // 0-23
     },
-    timezone: { type: String, default: "Asia/Kolkata" },
+    timezone: { type: String, default: DEFAULT_TIMEZONE },
   },
   { timestamps: true }
 );
@@ -221,10 +234,12 @@ NotificationSettingsSchema.methods.isInQuietHours = function (now = new Date()) 
   const { start, end } = this.quietHours || {};
   if (start == null || end == null) return false;
   // Hour in the configured timezone. Intl is the only stdlib API
-  // that gives us a tz-aware hour without a dep.
+  // that gives us a tz-aware hour without a dep. A stored name that is
+  // not a timezone is read as India's: Intl throws on one, and this is
+  // asked on the way to sending every notification that is not real-time.
   const hour = parseInt(
     new Intl.DateTimeFormat("en-GB", {
-      timeZone: this.timezone || "Asia/Kolkata",
+      timeZone: isTimezone(this.timezone) ? this.timezone : DEFAULT_TIMEZONE,
       hour: "2-digit", hour12: false,
     }).format(now),
     10
@@ -240,5 +255,6 @@ NotificationSettingsSchema.methods.isInQuietHours = function (now = new Date()) 
 // Expose for tests + the GET /settings normalizer.
 NotificationSettingsSchema.statics.normalizeEventConfig = normalizeEventConfig;
 NotificationSettingsSchema.statics.EVENT_DEFAULTS         = EVENT_DEFAULTS;
+NotificationSettingsSchema.statics.isTimezone             = isTimezone;
 
 module.exports = mongoose.model("NotificationSettings", NotificationSettingsSchema);

@@ -120,6 +120,16 @@ describe("quiet hours", () => {
     expect(s.isInQuietHours(new Date("2026-06-20T10:00:00Z"))).toBe(false);
   });
 
+  test("a stored timezone that is not one is read as India's, not thrown on", async () => {
+    const s = await NotificationSettings.load();
+    s.quietHours = { start: 22, end: 7 };
+    s.timezone = "Nowhere/Land";
+    // 18:00 UTC is 23:30 in India: inside 22-7. Before: RangeError, and
+    // with it every notification that is not real-time.
+    expect(s.isInQuietHours(new Date("2026-06-20T18:00:00Z"))).toBe(true);
+    expect(s.isInQuietHours(new Date("2026-06-20T06:00:00Z"))).toBe(false);
+  });
+
   test("realtime events ignore quiet hours; daily events defer", async () => {
     // Force "now" to land inside quiet hours by forcing wrap-around 0-23.
     const s = await NotificationSettings.load();
