@@ -393,6 +393,9 @@ describe('a job letting its machine go', () => {
 describe('a machine breaking down mid-run', () => {
   async function runningOnMachine(elastic) {
     const { job } = await seed();
+    // The job makes the elastic the caller is going to put on its looms:
+    // a head map may only carry an elastic that is on the job.
+    await JobOrder.updateOne({ _id: job._id }, { elastics: [{ elastic: elastic._id, quantity: 500 }] });
     const machine = await makeMachine();
     await planWeaving(job, machine, elastic);
 

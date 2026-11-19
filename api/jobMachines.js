@@ -21,6 +21,8 @@ const ShiftDetail = require('../models/ShiftDetail');
 const { draftedForJobs } = require('../services/floorDrafts');
 const { setMachineLoading } = require('../services/machineLoading');
 const { stampFingerprint, ACTION_CODES } = require('../utils/fingerprint');
+const { refreshOpenShiftHeads } = require('../utils/machineHeads');
+const { round3 } = require('../utils/quantity');
 const { checkWeavingReadiness } = require('../services/weavingReadiness');
 // Job status flow, transition rules, per-stage timestamps and the
 // stampStage helper all live in domain/jobStatus.js — the single
@@ -47,8 +49,10 @@ router.get(
     // Entered on the floor, not verified yet (services/floorDrafts.js):
     // shown beside the verified figure, never added to it.
     const drafts = (await draftedForJobs([job._id])).get(String(job._id));
-    const summary = job.elastics.map(e => {
-      const find = arr => arr.find(x => x.elastic._id.toString() === e.elastic._id.toString())?.quantity || 0;
+    // A line whose elastic is no longer there (populate gives null) is
+    // left out rather than taking the whole summary down with it.
+    const summary = job.elastics.filter(e => e.elastic).map(e => {
+      const find = arr => arr.find(x => x.elastic && x.elastic._id.toString() === e.elastic._id.toString())?.quantity || 0;
       const planned  = e.quantity;
       const produced = find(job.producedElastic);
       const packed   = find(job.packedElastic);
@@ -78,7 +82,8 @@ router.get(
         // owed is a different question with a different answer — the
         // order's `pendingDelivery` (ordered − packed), which is why the
         // two are kept apart.
-        remaining: Math.max(0, planned - produced),
+        // To the millimetre: 1000.3 − 400.1 is 600.1999999999999.
+        remaining: Math.max(0, round3(planned - produced)),
         packingPct: planned > 0 ? Math.round((packed / planned) * 100) : 0,
       };
     });
@@ -213,6 +218,12 @@ router.post(
           );
         }
 
+        // Where the job stood before this: which loom, and whether it
+        // was already weaving on it. Read now — the status may move below.
+        const previousMachineId = txJob.machine ? txJob.machine.toString() : null;
+        const movingWhileRunning =
+          txJob.status === 'weaving' && previousMachineId && previousMachineId !== machine._id.toString();
+
         claimed = await Machine.findOneAndUpdate(
           {
             _id: machine._id,
@@ -274,7 +285,29 @@ router.post(
             });
           }
         }
-        await setMachineLoading(claimed._id, loadingAfter(req, claimed, txJob.machine?.toString() ?? null), { session });
+        // The two things /plan-weaving — the web's route to this same
+        // head map — did and this one did not.
+        //
+        // A machine changed under a running job is a production event in
+        // its own right: no stage moved, so nothing else records it.
+        if (movingWhileRunning) {
+          stampFingerprint(txJob, ACTION_CODES.JOB_MACHINE_CHANGED, {
+            req,
+            meta: {
+              jobOrderNo:    txJob.jobOrderNo,
+              fromMachineId: previousMachineId,
+              toMachineId:   claimed._id.toString(),
+              toMachineName: claimed.ID,
+            },
+          });
+        }
+        // Re-planning the heads of the loom the job is already on: its
+        // shifts not yet verified take the new plan (utils/machineHeads.js).
+        if (previousMachineId === claimed._id.toString()) {
+          await refreshOpenShiftHeads(claimed, txJob._id, session);
+        }
+
+        await setMachineLoading(claimed._id, loadingAfter(req, claimed, previousMachineId), { session });
         txJob.machine = claimed._id;
         await txJob.save({ session });
         job.status = txJob.status;

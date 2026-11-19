@@ -50,13 +50,18 @@ afterEach(async () => {
   }
 });
 
+// The one elastic every job here makes. A head map may only carry an
+// elastic that is on the job (both machine routes check), so the plans
+// below put this one on the loom.
+const jobElastic = new mongoose.Types.ObjectId();
+
 async function makeJob({ warpingStatus, coveringStatus } = {}) {
   const job = await JobOrder.create({
     date: new Date(),
     order: new mongoose.Types.ObjectId(),
     customer: new mongoose.Types.ObjectId(),
     status: 'preparatory',
-    elastics: [],
+    elastics: [{ elastic: jobElastic, quantity: 500 }],
   });
   const patch = {};
   if (warpingStatus) {
@@ -219,7 +224,7 @@ describe('planning weaving does not smuggle a job into weaving either', () => {
     const job = await makeJob({ warpingStatus: 'open', coveringStatus: 'open' });
     const machine = await freeMachine(1);
 
-    const res = await planWeaving(job, machine, { 0: new mongoose.Types.ObjectId().toString() });
+    const res = await planWeaving(job, machine, { 0: jobElastic.toString() });
 
     expect(res.status).toBe(200);
     expect(res.body.weavingHeld.blockers).toHaveLength(2);
@@ -231,7 +236,7 @@ describe('planning weaving does not smuggle a job into weaving either', () => {
     const job = await makeJob({ warpingStatus: 'completed', coveringStatus: 'completed' });
     const machine = await freeMachine(1);
 
-    const res = await planWeaving(job, machine, { 0: new mongoose.Types.ObjectId().toString() });
+    const res = await planWeaving(job, machine, { 0: jobElastic.toString() });
 
     expect(res.status).toBe(200);
     expect(res.body.weavingHeld).toBeNull();

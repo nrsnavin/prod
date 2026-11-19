@@ -326,6 +326,22 @@ router.post(
         `${machineForFit.ID} has ${machineForFit.NoOfHead} heads; the plan uses ${headKeys.length}.`, 400
       ));
     }
+    // ── Each head runs one of THIS job's elastics, or is free ─────────
+    // /assign-machine — the phone's route to the same head map — has
+    // always refused anything else. This one did not look: any elastic
+    // id went onto the loom, and the shifts verified after that credited
+    // the job with metres of a product it was never raised for.
+    const onJob = new Set((job.elastics || []).map((e) => String(e.elastic)));
+    for (const key of headKeys) {
+      const id = headElasticMap[key];
+      if (id == null || id === '') continue; // a free head
+      if (!mongoose.Types.ObjectId.isValid(String(id))) {
+        return next(new ErrorHandler(`Invalid elastic id "${id}" for head ${key + 1}.`, 400));
+      }
+      if (!onJob.has(String(id))) {
+        return next(new ErrorHandler(`Elastic "${id}" (head ${key + 1}) is not part of this job.`, 400));
+      }
+    }
     const fit = await checkHookFit(machineForFit, Object.values(headElasticMap));
     if (!fit.fits && req.body?.confirmHooks !== true) {
       return next(hookFitError(machineForFit, fit, ErrorHandler));
