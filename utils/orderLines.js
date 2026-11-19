@@ -26,6 +26,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const mongoose = require('mongoose');
+const { round3 } = require('./quantity');
 
 /**
  * Validate and normalise the lines of an order.
@@ -70,10 +71,14 @@ function readOrderLines(elasticOrdered, { requireNonEmpty = true } = {}) {
     }
     seen.set(key, i + 1);
 
-    const quantity = Number(raw?.quantity);
-    if (!Number.isFinite(quantity)) {
+    if (!Number.isFinite(Number(raw?.quantity))) {
       return { error: `${where}: quantity must be a number` };
     }
+    // To the millimetre, as every figure worked out from it is kept
+    // (pending, produced, packed, the yarn it needs). Kept as typed, a
+    // quantity with more decimals than that could never be matched
+    // exactly by what was made against it.
+    const quantity = round3(raw.quantity);
     if (quantity <= 0) {
       // A line for nothing is not an order for nothing — it is a line
       // somebody meant to delete. Removing it is how that is said.

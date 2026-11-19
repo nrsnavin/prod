@@ -39,7 +39,48 @@ const { notify }           = require("../utils/notify.js");
 const { computeRawMaterialRequired } = require("./orderShared");
 const factoryDay = require("../utils/factoryDay");
 const { dayFrom } = require("../utils/requestDate");
+const crypto = require("crypto");
+const { onceAtATime } = require("../utils/onceAtATime");
+const { ORDER_STATUSES } = require("../domain/orderStatus");
 const router = express.Router();
+
+// ════════════════════════════════════════════════════════════════
+//  THE SAME ORDER, SENT TWICE
+//
+//  A double tap on Save, or a phone retrying on a bad line: nothing
+//  stood between the second request and a second order. Each creates
+//  its own new document, so there is no write for them to collide on.
+//
+//  An order that matches one saved in the last two minutes in every
+//  particular — customer, PO, both dates, every line and its rate — and
+//  that is still Open is that order sent again, and is answered with
+//  it. Anything that differs, or comes later, is another order: a
+//  customer does place the same PO twice.
+// ════════════════════════════════════════════════════════════════
+const RESEND_WINDOW_MS = 2 * 60_000;
+
+const linesKey = (lines) => (lines || [])
+  // A line saved with no rate is kept with a rate of 0 (models/Order.js).
+  .map((l) => `${String(l.elastic?._id ?? l.elastic)}:${Number(l.quantity) || 0}:${Number(l.rate) || 0}`)
+  .sort()
+  .join("|");
+const sameMoment = (a, b) => (a ? new Date(a).getTime() : null) === (b ? new Date(b).getTime() : null);
+
+async function sameOrderJustSaved({ customer, po, date, supplyDate, lines }) {
+  const recent = await Order.find({
+    customer,
+    po: po == null ? null : po,
+    status: "Open",
+    createdAt: { $gte: new Date(Date.now() - RESEND_WINDOW_MS) },
+  })
+    .select("orderNo date supplyDate elasticOrdered")
+    .sort({ createdAt: -1 })
+    .lean();
+  const wanted = linesKey(lines);
+  return recent.find((o) =>
+    linesKey(o.elasticOrdered) === wanted && sameMoment(o.date, date) && sameMoment(o.supplyDate, supplyDate)
+  ) || null;
+}
 
 // A photographed PO is a phone camera image; 12 MB covers a multi-page
 // scan without letting somebody upload a video of one.
@@ -85,9 +126,21 @@ router.get(
     if (!status) {
       return next(new ErrorHandler("Status is required", 400));
     }
-    // "All" (case-insensitive) lists every order regardless of status;
-    // any other value filters to that exact status.
-    const filter = String(status).toLowerCase() === "all" ? {} : { status };
+    // "All" (case-insensitive) is every order that has not been deleted.
+    // It matched every status, Deleted among them — and the web's list,
+    // which opens on "All" and has no such status, showed deleted orders
+    // among the live ones with a blank status. Deleted orders are still
+    // listed when asked for by name (the phone's Deleted tab).
+    //
+    // Any other value is that exact status. One nobody knows ("open",
+    // "Shipped") used to give an empty list, which reads as "there are
+    // no such orders" rather than "that is not a status".
+    const all = String(status).toLowerCase() === "all";
+    if (!all && !ORDER_STATUSES.includes(String(status))) {
+      return next(new ErrorHandler(
+        `Unknown status "${String(status).slice(0, 40)}" — use All or one of ${ORDER_STATUSES.join(", ")}`, 400));
+    }
+    const filter = all ? { status: { $ne: "Deleted" } } : { status: String(status) };
 
     // Optional ?search= for the app's global search: "42", "#42" or
     // "order 42" is an order number; anything else matches the customer
@@ -114,6 +167,11 @@ router.get(
 
     const [orders, total] = await Promise.all([
       Order.find(filter)
+        // Without the trail. Each order's fingerprints — every approval,
+        // draw and edit — came down with every row, up to 500 orders at
+        // a time, for pages that show one line per order. The order's
+        // own page has them.
+        .select("-fingerprints")
         .populate("customer",  "name")
         .populate("createdBy", "name role")
         .populate("updatedBy", "name role")
@@ -176,25 +234,46 @@ router.post(
       const packedElastic   = parsed.lines.map((e) => ({ elastic: e.elastic, quantity: 0 }));
       const pendingElastic  = parsed.lines.map((e) => ({ elastic: e.elastic, quantity: e.quantity }));
 
-      const order = await Order.create({
-        date, po, customer, supplyDate, description,
-        elasticOrdered: parsed.lines, producedElastic, packedElastic,
-        pendingElastic, rawMaterialRequired, status: "Open",
-        ...(creditOverride ? { creditOverride } : {}),
-      });
+      // One at a time for a customer's PO, so that of two requests
+      // arriving together the second is looking at what the first made.
+      const lease = `create-order:${customer}:${crypto.createHash("sha1").update(String(po ?? "")).digest("hex").slice(0, 16)}`;
+      const made = await onceAtATime(lease, async () => {
+        const already = await sameOrderJustSaved({ customer, po, date, supplyDate, lines: parsed.lines });
+        if (already) return { already };
 
-      const fp = buildFingerprint(ACTION_CODES.ORDER_CREATED, {
-        entityId: order._id,
-        actor:    actorFromRequest(req),
-        meta: {
-          po,
-          customer:      customer?.toString?.() ?? customer,
-          totalElastics: elasticOrdered.length,
-          totalRawMats:  rawMaterialRequired.length,
-        },
-      });
-      order.fingerprints.push(fp);
-      await order.save();
+        const order = await Order.create({
+          date, po, customer, supplyDate, description,
+          elasticOrdered: parsed.lines, producedElastic, packedElastic,
+          pendingElastic, rawMaterialRequired, status: "Open",
+          ...(creditOverride ? { creditOverride } : {}),
+        });
+
+        const fp = buildFingerprint(ACTION_CODES.ORDER_CREATED, {
+          entityId: order._id,
+          actor:    actorFromRequest(req),
+          meta: {
+            po,
+            customer:      customer?.toString?.() ?? customer,
+            // The lines that were saved (the request's array was counted).
+            totalElastics: parsed.lines.length,
+            totalRawMats:  rawMaterialRequired.length,
+          },
+        });
+        order.fingerprints.push(fp);
+        await order.save();
+        return { order, fp };
+      }, { what: "This order" });
+
+      if (made.already) {
+        return res.status(200).json({
+          success:   true,
+          duplicate: true,
+          orderId:   made.already._id,
+          orderNo:   made.already.orderNo,
+          message:   `Already saved as order #${made.already.orderNo} — the same order was sent twice.`,
+        });
+      }
+      const { order, fp } = made;
 
       res.status(201).json({
         success:     true,
@@ -209,7 +288,7 @@ router.post(
       // in journalctl instead of the orchestration looking opaque.
       (async () => {
         try {
-          const totalMeters = (elasticOrdered || [])
+          const totalMeters = parsed.lines
             .reduce((s, e) => s + (Number(e.quantity) || 0), 0);
           let customerName;
           if (customer) {
@@ -221,7 +300,7 @@ router.post(
             po,
             customerName,
             totalMeters,
-            lineCount:    (elasticOrdered || []).length,
+            lineCount:    parsed.lines.length,
             supplyDate,
             _entity: { type: "Order", id: order._id },
             _actor:  actorFromRequest(req),
