@@ -20,7 +20,12 @@ const ShiftDetail     = require('../models/ShiftDetail');
 const { shiftHours } = require('../utils/shiftHours');
 const { WRITE_OFF_LABEL } = require('../utils/payslipLines');
 
-const r2 = (n) => Math.round(n * 100) / 100;
+// To the paisa, a half going up (utils/money.js): `Math.round(n * 100) / 100`
+// drops about half of all half-paise, so 0.5 × 100.01 came to 50.00.
+// A figure that is not a number stays not one: on somebody's pay it must
+// fail to save, not come out as ₹0.
+const { toPaise } = require('../utils/money');
+const r2 = (n) => (Number.isFinite(n) ? toPaise(n) : NaN);
 
 /**
  * A date as the factory sees it, not as UTC sees it.
@@ -59,6 +64,21 @@ function resolveWorkedMinutes(rec) {
   if (Number.isFinite(rec.workedMinutes) && rec.workedMinutes > 0) return rec.workedMinutes;
   // The same reading of "HH:mm" the attendance routes use (models/Attendence.js).
   return Attendance.minutesBetween(rec.checkIn, rec.checkOut);
+}
+
+/**
+ * The wastage that belongs to a pay month, as aggregation stages: by the
+ * day it happened, or the day it was logged for an entry that never said.
+ * The payslip's penalty and the pay overview's list both read it, so the
+ * two name the same entries (the overview went by the day it was logged
+ * alone, and listed a different set from the one the slip charged).
+ */
+function wastageOfMonth(empId, start, end, { penalised = false } = {}) {
+  return [
+    { $match: { employee: new mongoose.Types.ObjectId(String(empId)), ...(penalised ? { penalty: { $gt: 0 } } : {}) } },
+    { $addFields: { effDate: { $ifNull: ['$incidentDate', '$createdAt'] } } },
+    { $match: { effDate: { $gte: start, $lte: end } } },
+  ];
 }
 
 async function computePayroll(empId, year, month) {
@@ -110,7 +130,11 @@ async function computePayroll(empId, year, month) {
 
   for (const rec of records) {
     const sh      = shiftHours(rec.shift);
-    const fullPay = hourlyRate * sh;
+    // Each line is rounded to the paisa where it is worked out, and the
+    // totals are the lines added up. They used to be rounded only at the
+    // end, so a slip stored "Half Day 512.0999999999999" and its printed
+    // lines could come to a paisa more or less than its gross.
+    const fullPay = r2(hourlyRate * sh);
     const dateStr = ymd(rec.date);
 
     if (rec.isApprovedLeave === true) {
@@ -141,7 +165,7 @@ async function computePayroll(empId, year, month) {
 
     if (rec.status === 'half_day') {
       halfDayShifts++;
-      const pay = fullPay / 2;
+      const pay = r2(fullPay / 2);
       if (rec.shift === 'DAY')   { dayShiftsWorked++;   dayShiftEarnings   += pay; }
       if (rec.shift === 'NIGHT') { nightShiftsWorked++; nightShiftEarnings += pay; }
       lineItems.push({ label: `Half Day (${rec.shift} ${dateStr})`, amount: pay, type: 'earning' });
@@ -178,8 +202,8 @@ async function computePayroll(empId, year, month) {
         // Cap the cut at the shift's pay — a data-entry error (or being
         // later than the shift is long) must never produce a NEGATIVE
         // shift earning that silently eats other shifts' pay.
-        const ded        = Math.min(fullPay, (billableMins / 60) * hourlyRate);
-        pay             -= ded;
+        const ded        = r2(Math.min(fullPay, (billableMins / 60) * hourlyRate));
+        pay              = r2(pay - ded);
         totalLateMinutes += lateMins;
         lateDeductionTotal += ded;
         lineItems.push({
@@ -221,14 +245,19 @@ async function computePayroll(empId, year, month) {
     const wasCapped = otMins < rawOtMins;
 
     if (otMins > 0 && hourlyRate > 0) {
-      const otPay = (otMins / 60) * hourlyRate * settings.overtimeMultiplier;
+      // Paid for the time the clock shows, to the paisa; SAID in whole
+      // minutes. A clock-in and clock-out are moments, so the minutes
+      // between them are rarely whole, and the line read
+      // "Overtime 37.49028333333331m ×1.25".
+      const otPay = r2((otMins / 60) * hourlyRate * settings.overtimeMultiplier);
+      const shown = Math.round(otMins);
       totalOvertimeMinutes += otMins;
       overtimeEarnings     += otPay;
       lineItems.push({
         label: wasCapped
-          ? `Overtime ${otMins}m ×${settings.overtimeMultiplier} (${rec.shift} ${dateStr})` +
+          ? `Overtime ${shown}m ×${settings.overtimeMultiplier} (${rec.shift} ${dateStr})` +
             ` — capped from ${Math.round(rawOtMins)}m; check the clock-out`
-          : `Overtime ${otMins}m ×${settings.overtimeMultiplier} (${rec.shift} ${dateStr})`,
+          : `Overtime ${shown}m ×${settings.overtimeMultiplier} (${rec.shift} ${dateStr})`,
         amount: otPay,
         type:   'earning',
       });
@@ -258,7 +287,7 @@ async function computePayroll(empId, year, month) {
     schedSeen.add(k);
     unapprovedAbsents++;
     totalShifts++;
-    const fullPay = hourlyRate * shiftHours(sd.shift);
+    const fullPay = r2(hourlyRate * shiftHours(sd.shift));
     lineItems.push({
       label:  `Absent — no attendance for scheduled ${sd.shift} (${ymd(sd.date)})`,
       amount: -fullPay,
@@ -282,9 +311,7 @@ async function computePayroll(empId, year, month) {
   // Wastage penalties attributed to the pay month by INCIDENT date
   // (falls back to createdAt for legacy rows that never set incidentDate).
   const wastageAgg = await Wastage.aggregate([
-    { $match: { employee: new mongoose.Types.ObjectId(String(empId)), penalty: { $gt: 0 } } },
-    { $addFields: { effDate: { $ifNull: ['$incidentDate', '$createdAt'] } } },
-    { $match: { effDate: { $gte: start, $lte: end } } },
+    ...wastageOfMonth(empId, start, end, { penalised: true }),
     { $group: { _id: null, total: { $sum: '$penalty' }, count: { $sum: 1 } } },
   ]);
   const wastagePenalty = r2(wastageAgg[0]?.total ?? 0);
@@ -349,7 +376,10 @@ async function computePayroll(empId, year, month) {
     cur = isConsec ? cur + 1 : 1;
     if (cur > best) best = cur;
     const sets = Math.floor(cur / 7);
-    if (sets > streakSetsPaid && settings.streakBonusPer7Shifts > 0) {
+    // Like the two bonuses above, it needs a shift actually worked: a
+    // fortnight of approved leave is an unbroken run of days too, and was
+    // paid two streak bonuses with nobody on the floor.
+    if (sets > streakSetsPaid && settings.streakBonusPer7Shifts > 0 && workedShifts > 0) {
       const newSets = sets - streakSetsPaid;
       streakSetsPaid = sets;
       const amt = newSets * settings.streakBonusPer7Shifts;
@@ -418,7 +448,7 @@ async function computePayroll(empId, year, month) {
     dayShiftsWorked, nightShiftsWorked,
     dayShiftEarnings:    r2(dayShiftEarnings),
     nightShiftEarnings:  r2(nightShiftEarnings),
-    totalOvertimeMinutes,
+    totalOvertimeMinutes: Math.round(totalOvertimeMinutes),
     overtimeEarnings:    r2(overtimeEarnings),
     grossEarnings,
     totalDeductions,
@@ -435,4 +465,4 @@ async function computePayroll(empId, year, month) {
   };
 }
 
-module.exports = { computePayroll };
+module.exports = { computePayroll, wastageOfMonth };

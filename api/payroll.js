@@ -27,13 +27,14 @@ const { resolveEmployeeId } = require('../utils/resolveEmployee');
 // The ~200-line pure pay computation lives in services/payrollService.js.
 // Re-exported below (router.computePayroll) so existing callers/tests
 // that reach it via the payroll router keep working.
-const { computePayroll } = require('../services/payrollService');
+const { computePayroll, wastageOfMonth } = require('../services/payrollService');
+const { parseMoney, toPaise } = require('../utils/money');
 const ledger = require('../services/ledgerService');
 const { writePayslip, payslipFileName } = require('../services/payslipPdf');
 const { shiftHours } = require('../utils/shiftHours');
 const factoryDay = require('../utils/factoryDay');
 // The month a request asks for; the factory's when it asks for none (utils/periods.js).
-const { monthOf, monthBefore, factoryMonth } = require('../utils/periods');
+const { monthOf, monthBefore, factoryMonth, yearOf } = require('../utils/periods');
 const { onceAtATime } = require('../utils/onceAtATime');
 const { workingDayKeys, dayKeyOf } = require('../services/attendanceMarks');
 
@@ -71,7 +72,9 @@ router.use(ownRecordsOr({
   readPaths: { '/employee-overview': ['/employees'] },
 }));
 
-const r2 = (n) => Math.round(n * 100) / 100;
+// To the paisa, a half going up (utils/money.js). A figure that is not a
+// number stays not one rather than reading as ₹0.
+const r2 = (n) => (Number.isFinite(n) ? toPaise(n) : NaN);
 
 // What a full shift pays at a rate — at the hours payroll pays it for
 // (utils/shiftHours.js). The night figure was worked out at 8 hours here
@@ -146,11 +149,19 @@ router.get('/employees', isAdmin('admin', 'accounts'), async (req, res) => {
   } catch (e) { sendError(req, res, e); }
 });
 
+// An hourly wage: a real number, 0 or more, and not more than anybody is
+// paid. `Number()` took a blank or a missing field as ₹0 (which drops the
+// employee out of payroll as "no rate set"), `true` as ₹1, and "Infinity"
+// as a rate — after which that employee's every payslip failed.
+const MAX_HOURLY_RATE = 100000;
+
 router.post('/employees/:id/rate', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const rate = Number(req.body.hourlyRate);
-    if (isNaN(rate) || rate < 0)
-      return res.status(400).json({ success: false, message: 'hourlyRate must be ≥ 0' });
+    const read = parseMoney(req.body?.hourlyRate, { max: MAX_HOURLY_RATE, label: 'The hourly rate' });
+    if (!read.ok) return res.status(400).json({ success: false, message: read.reason });
+    const rate = read.value;
+    if (!mongoose.isValidObjectId(req.params.id))
+      return res.status(404).json({ success: false, message: 'Employee not found' });
     const emp = await Employee.findByIdAndUpdate(
       req.params.id, { $set: { hourlyRate: rate } }, { new: true }
     ).select('name department hourlyRate');
@@ -501,6 +512,8 @@ router.get('/history/:empId', selfOrAdmin, async (req, res) => {
       { $addFields: {
           _owed: { $max: [0, { $subtract: ['$netPay', { $ifNull: ['$amountPaid', 0] }] }] },
       } },
+      // A slip with nothing left to pay is not an unpaid slip.
+      { $match: { _owed: { $gt: 0 } } },
       { $group: { _id: null, total: { $sum: '$_owed' }, count: { $sum: 1 } } },
     ]);
     const unpaid = agg[0] || { total: 0, count: 0 };
@@ -509,7 +522,7 @@ router.get('/history/:empId', selfOrAdmin, async (req, res) => {
       success: true,
       data: {
         payslips,
-        unpaidTotal: unpaid.total || 0,
+        unpaidTotal: r2(unpaid.total || 0),
         unpaidCount: unpaid.count || 0,
       },
     });
@@ -582,11 +595,37 @@ async function countAsPaidOut(adv, session, by) {
   await ledger.postAdvanceIssued(adv, session, { postedBy: adv.paidOutBy });
 }
 
+/**
+ * Whether a draft's planned recovery still stands against the advance
+ * as it is NOW.
+ *
+ * The plan is made when the draft is generated; the slip is finalized
+ * later, sometimes days later. In between an approved advance can be
+ * rejected ("never handed over"), or approved again for a later month.
+ * Finalize only capped the plan at the advance's balance, so it still
+ * took a rejected advance out of the worker's pay — and marked it
+ * recovered — and still took one that had been moved to next month.
+ *
+ * So the same test the draft applied (services/payrollService.js) is
+ * applied again here: the advance is one payroll recovers against, and
+ * its month has arrived.
+ */
+function stillToRecover(adv, p) {
+  if (!adv || !AdvanceRequest.RECOVERABLE_STATUSES.includes(adv.status)) return false;
+  if (adv.deductYear == null || adv.deductMonth == null) return false;
+  return adv.deductYear < p.year || (adv.deductYear === p.year && adv.deductMonth <= p.month);
+}
+
 async function finalizeDraft(p, session, by) {
-  let shortfall = 0;
+  let shortfall = 0;   // planned, but the advance has less left to recover
+  let dropped   = 0;   // planned, but the advance is no longer to be recovered here
   for (const rec of p.advanceRecoveries || []) {
     const adv = await AdvanceRequest.findById(rec.advance).session(session);
-    if (!adv) { shortfall = r2(shortfall + rec.amount); continue; }
+    if (!stillToRecover(adv, p)) {
+      dropped = r2(dropped + (Number(rec.amount) || 0));
+      rec.amount = 0;                                   // nothing was taken
+      continue;
+    }
     const current = adv.remainingBalance != null ? adv.remainingBalance : adv.amount;
     const take = Math.min(rec.amount, current);
     shortfall = r2(shortfall + (rec.amount - take));
@@ -601,23 +640,55 @@ async function finalizeDraft(p, session, by) {
     await adv.save({ session });
   }
 
-  // The draft over-deducted by `shortfall` — give it back so net pay
-  // reflects what was actually recovered.
-  if (shortfall > 0) {
-    p.totalAdvanceDeduction = r2((p.totalAdvanceDeduction || 0) - shortfall);
-    p.totalDeductions       = r2((p.totalDeductions || 0) - shortfall);
+  // The draft over-deducted by `shortfall` + `dropped` — give it back so
+  // net pay reflects what was actually recovered. Each has its own line:
+  // both begin "Advance recovery", which keeps them on the slip and out
+  // of the ledger like every advance set-off (utils/payslipLines.js).
+  const back = r2(shortfall + dropped);
+  if (back > 0) {
+    p.totalAdvanceDeduction = r2((p.totalAdvanceDeduction || 0) - back);
+    p.totalDeductions       = r2((p.totalDeductions || 0) - back);
     p.netPay                = r2(Math.max(0, (p.grossEarnings || 0) - p.totalDeductions + (p.totalBonuses || 0)));
-    p.lineItems.push({
-      label:  `Advance recovery capped — ₹${shortfall} carried to next month`,
-      amount: shortfall,
-      type:   'earning',
-    });
+    if (shortfall > 0) {
+      p.lineItems.push({
+        label:  `Advance recovery capped — ₹${shortfall} carried to next month`,
+        amount: shortfall,
+        type:   'earning',
+      });
+    }
+    if (dropped > 0) {
+      p.lineItems.push({
+        label:  `Advance recovery capped — ₹${dropped} not taken: the advance was rejected or moved to a later month after this slip was drawn up`,
+        amount: dropped,
+        type:   'earning',
+      });
+    }
     p.markModified('advanceRecoveries');
     p.markModified('lineItems');
   }
 
   p.status = 'finalized';
   p.finalizedAt = new Date();
+  settleIfNothingToPay(p, by);
+}
+
+/**
+ * A finalized slip with nothing to pay is settled.
+ *
+ * A month with no shift worked, or one whose deductions came to all of
+ * its pay, finalizes at ₹0. Paying it was refused ("Nothing left to
+ * pay"), so it stayed "finalized" for good: one more slip waiting to be
+ * paid on the dashboard, and "1 unpaid payslip, ₹0" on the worker's own
+ * page. Nothing is owed on it, so it is closed, with no payment recorded
+ * because none was made.
+ */
+function settleIfNothingToPay(p, by) {
+  if (!['finalized', 'partially_paid'].includes(p.status)) return false;
+  if (r2((p.netPay || 0) - (p.amountPaid || 0)) > 0) return false;
+  p.status = 'paid';
+  p.paidAt = p.paidAt || new Date();
+  p.paidBy = p.paidBy || by || 'admin';
+  return true;
 }
 
 // Post a finalized slip to the employee ledger. Separate from finalizeDraft
@@ -672,7 +743,16 @@ router.put('/:id/pay', isAdmin('admin', 'accounts'), async (req, res) => {
 
       const alreadyPaid = r2(p.amountPaid || 0);
       const remaining   = r2(Math.max(0, (p.netPay || 0) - alreadyPaid));
-      if (remaining <= 0) { out = { code: 400, body: { success: false, message: 'Nothing left to pay' } }; return; }
+      if (remaining <= 0) {
+        // Nothing to hand over: the slip is settled (see settleIfNothingToPay)
+        // instead of being refused and left waiting to be paid for good.
+        settleIfNothingToPay(p, req.user?.name || 'admin');
+        await p.save({ session });
+        if (wasDraft) await postPayrollToLedger(p, session, req.user?.name || 'admin');
+        await p.populate('employee', 'name');
+        out = { code: 200, body: { success: true, data: p, cashPaid: 0, advanceRecovered: 0, message: 'Nothing to pay on this slip — it is settled.' } };
+        return;
+      }
 
       // ── Recover advances out of THIS payment ────────────────────
       // Settling the slip = cash handed over + advance recovered. The
@@ -989,8 +1069,12 @@ router.put('/advance/:id/reject', isAdmin('admin', 'accounts'), async (req, res)
 
 router.get('/analytics', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
-    const year  = +(req.query.year  || new Date().getFullYear());
+    // The factory's year when none is asked for (the server's is still last
+    // year until 05:30 on 1 January), and a month that is one.
+    const year = yearOf(req.query.year);
     const month = req.query.month ? +req.query.month : null;
+    if (year == null || (month !== null && !(Number.isInteger(month) && month >= 1 && month <= 12)))
+      return res.status(400).json(NOT_A_MONTH);
 
     const filter = { year };
     if (month) filter.month = month;
@@ -1320,7 +1404,7 @@ router.get('/outstanding-advances', isAdmin('admin', 'accounts'), async (req, re
       })
       .filter((a) => a.remaining > 0);
 
-    const totalAmount = out.reduce((s, a) => s + (a.remaining || 0), 0);
+    const totalAmount = r2(out.reduce((s, a) => s + (a.remaining || 0), 0));
 
     return res.json({
       success:     true,
@@ -1372,11 +1456,17 @@ router.get('/employee-overview/:empId', isAdmin('admin', 'accounts'), async (req
           },
         },
       ]),
-      Wastage.find({ employee: empId, createdAt: { $gte: start, $lte: end } })
-        .select('reason penalty meters weight type createdAt')
-        .sort({ createdAt: -1 })
-        .limit(50)
-        .lean(),
+      // The month's wastage as the payslip counts it: by the day it
+      // happened (services/payrollService.js). This went by the day it was
+      // logged, so the list and its total were a different set of entries
+      // from the "Wastage penalty" line in the same answer; and it asked
+      // for fields a wastage entry does not have, so no quantity came back.
+      Wastage.aggregate([
+        ...wastageOfMonth(empId, start, end),
+        { $sort: { effDate: -1 } },
+        { $limit: 50 },
+        { $project: { reason: 1, penalty: 1, quantity: 1, job: 1, elastic: 1, incidentDate: 1, createdAt: 1, date: '$effDate' } },
+      ]),
     ]);
 
     // internal handle for /generate — not for clients.
@@ -1389,8 +1479,8 @@ router.get('/employee-overview/:empId', isAdmin('admin', 'accounts'), async (req
           id: emp._id, name: emp.name, department: emp.department,
           role: emp.role ?? '', hourlyRate: rate,
         },
-        // DAY and NIGHT are both 12h shifts (see services/payrollService.js).
-        shiftRates: { DAY: r2(rate * 12), NIGHT: r2(rate * 12) },
+        // What a full shift pays, at the hours payroll pays it for.
+        shiftRates: { DAY: r2(shiftPay(rate).dayShiftPay), NIGHT: r2(shiftPay(rate).nightShiftPay) },
         period: { year, month },
         payroll,
         production: {
