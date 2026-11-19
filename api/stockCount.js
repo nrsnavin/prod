@@ -59,6 +59,32 @@ const MAX_LINES = 2000;
 const { r2 } = require('../utils/money');
 const r4 = (v) => Math.round((Number(v) || 0) * 10000) / 10000;
 
+/**
+ * A counted quantity, as it was sent:
+ *
+ *   { clear: true }  null, or an emptied box — back to "not counted"
+ *   { qty }          a number, zero or more
+ *   { error }        anything else
+ *
+ * Number() alone made this decision, and Number('') is 0. So an emptied
+ * box, sent as it was, became a count of nothing: a variance of the
+ * whole rack, one "post" away from being written off. (So did `false`;
+ * `true` was a count of 1.) An emptied box means what null means here.
+ */
+function readCounted(value) {
+  if (value === null) return { clear: true };
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 0 ? { qty: r4(value) } : { error: 'countedQty must be zero or more' };
+  }
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (s === '') return { clear: true };
+    // Digits and one decimal point: "1e3" and "0x10" are not quantities.
+    return /^(\d+\.?\d*|\.\d+)$/.test(s) ? { qty: r4(Number(s)) } : { error: 'countedQty must be zero or more' };
+  }
+  return { error: 'countedQty must be a number' };
+}
+
 /** The reason threshold for one line, in absolute quantity. */
 const reasonThreshold = (systemQty) =>
   Math.max(REASON_THRESHOLD_ABS, Math.abs(Number(systemQty) || 0) * REASON_THRESHOLD_PCT);
@@ -432,6 +458,10 @@ router.patch(
     const errors  = [];
 
     for (const e of entries) {
+      if (!e || typeof e !== 'object') {
+        errors.push({ ref: null, error: 'Not a line' });
+        continue;
+      }
       const line = e.lineId
         ? byLineId.get(String(e.lineId))
         : byMaterial.get(String(e.rawMaterial));
@@ -441,10 +471,12 @@ router.patch(
         continue;
       }
 
-      // An explicit null clears a line back to uncounted — somebody
-      // keyed the wrong row and needs to undo it, which must be
-      // possible without abandoning the whole count.
-      if (e.countedQty === null) {
+      const counted = e.countedQty === undefined ? null : readCounted(e.countedQty);
+
+      // An explicit null (or an emptied box) clears a line back to
+      // uncounted — somebody keyed the wrong row and needs to undo it,
+      // which must be possible without abandoning the whole count.
+      if (counted?.clear) {
         line.countedQty = null;
         line.countedAt  = undefined;
         line.countedBy  = undefined;
@@ -453,13 +485,12 @@ router.patch(
         continue;
       }
 
-      if (e.countedQty !== undefined) {
-        const qty = Number(e.countedQty);
-        if (!Number.isFinite(qty) || qty < 0) {
-          errors.push({ ref: e.lineId || e.rawMaterial, error: 'countedQty must be zero or more' });
+      if (counted) {
+        if (counted.error) {
+          errors.push({ ref: e.lineId || e.rawMaterial, error: counted.error });
           continue;
         }
-        line.countedQty = r4(qty);
+        line.countedQty = counted.qty;
         line.countedAt  = new Date();
         line.countedBy  = req.user?._id;
       }
@@ -661,7 +692,9 @@ router.post(
           // The increment, not a set — see models/StockCount.js. Stock
           // still floors at zero, so a loss larger than what is on hand
           // now moves only what is there, and the row records both.
-          const newStock = Math.max(0, live + variance);
+          // Rounded as the count is kept: 250.7 on the books and 250.4 on
+          // the rack left a stock of 250.39999999999998.
+          const newStock = r4(Math.max(0, live + variance));
           const applied  = r4(newStock - live);
           line.appliedDelta = applied;
 

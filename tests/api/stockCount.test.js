@@ -738,3 +738,79 @@ describe('a count posted between another person\'s read and their save', () => {
     expect((await StockCount.findById(id).lean()).status).toBe('posted');
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading api/stockCount.js line by line.
+// ══════════════════════════════════════════════════════════════════
+describe('the stock a count leaves behind', () => {
+  it('is the counted figure, not the counted figure and some float noise', async () => {
+    // 250.7 kg on the books, 250.4 on the rack. 250.7 + (−0.3) is
+    // 250.39999999999998, and that was written as the stock.
+    const m = await makeMaterial({ stock: 250.7 });
+    const { body } = await open();
+    await enter(body.count._id, [{ rawMaterial: String(m._id), countedQty: 250.4 }]);
+    expect((await post(body.count._id)).status).toBe(200);
+
+    const after = await RawMaterial.findById(m._id).select('+stockMovements').lean();
+    expect(after.stock).toBe(250.4);
+    // And the ledger row's balance is the same figure.
+    const row = after.stockMovements[after.stockMovements.length - 1];
+    expect(row).toMatchObject({ type: 'STOCK_ADJUST', quantity: -0.3, balance: 250.4 });
+  });
+
+  it('a gain lands exactly too', async () => {
+    const m = await makeMaterial({ stock: 412.6 });
+    const { body } = await open();
+    await enter(body.count._id, [{ rawMaterial: String(m._id), countedQty: 425 }]);
+    expect((await post(body.count._id)).status).toBe(200);
+    expect((await RawMaterial.findById(m._id).lean()).stock).toBe(425);
+  });
+});
+
+describe('a counted quantity that is not a number', () => {
+  it.each([['an empty box', ''], ['spaces', '   ']])('%s is "not counted", never a count of zero', async (_what, blank) => {
+    const m = await makeMaterial({ stock: 100 });
+    const { body } = await open();
+    const res = await enter(body.count._id, [{ rawMaterial: String(m._id), countedQty: blank }]);
+    // Before: saved as 0 — a variance of −100 kg, one "post" away from
+    // writing the whole rack off.
+    expect(res.status).toBe(200);
+    const line = (await StockCount.findById(body.count._id).lean()).lines[0];
+    expect(line.countedQty).toBeNull();
+    expect(res.body.count.totals).toMatchObject({ counted: 0, uncounted: 1 });
+  });
+
+  it('an empty box clears a line that had been counted', async () => {
+    const m = await makeMaterial({ stock: 100 });
+    const { body } = await open();
+    await enter(body.count._id, [{ rawMaterial: String(m._id), countedQty: 94 }]);
+    await enter(body.count._id, [{ rawMaterial: String(m._id), countedQty: '' }]);
+    expect((await StockCount.findById(body.count._id).lean()).lines[0].countedQty).toBeNull();
+  });
+
+  it.each([['true', true], ['false', false], ['a list', [94]], ['words', 'ninety']])('%s is refused, and the line left as it was', async (_what, value) => {
+    const m = await makeMaterial({ stock: 100 });
+    const { body } = await open();
+    const res = await enter(body.count._id, [{ rawMaterial: String(m._id), countedQty: value }]);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('NO_LINES_APPLIED');
+    expect((await StockCount.findById(body.count._id).lean()).lines[0].countedQty).toBeNull();
+  });
+
+  it('an entry that is not a line at all is a bad request, not a server error', async () => {
+    await makeMaterial({ stock: 100 });
+    const { body } = await open();
+    const res = await enter(body.count._id, [null, 'row 3']);
+    // Before: 500 — "Cannot read properties of null (reading 'lineId')".
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('NO_LINES_APPLIED');
+  });
+
+  it('a number typed as text is still a number', async () => {
+    const m = await makeMaterial({ stock: 100 });
+    const { body } = await open();
+    const res = await enter(body.count._id, [{ rawMaterial: String(m._id), countedQty: ' 94.5 ' }]);
+    expect(res.status).toBe(200);
+    expect((await StockCount.findById(body.count._id).lean()).lines[0].countedQty).toBe(94.5);
+  });
+});
