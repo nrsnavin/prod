@@ -347,6 +347,28 @@ async function payslipClosed(employee, date) {
  */
 const WORKED_AFTER_ALL = Object.freeze({ isApprovedLeave: false, leaveType: '' });
 
+/**
+ * The day a timer row is kept under when it is started.
+ *
+ * A night shift keeps the date it started on (utils/factoryDay.js
+ * shiftDay), and both apps send "today" with every clock-in. So until
+ * the day shift starts, a night clock-in for today — somebody late, or
+ * back from a break after midnight — belongs to last evening's shift,
+ * not to the one that begins tonight. A day shift is the day it is, and
+ * a day named on purpose (not today) is left alone.
+ *
+ * @param {Date} asked  the calendar date asked for (UTC midnight)
+ * @param {'DAY'|'NIGHT'} shift
+ * @param {Date} [now]
+ * @returns {Date}
+ */
+function timerDayFor(asked, shift, now = new Date()) {
+  if (shift !== 'NIGHT') return asked;
+  const today = factoryDay.calendarDay(now);
+  if (!today || asked.getTime() !== today.getTime()) return asked;
+  return factoryDay.shiftDay(now) || asked;
+}
+
 const dayKeyOf = (d) => new Date(d).toISOString().slice(0, 10);
 
 /**
@@ -368,7 +390,7 @@ module.exports = {
   dayKeyOf, workingDayKeys,
   MARK_DAY, EDIT_MARK, CLOCK,
   BY_LEAVE_APPROVAL, WORKED_AFTER_ALL,
-  nextMark, timerMinutes, stampsFor,
+  nextMark, timerMinutes, stampsFor, timerDayFor,
   approvedLeaveByEmployee, markLeaveApproved, unmarkLeaveWithdrawn,
   payslipClosed,
 };

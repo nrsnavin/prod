@@ -215,7 +215,16 @@ router.post('/clock-in', isAdmin('admin', 'accounts'), validate({ body: marks.CL
   try {
     const ctx = requireEmpAndShift(req, res);
     if (!ctx) return;
-    const { employeeId, shiftUp, dateObj } = ctx;
+    const { employeeId, shiftUp } = ctx;
+    // A night shift keeps the date it began on: clocked in after midnight,
+    // it is last evening's shift (services/attendanceMarks.js timerDayFor).
+    const dateObj = marks.timerDayFor(ctx.dateObj, shiftUp);
+
+    // For somebody who is an employee: the upsert below would otherwise
+    // start a timer, and an attendance row, for nobody.
+    if (!(await Employee.exists({ _id: employeeId }))) {
+      return res.status(404).json({ success: false, message: 'Employee not found.' });
+    }
 
     const existing = await Attendance.findOne({ employee: employeeId, date: dateObj, shift: shiftUp });
     if (existing?.clockInAt && !existing?.clockOutAt) {
@@ -279,7 +288,19 @@ router.post('/clock-out', isAdmin('admin', 'accounts'), validate({ body: marks.C
     if (!ctx) return;
     const { employeeId, shiftUp, dateObj } = ctx;
 
-    const doc = await Attendance.findOne({ employee: employeeId, date: dateObj, shift: shiftUp });
+    // The shift to close: the one running under the day asked for, or
+    // the one still running from the day before. A night shift keeps the
+    // date it began on, and both apps send today's date — so after
+    // midnight a clock-out for it was looked for under the wrong day,
+    // answered "Not clocked in", and the shift stayed open for good.
+    const asked = await Attendance.findOne({ employee: employeeId, date: dateObj, shift: shiftUp });
+    const isRunning = (row) => !!(row?.clockInAt && !row.clockOutAt);
+    const doc = isRunning(asked)
+      ? asked
+      : (await Attendance.findOne({
+          employee: employeeId, date: new Date(dateObj.getTime() - factoryDay.DAY), shift: shiftUp,
+          clockInAt: { $ne: null }, clockOutAt: null,
+        })) || asked;
     if (!doc || !doc.clockInAt) {
       return res.status(400).json({ success: false, message: 'Not clocked in for this shift.' });
     }
@@ -312,9 +333,13 @@ router.post('/clock-out', isAdmin('admin', 'accounts'), validate({ body: marks.C
 router.get('/active', isAdmin('admin', 'accounts'), async (req, res) => {
   try {
     const dateObj = dayOrToday(req.query.date);
+    // With the shifts still running from the day before: a night shift is
+    // kept under the date it began on, and at midnight it used to drop off
+    // this list — nobody could see it was running, or clock it out.
     const rows = await Attendance.find({
-      date: dateObj, clockInAt: { $ne: null }, clockOutAt: null,
-    }).populate('employee', 'name department skill role').lean();
+      date: { $in: [dateObj, new Date(dateObj.getTime() - factoryDay.DAY)] },
+      clockInAt: { $ne: null }, clockOutAt: null,
+    }).sort({ clockInAt: 1 }).populate('employee', 'name department skill role').lean();
     return res.json({ success: true, data: rows.map(fmtRecord) });
   } catch (err) {
     console.error('[GET /active]', err);
@@ -382,10 +407,12 @@ router.get('/date', isAdmin('admin', 'accounts'), async (req, res) => {
     const filter = { date: { $gte: startOfDay(date), $lte: endOfDay(date) } };
     if (shift !== 'all') filter.shift = String(shift).toUpperCase();
 
-    const records = await Attendance.find(filter)
+    // In order of name. The name is on the employee, not on this row, so
+    // the database could not sort by it and the list came back in no order.
+    const records = (await Attendance.find(filter)
       .populate('employee', 'name department skill role')
-      .sort({ 'employee.name': 1 })
-      .lean();
+      .lean())
+      .sort((a, b) => String(a.employee?.name ?? '').localeCompare(String(b.employee?.name ?? '')) || String(a.shift).localeCompare(String(b.shift)));
 
     // Only people still here on that day can be missing from it.
     const allEmployees = await Employee.find(employedFrom(date), 'name department skill role').lean();
@@ -510,7 +537,10 @@ router.get('/summary', isAdmin('admin', 'accounts'), async (req, res) => {
       }
       const e = empMap.get(id);
       e.total++;
-      e[r.status === 'half_day' ? 'halfDay' : r.status]++;
+      // The tally's own names. "on_leave" was added to a field of that
+      // name, which the tally does not have: everybody's leave was 0.
+      const tally = { half_day: 'halfDay', on_leave: 'onLeave' }[r.status] || r.status;
+      if (typeof e[tally] === 'number') e[tally]++;
       e.totalLateMin += r.lateMinutes || 0;
     }
 
