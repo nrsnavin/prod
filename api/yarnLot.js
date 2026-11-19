@@ -20,7 +20,7 @@ const ErrorHandler = require("../utils/ErrorHandler");
 const { dateFrom } = require("../utils/requestDate");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
-const { creditLot, unplacedQuantity, appendLotMovement } = require("../services/yarnLotService");
+const { creditLot, unplacedQuantity, appendLotMovement, round3, balanceOf, BALANCE } = require("../services/yarnLotService");
 const { appendStockMovement } = require("../utils/stockLedger");
 const { costOf } = require("../utils/materialValuation");
 const { describeLotMovements } = require("../utils/lotLedger");
@@ -53,9 +53,11 @@ router.get("/list", catchAsyncErrors(async (req, res, next) => {
     filter.$or = [{ lotNo: rx }, { shade: rx }];
   }
   // The balance is a virtual, so it cannot be filtered on in the query.
-  // $expr compares the two stored fields directly instead.
+  // $expr computes it from the two stored fields instead — to the gram,
+  // as the lot itself does, so a remainder that is only rounding is not
+  // "something left to draw".
   if (String(issuable) === "true") {
-    filter.$expr = { $gt: [{ $subtract: ["$receivedQty", "$consumedQty"] }, 0] };
+    filter.$expr = { $gt: [BALANCE, 0] };
   }
 
   const [lots, total] = await Promise.all([
@@ -306,8 +308,10 @@ router.post(
   catchAsyncErrors(async (req, res, next) => {
     if (!oid(req.params.id)) return next(new ErrorHandler("Invalid lot id", 400));
 
-    const delta = Number(req.body?.delta);
-    if (!Number.isFinite(delta) || delta === 0) {
+    // To the gram, like every other lot move (services/yarnLotService.js).
+    const asked = Number(req.body?.delta);
+    const delta = round3(asked);
+    if (!Number.isFinite(asked) || delta === 0) {
       return next(new ErrorHandler("delta must be a non-zero number", 400));
     }
     const reason = String(req.body?.reason || "").trim();
@@ -325,8 +329,8 @@ router.post(
         const lot = await YarnLot.findById(req.params.id).session(session);
         if (!lot) throw new ErrorHandler("Yarn lot not found", 404);
 
-        const balance = (lot.receivedQty || 0) - (lot.consumedQty || 0);
-        if (delta < 0 && balance + delta < 0) {
+        const balance = balanceOf(lot);
+        if (delta < 0 && round3(balance + delta) < 0) {
           throw new ErrorHandler(
             `Lot ${lot.lotNo} holds only ${balance} — cannot take ${Math.abs(delta)} off it`,
             409
@@ -336,10 +340,10 @@ router.post(
         // A shortfall is recorded as MORE consumed, a gain as MORE
         // received. Both keep receivedQty >= consumedQty and leave the
         // lot's own arithmetic intact, which zeroing one side would not.
-        if (delta < 0) lot.consumedQty = (lot.consumedQty || 0) + Math.abs(delta);
-        else lot.receivedQty = (lot.receivedQty || 0) + delta;
+        if (delta < 0) lot.consumedQty = round3((lot.consumedQty || 0) + Math.abs(delta));
+        else lot.receivedQty = round3((lot.receivedQty || 0) + delta);
 
-        const after = (lot.receivedQty || 0) - (lot.consumedQty || 0);
+        const after = balanceOf(lot);
         // Follow the balance where it lands, both ways.
         if (after <= 0 && lot.status === "open") lot.status = "exhausted";
         if (after > 0 && lot.status === "exhausted") lot.status = "open";
@@ -357,13 +361,16 @@ router.post(
         const material = await RawMaterial.findById(lot.rawMaterial).session(session);
         if (material) {
           const before = Number(material.stock) || 0;
-          material.stock = Math.max(0, before + delta);
+          material.stock = Math.max(0, round3(before + delta));
           // The aggregate floors at zero, so it can move by less than
           // the lot did — a lot correction of −40 against 25 on hand
           // moves 25. The row records what moved and, beside it, what
           // was asked for; recording the ask as though it happened left
           // a ledger whose balances did not follow from its quantities.
-          const applied = material.stock - before;
+          // Rounded for the same reason: 0.3 − 0.2 is 0.09999999999999998,
+          // which is not −0.2 away from 0.3 and would mark an ordinary
+          // correction as one that only partly applied.
+          const applied = round3(material.stock - before);
           await material.save({ session });
           await appendStockMovement(material._id, {
             type: "STOCK_ADJUST",

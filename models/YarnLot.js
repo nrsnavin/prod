@@ -157,9 +157,15 @@ const YarnLotSchema = new mongoose.Schema(
   { timestamps: true, toJSON: { virtuals: true }, toObject: { virtuals: true } }
 );
 
-/** What is left on the rack. Never negative — issue refuses to overdraw. */
+/**
+ * What is left on the rack, to the gram. Never negative — issue refuses
+ * to overdraw. Rounded, because the two totals are sums of decimal
+ * kilos: 30.3 − 10.1 is 20.200000000000003, and a remainder of
+ * 0.00000000000000006 is an empty lot (services/yarnLotService.js).
+ */
 YarnLotSchema.virtual('balance').get(function balance() {
-  return Math.max(0, (this.receivedQty || 0) - (this.consumedQty || 0));
+  const left = (this.receivedQty || 0) - (this.consumedQty || 0);
+  return Math.max(0, Math.round(left * 1000) / 1000);
 });
 
 /** A lot can be drawn from only while it is open and has something left. */

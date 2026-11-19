@@ -13,7 +13,24 @@ const ErrorHandler = require('../utils/ErrorHandler');
  * the supervisor and the warper both have the batch screen open. Reading
  * the balance and then writing it back would let both pass a check that
  * only one of them can honour, and the lot would go negative.
+ *
+ * ── To the gram ───────────────────────────────────────────────────
+ * Quantities are kept, and compared, to three decimals. Kilos with a
+ * decimal are not exact in binary, so bare `$inc`s drifted — 0.3 − 0.1
+ * is 0.19999999999999998 — and the guards below then refused what was
+ * plainly true: the rest of a lot could not be drawn ("has only
+ * 0.19999999999999998 left — cannot issue 0.2"), a cancelled batch's
+ * yarn could not be put back, and a lot drawn to a sixteenth-decimal
+ * remainder stayed "open" with nothing in it. Each move now writes the
+ * rounded total in the same conditional update, and every comparison
+ * rounds first, so totals that had already drifted read correctly too.
  */
+
+const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
+/** What is on the rack, as the database computes it. */
+const BALANCE = { $round: [{ $subtract: ['$receivedQty', '$consumedQty'] }, 3] };
+/** The same, from a lot already read. */
+const balanceOf = (lot) => round3((lot?.receivedQty || 0) - (lot?.consumedQty || 0));
 
 /**
  * Credit yarn into a lot, opening the bucket on first sight.
@@ -55,7 +72,7 @@ async function creditLot(
   { rawMaterial, lotNo, quantity, shade, supplier, dyer, inward, receivedDate },
   session
 ) {
-  const qty = Number(quantity) || 0;
+  const qty = round3(quantity);
   const lot = String(lotNo || '').trim();
   if (!lot || qty <= 0) return null;
 
@@ -87,6 +104,19 @@ async function creditLot(
     opts
   );
 
+  // The upsert has to be a plain `$inc` ($setOnInsert has no pipeline
+  // form), so the total is squared up straight after it, in the same
+  // transaction when there is one: 0.1 + 0.2 is kept as 0.3.
+  if (doc && doc.receivedQty !== round3(doc.receivedQty)) {
+    const q = YarnLot.updateOne(
+      { _id: doc._id },
+      [{ $set: { receivedQty: { $round: ['$receivedQty', 3] } } }]
+    );
+    if (session) q.session(session);
+    await q;
+    doc.receivedQty = round3(doc.receivedQty);
+  }
+
   // A lot that had been drawn to nothing is live again now that more of
   // it has arrived. Quarantined and closed lots stay where they are —
   // reopening those is a decision for a person, not a delivery note.
@@ -101,7 +131,7 @@ async function creditLot(
     await appendLotMovement(doc._id, {
       type: 'INWARD',
       quantity: qty,
-      balance: (doc.receivedQty || 0) - (doc.consumedQty || 0),
+      balance: balanceOf(doc),
       inward: inward || undefined,
       date: receivedDate || new Date(),
     }, session);
@@ -117,7 +147,7 @@ async function creditLot(
  * leaves this one unmatched, and it fails rather than overdrawing.
  */
 async function drawFromLot(lotId, quantity, session, meta = {}) {
-  const qty = Number(quantity) || 0;
+  const qty = round3(quantity);
   if (qty <= 0) throw new ErrorHandler('Issue quantity must be greater than zero', 400);
 
   const opts = { new: true };
@@ -127,9 +157,9 @@ async function drawFromLot(lotId, quantity, session, meta = {}) {
     {
       _id: lotId,
       status: 'open',
-      $expr: { $gte: [{ $subtract: ['$receivedQty', '$consumedQty'] }, qty] },
+      $expr: { $gte: [BALANCE, qty] },
     },
-    { $inc: { consumedQty: qty } },
+    [{ $set: { consumedQty: { $round: [{ $add: ['$consumedQty', qty] }, 3] } } }],
     opts
   );
 
@@ -154,7 +184,7 @@ async function drawFromLot(lotId, quantity, session, meta = {}) {
 
   // Drawn to nothing: take it out of the picker so the next batch does
   // not have to discover the hard way that it is empty.
-  if (updated.receivedQty - updated.consumedQty <= 0) {
+  if (balanceOf(updated) <= 0) {
     const q = YarnLot.updateOne({ _id: updated._id, status: 'open' }, { $set: { status: 'exhausted' } });
     if (session) q.session(session);
     await q;
@@ -166,7 +196,7 @@ async function drawFromLot(lotId, quantity, session, meta = {}) {
   await appendLotMovement(updated._id, {
     type: 'BATCH_ISSUE',
     quantity: -qty,
-    balance: updated.receivedQty - updated.consumedQty,
+    balance: balanceOf(updated),
     warpingBatch: meta.warpingBatch,
     refNo: meta.refNo || '',
   }, session);
@@ -176,19 +206,22 @@ async function drawFromLot(lotId, quantity, session, meta = {}) {
 /**
  * Put `quantity` back — a cancelled batch, or a correction.
  *
- * `consumedQty` has a min of 0 on the schema, but $inc bypasses schema
- * validation entirely, so the floor is enforced in the filter here.
+ * `consumedQty` has a min of 0 on the schema, but an update bypasses
+ * schema validation entirely, so the floor is enforced in the filter
+ * here — and again in the write, so a total that had drifted a hair
+ * under what is being returned lands on 0 rather than just below it
+ * (which the schema would then refuse on the lot's next save).
  */
 async function returnToLot(lotId, quantity, session, meta = {}) {
-  const qty = Number(quantity) || 0;
+  const qty = round3(quantity);
   if (qty <= 0) return null;
 
   const opts = { new: true };
   if (session) opts.session = session;
 
   const updated = await YarnLot.findOneAndUpdate(
-    { _id: lotId, $expr: { $gte: ['$consumedQty', qty] } },
-    { $inc: { consumedQty: -qty } },
+    { _id: lotId, $expr: { $gte: [{ $round: ['$consumedQty', 3] }, qty] } },
+    [{ $set: { consumedQty: { $max: [0, { $round: [{ $subtract: ['$consumedQty', qty] }, 3] }] } } }],
     opts
   );
   if (!updated) {
@@ -202,7 +235,7 @@ async function returnToLot(lotId, quantity, session, meta = {}) {
   }
   // It has stock again, so it belongs back in the picker. Quarantined and
   // closed lots keep their status — a return is not a clearance.
-  if (updated.status === 'exhausted' && updated.receivedQty - updated.consumedQty > 0) {
+  if (updated.status === 'exhausted' && balanceOf(updated) > 0) {
     const q = YarnLot.updateOne({ _id: updated._id, status: 'exhausted' }, { $set: { status: 'open' } });
     if (session) q.session(session);
     await q;
@@ -212,7 +245,7 @@ async function returnToLot(lotId, quantity, session, meta = {}) {
   await appendLotMovement(updated._id, {
     type: 'BATCH_RETURN',
     quantity: qty,
-    balance: updated.receivedQty - updated.consumedQty,
+    balance: balanceOf(updated),
     warpingBatch: meta.warpingBatch,
     refNo: meta.refNo || '',
     reason: meta.reason || '',
@@ -240,7 +273,7 @@ async function placedQuantity(rawMaterial, session) {
   ]);
   if (session) q.session(session);
   const [row] = await q;
-  return Math.max(0, Number(row?.placed) || 0);
+  return Math.max(0, round3(row?.placed));
 }
 
 /**
@@ -268,6 +301,9 @@ async function unplacedQuantity(material, session) {
 }
 
 module.exports = {
+  round3,
+  balanceOf,
+  BALANCE,
   appendLotMovement,
   creditLot,
   drawFromLot,

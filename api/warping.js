@@ -1212,7 +1212,8 @@ router.get("/plan-context/:jobId", catchAsyncErrors(async (req, res, next) => {
     ? await YarnLot.find({
         rawMaterial: { $in: yarnIds },
         status: "open",
-        $expr: { $gt: [{ $subtract: ["$receivedQty", "$consumedQty"] }, 0] },
+        // To the gram: a remainder that is only rounding is an empty lot.
+        $expr: { $gt: [{ $round: [{ $subtract: ["$receivedQty", "$consumedQty"] }, 3] }, 0] },
       }).sort({ receivedDate: -1 })
     : [];
 

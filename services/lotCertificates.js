@@ -192,7 +192,7 @@ async function search({ material, key, min = null, max = null } = {}) {
   return lots.map((l) => {
     const t = l.certificate.tests.find((x) => x.key === key);
     return {
-      ...lotSummary(l), balance: Math.max(0, (l.receivedQty || 0) - (l.consumedQty || 0)),
+      ...lotSummary(l), balance: Math.max(0, Math.round(((l.receivedQty || 0) - (l.consumedQty || 0)) * 1000) / 1000),
       value: t.value, unit: t.unit, min: t.min, max: t.max, certNo: l.certificate.certNo, date: l.certificate.date,
       outOfSpec: (t.min !== null && t.min !== undefined && t.value < t.min) || (t.max !== null && t.max !== undefined && t.value > t.max),
     };
