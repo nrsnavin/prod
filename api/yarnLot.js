@@ -21,7 +21,7 @@ const { dateFrom } = require("../utils/requestDate");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
 const { creditLot, unplacedQuantity, appendLotMovement, round3, balanceOf, BALANCE } = require("../services/yarnLotService");
-const { appendStockMovement } = require("../utils/stockLedger");
+const { appendStockMovement, movedBy } = require("../utils/stockLedger");
 const { costOf } = require("../utils/materialValuation");
 const { describeLotMovements } = require("../utils/lotLedger");
 const { isAdmin } = require("../middleware/auth");
@@ -378,6 +378,7 @@ router.post(
             requested: applied === delta ? undefined : delta,
             balance: material.stock,
             reason: `Lot ${lot.lotNo}: ${reason}`,
+            ...movedBy(req.user),
             unitCost: costOf(material),
           }, session);
         }

@@ -47,7 +47,7 @@ const { parseMoney, MAX_RATE } = require("../utils/money");
 
 // PO numbering, the line checks and a PO's status are shared with the
 // other places a PO is raised or received (services/purchaseOrderRules.js).
-const { nextPoNumber, pendingOf, deriveStatus, readPoLines, assertSupplier, round3 } = require("../services/purchaseOrderRules");
+const { nextPoNumber, pendingOf, deriveStatus, readPoLines, assertSupplier, round3, overReceipt } = require("../services/purchaseOrderRules");
 const { requireReason } = require("../utils/auditReason");
 const { momentFrom } = require("../utils/requestDate");
 const { pageOf } = require("../utils/paging");
@@ -66,22 +66,9 @@ router.use(isAuthenticated);
 router.use(require("./priceListRoutes"));
 
 
-// ─────────────────────────────────────────────────────────────────────────
-// OVER-RECEIPT
-//
-// A supplier sending slightly more than ordered is normal — a full bag
-// instead of a part one, a roll that weighed heavy. Refusing it outright
-// only pushed the difference into a stock adjustment, which credits the
-// same yarn while losing the link to the PO that brought it in.
-//
-// So a delivery may exceed the line's ordered quantity. Up to this
-// fraction over, no explanation is asked for; past it, someone has to
-// say why, and that reason is kept on the inward row.
-// ─────────────────────────────────────────────────────────────────────────
-const OVER_RECEIPT_TOLERANCE = 0.10;
-const MIN_EXCESS_REASON = 5;
-
-const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+// OVER-RECEIPT: a delivery may exceed what was ordered — a little without
+// a word, more with a reason. The rule is services/purchaseOrderRules.js
+// (overReceipt), shared with the other door goods come in by.
 
 // ─────────────────────────────────────────────────────────────────────────
 // POST /create-supplier
@@ -729,34 +716,15 @@ router.post(
           );
         }
 
-        const ordered  = Number(poItem.quantity) || 0;
-        const already  = Number(poItem.receivedQuantity) || 0;
-        const totalAfter = round3(already + Number(inItem.quantity));
-        // Measured against what was ORDERED, not what is still pending.
-        // Against pending, a PO for 100 already 90 received would call a
-        // 12-unit delivery a 20% overshoot when it is 2% over the order —
-        // and the tolerance is about the delivery against the order.
-        const excess = Math.max(0, round3(totalAfter - ordered));
-        const allowanceFree = ordered * OVER_RECEIPT_TOLERANCE;
-
-        if (excess > 0) {
-          const reason = String(inItem.excessReason || excessReason || "").trim();
-          if (excess > allowanceFree && reason.length < MIN_EXCESS_REASON) {
-            return next(new ErrorHandler(
-              `Receiving ${totalAfter} against ${ordered} ordered is ` +
-              `${excess} over — past the ` +
-              `${Math.round(OVER_RECEIPT_TOLERANCE * 100)}% tolerance ` +
-              `(${round2(allowanceFree)}). Give a reason of at least ` +
-              `${MIN_EXCESS_REASON} characters to receive it.`,
-              400
-            ));
-          }
-          excessByMaterial.set(String(inItem.rawMaterial), {
-            excess: round2(excess),
-            // Inside the tolerance a reason is optional, but keep one if
-            // it was offered — it costs nothing and helps later.
-            reason: excess > allowanceFree ? reason : reason || "",
-          });
+        const over = overReceipt({
+          ordered:  poItem.quantity,
+          already:  poItem.receivedQuantity,
+          incoming: inItem.quantity,
+          reason:   inItem.excessReason || excessReason,
+        });
+        if (over.error) return next(new ErrorHandler(over.error, 400));
+        if (over.excess > 0) {
+          excessByMaterial.set(String(inItem.rawMaterial), { excess: over.excess, reason: over.reason });
         }
       }
 

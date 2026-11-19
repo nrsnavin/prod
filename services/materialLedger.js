@@ -104,8 +104,19 @@ const inwardRow = (iw) => {
     lotNo: iw.lotNo || '',
     unitPrice: num(iw.unitPrice),
     remarks: iw.remarks || '',
+    by: whoMade(iw),
   };
 };
+
+// Who keyed the receipt or the issue. Every one of these rows has
+// carried its author since it was written (models/plugins/auditFields.js)
+// and the ledger never showed it — which matters most on the rows that
+// have no document behind them: a stock adjustment is a person's word.
+const whoMade = (row) => String(row?.createdBy?.name || '').trim();
+// `createdBy` is added to every schema as the server starts (app.js). A
+// script or a test that loads the models on their own has none, and is
+// answered without names rather than refused.
+const AUTHOR = Object.freeze({ path: 'createdBy', select: 'name', strictPopulate: false });
 
 const OUT_LABEL = {
   ORDER_APPROVAL: 'Order approval',
@@ -139,6 +150,7 @@ const outwardRow = (ow) => {
     lotNo: ow.lotNo || '',
     unitPrice: num(ow.unitPrice),
     remarks: ow.remarks || '',
+    by: whoMade(ow),
   };
 };
 
@@ -212,11 +224,13 @@ async function materialLedger(materialId, { from = null, to = null } = {}) {
   const [inwards, outs, afterIn, afterOut] = await Promise.all([
     MaterialInward.find(inFilter(materialId, windowClause))
       .populate('purchaseOrder', 'poNo status')
+      .populate(AUTHOR)
       .sort({ inwardDate: 1 })
       .lean(),
     MaterialOutward.find(liveOutFilter(materialId, windowClause))
       .populate('order', 'orderNo')
       .populate('job', 'jobOrderNo')
+      .populate(AUTHOR)
       .sort({ outwardDate: 1 })
       .lean(),
     afterClause

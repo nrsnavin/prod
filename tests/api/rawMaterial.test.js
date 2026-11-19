@@ -79,14 +79,19 @@ const fakeMaterial = (overrides = {}) => ({
 // ─── POST /create-raw-material ──────────────────────────────────────────────
 
 describe("POST /api/v2/materials/create-raw-material", () => {
-  beforeEach(() => jest.clearAllMocks());
+  // A material is added under a supplier that exists — the route looks
+  // (tests/api/materialMasterStockAndArchive.test.js does it for real).
+  beforeEach(() => {
+    jest.clearAllMocks();
+    Supplier.exists = jest.fn().mockResolvedValue({ _id: OID });
+  });
 
   it("creates material and returns 201", async () => {
     RawMaterial.create = jest.fn().mockResolvedValue(fakeMaterial());
 
     const res = await request(app)
       .post("/api/v2/materials/create-raw-material")
-      .send({ name: "Nylon Thread", category: "warp", supplier: "sup1" });
+      .send({ name: "Nylon Thread", category: "warp", supplier: OID });
 
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
@@ -123,7 +128,7 @@ describe("POST /api/v2/materials/create-raw-material", () => {
 
     const res = await request(app)
       .post("/api/v2/materials/create-raw-material")
-      .send({ name: "Nylon", category: "warp", supplier: "sup1" });
+      .send({ name: "Nylon", category: "warp", supplier: OID });
 
     expect(res.status).toBe(201);
     expect(RawMaterial.create).toHaveBeenCalledWith(
@@ -285,8 +290,12 @@ describe("DELETE /api/v2/materials/delete-raw-material", () => {
       deleteOne: jest.fn(),
     };
     RawMaterial.findById = jest.fn().mockResolvedValue(doc);
+    // The archive it falls back to asks first whether an open order
+    // still needs the material; none does here.
+    const openOrders = jest.spyOn(require("../../models/Order"), "countDocuments").mockResolvedValue(0);
 
     const res = await request(app).delete(`/api/v2/materials/delete-raw-material?id=${OID}`);
+    openOrders.mockRestore();
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ archived: true, deleted: false });

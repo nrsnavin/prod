@@ -34,7 +34,7 @@ const MaterialOutward = require('../models/MaterialOut.cjs');
 const ErrorHandler     = require('../utils/ErrorHandler');
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const { isAdmin }      = require('../middleware/auth');
-const { appendStockMovement } = require('../utils/stockLedger');
+const { appendStockMovement, movedBy } = require('../utils/stockLedger');
 const { saveIf, changedMeanwhile } = require('../utils/conditionalSave');
 const { costOf }       = require('../utils/materialValuation');
 const {
@@ -726,6 +726,8 @@ router.post(
           await appendStockMovement(material._id, {
             type:      'STOCK_ADJUST',
             reason:    `Count #${count.countNo}: ${reason}`,
+            // Whoever posted the count.
+            ...movedBy(req.user),
             quantity:  applied,
             requested: applied === variance ? undefined : variance,
             balance:   newStock,

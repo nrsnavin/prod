@@ -209,8 +209,21 @@ function normaliseMovements(movements = [], currentStock = 0) {
   return signed;
 }
 
+/**
+ * Who made a movement, for the rows a person decides on (a manual
+ * adjustment, a count posted, a lot corrected). Spread into the row:
+ * nothing at all when there is no signed-in user, so a job run by the
+ * server writes no empty name.
+ */
+function movedBy(user) {
+  if (!user?._id) return {};
+  const byName = String(user.name || "").trim();
+  return byName ? { by: user._id, byName } : { by: user._id };
+}
+
 module.exports = {
   appendStockMovement,
+  movedBy,
   normaliseMovements,
   describeMovement,
   TYPE_LABEL,

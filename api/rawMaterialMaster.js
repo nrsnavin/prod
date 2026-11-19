@@ -37,8 +37,31 @@ const { countUsage } = require("../utils/masterUsage");
 const YarnLot           = require("../models/YarnLot");
 const { unplacedQuantity } = require("../services/yarnLotService");
 const { maybeFirePriceChangeAlert } = require("../utils/inventoryAlerts");
-const { enqueue } = require("../utils/outbox");
+const { LIVE_STATUSES } = require("../domain/orderStatus");
+const { round3 } = require("../utils/quantity");
 const router = express.Router();
+
+/**
+ * How many orders still in hand need this material.
+ *
+ * The guard on retiring one: hidden, it drops out of the MRP and the
+ * buying lists at the moment somebody has to buy it. Asked in three
+ * places (archive, archive from the list's selection, and the archive a
+ * delete falls back to) — and the third did not ask at all, while the
+ * other two asked for "neither Completed nor Cancelled", which counts a
+ * DELETED order as open and held the material for good.
+ */
+const openOrdersNeeding = (materialId) => Order.countDocuments({
+  "rawMaterialRequired.rawMaterial": materialId,
+  status: { $in: LIVE_STATUSES },
+});
+const stillNeeded = (live) =>
+  `${live} open order${live === 1 ? " still requires" : "s still require"} it`;
+
+/** A supplier that is one. A valid-looking id for nobody was saved as it came. */
+async function supplierExists(id) {
+  return mongoose.Types.ObjectId.isValid(String(id || "")) && !!(await Supplier.exists({ _id: id }));
+}
 
 /**
  * Settle the two classifications independently.
@@ -109,6 +132,9 @@ router.post(
 
     const resolved = await resolveClassification({ group, category });
     if (resolved.error) return next(new ErrorHandler(resolved.error, 400));
+    if (!(await supplierExists(supplier))) {
+      return next(new ErrorHandler("Choose a supplier that exists", 400));
+    }
 
     // The group's defaults fill blanks at CREATE only, and are copied
     // onto the material rather than read through. A material's own
@@ -127,7 +153,8 @@ router.post(
       category: resolved.category,
       group:    resolved.group,
       unit:     String(unit ?? "").trim() || defaults.unit || "kg",
-      stock:    stock    || 0,
+      // Opening stock, to the gram as stock is kept everywhere else.
+      stock:    Number.isFinite(Number(stock)) ? round3(stock) : (stock || 0),
       minStock: minStock !== undefined && minStock !== null && minStock !== ""
         ? minStock
         : defaults.minStock,
@@ -380,6 +407,18 @@ router.delete(
         });
       }
 
+      // The archive this falls back to is held to the archive button's
+      // own rule. It was not: a material an open order still needs
+      // could be retired by pressing Delete instead.
+      const live = await openOrdersNeeding(material._id);
+      if (live > 0) {
+        return next(new ErrorHandler(
+          `"${material.name}" cannot be deleted, or archived yet — ${stillNeeded(live)}. ` +
+          `Complete or cancel ${live === 1 ? "it" : "them"} first.`,
+          400
+        ));
+      }
+
       material.archived   = true;
       material.archivedAt = new Date();
       await material.save();
@@ -500,12 +539,9 @@ router.post(
       if (!m) { results.push({ id, ok: false, reason: "Not found" }); continue; }
       if (!!m.archived === wantArchived) { results.push({ id, name: m.name, ok: true, unchanged: true }); continue; }
       if (wantArchived) {
-        const live = await Order.countDocuments({
-          "rawMaterialRequired.rawMaterial": m._id,
-          status: { $nin: ["Completed", "Cancelled"] },
-        });
+        const live = await openOrdersNeeding(m._id);
         if (live > 0) {
-          results.push({ id, name: m.name, ok: false, reason: `${live} open order${live === 1 ? "" : "s"} still need it` });
+          results.push({ id, name: m.name, ok: false, reason: stillNeeded(live) });
           continue;
         }
       }
@@ -534,14 +570,11 @@ router.patch(
     if (!material) return next(new ErrorHandler("Raw material not found", 404));
 
     if (wantArchived) {
-      const live = await Order.countDocuments({
-        "rawMaterialRequired.rawMaterial": material._id,
-        status: { $nin: ["Completed", "Cancelled"] },
-      });
+      const live = await openOrdersNeeding(material._id);
       if (live > 0) {
         return next(new ErrorHandler(
-          `Cannot archive "${material.name}" — ${live} open order${live === 1 ? "" : "s"} still ` +
-          `require${live === 1 ? "s" : ""} it. Complete or cancel them first.`,
+          `Cannot archive "${material.name}" — ${stillNeeded(live)}. ` +
+          `Complete or cancel ${live === 1 ? "it" : "them"} first.`,
           400
         ));
       }
@@ -577,7 +610,12 @@ router.put(
     // let a caller overwrite the audit ledgers (stockMovements,
     // priceHistory) or totalConsumption wholesale — build an explicit
     // update instead. The append-only priceHistory is managed below.
-    const ALLOWED = ["name", "supplier", "price", "minStock", "stock", "unit"];
+    //
+    // STOCK IS NOT ONE OF THEM. It was, and it was the one way to move
+    // stock that left nothing behind: no ledger row, no receipt or
+    // issue, no reason, no name. Stock is changed by a receipt, an issue
+    // or an adjustment, each of which records itself.
+    const ALLOWED = ["name", "supplier", "price", "minStock", "unit"];
     const update = {};
     for (const f of ALLOWED) {
       if (req.body[f] !== undefined) update[f] = req.body[f];
@@ -589,6 +627,32 @@ router.put(
     // The form's version, when it sent one: a save made from a stale
     // screen is a 409, not a silent overwrite of someone else's edit.
     assertVersion(existing, req);
+
+    // A form that still sends the stock it loaded is not refused for
+    // sending it — only for sending a DIFFERENT figure. That is either
+    // somebody typing a new stock into the form, or (the dangerous one)
+    // a form opened before yarn was drawn, about to put it back: stock
+    // movements do not move the record's version, so the check above
+    // cannot see them. Either way nothing is saved, and the message
+    // says where stock is changed.
+    if (req.body.stock !== undefined && req.body.stock !== null && req.body.stock !== "") {
+      const sent = Number(req.body.stock);
+      const held = round3(existing.stock);
+      if (!Number.isFinite(sent) || round3(sent) !== held) {
+        const err = new ErrorHandler(
+          `Stock is not changed from this form. "${existing.name}" holds ${held} ${existing.unit || "kg"}` +
+          `${Number.isFinite(sent) ? ` and the form sent ${round3(sent)}` : ""} — nothing was saved. ` +
+          `To correct the figure use Adjust stock, which records who changed it and why; ` +
+          `then reopen this form for anything else.`,
+          400
+        );
+        err.code = "STOCK_NOT_EDITED_HERE";
+        return next(err);
+      }
+    }
+    if (update.supplier !== undefined && !(await supplierExists(update.supplier))) {
+      return next(new ErrorHandler("Choose a supplier that exists", 400));
+    }
 
     // `category` and `group` are settled together, never separately.
     // Both go through the resolver even when only one was sent, so an
@@ -610,7 +674,6 @@ router.put(
 
     // Snapshot for the inventory-alert fire-and-forget below.
     const _alertSnap = {
-      oldStock:  Number(existing.stock) || 0,
       oldPrice:  Number(existing.price) || 0,
       reason:    String(req.body.reason || priceReason || "Manual edit").trim(),
     };
@@ -654,7 +717,6 @@ router.put(
     (async () => {
       try {
         const newPrice = Number(material.price);
-        const newStock = Number(material.stock);
         if (newPrice !== _alertSnap.oldPrice) {
           await maybeFirePriceChangeAlert({
             material,
@@ -663,17 +725,8 @@ router.put(
             reason:   _alertSnap.reason,
           });
         }
-        if (newStock !== _alertSnap.oldStock) {
-          // Durable path: the dispatcher re-checks the skip rules and
-          // retries on WhatsApp hiccups (fire-and-forget lost the alert
-          // on any crash). No session — the update above was atomic.
-          await enqueue(null, "inventory.stockoutCheck", {
-            materialId: material._id.toString(),
-            oldStock:   _alertSnap.oldStock,
-            newStock,
-            reason:     `Manual edit: ${_alertSnap.reason}`,
-          });
-        }
+        // (No stock-out check here any more: an edit does not move
+        // stock. The adjustment that does raises its own.)
       } catch (err) {
         console.warn(`[edit-raw-material] alerts for ${material._id}: ${err?.message}`);
       }

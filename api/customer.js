@@ -11,6 +11,7 @@ const { escapeRegex } = require("../utils/escapeRegex");
 const Customer     = require("../models/Customer");
 const CustomerUser = require("../models/CustomerUser");
 const Order        = require("../models/Order");
+const { LIVE_STATUSES } = require("../domain/orderStatus");
 const { pageOf } = require("../utils/paging");
 
 // All customer management routes are admin-only.
@@ -165,9 +166,12 @@ router.patch(
     if (!customer) return next(new ErrorHandler("Customer not found", 404));
 
     if (wantArchived) {
+      // Orders still in hand. Asked as "neither Completed nor Cancelled",
+      // a DELETED order counted as open — and the customer could never
+      // be archived, told to complete an order nobody can open.
       const live = await Order.countDocuments({
         customer: customer._id,
-        status: { $nin: ["Completed", "Cancelled"] },
+        status: { $in: LIVE_STATUSES },
       });
       if (live > 0) {
         return next(new ErrorHandler(

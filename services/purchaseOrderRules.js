@@ -106,4 +106,59 @@ async function assertSupplier(supplier) {
   }
 }
 
-module.exports = { nextPoNumber, pendingOf, deriveStatus, readPoLines, assertSupplier, round3 };
+// ── OVER-DELIVERY ────────────────────────────────────────────────────
+// A supplier sending slightly more than ordered is normal — a full bag
+// instead of a part one, a roll that weighed heavy. Refusing it outright
+// only pushed the difference into a stock adjustment, which credits the
+// same yarn while losing the link to the PO that brought it in.
+//
+// So a delivery may exceed the line's ordered quantity. Up to this
+// fraction over, no explanation is asked for; past it, someone has to
+// say why, and that reason is kept on the receipt.
+//
+// Here, and not in the route, because there are two doors goods come in
+// by (the purchase order page, and the older /materials/material-inward)
+// and only one of them had the rule.
+const OVER_RECEIPT_TOLERANCE = 0.10;
+const MIN_EXCESS_REASON = 5;
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+/**
+ * One delivery measured against the line it came on.
+ *
+ * Measured against what was ORDERED, not what is still pending. Against
+ * pending, a PO for 100 already 90 received would call a 12-unit
+ * delivery a 20% overshoot when it is 2% over the order — and the
+ * tolerance is about the delivery against the order.
+ *
+ * @returns {{ excess: number, reason: string, error: string|null }}
+ *   `excess` to two places (0 for an ordinary receipt); `error` is the
+ *   refusal to show when the excess is past the tolerance with no reason.
+ */
+function overReceipt({ ordered, already, incoming, reason }) {
+  const want = Number(ordered) || 0;
+  const totalAfter = round3((Number(already) || 0) + Number(incoming));
+  const excess = Math.max(0, round3(totalAfter - want));
+  const allowanceFree = want * OVER_RECEIPT_TOLERANCE;
+  const said = String(reason || "").trim();
+  if (excess > allowanceFree && said.length < MIN_EXCESS_REASON) {
+    return {
+      excess: round2(excess),
+      reason: said,
+      error:
+        `Receiving ${totalAfter} against ${want} ordered is ` +
+        `${excess} over — past the ` +
+        `${Math.round(OVER_RECEIPT_TOLERANCE * 100)}% tolerance ` +
+        `(${round2(allowanceFree)}). Give a reason of at least ` +
+        `${MIN_EXCESS_REASON} characters to receive it.`,
+    };
+  }
+  // Inside the tolerance a reason is optional, but kept if it was
+  // offered — it costs nothing and helps later.
+  return { excess: round2(excess), reason: excess > 0 ? said : "", error: null };
+}
+
+module.exports = {
+  nextPoNumber, pendingOf, deriveStatus, readPoLines, assertSupplier, round3,
+  overReceipt, OVER_RECEIPT_TOLERANCE, MIN_EXCESS_REASON,
+};

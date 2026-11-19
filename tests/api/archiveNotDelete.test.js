@@ -183,7 +183,25 @@ describe('deleting a raw material', () => {
     expect(await RawMaterial.countDocuments({ _id: m._id })).toBe(1);
   });
 
-  it('archives it when an order requires it', async () => {
+  it('archives it when a finished order required it', async () => {
+    const m = await makeMaterial();
+    const c = await makeCustomer();
+    const e = await makeElastic();
+    await makeOrder(c, e, {
+      status: 'Completed',
+      rawMaterialRequired: [{ rawMaterial: m._id, requiredWeight: 40 }],
+    });
+
+    const res = await deleteMaterial(m._id);
+    expect(res.body.archived).toBe(true);
+    expect(res.body.message).toMatch(/1 order requirement/);
+  });
+
+  it('does neither while an open order still requires it', async () => {
+    // This used to archive: the delete button's fallback skipped the
+    // check the archive button makes (below), so a material an order in
+    // hand still needs could be retired — off the MRP and the buying
+    // lists — by pressing Delete instead of Archive.
     const m = await makeMaterial();
     const c = await makeCustomer();
     const e = await makeElastic();
@@ -192,8 +210,11 @@ describe('deleting a raw material', () => {
     });
 
     const res = await deleteMaterial(m._id);
-    expect(res.body.archived).toBe(true);
-    expect(res.body.message).toMatch(/1 order requirement/);
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/1 open order still requires it/);
+    const after = await RawMaterial.findById(m._id).lean();
+    expect(after).not.toBeNull();
+    expect(after.archived).toBeFalsy();
   });
 
   it('deletes one nothing has ever used', async () => {

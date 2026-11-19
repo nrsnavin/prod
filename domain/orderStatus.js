@@ -52,6 +52,12 @@ function isTerminal(status) {
   return (ORDER_TRANSITIONS[status] || []).length === 0;
 }
 
+// The orders still in hand: Open, Approved, InProgress. For "does a live
+// order still depend on this?" — and written out as a list of what IS
+// live, because it used to be asked as "neither Completed nor
+// Cancelled", which let a DELETED order through as though it were open.
+const LIVE_STATUSES = Object.freeze(ORDER_STATUSES.filter((s) => !isTerminal(s)));
+
 /**
  * Apply a status to an order document IF the move is legitimate.
  *
@@ -88,5 +94,6 @@ module.exports = {
   STAMPS,
   canTransition,
   isTerminal,
+  LIVE_STATUSES,
   applyOrderStatus,
 };

@@ -26,14 +26,14 @@ const Supplier          = require("../models/Supplier");
 const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { escapeRegex } = require("../utils/escapeRegex");
-const { appendStockMovement } = require("../utils/stockLedger");
+const { appendStockMovement, movedBy } = require("../utils/stockLedger");
 const { receiveAtCost, costOf, noteLatestPrice } = require("../utils/materialValuation");
 const { creditLot, drawFromLot } = require("../services/yarnLotService");
 const { maybeFirePoReceivedForCritical } = require("../utils/inventoryAlerts");
 const { enqueue } = require("../utils/outbox");
 const { claimKey, isDuplicateKeyError, isClaimed } = require("../utils/idempotency");
 const { materialLedger, parseRange } = require("../services/materialLedger");
-const { nextPoNumber, readPoLines, assertSupplier, deriveStatus } = require("../services/purchaseOrderRules");
+const { nextPoNumber, readPoLines, assertSupplier, deriveStatus, overReceipt } = require("../services/purchaseOrderRules");
 const { round3 } = require("../utils/quantity");
 const { asCallerError } = require("../utils/routeError");
 const { getPdfBranding } = require("../services/documentSettings");
@@ -126,7 +126,7 @@ router.post(
     // saved: two receipts against one PO at once both read the same
     // figure and one of them was lost. Read inside the transaction, the
     // second is retried after the first and adds to its total.
-    let material, po, inward, _stockBefore, unitPrice;
+    let material, po, inward, _stockBefore, unitPrice, excess;
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
@@ -150,6 +150,18 @@ router.post(
           throw new ErrorHandler(
             `${material.name} is not on PO ${po.poNo != null ? `#${po.poNo}` : "that purchase order"} — receive it against the PO it was ordered on`, 400);
         }
+        // Held to the order, as the purchase order page's receipt is:
+        // a little over without a word, more with a reason. This door
+        // took any quantity at all — 150 kg against an order for 100.
+        const over = overReceipt({
+          ordered:  poLine.quantity,
+          already:  poLine.receivedQuantity,
+          incoming: qtyNum,
+          reason:   req.body.excessReason,
+        });
+        if (over.error) throw new ErrorHandler(over.error, 400);
+        excess = over;
+
         // At the price it was bought at, so the weighted average moves
         // with what the yarn actually cost.
         unitPrice = Math.max(0, Number(poLine?.price ?? material.price) || 0);
@@ -183,6 +195,8 @@ router.post(
           remarks:       remarks || "",
           lotNo,
           unitPrice,
+          excessQuantity: excess.excess,
+          excessReason:   excess.reason,
         }], { session });
 
         // To three places, and the status from the same rule the purchase
@@ -367,6 +381,8 @@ router.post(
               // person typed IS the explanation, and it was being
               // computed on the next line and then thrown away.
               reason,
+              // …and whose reason it is.
+              ...movedBy(req.user),
               quantity: applied,
               requested: applied === item.adjustment ? undefined : item.adjustment,
               balance:  newStock,
@@ -585,6 +601,8 @@ router.get(
                 adjustment: "$stockMovements.quantity",
                 balance: "$stockMovements.balance",
                 reason: { $ifNull: ["$stockMovements.reason", ""] },
+                // Who made it. Blank on rows written before the name was kept.
+                by: { $ifNull: ["$stockMovements.byName", ""] },
               },
             },
           ],

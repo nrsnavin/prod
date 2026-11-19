@@ -43,6 +43,14 @@ const StockMovementSchema = new mongoose.Schema(
     // the rest are explained by the document they point at.
     reason: { type: String, trim: true, default: "" },
 
+    // …and who that person was. A manual adjustment is the one movement
+    // somebody decides on their own, and it carried a reason and no
+    // name: "who wrote this off" could not be answered from the ledger.
+    // The name is kept beside the id for the reason refNo is kept beside
+    // its reference — the row has to read years later.
+    by:     { type: mongoose.Types.ObjectId, ref: "User" },
+    byName: { type: String, trim: true },
+
     // What actually happened to stock — the delta the balance below
     // moved by. A row where `quantity` and `balance` disagree with the
     // row before it is a ledger that cannot be reconciled, which is the
