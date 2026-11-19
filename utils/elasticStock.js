@@ -89,6 +89,37 @@ const MAX_ABS_QUANTITY = 1e7;
 /** A quantity to three decimal places (see TO THE MILLIMETRE above). */
 const { round3 } = require("./quantity");
 
+/**
+ * THE TOTAL PRODUCED, after it has moved by `delta`.
+ *
+ * `quantityProduced` is not one of the two balances the write below is
+ * conditional on, so it cannot be worked out here and set: somebody
+ * else may have moved it since it was read. The database works it out
+ * instead, from the figure it holds at the moment of the write —
+ * rounded like every other quantity, and never below nothing. (It was a
+ * bare increment: 227.69 + 168.85 was stored as 396.53999999999996, and
+ * a correction could take it below zero, which the database's own rule
+ * on this field refuses outright — the whole request then failed.)
+ */
+const producedAfter = (delta) => ({
+  $round: [{ $max: [0, { $add: [{ $ifNull: ["$quantityProduced", 0] }, delta] }] }, 3],
+});
+
+/**
+ * Move an elastic's total produced by `delta`, on its own — for a
+ * correction that changes what was produced by more (or less) than it
+ * could change the stock by.
+ */
+async function moveProduced(session, elasticId, delta) {
+  const by = round3(delta);
+  if (!elasticId || !by) return;
+  await Elastic.updateOne(
+    { _id: elasticId },
+    [{ $set: { quantityProduced: producedAfter(by) } }],
+    { session }
+  );
+}
+
 async function applyMovement(session, opts) {
   const {
     elasticId,
@@ -173,16 +204,16 @@ async function applyMovement(session, opts) {
     // filter below only matches while both are still what was read, so
     // setting them is as safe as incrementing — and leaves no stray
     // 0.0000000000003 on the shelf.
-    const update = {};
-    if (applied || reservedApplied) {
-      update.$set = {};
-      if (applied) update.$set.stock = newStock;
-      if (reservedApplied) update.$set.reservedStock = newReserved;
-    }
-    // Not in the filter, so it stays an increment.
-    if (alsoIncProduced && applied) update.$inc = { quantityProduced: applied };
+    const set = {};
+    if (applied) set.stock = newStock;
+    if (reservedApplied) set.reservedStock = newReserved;
+    // The total produced is not in the filter, so the database adds to
+    // whatever it holds — see producedAfter.
+    const update = alsoIncProduced && applied
+      ? [{ $set: { ...set, quantityProduced: producedAfter(applied) } }]
+      : { $set: set };
 
-    const updated = Object.keys(update).length
+    const updated = Object.keys(set).length
       ? await Elastic.findOneAndUpdate(
           // Both observed values in the filter: a concurrent writer that
           // moved either one invalidates the arithmetic above.
@@ -226,4 +257,4 @@ async function applyMovement(session, opts) {
   );
 }
 
-module.exports = { applyMovement, round3, VALID_TYPES, MAX_ABS_QUANTITY };
+module.exports = { applyMovement, moveProduced, round3, VALID_TYPES, MAX_ABS_QUANTITY };

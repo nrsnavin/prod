@@ -17,7 +17,8 @@ const Elastic          = require("../models/Elastic");
 const StockMovement    = require("../models/StockMovement");
 const { buildFingerprint, ACTION_CODES, actorFromRequest, stampFingerprint } = require("../utils/fingerprint");
 const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
-const { applyMovement } = require("../utils/elasticStock");
+const { applyMovement, moveProduced } = require("../utils/elasticStock");
+const { round3 } = require("../utils/quantity");
 const { requireReason } = require("../utils/auditReason");
 
 /**
@@ -64,11 +65,13 @@ function movePackedElastic(job, elasticId, delta) {
   if (!job || !delta) return;
   const key = elasticId.toString();
   const idx = job.packedElastic.findIndex((e) => e.elastic?.toString() === key);
+  // To the millimetre: a job's packed figure is a sum of typed decimals,
+  // and 227.69 + 168.85 is otherwise kept as 396.53999999999996.
   if (idx >= 0) {
     job.packedElastic[idx].quantity =
-      Math.max(0, (job.packedElastic[idx].quantity || 0) + delta);
+      Math.max(0, round3((job.packedElastic[idx].quantity || 0) + delta));
   } else if (delta > 0) {
-    job.packedElastic.push({ elastic: elasticId, quantity: delta });
+    job.packedElastic.push({ elastic: elasticId, quantity: round3(delta) });
   }
 }
 
@@ -210,6 +213,13 @@ router.post(
       return next(new ErrorHandler(
         `meter ${meter} exceeds ${PACKING_METER_MAX}m per record`, 400));
     }
+    // Kept to the millimetre, and the one figure used from here on: the
+    // record, the job, the order, the stock and the total produced all
+    // have to move by the same amount.
+    const meters = round3(meter);
+    if (!(meters > 0)) {
+      return next(new ErrorHandler("meter must be a positive number",    400));
+    }
     // `!weight || isNaN(weight)` let every NEGATIVE weight through — the
     // one shape of wrong number a scale actually produces when the tare
     // is keyed the wrong way round. A box cannot weigh less than nothing.
@@ -258,6 +268,17 @@ router.post(
             409
           );
         }
+        // And one that has not reached the loom has nothing to pack. The
+        // list both apps pick the job from (GET /jobs-packing) already
+        // leaves these out; the route that moves the stock did not, so a
+        // box could still be recorded — and finished stock raised —
+        // against a job whose warp was not yet made.
+        if (!POST_PREP_STAGES.includes(jobDoc.status)) {
+          throw new ErrorHandler(
+            `Job #${jobDoc.jobOrderNo} has not started weaving — there is nothing to pack against it yet`,
+            409
+          );
+        }
 
         // The elastic has to be one the job is making. Without this an
         // elastic picked off the wrong row raised ITS stock, stamped a
@@ -275,7 +296,7 @@ router.post(
 
         const [packing] = await Packing.create([{
           job, elastic,
-          meter:       Number(meter),
+          meter:       meters,
           joints:      Number(joints) || 0,
           tareWeight:  Number(tareWeight),
           netWeight:   Number(netWeight),
@@ -286,7 +307,7 @@ router.post(
           ...(requestId ? { requestId } : {}),
         }], { session });
 
-        movePackedElastic(jobDoc, elastic, Number(meter));
+        movePackedElastic(jobDoc, elastic, meters);
         jobDoc.packingDetails.push(packing._id);
 
         const actor = actorFromRequest(req);
@@ -297,7 +318,7 @@ router.post(
             packingId:   packing._id.toString(),
             elasticId:   elastic.toString(),
             elasticName: elasticDoc.name,
-            meter:       Number(meter),
+            meter:       meters,
             joints:      Number(joints) || 0,
             netWeight:   Number(netWeight),
             grossWeight: Number(grossWeight),
@@ -321,7 +342,7 @@ router.post(
                 jobId:          jobDoc._id.toString(),
                 jobOrderNo:     jobDoc.jobOrderNo,
                 elasticName:    elasticDoc.name,
-                meter:          Number(meter),
+                meter:          meters,
                 relatedHash:    fp.hash,
                 relatedShortId: fp.shortId,
               },
@@ -338,7 +359,7 @@ router.post(
         await applyMovement(session, {
           elasticId:       elastic,
           type:            "PACKING_INWARD",
-          quantity:        +Number(meter),
+          quantity:        meters,
           refType:         "Packing",
           refId:           packing._id,
           by:              req.user?._id,
@@ -346,7 +367,7 @@ router.post(
         });
 
         console.log(
-          `[packing/create] Job #${jobDoc.jobOrderNo} | elastic ${elasticDoc.name} | ${meter}m`
+          `[packing/create] Job #${jobDoc.jobOrderNo} | elastic ${elasticDoc.name} | ${meters}m`
         );
 
         resp = { packing, fingerprint: fp };
@@ -404,19 +425,6 @@ router.get(
 );
 
 // ═══════════════════════════════════════════════════════════
-//  DELETE PACKING — admin undo
-//
-//  P0-3: split the stock reversal from the quantityProduced
-//  decrement. The clamped `applied` on PACKING_REVERSE is correct
-//  for stock (max -current), but quantityProduced should reflect
-//  the full original production — so we decrement it by the
-//  source PACKING_INWARD's `applied` independent of the clamp.
-//
-//  Without this split, deleting a 10 m packing against a current
-//  stock of 5 would only knock 5 off quantityProduced, leaving
-//  the counter 5 above truth.
-// ═══════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════
 //  EDIT PACKING — correct the packed meters. Applies the delta to
 //  the job counter, the stock ledger (PACKING_INWARD / _REVERSE)
 //  and Elastic.quantityProduced, then stamps a fingerprint.
@@ -437,8 +445,11 @@ router.put(
         if (!packing) throw new ErrorHandler("Packing record not found", 404);
 
         const oldMeter = Number(packing.meter || 0);
-        const newMeter = meter != null ? Number(meter) : oldMeter;
-        if (!Number.isFinite(newMeter) || newMeter <= 0) throw new ErrorHandler("Meter must be > 0", 400);
+        const typed    = meter != null ? Number(meter) : oldMeter;
+        if (!Number.isFinite(typed) || typed <= 0) throw new ErrorHandler("Meter must be > 0", 400);
+        // To the millimetre, as it is when the box is first recorded.
+        const newMeter = meter != null ? round3(typed) : oldMeter;
+        if (!(newMeter > 0)) throw new ErrorHandler("Meter must be > 0", 400);
         // The same ceiling the create path enforces. It was on one door
         // only, so a typo refused at 999999999 on the way in was accepted
         // by editing the record afterwards to exactly that.
@@ -446,7 +457,9 @@ router.put(
           throw new ErrorHandler(
             `meter ${newMeter} exceeds ${PACKING_METER_MAX}m per record`, 400);
         }
-        const delta = newMeter - oldMeter;
+        // 100.1 − 100.3 is −0.20000000000000284; everything below moves
+        // by this one figure, so it is the difference and nothing more.
+        const delta = round3(newMeter - oldMeter);
 
         if (delta !== 0) {
           const job = await JobOrder.findById(packing.job).session(session);
@@ -464,7 +477,9 @@ router.put(
               refType: "Packing", refId: packing._id,
               reason: `packing edit ${delta} (${auditReason})`, by: req.user?._id,
             });
-            await Elastic.updateOne({ _id: packing.elastic }, { $inc: { quantityProduced: delta } }, { session });
+            // The stock can come down by less than the correction (it
+            // stops at nothing); what was produced comes down by all of it.
+            await moveProduced(session, packing.elastic, delta);
           }
 
           packing.meter = newMeter;
@@ -492,6 +507,22 @@ router.put(
   })
 );
 
+// ═══════════════════════════════════════════════════════════
+//  DELETE PACKING — admin undo
+//
+//  The stock comes down by what is there to take (it stops at nothing);
+//  the total produced comes down by the whole box, whatever the stock
+//  could give back. Deleting a 10 m packing against a stock of 5 takes
+//  5 off the shelf and 10 off what was produced.
+//
+//  "The whole box" is the metres the record holds NOW. This used to
+//  take off what the box was FIRST entered as, read from its first
+//  stock-ledger row — but a correction had already moved the total by
+//  the difference. A box entered as 100 m, corrected to 150 and then
+//  deleted left 50 m produced that nobody had made; corrected to 60 and
+//  deleted, it asked for a total of −40, which the database refuses,
+//  so the box could not be deleted at all.
+// ═══════════════════════════════════════════════════════════
 router.delete(
   "/:id",
   isAdmin('admin', 'production'),
@@ -529,10 +560,8 @@ router.delete(
           await syncOrderPacked(job.order, session);
         }
 
-        // Look up the original PACKING_INWARD so we know how much
-        // production was originally credited. quantityProduced is
-        // decremented by THAT, not by the (possibly clamped) stock
-        // delta of this reversal.
+        // The row this box came into stock on, named on the reversal so
+        // the two can be read together.
         const original = await StockMovement.findOne({
           refType: "Packing",
           refId:   packing._id,
@@ -540,8 +569,8 @@ router.delete(
           type:    "PACKING_INWARD",
         }).session(session);
 
-        // Reverse the stock side. alsoIncProduced is OFF here —
-        // the produced counter is corrected below independently.
+        // Reverse the stock side. The total produced is corrected
+        // below, on its own.
         await applyMovement(session, {
           elasticId: packing.elastic,
           type:      "PACKING_REVERSE",
@@ -554,20 +583,9 @@ router.delete(
           by:        req.user?._id,
         });
 
-        // Correct quantityProduced by the full original inward
-        // amount. Falls back to `packing.meter` for legacy packings
-        // that predate the ledger.
-        const producedDelta = original
-          ? Number(original.applied || 0)
-          : Number(packing.meter || 0);
-
-        if (producedDelta > 0) {
-          await Elastic.updateOne(
-            { _id: packing.elastic },
-            { $inc: { quantityProduced: -producedDelta } },
-            { session }
-          );
-        }
+        // What this box added to the total produced is what it holds
+        // now — see the note above the route.
+        await moveProduced(session, packing.elastic, -Number(packing.meter || 0));
 
         await packing.deleteOne({ session });
       });

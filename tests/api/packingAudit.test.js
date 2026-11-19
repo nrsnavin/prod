@@ -350,3 +350,157 @@ describe('listing packings', () => {
     expect(res.status).toBe(200);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading api/packing.js line by line.
+// ══════════════════════════════════════════════════════════════════
+/** Record one box of the job's elastic. */
+const packOn = (job, over) => pack({ job: job._id, elastic: elastic._id, ...box(over) });
+
+describe("an elastic's total produced", () => {
+  const produced = async () => (await Elastic.findById(elastic._id).lean()).quantityProduced;
+  const edit = (id, body) =>
+    request(app).put(`/api/v2/packing/${id}`).set('Cookie', cookie()).send(body);
+  const drop = (id) =>
+    request(app).delete(`/api/v2/packing/${id}?auditReason=entered%20twice`).set('Cookie', cookie());
+
+  it('goes back to where it was when a packing that was corrected upwards is deleted', async () => {
+    const { job } = await seed();
+    const created = await packOn(job, { meter: 100 });
+    expect(await produced()).toBe(100);
+    expect((await edit(created.body.packing._id, { meter: 150, auditReason: 'recount' })).status).toBe(200);
+    expect(await produced()).toBe(150);
+
+    expect((await drop(created.body.packing._id)).status).toBe(200);
+    // Before: 50 (or 100). The delete took back what the FIRST entry
+    // added, not what the record stood at after it had been corrected.
+    expect(await produced()).toBe(0);
+  });
+
+  it('does not go below nothing when one corrected downwards is deleted', async () => {
+    const { job } = await seed();
+    const created = await packOn(job, { meter: 100 });
+    await edit(created.body.packing._id, { meter: 60, auditReason: 'recount' });
+    expect(await produced()).toBe(60);
+
+    expect((await drop(created.body.packing._id)).status).toBe(200);
+    // Before: −40.
+    expect(await produced()).toBe(0);
+  });
+});
+
+describe('metres with a decimal on a packing', () => {
+  const edit = (id, body) =>
+    request(app).put(`/api/v2/packing/${id}`).set('Cookie', cookie()).send(body);
+  const onJob = (job) => packedOnJob(job._id, elastic._id);
+  const onOrder = (order) => packedOnOrder(order._id, elastic._id);
+
+  it('add up exactly on the job, the order, the stock and the total produced', async () => {
+    const { job, order } = await seed();
+    // 227.69 + 168.85 is 396.53999999999996.
+    expect((await packOn(job, { meter: 227.69 })).status).toBe(201);
+    expect((await packOn(job, { meter: 168.85 })).status).toBe(201);
+
+    expect(await onJob(job)).toBe(396.54);
+    expect(await onOrder(order)).toBe(396.54);
+    const el = await Elastic.findById(elastic._id).lean();
+    expect(el.stock).toBe(396.54);
+    expect(el.quantityProduced).toBe(396.54);
+  });
+
+  it('a correction to one box of two moves them by exactly the difference', async () => {
+    const { job, order } = await seed();
+    const created = await packOn(job, { meter: 100.3 });
+    await packOn(job, { meter: 200.3 });
+    // 300.6 + (100.1 − 100.3) is 300.40000000000003.
+    expect((await edit(created.body.packing._id, { meter: 100.1, auditReason: 'recount' })).status).toBe(200);
+    expect(await onJob(job)).toBe(300.4);
+    expect(await onOrder(order)).toBe(300.4);
+    const el = await Elastic.findById(elastic._id).lean();
+    expect(el.stock).toBe(300.4);
+    expect(el.quantityProduced).toBe(300.4);
+  });
+
+  it('a box is kept to the millimetre', async () => {
+    const { job } = await seed();
+    const created = await packOn(job, { meter: 12.34567 });
+    expect(created.body.packing.meter).toBe(12.346);
+    expect(await onJob(job)).toBe(12.346);
+  });
+});
+
+describe('an order planned in two jobs with decimals', () => {
+  it('has nothing pending, not a sliver of float noise', async () => {
+    const { recomputePending, recomputePacked, recomputeProduced } = require('../../services/orderPending.js');
+    const order = await Order.create({
+      customer: customer._id, po: 'PO-9', date: new Date(), supplyDate: new Date(), status: 'InProgress',
+      elasticOrdered:  [{ elastic: elastic._id, quantity: 396.54, rate: 10 }],
+      producedElastic: [{ elastic: elastic._id, quantity: 0 }],
+      packedElastic:   [{ elastic: elastic._id, quantity: 0 }],
+    });
+    for (const quantity of [227.69, 168.85]) {
+      await JobOrder.create({
+        order: order._id, customer: customer._id, date: new Date(), status: 'weaving',
+        elastics:        [{ elastic: elastic._id, quantity }],
+        producedElastic: [{ elastic: elastic._id, quantity }],
+        packedElastic:   [{ elastic: elastic._id, quantity }],
+      });
+    }
+    await recomputePending(order);
+    // Before: 5.684341886080802e-14 — an order fully planned that still
+    // read as having something left to plan.
+    expect(order.pendingElastic[0].quantity).toBe(0);
+    await recomputeProduced(order);
+    await recomputePacked(order);
+    expect(order.producedElastic[0].quantity).toBe(396.54);
+    expect(order.packedElastic[0].quantity).toBe(396.54);
+  });
+});
+
+describe('a job that has not reached the loom', () => {
+  it('cannot have a box recorded against it, as the packing list already says', async () => {
+    const { job } = await seed({ jobStatus: 'preparatory' });
+    const list = await request(app).get('/api/v2/packing/jobs-packing').set('Cookie', cookie());
+    expect(list.body.jobs.map((j) => String(j._id))).not.toContain(String(job._id));
+
+    const res = await packOn(job, { meter: 100 });
+    // Before: 201 — 100 m of finished stock for a job with no warp yet.
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/not started weaving/i);
+    expect(await Packing.countDocuments({})).toBe(0);
+    expect(await stockOf(elastic._id)).toBe(0);
+  });
+
+  it.each(['weaving', 'finishing', 'checking', 'packing'])('a job in %s still can', async (jobStatus) => {
+    const { job } = await seed({ jobStatus });
+    expect((await packOn(job, { meter: 100 })).status).toBe(201);
+  });
+});
+
+describe('with the rules the live database enforces on its own', () => {
+  // The production database refuses an elastic whose total produced is
+  // below nothing (migrations/20260711000003). The tests above run
+  // without those rules, where the same mistake shows as a figure of
+  // −40; with them, the request itself fails.
+  const validators = require('../../migrations/20260711000003-db-validators.js');
+  beforeAll(() => validators.up(mongoose.connection.db));
+  afterAll(() => validators.down(mongoose.connection.db));
+
+  it('a box that was corrected downwards can still be deleted', async () => {
+    const { job } = await seed();
+    const created = await packOn(job, { meter: 100 });
+    expect(created.status).toBe(201);
+    const id = created.body.packing._id;
+    const edited = await request(app).put(`/api/v2/packing/${id}`).set('Cookie', cookie())
+      .send({ meter: 60, auditReason: 'recount' });
+    expect(edited.status).toBe(200);
+
+    const res = await request(app).delete(`/api/v2/packing/${id}?auditReason=entered%20twice`).set('Cookie', cookie());
+    // Before: 500 "Document failed validation" — and the box stayed.
+    expect(res.status).toBe(200);
+    expect(await Packing.countDocuments({})).toBe(0);
+    const el = await Elastic.findById(elastic._id).lean();
+    expect(el.quantityProduced).toBe(0);
+    expect(el.stock).toBe(0);
+  });
+});

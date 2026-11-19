@@ -22,6 +22,10 @@
 // ══════════════════════════════════════════════════════════════
 
 const JobOrder = require('../models/JobOrder');
+// Metres are added up here from several jobs, and plain sums of typed
+// decimals do not come out even: an order for 396.54 planned as 227.69
+// and 168.85 was left with 0.00000000000006 "still to plan".
+const { round3 } = require('../utils/quantity');
 
 // Jobs that no longer hold any of the order's quantity.
 const RELEASING_STATUSES = ['cancelled'];
@@ -59,7 +63,7 @@ async function recomputePending(order, session) {
       elastic: o.elastic,
       // Never negative: over-planning an order is a data problem, not a
       // reason to show a negative outstanding quantity.
-      quantity: Math.max(0, (o.quantity || 0) - (planned[o.elastic.toString()] || 0)),
+      quantity: Math.max(0, round3((o.quantity || 0) - (planned[o.elastic.toString()] || 0))),
     }));
 
   return order.pendingElastic;
@@ -84,7 +88,7 @@ async function recomputeProduced(order, session) {
   }
 
   for (const row of order.producedElastic || []) {
-    row.quantity = produced[row.elastic.toString()] || 0;
+    row.quantity = round3(produced[row.elastic.toString()]);
   }
   return order.producedElastic;
 }
@@ -121,7 +125,7 @@ async function recomputePacked(order, session) {
   }
 
   for (const row of order.packedElastic || []) {
-    row.quantity = packed[row.elastic.toString()] || 0;
+    row.quantity = round3(packed[row.elastic.toString()]);
   }
   return order.packedElastic;
 }
