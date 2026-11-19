@@ -87,6 +87,18 @@ const fmt = {
   },
 
   machineBreakdown(p) {
+    // A machine issue filed as high or critical goes out under this same
+    // event (services/machineIssueAlert.js): one switch for the owner.
+    if (p.issue) {
+      const title = String(p.issue).trim();
+      return [
+        `🚨 *Machine issue — ${p.severity || "urgent"}*`,
+        p.machineId ? `Machine: ${p.machineId}` : null,
+        title.length > 160 ? `${title.slice(0, 157).trim()}…` : title,
+        p.by ? `Reported by: ${p.by}` : null,
+        p.via ? `Via: ${p.via}` : null,
+      ].filter(Boolean).join("\n");
+    }
     return [
       "🚨 *Machine breakdown*",
       p.machineId ? `Machine: ${p.machineId}` : null,

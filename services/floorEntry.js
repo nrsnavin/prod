@@ -672,6 +672,10 @@ async function raiseIssueFromRemark(session, detailId) {
         decidedBy: null, expectSurface: 'machine-issue-intake', ignoreMissing: true,
       }).catch(() => null);
     }
+    // A stopped loom is told to the owner as a breakdown is — once an hour
+    // a machine, and never the floor's wait (services/machineIssueAlert.js).
+    require('./machineIssueAlert').alertIfUrgent(issue, { by: session.name, via: 'Floor entry' })
+      .catch((err) => console.warn(`[floor] issue alert failed: ${err?.message}`));
   }
   await ShiftDetail.updateOne({ _id: detail._id }, { $set: { 'remark.issue': issue._id } });
   return { issue: { id: String(issue._id), title: issue.title, severity: issue.severity, status: issue.status }, duplicate, already: false };

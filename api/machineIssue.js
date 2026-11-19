@@ -10,6 +10,9 @@
 //    GET   /:id               — single issue detail (AUTH)
 //    PUT   /:id/status        — admin updates status / resolution (ADMIN)
 //    DELETE /:id              — worker withdraws an open issue (AUTH)
+//
+//  A high or critical issue is told to the owner as a breakdown is
+//  (services/machineIssueAlert.js).
 // ══════════════════════════════════════════════════════════════
 "use strict";
 
@@ -19,6 +22,7 @@ const router         = express.Router();
 const MachineIssue   = require("../models/MachineIssue");
 const Machine        = require("../models/Machine");
 const Employee       = require("../models/Employee");
+const ShiftDetail    = require("../models/ShiftDetail");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { capped } = require("../utils/listLimit");
@@ -29,6 +33,7 @@ const { resolveEmployeeId } = require("../utils/resolveEmployee");
 const multer = require("multer");
 const { keepRequestContext } = require("../middleware/userContext");
 const issueIntake = require("../services/machineIssueIntake");
+const { alertIfUrgent } = require("../services/machineIssueAlert");
 const aiLedger = require("../services/aiLedger");
 
 const PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -40,6 +45,20 @@ router.use(isAuthenticated);
 
 const SEVERITIES = ["low", "medium", "high", "critical"];
 const STATUSES   = ["open", "acknowledged", "in_progress", "resolved", "rejected"];
+// The two ways an issue ends: `resolvedAt` / `resolvedBy` are of these.
+const CLOSED     = ["resolved", "rejected"];
+
+// A value written as itself in a pipeline update — a text beginning
+// with "$" would otherwise be read as the name of a field.
+const lit = (v) => ({ $literal: v });
+
+// What every screen shows of an issue: its machine, who raised it —
+// the operator, or the office login when there is none — and who closed it.
+const withPeople = (query) => query
+  .populate("machine", "ID status")
+  .populate("employee", "name department role")
+  .populate("reportedBy", "name")
+  .populate("resolvedBy", "name role");
 
 // ─────────────────────────────────────────────────────────────
 //  POST /machine-issue/intake   { machineId, text } + optional "photo"
@@ -88,8 +107,13 @@ router.post(
     if (!employeeId && !isAdminRole) {
       return next(new ErrorHandler("Cannot determine employee — your account has no linked employee", 403));
     }
-    if (!title?.trim())       return next(new ErrorHandler("title is required", 400));
-    if (!description?.trim()) return next(new ErrorHandler("description is required", 400));
+    // Text, and some of it: `title?.trim()` on a number was a server error.
+    if (typeof title !== "string" || !title.trim()) {
+      return next(new ErrorHandler("title is required", 400));
+    }
+    if (typeof description !== "string" || !description.trim()) {
+      return next(new ErrorHandler("description is required", 400));
+    }
     if (!SEVERITIES.includes(severity)) {
       return next(new ErrorHandler(
         `severity must be one of: ${SEVERITIES.join(", ")}`, 400));
@@ -97,9 +121,11 @@ router.post(
 
     const machine = await Machine.findById(machineId, "ID status");
     if (!machine)  return next(new ErrorHandler("Machine not found", 404));
+    let reporter = req.user?.name || "";
     if (employeeId) {
       const employee = await Employee.findById(employeeId, "name");
       if (!employee) return next(new ErrorHandler("Employee not found", 404));
+      reporter = employee.name || reporter;
     }
 
     const issue = await MachineIssue.create({
@@ -122,6 +148,11 @@ router.post(
     }
 
     res.status(201).json({ success: true, data: issue });
+
+    // A stopped loom is not something to find in a list later. After the
+    // answer, and never its problem: the issue is filed either way.
+    alertIfUrgent(issue, { by: reporter, actor: { id: req.user?._id, name: req.user?.name } })
+      .catch((err) => console.warn(`[machine-issue] alert failed: ${err?.message}`));
   })
 );
 
@@ -150,9 +181,7 @@ router.get(
 
     // Newest first, at most LIST_CEILING (utils/listLimit): this list only grows.
     const { rows: issues, capped: cut } = await capped(
-      MachineIssue.find(filter)
-        .populate("machine", "ID status")
-        .populate("employee", "name department role")
+      withPeople(MachineIssue.find(filter))
         .sort({ createdAt: -1 })
         .lean(),
       res
@@ -207,10 +236,7 @@ router.get(
 router.get(
   "/:id",
   catchAsyncErrors(async (req, res, next) => {
-    const issue = await MachineIssue.findById(req.params.id)
-      .populate("machine", "ID status")
-      .populate("employee", "name department role")
-      .populate("resolvedBy", "name role");
+    const issue = await withPeople(MachineIssue.findById(req.params.id));
     if (!issue) return next(new ErrorHandler("Issue not found", 404));
     res.json({ success: true, data: issue });
   })
@@ -230,18 +256,34 @@ router.put(
       return next(new ErrorHandler(
         `status must be one of: ${STATUSES.join(", ")}`, 400));
     }
-    const resolutionNotes = typeof req.body.resolutionNotes === "string" ? req.body.resolutionNotes.slice(0, 2000) : "";
-
-    const update = { status, resolutionNotes };
-    if (status === "resolved" || status === "rejected") {
-      update.resolvedAt = new Date();
-      update.resolvedBy = req.user?._id || null;
+    const set = { status: lit(status) };
+    // The notes are changed when notes are sent. A change of status that
+    // says nothing of them used to write "" over "Ordered the belt, due
+    // Friday". An empty text, sent, still clears them.
+    if (typeof req.body.resolutionNotes === "string") {
+      set.resolutionNotes = lit(req.body.resolutionNotes.slice(0, 2000));
     }
 
-    const issue = await MachineIssue.findByIdAndUpdate(
-      req.params.id, { $set: update }, { new: true })
-      .populate("machine", "ID status")
-      .populate("employee", "name");
+    // One write, reading the status it replaces: every `$status` below is
+    // the one on file, not the one being set.
+    const stages = [{ $set: set }];
+    if (CLOSED.includes(status)) {
+      // When it was closed, and by whom — stamped when that is decided,
+      // not again each time a closed issue is saved (a note corrected the
+      // week after moved "resolved" to that day, under that name).
+      const unchanged = { $eq: ["$status", lit(status)] };
+      const now = lit(new Date());
+      const who = lit(req.user?._id || null);
+      set.resolvedAt = { $cond: [unchanged, { $ifNull: ["$resolvedAt", now] }, now] };
+      set.resolvedBy = { $cond: [unchanged, { $ifNull: ["$resolvedBy", who] }, who] };
+    } else {
+      // Open again: it no longer says it was resolved, on a day, by someone.
+      stages.push({ $unset: ["resolvedAt", "resolvedBy"] });
+    }
+
+    const issue = await withPeople(
+      MachineIssue.findByIdAndUpdate(req.params.id, stages, { new: true })
+    );
 
     if (!issue) return next(new ErrorHandler("Issue not found", 404));
     res.json({ success: true, data: issue });
@@ -264,15 +306,40 @@ router.delete(
     // Workers can only withdraw their own issues; admins can withdraw
     // any. Without this check the route's router-level isAuthenticated
     // let any logged-in worker delete other workers' complaints.
-    const isOwner = req.user?.employee?.toString() ===
-      issue.employee?.toString();
+    //
+    // "Their own" needs an employee on both sides. An office login has
+    // none, and neither has an issue the office raised — and undefined
+    // is undefined, so any such login "owned" every such issue.
     const isAdminRole = req.user?.role === 'admin';
-    if (!isOwner && !isAdminRole) {
-      return next(new ErrorHandler(
-        "You can only withdraw your own issues", 403));
+    if (!isAdminRole) {
+      const mine = Boolean(req.user?.employee && issue.employee) &&
+        String(req.user.employee) === String(issue.employee);
+      if (!mine) {
+        return next(new ErrorHandler(
+          "You can only withdraw your own issues", 403));
+      }
+      // Raised by the supervisor from the floor entry: the loom's operator
+      // is on it, but did not report it, and it is not theirs to take back.
+      if (issue.source === "floor") {
+        return next(new ErrorHandler(
+          "This was raised from the floor entry — ask the office to close it", 403));
+      }
     }
 
-    await issue.deleteOne();
+    // Only while it is still open — checked in the delete itself, so one
+    // the office picked up a moment ago is not removed under them.
+    const gone = await MachineIssue.findOneAndDelete({ _id: issue._id, status: "open" });
+    if (!gone) {
+      return next(new ErrorHandler(
+        "Only open issues can be withdrawn", 400));
+    }
+    // The floor entry it was raised from no longer points at it.
+    if (gone.shiftDetail) {
+      await ShiftDetail.updateOne(
+        { _id: gone.shiftDetail, "remark.issue": gone._id },
+        { $unset: { "remark.issue": 1 } }
+      );
+    }
     res.json({ success: true, message: "Issue withdrawn" });
   })
 );

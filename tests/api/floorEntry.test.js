@@ -653,6 +653,11 @@ describe('the remark left with an entry', () => {
 
   it('a fault is offered to the fitter: raised once as a machine issue, or linked to the open one it repeats', async () => {
     const MachineIssue = require('../../models/MachineIssue');
+    const Notification = require('../../models/Notification');
+    const settings = await require('../../models/NotificationSettings').load();
+    settings.recipients = ['+919876543210'];
+    await settings.save();
+    const told = () => Notification.find({ event: 'machineBreakdown', status: 'dry_run' }).lean();
     const s = await seed();
     const f = floor((await open({ name: 'Kumar' })).body.token);
     const detailId = (await f.post('/operator', { machine: String(s.running._id), operator: String(s.ravi._id) })).body.detailId;
@@ -665,6 +670,14 @@ describe('the remark left with an entry', () => {
     const issue = await MachineIssue.findById(raised.body.issue.id).lean();
     expect(issue).toMatchObject({ source: 'floor', reportedByName: 'Kumar', employee: s.ravi._id, machine: s.running._id, shiftDetail: new mongoose.Types.ObjectId(detailId) });
     expect(issue.description).toMatch(/motor bearing noise/);
+    // A stopped head is "high": the owner is told, as for a breakdown.
+    // (Sent after the answer — so wait for it.)
+    for (let i = 0; i < 160 && !(await told()).length; i++) await new Promise((r) => setTimeout(r, 25));
+    const alert = await told();
+    expect(alert).toHaveLength(1);
+    expect(alert[0].body).toMatch(/Machine issue — high/);
+    expect(alert[0].body).toMatch(/Reported by: Kumar/);
+    expect(alert[0].body).toMatch(/Via: Floor entry/);
     // Asked again: the same issue, not a second.
     expect((await f.post('/remark-issue', { detailId })).body).toMatchObject({ already: true, issue: { id: raised.body.issue.id } });
     // Saving the entry again keeps the link.
@@ -676,6 +689,9 @@ describe('the remark left with an entry', () => {
     await night.post('/entry', { detailId: nightId, production: 200, timer: '5:00', feedback: 'motor bearing noise again, head 3 stopped' });
     expect((await night.post('/remark-issue', { detailId: nightId })).body).toMatchObject({ duplicate: true, issue: { id: raised.body.issue.id } });
     expect(await MachineIssue.countDocuments({})).toBe(1);
+    // Linked, not raised: nobody is told a second time.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(await told()).toHaveLength(1);
   });
 
   it('is refused on an entry with no remark, or not on this shift', async () => {
