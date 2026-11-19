@@ -43,6 +43,10 @@ const TYPES      = ["complaint", "suggestion"];
 const CATEGORIES = ["machine", "safety", "management", "facilities", "payroll", "other"];
 const STATUSES   = ["open", "in_review", "resolved", "rejected", "closed"];
 
+// A value written as itself in a pipeline update — a text beginning
+// with "$" would otherwise be read as the name of a field.
+const lit = (v) => ({ $literal: v });
+
 // ─────────────────────────────────────────────────────────────
 // POST /
 // ─────────────────────────────────────────────────────────────
@@ -101,11 +105,13 @@ router.post(
     if (fb.type === "complaint") {
       (async () => {
         try {
+          // By what was stored, not by what was sent: "false" as text is
+          // a note with a name on it — and was announced as anonymous.
           await notify("customerComplaintFiled", {
             subject:      fb.subject,
             category:     fb.category,
-            employeeName: isAnonymous ? null : emp.name,
-            isAnonymous:  !!isAnonymous,
+            employeeName: fb.isAnonymous ? null : emp.name,
+            isAnonymous:  fb.isAnonymous,
             bodyPreview:  fb.body.length > 140 ? `${fb.body.slice(0, 140)}…` : fb.body,
             _entity:      { type: "EmployeeFeedback", id: String(fb._id) },
           });
@@ -191,23 +197,36 @@ router.put(
       return next(new ErrorHandler("Invalid feedback id", 400));
     }
     const { status } = req.body || {};
-    const response = typeof req.body?.response === "string" ? req.body.response.slice(0, 4000) : "";
     if (status && !STATUSES.includes(status)) {
       return next(new ErrorHandler(
         `status must be one of: ${STATUSES.join(", ")}`, 400));
     }
 
-    // Trust the server, not the client: respondedBy comes from req.user.
-    const update = {
-      response,
-      respondedAt: new Date(),
-      respondedBy: req.user?._id || null,
-    };
-    if (status) update.status = status;
+    const set = {};
+    if (status) set.status = lit(status);
+    // The reply is changed when a reply is sent. A change of status that
+    // says nothing of it used to write "" over the answer the worker had
+    // read. An empty text, sent, still takes it back.
+    if (typeof req.body?.response === "string") {
+      const response = req.body.response.slice(0, 4000);
+      // Who replied, and when: stamped when the reply is written or
+      // changed — not on every save, which made the admin closing a note
+      // a week later the one who had "responded", that day. (Trust the
+      // server, not the client: respondedBy comes from req.user.)
+      const unchanged = { $eq: [{ $ifNull: ["$response", ""] }, lit(response)] };
+      set.response    = lit(response);
+      set.respondedAt = { $cond: [unchanged, "$respondedAt", lit(new Date())] };
+      set.respondedBy = { $cond: [unchanged, "$respondedBy", lit(req.user?._id || null)] };
+    }
 
-    const doc = await Feedback.findByIdAndUpdate(
-      req.params.id, { $set: update }, { new: true })
-      .populate("employee", "name");
+    // One write, reading the reply it replaces. With nothing to change
+    // the note is only read.
+    const query = Object.keys(set).length
+      ? Feedback.findByIdAndUpdate(req.params.id, [{ $set: set }], { new: true })
+      : Feedback.findById(req.params.id);
+    const doc = await query
+      .populate("employee", "name department role")
+      .populate("respondedBy", "name role");
     if (!doc) return next(new ErrorHandler("Feedback not found", 404));
     res.json({ success: true, data: forOffice(doc) });
   })
@@ -229,11 +248,15 @@ router.delete(
     if (req.user?.role !== "admin" && String(req.user?.employee || "") !== String(fb.employee)) {
       return next(new ErrorHandler("You can withdraw only your own feedback", 403));
     }
-    if (fb.status !== "open") {
+    // Only while it is still open — checked in the delete itself, so a
+    // note the office answered a moment ago is not removed under them.
+    const gone = fb.status === "open"
+      ? await Feedback.findOneAndDelete({ _id: fb._id, status: "open" })
+      : null;
+    if (!gone) {
       return next(new ErrorHandler(
         "Only open feedback can be withdrawn", 400));
     }
-    await fb.deleteOne();
     res.json({ success: true, message: "Feedback withdrawn" });
   })
 );
