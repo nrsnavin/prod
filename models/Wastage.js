@@ -51,6 +51,12 @@ const WastageSchema = new mongoose.Schema(
       required: true,
     },
 
+    // The loom it happened on: the one this employee ran this job on, as
+    // the shifts stood when it was entered (utils/wastageMachine.js). Kept
+    // here because the job forgets its machine when it leaves the loom.
+    // Older records have none, and are worked out from the shifts.
+    machine: { type: mongoose.Types.ObjectId, ref: "Machine" },
+
     // Who entered it. A penalty is taken from somebody's pay, and the
     // record of it did not say who put it there (api/wastage.js).
     recordedBy:     { type: mongoose.Types.ObjectId, ref: "User" },

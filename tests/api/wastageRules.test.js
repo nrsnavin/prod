@@ -49,7 +49,7 @@ beforeAll(async () => {
   await mongoose.connect(mongo.getUri());
   app = require('../../app.js');
   M = {};
-  for (const n of ['Customer', 'Elastic', 'Employee', 'Order', 'JobOrder', 'Wastage', 'User', 'ShiftDetail']) M[n] = require(`../../models/${n}`);
+  for (const n of ['Customer', 'Elastic', 'Employee', 'Order', 'JobOrder', 'Wastage', 'User', 'ShiftDetail', 'Machine']) M[n] = require(`../../models/${n}`);
   admin = await M.User.create({ name: 'Owner', email: 'waste-admin@t.co', password: 'pass1234', role: 'admin', department: 'admin' });
 }, 180_000);
 
@@ -88,11 +88,14 @@ async function scene(over = {}) {
     elastics: [{ elastic: elastic._id, quantity: 3000 }], wastageElastic: [{ elastic: elastic._id, quantity: 0 }],
   });
   const operator = await M.Employee.create({ name: `Operator ${n}`, department: 'weaving', hourlyRate: 100, performance: 80, ...over });
+  const machine = await M.Machine.create({
+    ID: `M-${n}`, manufacturer: 'Comez', DateOfPurchase: new Date('2020-01-01'), NoOfHead: 4, NoOfHooks: 8, status: 'running',
+  });
   await M.ShiftDetail.create({
     date: new Date(), shift: 'DAY', timer: '08:00:00', elastics: [], status: 'closed', productionMeters: 900,
-    employee: operator._id, job: job._id, shiftPlan: new mongoose.Types.ObjectId(), machine: new mongoose.Types.ObjectId(),
+    employee: operator._id, job: job._id, shiftPlan: new mongoose.Types.ObjectId(), machine: machine._id,
   });
-  return { job, elastic, operator };
+  return { job, elastic, operator, machine };
 }
 const entry = (s, over = {}) => ({
   job: String(s.job._id), elastic: String(s.elastic._id), employee: String(s.operator._id),
@@ -196,6 +199,34 @@ describe('the penalty on a wastage entry', () => {
     const good = await as(admin).put(`/${made._id}`, { penalty: 0, auditReason: 'waived by the owner' });
     expect(good.status).toBe(200);
     expect(good.body.wastage.penalty).toBe(0);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+describe('the machine a wastage entry belongs to', () => {
+  it('is kept on the record: the loom the operator ran the job on', async () => {
+    const s = await scene();
+    const made = await as(supervisor).post('/add-wastage', entry(s));
+    expect(made.status).toBe(201);
+    expect(String((await M.Wastage.findById(made.body.wastage._id).lean()).machine)).toBe(String(s.machine._id));
+  });
+
+  it('is still named on the root-cause page after the job has left the loom', async () => {
+    const s = await scene();
+    // An entry from before the machine was kept on the record, on a job
+    // that has since gone to finishing and no longer points at a loom.
+    const old = await M.Wastage.create({
+      job: s.job._id, elastic: s.elastic._id, employee: s.operator._id, quantity: 40, penalty: 0, reason: 'Selvedge torn',
+    });
+    expect(old.machine).toBeUndefined();
+    await M.JobOrder.updateOne({ _id: s.job._id }, { $set: { status: 'finishing' }, $unset: { machine: 1 } });
+
+    const res = await as(admin).get('/root-cause?days=7');
+    expect(res.status).toBe(200);
+    // Before: machine "—" on both, and no hotspot named.
+    expect(res.body.byMachine).toEqual([{ machineID: s.machine.ID, qty: 40, count: 1 }]);
+    expect(res.body.reasonMachine).toEqual([{ reason: 'Selvedge torn', machineID: s.machine.ID, qty: 40, count: 1 }]);
+    expect(res.body.insights.map((i) => i.title)).toContain(`Hotspot: "Selvedge torn" on ${s.machine.ID}`);
   });
 });
 

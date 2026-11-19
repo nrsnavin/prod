@@ -32,6 +32,7 @@ const Order      = require('../models/Order');
 const Elastic    = require('../models/Elastic');
 const ElasticGroup = require('../models/ElasticGroup');
 const { isAuthenticated } = require('../middleware/auth');
+const { machineOfWastage } = require('../utils/wastageMachine');
 // Pure stat + gamification helpers live in their own module now
 // (Phase 4 god-file split) — see utils/productionStats.test.js.
 const {
@@ -288,12 +289,22 @@ router.get('/analytics', async (req, res) => {
       rangeStart = parseDateParam(startDate,0,0,0,0);
       rangeEnd   = parseDateParam(endDate,23,59,59,999);
     } catch(e) { return res.status(400).json({ success:false, message:e.message }); }
+    // Every shift in the range is loaded to work this out.
+    const tooWide = rangeProblem(rangeStart, rangeEnd);
+    if (tooWide) return res.status(400).json({ success:false, message: tooWide });
 
     // ── DB filter ──────────────────────────────────────────────
-    // Loading shifts produce nothing by design: left out, so a loom being
-    // loaded does not read as an idle one (services/machineLoading.js).
-    const dbFilter = { date:{ $gte:rangeStart, $lte:rangeEnd }, status:{ $ne:'loading' } };
-    if (shift !== 'all') dbFilter.shift = shift.toUpperCase();
+    // Verified shifts only. A shift's productionMeters is written when it
+    // is verified; until then it is 0, and what the operator typed waits
+    // in submittedProductionMeters. This read every shift but a loading
+    // one, so each of today's — still running, or waiting for the
+    // supervisor — counted as a shift that made nothing: a high "recorded
+    // 0m production" anomaly apiece, the averages pulled down, a streak
+    // ended, a worst shift of 0. It is also what /breakdown counts, so
+    // the two tabs of one page now agree. (A loading shift is never
+    // closed — services/machineLoading.js — so it stays out.)
+    const dbFilter = { date:{ $gte:rangeStart, $lte:rangeEnd }, status:'closed' };
+    if (shift !== 'all') dbFilter.shift = String(shift).toUpperCase();
     if (machineId)  dbFilter.machine  = machineId;
     if (employeeId) dbFilter.employee = employeeId;
 
@@ -718,6 +729,8 @@ router.get('/breakdown', async (req, res) => {
       rangeStart = parseDateParam(start, 0, 0, 0, 0);
       rangeEnd   = parseDateParam(end, 23, 59, 59, 999);
     } catch (e) { return res.status(400).json({ success: false, message: e.message }); }
+    const tooWide = rangeProblem(rangeStart, rangeEnd);
+    if (tooWide) return res.status(400).json({ success: false, message: tooWide });
 
     // ── Shared filters ───────────────────────────────────────
     const mId = machineId  ? toObjectId(machineId)  : null;
@@ -725,25 +738,29 @@ router.get('/breakdown', async (req, res) => {
     const cId = customerId ? toObjectId(customerId) : null;
     const oId = orderId    ? toObjectId(orderId)    : null;
 
-    // ── Production pipeline (ShiftDetail) ─────────────────────
+    // ── Production (verified shifts) ─────────────────────────
     const prodMatch = { date: { $gte: rangeStart, $lte: rangeEnd }, status: 'closed' };
-    if (shift !== 'all') prodMatch.shift = shift.toUpperCase();
+    if (shift !== 'all') prodMatch.shift = String(shift).toUpperCase();
     if (mId) prodMatch.machine  = mId;
     if (eId) prodMatch.employee = eId;
 
-    const prodPipe = [{ $match: prodMatch }];
+    // What is counted, before it is grouped: the totals are taken from
+    // this, so they are the same whichever way the rows are cut.
+    const prodBase = [{ $match: prodMatch }];
     // Only pay for the join when a customer/order dimension or filter needs it.
     const needsJobJoin = groupBy === 'customer' || groupBy === 'order' || cId || oId;
     if (needsJobJoin) {
-      prodPipe.push(
+      prodBase.push(
         { $lookup: { from: 'joborders', localField: 'job', foreignField: '_id', as: 'jobDoc' } },
         { $unwind: { path: '$jobDoc', preserveNullAndEmptyArrays: true } },
       );
       const post = {};
       if (cId) post['jobDoc.customer'] = cId;
       if (oId) post['jobDoc.order'] = oId;
-      if (Object.keys(post).length) prodPipe.push({ $match: post });
+      if (Object.keys(post).length) prodBase.push({ $match: post });
     }
+
+    let prodGroup;
     if (groupBy === 'elastic' || groupBy === 'group') {
       // Production is booked per shift, not per elastic. Attribute a
       // shift's metres across the elastics it ran, weighted by how many
@@ -751,20 +768,20 @@ router.get('/breakdown', async (req, res) => {
       // A shift can therefore contribute to several elastics; shiftCount
       // counts distinct shifts that touched each elastic. The 'group'
       // dimension aggregates per elastic here, then rolls up into groups
-      // below.
-      prodPipe.push(
-        { $addFields: { totalHeads: { $size: { $ifNull: ['$elastics', []] } } } },
-        { $match: { totalHeads: { $gt: 0 } } },
-        { $unwind: '$elastics' },
+      // below. A shift with no head map is kept, under no elastic: its
+      // metres were made.
+      prodGroup = [
+        { $addFields: { headsMapped: { $size: { $ifNull: ['$elastics', []] } } } },
+        { $unwind: { path: '$elastics', preserveNullAndEmptyArrays: true } },
         { $group: {
             _id: '$elastics.elastic',
             production: {
-              $sum: { $divide: ['$productionMeters', '$totalHeads'] },
+              $sum: { $divide: ['$productionMeters', { $max: ['$headsMapped', 1] }] },
             },
             shiftIds: { $addToSet: '$_id' },
         } },
         { $project: { production: 1, shiftCount: { $size: '$shiftIds' } } },
-      );
+      ];
     } else {
       const prodKey = {
         machine:  '$machine',
@@ -772,74 +789,83 @@ router.get('/breakdown', async (req, res) => {
         customer: '$jobDoc.customer',
         order:    '$jobDoc.order',
       }[groupBy];
-      prodPipe.push({
+      prodGroup = [{
         $group: {
           _id: prodKey,
           production: { $sum: '$productionMeters' },
           shiftCount: { $sum: 1 },
         },
-      });
+      }];
     }
 
-    // ── Wastage pipeline (Wastage ledger) ────────────────────
-    // Wastage carries employee directly; machine/customer/order are
-    // resolved through the parent job. Dated by createdAt to match
-    // the existing /wastage/analytics convention.
-    const wastePipe = [{ $match: { createdAt: { $gte: rangeStart, $lte: rangeEnd } } }];
+    // ── Wastage (Wastage ledger) ─────────────────────────────
+    // Wastage carries employee and elastic directly; customer and order
+    // come through its job, and its machine from the shifts
+    // (utils/wastageMachine.js — the job itself forgets its machine when
+    // it leaves the loom). Dated by createdAt to match /wastage/analytics,
+    // and by India's days: createdAt is a moment, and cut at UTC midnight
+    // an entry logged before 05:30 fell on the day before.
+    const wasteBase = [{
+      $match: { createdAt: { $gte: factoryDay.dayStart(rangeStart), $lte: factoryDay.dayEnd(rangeEnd) } },
+    }];
+    const wasteNeedsMachine = groupBy === 'machine' || mId;
     const wasteNeedsJob =
-      groupBy === 'machine' || groupBy === 'customer' || groupBy === 'order' || mId || cId || oId;
+      wasteNeedsMachine || groupBy === 'customer' || groupBy === 'order' || cId || oId;
     if (wasteNeedsJob) {
-      wastePipe.push(
+      wasteBase.push(
         { $lookup: { from: 'joborders', localField: 'job', foreignField: '_id', as: 'jobDoc' } },
         { $unwind: { path: '$jobDoc', preserveNullAndEmptyArrays: true } },
       );
     }
+    if (wasteNeedsMachine) wasteBase.push(...machineOfWastage());
     const wPost = {};
-    if (mId) wPost['jobDoc.machine']  = mId;
+    if (mId) wPost.machineRef         = mId;
     if (eId) wPost.employee           = eId;
     if (cId) wPost['jobDoc.customer'] = cId;
     if (oId) wPost['jobDoc.order']    = oId;
-    if (Object.keys(wPost).length) wastePipe.push({ $match: wPost });
+    if (Object.keys(wPost).length) wasteBase.push({ $match: wPost });
 
     const wasteKey = {
-      machine:  '$jobDoc.machine',
+      machine:  '$machineRef',
       operator: '$employee',
       customer: '$jobDoc.customer',
       order:    '$jobDoc.order',
       elastic:  '$elastic',
       group:    '$elastic', // rolled up into groups after aggregation
     }[groupBy];
-    wastePipe.push({
-      $group: {
-        _id: wasteKey,
-        wastageQty:     { $sum: '$quantity' },
-        wastageEvents:  { $sum: 1 },
-        wastagePenalty: { $sum: '$penalty' },
-      },
-    });
+    const wasteSums = {
+      wastageQty:     { $sum: '$quantity' },
+      wastageEvents:  { $sum: 1 },
+      wastagePenalty: { $sum: '$penalty' },
+    };
 
-    const [prodRows, wasteRows] = await Promise.all([
-      ShiftDetail.aggregate(prodPipe),
-      Wastage.aggregate(wastePipe),
+    const [prodRows, wasteRows, prodAll, wasteAll] = await Promise.all([
+      ShiftDetail.aggregate([...prodBase, ...prodGroup]),
+      Wastage.aggregate([...wasteBase, { $group: { _id: wasteKey, ...wasteSums } }]),
+      ShiftDetail.aggregate([...prodBase, { $group: { _id: null, production: { $sum: '$productionMeters' }, shiftCount: { $sum: 1 } } }]),
+      Wastage.aggregate([...wasteBase, { $group: { _id: null, ...wasteSums } }]),
     ]);
 
     // ── Merge on the dimension key ───────────────────────────
+    // What belongs to nothing in this dimension — a shift run with no job
+    // has no customer — is kept under NONE and named, not dropped: the
+    // rows then account for everything the totals count.
+    const NONE = 'none';
+    const keyOf = (id) => (id ? id.toString() : NONE);
     const rowMap = new Map();
     const blank = () => ({
       production: 0, shiftCount: 0,
       wastageQty: 0, wastageEvents: 0, wastagePenalty: 0,
     });
     for (const p of prodRows) {
-      if (!p._id) continue;
-      const k = p._id.toString();
+      const k = keyOf(p._id);
       const r = rowMap.get(k) || blank();
       r.production += p.production || 0;
       r.shiftCount += p.shiftCount || 0;
       rowMap.set(k, r);
     }
     for (const w of wasteRows) {
-      if (!w._id) continue;
-      const k = w._id.toString();
+      const k = keyOf(w._id);
       const r = rowMap.get(k) || blank();
       r.wastageQty     += w.wastageQty || 0;
       r.wastageEvents  += w.wastageEvents || 0;
@@ -851,7 +877,8 @@ router.get('/breakdown', async (req, res) => {
     //    group that contains the elastic. Groups can share elastics, so
     //    an elastic's output may count toward several groups — this is a
     //    per-group rollup (across all customers), not a partition, so
-    //    rows can overlap and need not sum to the plant total.
+    //    rows can overlap and need not sum to the plant total. What is in
+    //    no active group is one more row.
     let presetLabels = null;
     if (groupBy === 'group') {
       const perElastic = new Map(rowMap); // keyed by elastic id
@@ -859,6 +886,14 @@ router.get('/breakdown', async (req, res) => {
         .populate('customer', 'name').lean();
       rowMap.clear();
       presetLabels = new Map();
+      const grouped = new Set();
+      const add = (acc, r) => {
+        acc.production     += r.production;
+        acc.shiftCount     += r.shiftCount;
+        acc.wastageQty     += r.wastageQty;
+        acc.wastageEvents  += r.wastageEvents;
+        acc.wastagePenalty += r.wastagePenalty;
+      };
       for (const g of groups) {
         const acc = blank();
         let any = false;
@@ -867,11 +902,8 @@ router.get('/breakdown', async (req, res) => {
           const r = eid && perElastic.get(eid);
           if (!r) continue;
           any = true;
-          acc.production     += r.production;
-          acc.shiftCount     += r.shiftCount;
-          acc.wastageQty     += r.wastageQty;
-          acc.wastageEvents  += r.wastageEvents;
-          acc.wastagePenalty += r.wastagePenalty;
+          grouped.add(eid);
+          add(acc, r);
         }
         if (!any) continue; // no activity for this group's elastics in range
         const gid = g._id.toString();
@@ -881,11 +913,27 @@ router.get('/breakdown', async (req, res) => {
           sublabel: g.customer?.name || 'Global',
         });
       }
+      const loose = blank();
+      let anyLoose = false;
+      for (const [eid, r] of perElastic) {
+        if (grouped.has(eid)) continue;
+        anyLoose = true;
+        add(loose, r);
+      }
+      if (anyLoose) rowMap.set(NONE, loose);
     }
 
     // ── Resolve human labels for the dimension ───────────────
-    const keys = [...rowMap.keys()].map(toObjectId).filter(Boolean);
+    const keys = [...rowMap.keys()].filter((k) => k !== NONE).map(toObjectId).filter(Boolean);
     const labels = presetLabels || new Map(); // key → { label, sublabel }
+    labels.set(NONE, {
+      machine:  { label: 'No machine',     sublabel: 'Wastage on a job with no shift recorded' },
+      operator: { label: 'No operator',    sublabel: '' },
+      customer: { label: 'No customer',    sublabel: 'Shifts run with no job on the loom' },
+      order:    { label: 'No order',       sublabel: 'Shifts run with no job on the loom' },
+      elastic:  { label: 'No elastic',     sublabel: 'Shifts with no head plan' },
+      group:    { label: 'Not in a group', sublabel: 'Elastics in no active group' },
+    }[groupBy]);
     if (!presetLabels && keys.length) {
       if (groupBy === 'machine') {
         const docs = await Machine.find({ _id: { $in: keys } })
@@ -929,13 +977,15 @@ router.get('/breakdown', async (req, res) => {
 
     // ── Assemble + derive rates ──────────────────────────────
     const round = (n) => Math.round(n * 100) / 100;
-    let totalProd = 0, totalShifts = 0, totalWaste = 0, totalEvents = 0, totalPenalty = 0;
+    // The totals are what was counted, not what the rows add up to: under
+    // Group an elastic in two groups is in both rows, and was in the total
+    // twice.
+    const totalProd    = prodAll[0]?.production || 0;
+    const totalShifts  = prodAll[0]?.shiftCount || 0;
+    const totalWaste   = wasteAll[0]?.wastageQty || 0;
+    const totalEvents  = wasteAll[0]?.wastageEvents || 0;
+    const totalPenalty = wasteAll[0]?.wastagePenalty || 0;
     let rows = [...rowMap.entries()].map(([key, r]) => {
-      totalProd    += r.production;
-      totalShifts  += r.shiftCount;
-      totalWaste   += r.wastageQty;
-      totalEvents  += r.wastageEvents;
-      totalPenalty += r.wastagePenalty;
       const meta = labels.get(key) || { label: 'Unknown', sublabel: '' };
       const denom = r.production + r.wastageQty;
       return {
@@ -951,7 +1001,8 @@ router.get('/breakdown', async (req, res) => {
         wastageRate: denom > 0 ? round((r.wastageQty / denom) * 100) : 0,
       };
     });
-    rows.sort((a, b) => b.production - a.production);
+    // What belongs to nothing goes last, whatever its size.
+    rows.sort((a, b) => (a.key === NONE) - (b.key === NONE) || b.production - a.production);
     // Share of total production, computed after totals are known.
     rows = rows.map((r) => ({
       ...r,
@@ -965,8 +1016,10 @@ router.get('/breakdown', async (req, res) => {
     // ── Rule-based insights ("AI analytical") ────────────────
     const dimLabel = { machine: 'machine', operator: 'operator', customer: 'customer', order: 'order', elastic: 'elastic', group: 'group' }[groupBy] || groupBy;
     const insights = [];
-    if (rows.length) {
-      const top = rows[0];
+    // Of the things that have a name: "Top machine: No machine" says nothing.
+    const named = rows.filter((r) => r.key !== NONE);
+    if (named.length) {
+      const top = named[0];
       if (top.production > 0) {
         insights.push({
           severity: 'good',
@@ -975,7 +1028,7 @@ router.get('/breakdown', async (req, res) => {
         });
       }
       // Output concentration risk.
-      if (top.share >= 40 && rows.length > 2) {
+      if (top.share >= 40 && named.length > 2) {
         insights.push({
           severity: 'warn',
           title: 'Output is concentrated',
@@ -983,7 +1036,7 @@ router.get('/breakdown', async (req, res) => {
         });
       }
       // Worst wastage offenders vs plant rate.
-      const wasters = rows
+      const wasters = named
         .filter((r) => r.wastageQty > 0 && r.wastageRate > 0)
         .sort((a, b) => b.wastageRate - a.wastageRate);
       if (wasters.length) {
@@ -1005,7 +1058,7 @@ router.get('/breakdown', async (req, res) => {
         }
       }
       // Under-utilised: lowest avg/shift among those with enough shifts.
-      const active = rows.filter((r) => r.shiftCount >= 3);
+      const active = named.filter((r) => r.shiftCount >= 3);
       if (active.length >= 3) {
         const avgOfAvgs = round(active.reduce((s, r) => s + r.avgPerShift, 0) / active.length);
         const laggard = [...active].sort((a, b) => a.avgPerShift - b.avgPerShift)[0];

@@ -22,6 +22,7 @@ const { enqueue }   = require("../utils/outbox");
 const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 const factoryDay = require("../utils/factoryDay");
 const { parseMoney } = require("../utils/money");
+const { machineOfWastage, machineForNewWastage } = require("../utils/wastageMachine");
 const { applyMovement, round3 } = require("../utils/elasticStock");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { requireReason } = require("../utils/auditReason");
@@ -165,8 +166,11 @@ router.post(
           throw new ErrorHandler("Elastic is not part of this job", 400);
         }
 
+        const machineId = await machineForNewWastage(job, employeeId, session);
+
         const [wastage] = await Wastage.create([{
           job: jobId, elastic: elasticId, employee: employeeId,
+          ...(machineId ? { machine: machineId } : {}),
           quantity, penalty: penaltyAmount, reason: reason.trim(),
           recordedBy: req.user?._id, recordedByName: req.user?.name || "",
           // When the wastage happened — drives which payroll month the
@@ -681,9 +685,13 @@ router.get(
     const { days, since } = windowOf(req.query.days);
     const reasonExpr = { $trim: { input: { $ifNull: ["$reason", "(no reason given)"] } } };
     const base    = [{ $match: { createdAt: { $gte: since } } }];
+    // With the machine each entry belongs to. It was read off the job,
+    // which forgets its machine when it leaves the loom — so most of a
+    // month's wastage sat under machine "—" and the hotspot went unseen.
     const withJob = [...base,
       { $lookup: { from: "joborders", localField: "job", foreignField: "_id", as: "jobDoc" } },
-      { $unwind: { path: "$jobDoc", preserveNullAndEmptyArrays: true } }];
+      { $unwind: { path: "$jobDoc", preserveNullAndEmptyArrays: true } },
+      ...machineOfWastage()];
 
     const [byReason, byOperator, byElastic, byMachine, reasonMachine, reasonOperator, totalsAgg] =
       await Promise.all([
@@ -704,13 +712,13 @@ router.get(
           { $unwind: { path: "$el", preserveNullAndEmptyArrays: true } },
           { $project: { _id: 0, name: { $ifNull: ["$el.name", "Unknown"] }, qty: 1, count: 1 } }]),
         Wastage.aggregate([...withJob,
-          { $group: { _id: "$jobDoc.machine", qty: { $sum: "$quantity" }, count: { $sum: 1 } } },
+          { $group: { _id: "$machineRef", qty: { $sum: "$quantity" }, count: { $sum: 1 } } },
           { $sort: { qty: -1 } }, { $limit: 6 },
           { $lookup: { from: "machines", localField: "_id", foreignField: "_id", as: "m" } },
           { $unwind: { path: "$m", preserveNullAndEmptyArrays: true } },
           { $project: { _id: 0, machineID: { $ifNull: ["$m.ID", "—"] }, qty: 1, count: 1 } }]),
         Wastage.aggregate([...withJob,
-          { $group: { _id: { reason: reasonExpr, machine: "$jobDoc.machine" }, qty: { $sum: "$quantity" }, count: { $sum: 1 } } },
+          { $group: { _id: { reason: reasonExpr, machine: "$machineRef" }, qty: { $sum: "$quantity" }, count: { $sum: 1 } } },
           { $sort: { qty: -1 } }, { $limit: 6 },
           { $lookup: { from: "machines", localField: "_id.machine", foreignField: "_id", as: "m" } },
           { $unwind: { path: "$m", preserveNullAndEmptyArrays: true } },
