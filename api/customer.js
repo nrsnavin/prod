@@ -13,6 +13,35 @@ const CustomerUser = require("../models/CustomerUser");
 const Order        = require("../models/Order");
 const { LIVE_STATUSES } = require("../domain/orderStatus");
 const { pageOf } = require("../utils/paging");
+const { recordAccess } = require("../utils/accessLog");
+const { ACTION_CODES } = require("../utils/fingerprint");
+
+// ── CREDIT TERMS ─────────────────────────────────────────────────
+// What holds an order, a challan or an invoice back, and what the
+// customer is charged for paying late. Releasing ONE hold takes an admin
+// and a written reason, kept on the document; changing the terms
+// themselves took neither and left nothing behind — no line anywhere
+// said the limit had been ₹5 lakh on Monday and ₹15 lakh on Tuesday, or
+// who made it so. A change to any of these is now kept (who, from what,
+// to what) and shows on the weekly list of changes worth a second look.
+const CREDIT_TERMS = ["creditLimit", "maxOverdueDays", "paymentTerms", "interestRate", "interestGraceDays"];
+const NUMERIC_TERMS = new Set(["creditLimit", "maxOverdueDays", "interestRate", "interestGraceDays"]);
+/** One term as it is compared: a number as a number, nothing as null, text trimmed. */
+function termValue(field, value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (NUMERIC_TERMS.has(field)) return Number.isFinite(Number(value)) ? Number(value) : null;
+  return String(value).trim();
+}
+/** { field: { from, to } } for each credit term that differs between two records. */
+function creditTermChanges(before, after) {
+  const changes = {};
+  for (const field of CREDIT_TERMS) {
+    const from = termValue(field, before?.[field]);
+    const to = termValue(field, after?.[field]);
+    if (from !== to) changes[field] = { from, to };
+  }
+  return changes;
+}
 
 // All customer management routes are admin-only.
 router.use(isAuthenticated, isAdmin('admin', 'accounts'));
@@ -65,12 +94,24 @@ router.put(
     // write wins, silently. With the version the form loaded, a stale
     // save is a 409 instead. See utils/versioning.js.
     const changes = pickCustomer(req.body);
+    // The terms as they stand, to say what a change was FROM.
+    const touchesTerms = CREDIT_TERMS.some((f) => changes[f] !== undefined);
+    const before = touchesTerms ? await Customer.findById(id).select(CREDIT_TERMS.join(" ")).lean() : null;
     const customer = await Customer.findOneAndUpdate(
       { _id: id, ...versionFilter(req) },
       { ...(Object.keys(changes).length ? { $set: changes } : {}), ...bumpVersion() },
       { new: true, runValidators: true }
     );
     if (!customer) await explainMiss(Customer, id, req, "Customer not found");
+
+    // After it is saved, and only for what actually moved: the form sends
+    // every term with every save. Never fails the save (utils/accessLog.js).
+    if (before) {
+      const moved = creditTermChanges(before, customer);
+      if (Object.keys(moved).length) {
+        await recordAccess(req, ACTION_CODES.CREDIT_TERMS_CHANGED, { _id: customer._id, name: customer.name }, { changes: moved });
+      }
+    }
     res.status(200).json({ success: true, data: customer });
   })
 );
@@ -197,6 +238,42 @@ router.patch(
   })
 );
 
+// ─────────────────────────────────────────────────────────────
+//  GET /api/v2/customer/:id/credit-terms
+//
+//  The customer's credit terms as they stand, and every change made to
+//  them since changes were kept: when, by whom, from what to what. For
+//  the customer's page — the place somebody asks "who raised this?".
+// ─────────────────────────────────────────────────────────────
+router.get(
+  "/:id/credit-terms",
+  catchAsyncErrors(async (req, res, next) => {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) return next(new ErrorHandler("Customer not found", 404));
+    const customer = await Customer.findById(id).select(CREDIT_TERMS.join(" ")).lean();
+    if (!customer) return next(new ErrorHandler("Customer not found", 404));
+
+    const { termChange } = require("../services/auditWatch");
+    const events = await require("../models/AccessEvent")
+      .find({ code: ACTION_CODES.CREDIT_TERMS_CHANGED, "subject.id": String(id) })
+      .sort({ at: -1 })
+      .limit(30)
+      .lean();
+
+    res.json({
+      success: true,
+      terms: Object.fromEntries(CREDIT_TERMS.map((f) => [f, termValue(f, customer[f])])),
+      history: events.map((e) => ({
+        at: e.at,
+        by: e.actor?.name || e.actor?.email || "Someone",
+        changes: e.meta?.changes || {},
+        // In the words the weekly list uses, so the two read the same.
+        detail: Object.entries(e.meta?.changes || {}).map(([field, change]) => termChange(field, change)).join(" · "),
+      })),
+    });
+  })
+);
+
 router.get(
   "/customerDetail",
   catchAsyncErrors(async (req, res, next) => {
@@ -263,12 +340,16 @@ router.get(
     const DeliveryChallan = require("../models/DeliveryChallan");
     const Invoice = require("../models/Invoice");
 
-    const orders = await Order.find({ customer: id })
+    const everyOrder = await Order.find({ customer: id })
       .select("orderNo po status supplyDate createdAt")
       .sort({ createdAt: -1 })
       .lean();
-    const orderIds = orders.map((o) => o._id);
-    const orderNos = orders.map((o) => o.orderNo).filter((n) => n != null);
+    // Challans and invoices are reached through every order there has
+    // been; the list of ORDERS leaves out the deleted ones, which sat on
+    // the customer's page among the live ones with a blank status.
+    const orderIds = everyOrder.map((o) => o._id);
+    const orderNos = everyOrder.map((o) => o.orderNo).filter((n) => n != null);
+    const orders = everyOrder.filter((o) => o.status !== "Deleted");
     const dcMatch = [{ order: { $in: orderIds } }];
     if (orderNos.length) dcMatch.push({ orderNo: { $in: orderNos } });
 

@@ -13,9 +13,13 @@
 //    edited      verified shift production changed afterwards
 //    backdated   a money document dated more than a week before it was entered
 //    late night  changes made between 10 pm and 5 am in India
-//    stock       a stock count posted or elastic stock adjusted by hand
+//    stock       a stock count posted, elastic stock adjusted by hand, or
+//                raw material written off or added by hand (with its
+//                worth, its reason, and whose word it was)
 //    access      logins created, changed or removed; Aadhaar numbers viewed
 //    pay         an employee's hourly rate changed (from what to what)
+//    credit      a customer's credit limit, overdue allowance, payment or
+//                interest terms changed (from what to what)
 //
 //  It reads only. Each item says who, when, and which document, so it
 //  can be opened and asked about. Sent to the owner each Monday morning
@@ -46,6 +50,42 @@ const ACCESS = new Set(['LOGIN_CREATED', 'LOGIN_UPDATED', 'LOGIN_DELETED', 'PHON
 const ABOUT_EMPLOYEE = new Set(['AADHAAR_VIEWED', 'AADHAAR_QR_CHECKED', 'PAY_RATE_CHANGED']);
 const PAY = new Set(['PAY_RATE_CHANGED']);
 const perHour = (n) => `₹${(Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}/h`;
+// Entries about a customer's record (api/customer.js).
+const CREDIT = new Set(['CREDIT_TERMS_CHANGED']);
+const TERM_WORDS = {
+  creditLimit: 'Credit limit', maxOverdueDays: 'overdue days allowed', paymentTerms: 'payment terms',
+  interestRate: 'interest rate', interestGraceDays: 'interest grace days',
+};
+function termChange(field, change = {}) {
+  const show = (v) => {
+    if (v === null || v === undefined || v === '') return 'none';
+    if (field === 'creditLimit') return `₹${Math.round(Number(v) || 0).toLocaleString('en-IN')}`;
+    return field === 'interestRate' ? `${v}%` : String(v);
+  };
+  return `${TERM_WORDS[field] || field} ${show(change.from)} to ${show(change.to)}`;
+}
+/** What kind of record an access-log entry is about (the audit feed asks too). */
+const subjectType = (code) => (ABOUT_EMPLOYEE.has(code) ? 'Employee' : CREDIT.has(code) ? 'Customer' : 'Login');
+
+// ── Raw material moved by hand ───────────────────────────────────────
+// A manual adjustment has no document behind it: it lives as a row on
+// the material (utils/stockLedger.js), with a reason and — now — a name.
+// It is the ordinary way yarn leaves the books without an order, and it
+// was not on this list. A row written by posting a COUNT is left to the
+// count's own entry above, which carries the whole variance.
+const COUNT_ROW = /^Count #/;
+const qty = (n) => (Math.round(Math.abs(Number(n) || 0) * 1000) / 1000).toLocaleString('en-IN', { maximumFractionDigits: 3 });
+async function handAdjustments(from, to) {
+  const window = { type: 'STOCK_ADJUST', date: { $gte: from, $lt: to } };
+  const rows = await M('RawMaterial').aggregate([
+    { $match: { stockMovements: { $elemMatch: window } } },
+    { $project: { name: 1, unit: 1, stockMovements: 1 } },
+    { $unwind: '$stockMovements' },
+    { $match: { 'stockMovements.type': window.type, 'stockMovements.date': window.date } },
+    { $project: { name: 1, unit: 1, row: '$stockMovements' } },
+  ]);
+  return rows.filter((r) => !COUNT_ROW.test(String(r.row?.reason || '')) && Number(r.row?.quantity));
+}
 
 // Money documents and their own date, for back-dating.
 const DATED = [
@@ -77,9 +117,10 @@ async function fingerprintsBetween([model, type, numberField], from, to) {
 async function watch({ days = 7, now = new Date() } = {}) {
   const to = new Date(now);
   const from = new Date(to.getTime() - Math.min(Math.max(Number(days) || 7, 1), 31) * DAY);
-  const [prints, access] = await Promise.all([
+  const [prints, access, byHand] = await Promise.all([
     Promise.all(SOURCES.map((s) => fingerprintsBetween(s, from, to).catch(() => []))).then((xs) => xs.flat()),
     M('AccessEvent').find({ at: { $gte: from, $lt: to } }).lean(),
+    handAdjustments(from, to).catch(() => []),
   ]);
   const items = [];
   const push = (kind, severity, e, title, detail = '') => items.push({
@@ -100,14 +141,36 @@ async function watch({ days = 7, now = new Date() } = {}) {
       push('pay', 'check', e, `Pay rate changed: ${a.subject?.name || ''}`.trim(), `${perHour(a.meta?.from)} to ${perHour(a.meta?.to)}`);
       continue;
     }
+    if (CREDIT.has(a.code)) {
+      // Always worth a look: it is what holds an order back, or lets it go.
+      const e = { ...a, entityType: 'Customer', entityId: a.subject?.id, entityNo: a.subject?.name };
+      push('credit', 'check', e, `Credit terms changed: ${a.subject?.name || ''}`.trim(),
+        Object.entries(a.meta?.changes || {}).map(([field, change]) => termChange(field, change)).join(' · '));
+      continue;
+    }
     if (!ACCESS.has(a.code)) continue;
     const e = { ...a, entityType: ABOUT_EMPLOYEE.has(a.code) ? 'Employee' : 'Login', entityId: a.subject?.id, entityNo: a.subject?.name };
     push('access', ABOUT_EMPLOYEE.has(a.code) || a.code === 'LOGIN_UPDATED' ? 'info' : 'check', e, `${a.label || a.code}: ${a.subject?.name || a.subject?.email || ''}`.trim(), a.meta?.changes ? `Changed: ${[].concat(a.meta.changes).join(', ')}` : '');
   }
 
+  // Raw material adjusted by hand. A write-off is to be looked at;
+  // stock found is a note.
+  const adjusted = byHand.map(({ _id, name, unit, row }) => {
+    const out = Number(row.quantity) < 0;
+    const worth = Math.abs(Number(row.quantity) || 0) * (Number(row.unitCost) || 0);
+    const e = {
+      at: row.date, actor: row.byName ? { name: row.byName } : null,
+      entityType: 'RawMaterial', entityId: _id, entityNo: name,
+      label: out ? 'Stock written off by hand' : 'Stock added by hand',
+    };
+    push('stock', out ? 'check' : 'info', e, `${name}: ${qty(row.quantity)} ${unit || 'kg'} ${out ? 'written off' : 'added'} by hand`,
+      [row.reason ? `Reason: ${row.reason}` : 'No reason given', worth > 0 ? `worth ${inr(worth)}` : ''].filter(Boolean).join(' · '));
+    return e;
+  });
+
   // Late at night: one line per person, with how many changes.
   const late = new Map();
-  for (const e of [...prints, ...access]) {
+  for (const e of [...prints, ...access, ...adjusted]) {
     const h = indiaHour(e.at);
     if (!(h >= LATE_FROM || h < LATE_TO)) continue;
     const k = who(e.actor);
@@ -140,7 +203,7 @@ async function watch({ days = 7, now = new Date() } = {}) {
   return { from, to, counts, total: items.length, toLookAt: items.filter((i) => i.severity === 'check').length, items };
 }
 
-const KIND_WORDS = { cancelled: 'cancelled', deleted: 'deleted', edited: 'production edited after verifying', backdated: 'back-dated', 'late-night': 'people working late at night', stock: 'stock adjusted', access: 'login changes', pay: 'pay rates changed' };
+const KIND_WORDS = { cancelled: 'cancelled', deleted: 'deleted', edited: 'production edited after verifying', backdated: 'back-dated', 'late-night': 'people working late at night', stock: 'stock adjusted', access: 'login changes', pay: 'pay rates changed', credit: 'credit terms changed' };
 
 /** The WhatsApp summary for the owner. */
 function message(w) {
@@ -159,4 +222,4 @@ async function runWeekly({ now = new Date() } = {}) {
   return { total: w.total, toLookAt: w.toLookAt, result };
 }
 
-module.exports = { watch, message, runWeekly, KIND_WORDS, ABOUT_EMPLOYEE };
+module.exports = { watch, message, runWeekly, KIND_WORDS, ABOUT_EMPLOYEE, subjectType, termChange };

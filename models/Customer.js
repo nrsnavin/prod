@@ -3,11 +3,15 @@ const mongoose = require("mongoose");
 
 const CustomerSchema = new mongoose.Schema(
     {
+        // Trimmed, so a name of nothing but spaces is no name. ("min" and
+        // "max" stood here for years: they are rules for numbers, and on
+        // text they checked nothing. No length is enforced now either —
+        // on purpose: a rule added today would refuse the next save of
+        // any customer already on file who does not meet it.)
         name: {
             type: String,
             required: true,
-            min: 2,
-            max: 100,
+            trim: true,
         },
         // The ledger's name in Tally, when it is not `name` exactly
         // ("SUNRISE GARMENTS (TPR)"). Every voucher to Tally uses it, so
@@ -15,12 +19,15 @@ const CustomerSchema = new mongoose.Schema(
         tallyName: { type: String, trim: true, default: "", maxlength: 120 },
         email: {
             type: String,
-            
+            trim: true,
             default: "",
-            max: 50,
         },
+        // In capitals, as it is issued: an e-invoice refuses one in small
+        // letters, and a look-up by GSTIN has to find it however it was typed.
         gstin: {
             type: String,
+            trim: true,
+            uppercase: true,
             default: "",
         },
 

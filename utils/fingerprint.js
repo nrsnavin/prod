@@ -171,6 +171,9 @@ const ACTION_CODES = Object.freeze({
   // (utils/payRate.js). Kept beside the access records because an
   // employee carries no audit trail of its own.
   PAY_RATE_CHANGED:         'PAY_RATE_CHANGED',
+  // A customer's credit limit, overdue allowance, payment or interest
+  // terms changed (api/customer.js) — kept as pay changes are.
+  CREDIT_TERMS_CHANGED:     'CREDIT_TERMS_CHANGED',
 });
 
 const ACTION_LABELS = Object.freeze({
@@ -283,6 +286,7 @@ const ACTION_LABELS = Object.freeze({
   AADHAAR_VIEWED:           'Aadhaar Viewed',
   AADHAAR_QR_CHECKED:       'Aadhaar QR Checked',
   PAY_RATE_CHANGED:         'Pay Rate Changed',
+  CREDIT_TERMS_CHANGED:     'Credit Terms Changed',
 });
 
 /**

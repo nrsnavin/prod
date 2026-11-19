@@ -33,7 +33,7 @@ const MaterialGroup   = require("../models/MaterialGroup");
 const AccessEvent     = require("../models/AccessEvent");
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
-const { ABOUT_EMPLOYEE } = require("../services/auditWatch");
+const { subjectType } = require("../services/auditWatch");
 
 // Pull the most recent fingerprints from one collection, tagged with
 // entity type + human number so the feed row is self-describing.
@@ -102,8 +102,8 @@ router.get(
     // can't carry its own history); shaped like every other entry.
     const access = (await AccessEvent.find({}).sort({ at: -1 }).limit(limit).lean()).map((e) => ({
       // An Aadhaar view or QR check, or a change of pay rate, is about an
-      // employee record, not a login.
-      entityType: ABOUT_EMPLOYEE.has(e.code) ? "Employee" : "Login",
+      // employee record; a change of credit terms is about a customer's.
+      entityType: subjectType(e.code),
       entityId: e.subject?.id ?? null,
       entityNo: e.subject?.name ?? null,
       code: e.code,
