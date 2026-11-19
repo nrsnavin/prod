@@ -60,6 +60,12 @@ function assessLines(requested, order, plannedByElastic) {
     // two jobs each inside the allowance must not add up to 40% over.
     const excess = Math.max(0, totalPlanned - ordered);
     const excessPct = ordered > 0 ? r2((excess / ordered) * 100) : (excess > 0 ? Infinity : 0);
+    // What THIS line adds past the order: its own metres that lie
+    // beyond what was ordered, after whatever the order's other jobs had
+    // already planned past it. The allowance is judged on `excess`; the
+    // yarn is drawn for this. Drawing for `excess` made every later job
+    // on an over-planned order pay for the earlier jobs' extra again.
+    const ownExcess = Math.max(0, excess - Math.max(0, alreadyPlanned - ordered));
 
     return {
       elastic: id,
@@ -68,6 +74,7 @@ function assessLines(requested, order, plannedByElastic) {
       requested: requestedQty,
       totalPlanned,
       excess: r2(excess),
+      ownExcess: r2(ownExcess),
       excessPct,
       needsReason: excessPct > FREE_EXCESS_PCT,
       onOrder: orderedBy.has(id),
@@ -92,16 +99,18 @@ function plannedFromJobs(jobs) {
 }
 
 /**
- * Material needed for the excess meters only.
+ * Material needed for the excess meters THESE LINES ADD, and no more.
  *
  * The ordered meters were costed and drawn at approval; asking for the
  * requirement of the whole planned quantity here would draw that yarn
- * a second time.
+ * a second time. And the excess other jobs already planned was drawn
+ * when THEY were raised — so it is each row's own excess, not the
+ * order's running total.
  */
 async function excessMaterialRequirement(rows) {
   const lines = rows
-    .filter((r) => r.excess > 0)
-    .map((r) => ({ elastic: r.elastic, quantity: r.excess }));
+    .filter((r) => r.ownExcess > 0)
+    .map((r) => ({ elastic: r.elastic, quantity: r.ownExcess }));
   if (lines.length === 0) return [];
   return computeMaterialRequirement(lines);
 }

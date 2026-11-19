@@ -137,6 +137,28 @@ describe('normalising a movement list', () => {
 // ══════════════════════════════════════════════════════════════════
 //  What the writers now record
 // ══════════════════════════════════════════════════════════════════
+// Found reading services/jobRaise.js: a job's own draw of yarn (for the
+// metres it plans over the order) carries the JOB's number, and so does
+// its return when the job is cancelled.
+describe('a movement that belongs to a job', () => {
+  const { describeMovement } = require('../../utils/stockLedger');
+
+  it('names the job, where a bare number read as an order\'s', () => {
+    expect(describeMovement({ type: 'JOB_CONSUMPTION', refNo: '12' })).toMatchObject({ typeLabel: 'Issued to job', reference: 'Job J-12' });
+    expect(describeMovement({ type: 'JOB_CANCEL_REFUND', refNo: '12' })).toMatchObject({ typeLabel: 'Job cancelled — returned', reference: 'Job J-12' });
+  });
+
+  it('a return to stock is a positive quantity on the ledger', () => {
+    const [row] = normaliseMovements([{ type: 'JOB_CANCEL_REFUND', quantity: 0.4, balance: 1000 }], 1000);
+    expect(row.quantity).toBe(0.4);
+  });
+
+  it('other movements keep the reference they had', () => {
+    expect(describeMovement({ type: 'STOCK_ADJUST', refNo: '12' }).reference).toBe('#12');
+    expect(describeMovement({ type: 'PO_INWARD', refNo: 'PO 44' }).reference).toBe('PO 44');
+  });
+});
+
 describe('a PO receipt', () => {
   async function receive(qty = 100, stock = 0) {
     const material = await RawMaterial.create({

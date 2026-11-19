@@ -29,6 +29,7 @@ const { validateTransition, stampStage } = require('../domain/jobStatus');
 const orderLifecycle = require('../services/orderLifecycle');
 const dispatchQueue = require('../services/dispatchQueue');
 const { stopPreparatory } = require('../services/jobPreparatory');
+const { returnExcessDraw } = require('../services/jobExcessReturn');
 const { outsourcingBlockers } = require('../utils/outsourcingRecord');
 const router = express.Router();
 
@@ -252,6 +253,8 @@ router.post(
     let job;
     let fp;
     let stopped;
+    let yarn;
+    let lots;
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
@@ -292,6 +295,11 @@ router.post(
         // job nobody will weave (services/jobPreparatory.js). On the
         // job's trail, so saved with it.
         stopped = await stopPreparatory(job, { session, actor: actorFromRequest(req) });
+
+        // And the yarn drawn for this job alone — for the metres it
+        // planned past the order — goes back, when it has woven nothing
+        // (services/jobExcessReturn.js). Also on the job's trail.
+        yarn = await returnExcessDraw(job, { session, actor: actorFromRequest(req), userId: req.user?._id });
         await job.save({ session });
 
         // Nothing left to deliver: off the dispatch queue, if it was on it.
@@ -303,26 +311,54 @@ router.post(
         // quantity return to pending: recomputed after the save, in the
         // same transaction. With nothing live left, a running order goes
         // back to waiting (services/orderLifecycle.js).
-        await orderLifecycle.jobCancelled(job, { userId: req.user?._id, session });
+        const order = await orderLifecycle.jobCancelled(job, { userId: req.user?._id, session });
+        lots = order?.$locals?.earmarkChanges || { trimmed: [], dropped: [] };
       });
     } finally {
       await session.endSession();
     }
 
+    // What the person cancelling it needs to know besides "cancelled",
+    // in the message — which is what both apps show.
+    const kg = (n) => `${Math.round(n * 1000) / 1000} kg`;
+    const notes = [];
     // A warping with yarn out on it could not be cancelled here: only
-    // cancelling the batch puts that yarn back on the rack. Said in the
-    // message, which is what both apps show.
+    // cancelling the batch puts that yarn back on the rack.
     const held = stopped.warpingBatches;
+    if (held.length) {
+      notes.push(
+        `Its warping is still open: yarn has been issued on ${held.join(', ')} — `
+        + `cancel ${held.length === 1 ? 'that batch' : 'those batches'} to put the yarn back, then cancel the warping.`
+      );
+    }
+    if (yarn.returned.length) {
+      notes.push(
+        `${yarn.returned.map((y) => `${kg(y.quantity)} of ${y.name}`).join(', ')} went back to stock: `
+        + 'the yarn drawn for the metres this job planned over the order.'
+      );
+    }
+    if (yarn.kept.length) {
+      notes.push(
+        `${yarn.kept.map((y) => `${kg(y.quantity)} of ${y.name}`).join(', ')} stays issued: it was drawn for the metres `
+        + 'this job planned over the order, and the job has woven. Adjust the stock if any of it is still on the rack.'
+      );
+    }
+    const lotNote = [
+      lots.trimmed.length && `Dye lots trimmed to fit on ${lots.trimmed.map((t) => t.name).join(', ')}`,
+      lots.dropped.length && `Dye lots released on ${lots.dropped.map((d) => d.name).join(', ')}`,
+    ].filter(Boolean).join('. ');
+    if (lotNote) notes.push(`${lotNote}.`);
+
     res.json({
       success: true,
-      message: held.length
-        ? `Job cancelled and quantities restored to order. Its warping is still open: yarn has been issued on ${held.join(', ')} — `
-          + `cancel ${held.length === 1 ? 'that batch' : 'those batches'} to put the yarn back, then cancel the warping.`
-        : 'Job cancelled and quantities restored to order',
+      message: ['Job cancelled and quantities restored to order', ...notes].join('. ').replace(/\.\. /g, '. '),
+      notes,
       data: { _id: job._id, jobOrderNo: job.jobOrderNo, status: job.status },
       fingerprint: fp,
       programmes: stopped.programmes,
       warpingBatches: held,
+      yarnReturned: yarn.returned,
+      yarnKept: yarn.kept,
     });
   })
 );

@@ -20,11 +20,10 @@ const ErrorHandler = require("../utils/ErrorHandler.js");
 const { saveIf, changedMeanwhile } = require("../utils/conditionalSave");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
+const { returnOutwardToStock } = require("../services/materialReturn");
 const mongoose        = require("mongoose");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint.js");
-const { appendStockMovement } = require("../utils/stockLedger.js");
 const { addElasticToOrder } = require("../services/orderAmend");
-const { receiveAtCost } = require("../utils/materialValuation.js");
 const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
 const { approveOrderTxn }  = require("../services/orderService.js");
@@ -62,67 +61,27 @@ async function _refundRawMaterialsForOrder(session, order, actor, userObjectId) 
   if (outwards.length === 0) return refunded;
 
   for (const ow of outwards) {
-    const qty = Number(ow.quantity || 0);
-    if (qty <= 0) continue;
-
-    const material = await RawMaterial.findById(ow.rawMaterial).session(session);
-    if (!material) continue;
-
-    // The consumption counter first, on its own — `stock` and `avgCost`
-    // are moved by receiveAtCost below and must not also be written
-    // from this stale in-memory copy.
-    material.totalConsumption = Math.max(
-      0,
-      (Number(material.totalConsumption) || 0) - qty
-    );
-    await material.save({ session });
-
-    // Back at exactly what it left at. The outward row this is
-    // reversing recorded the unit cost at issue time, so the yarn
-    // returns to the shelf carrying the value it took off it —
-    // crediting it at TODAY's average would quietly create money every
-    // time an order was cancelled after a price rise.
-    //
-    // receiveAtCost moves the weighted average in the same atomic
-    // update as the stock, the way any other receipt does.
-    const refundCost = Number(ow.unitPrice) || 0;
-    const restored = await receiveAtCost(ow.rawMaterial, qty, refundCost, session);
-    material.stock = restored
-      ? Number(restored.stock) || 0
-      : (Number(material.stock) || 0) + qty;
-
-    await appendStockMovement(material._id, {
-      type:     "ORDER_CANCEL_REFUND",
-      order:    order._id,
-      refNo:    order.orderNo != null ? String(order.orderNo) : "",
-      quantity: qty,
-      balance:  material.stock,
-      unitCost: refundCost,
-    }, session);
-
-    // Mark the outward row as reversed so audit + the dedupe filter
-    // above stay self-consistent. The original outward stays in
-    // place for history; no MaterialInward is created because this
-    // wasn't a true receipt.
-    ow.reversed   = true;
-    ow.reversedAt = new Date();
-    // reversedBy is an ObjectId ref to User; only assign when we
-    // have a real mongo user id. The normalised `actor.id` can be
-    // a string sentinel like "system" / "unknown" which would
-    // CastError on save. The fingerprint already captures actor
-    // identity for audit, so this field is purely a cross-ref.
-    if (userObjectId) ow.reversedBy = userObjectId;
-    await ow.save({ session });
+    // How a draw goes back on the shelf — at the cost it left at, the
+    // consumption counter down, a ledger row, the outward marked
+    // reversed — is services/materialReturn.js. A job's own draw goes
+    // back the same way when the job is cancelled.
+    const back = await returnOutwardToStock(session, ow, {
+      type:  "ORDER_CANCEL_REFUND",
+      order: order._id,
+      refNo: order.orderNo != null ? String(order.orderNo) : "",
+      userObjectId,
+    });
+    if (!back) continue;
 
     const fp = buildFingerprint(ACTION_CODES.RAW_MATERIAL_RESTORED, {
       entityId: order._id,
       actor,
       meta: {
         rawMaterialId:   ow.rawMaterial.toString(),
-        rawMaterialName: material.name,
-        quantity:        qty,
+        rawMaterialName: back.material.name,
+        quantity:        back.quantity,
         unit:            "kg",
-        balanceAfter:    material.stock,
+        balanceAfter:    back.balanceAfter,
         reversedFrom:    ow._id.toString(),
       },
     });
@@ -130,9 +89,9 @@ async function _refundRawMaterialsForOrder(session, order, actor, userObjectId) 
 
     refunded.push({
       materialId:   ow.rawMaterial.toString(),
-      materialName: material.name,
-      quantity:     qty,
-      balanceAfter: material.stock,
+      materialName: back.material.name,
+      quantity:     back.quantity,
+      balanceAfter: back.balanceAfter,
     });
   }
 

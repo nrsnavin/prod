@@ -31,6 +31,9 @@ const { applyOrderStatus } = require('../domain/orderStatus');
 const { stampFingerprint, ACTION_CODES } = require('../utils/fingerprint');
 const { releaseAllReservations } = require('./orderReservations');
 const { recomputePending } = require('./orderPending');
+const { plannedFromJobs } = require('./excessPlanning');
+const { computeMaterialRequirement } = require('../utils/materialRequirement');
+const { carryEarmarksForward } = require('./lotAllocation');
 
 /**
  * A job was raised on `order`. The order is running from now on — a
@@ -105,6 +108,33 @@ async function jobCancelled(job, { userId, session = null }) {
   const order = await Order.findById(job.order).session(session);
   if (!order) return null;
   await recomputePending(order, session);
+
+  // ── The requirement sheet, when the job had planned past the order ──
+  // Raising such a job restates the order's yarn requirement for what is
+  // PLANNED (services/jobRaise.js). With the job gone the sheet went on
+  // asking for its metres, so the order read as short of yarn it no
+  // longer needed. Restated the same way, for what is still planned —
+  // and only for an order this job over-planned: any other order's sheet
+  // is as approval left it, and is not this cancellation's to rewrite.
+  // Dye lots set aside are carried, trimmed only where the requirement
+  // has shrunk below them (as every other restatement does).
+  order.$locals.earmarkChanges = { trimmed: [], dropped: [] };
+  const overPlanned = (order.excessPlanning || []).some((x) => String(x.job) === String(job._id));
+  if (overPlanned) {
+    const live = await JobOrder.find({ order: order._id, status: { $ne: 'cancelled' } })
+      .select('elastics').session(session).lean();
+    const planned = plannedFromJobs(live);
+    const plannedLines = (order.elasticOrdered || []).filter((l) => l?.elastic).map((l) => ({
+      elastic: l.elastic,
+      quantity: Math.max(Number(l.quantity) || 0, planned.get(String(l.elastic)) ?? 0),
+    }));
+    const recomputed = await computeMaterialRequirement(plannedLines);
+    const carried = carryEarmarksForward(order.rawMaterialRequired, recomputed);
+    order.rawMaterialRequired = carried.rows;
+    order.updatedItemsAt = new Date();
+    order.$locals.earmarkChanges = { trimmed: carried.trimmed, dropped: carried.dropped };
+  }
+
   const remainingJobs = await JobOrder.countDocuments({
     order: job.order, _id: { $ne: job._id }, status: liveJobStatus(),
   }).session(session);

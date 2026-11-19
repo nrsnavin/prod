@@ -70,6 +70,7 @@ const MOVEMENT_DIRECTION = {
   JOB_CONSUMPTION:     -1,
   PO_INWARD:           +1,
   ORDER_CANCEL_REFUND: +1,
+  JOB_CANCEL_REFUND:   +1,
 };
 
 /**
@@ -82,10 +83,14 @@ const TYPE_LABEL = {
   ORDER_APPROVAL:      'Order approved',
   ORDER_AMENDMENT:     'Order amended — elastic added',
   ORDER_CANCEL_REFUND: 'Order cancelled — returned',
+  JOB_CANCEL_REFUND:   'Job cancelled — returned',
   PO_INWARD:           'Goods received',
   JOB_CONSUMPTION:     'Issued to job',
   STOCK_ADJUST:        'Manual adjustment',
 };
+
+/** Movements whose `refNo` is a JOB number (services/jobRaise.js, jobExcessReturn.js). */
+const JOB_MOVEMENTS = new Set(['JOB_CONSUMPTION', 'JOB_CANCEL_REFUND']);
 
 /** Pull an id out of a field that may or may not have been populated. */
 const idOf = (v) => (v && typeof v === 'object' ? v._id ?? null : v ?? null);
@@ -127,6 +132,10 @@ function describeMovement(row = {}) {
     referenceId = idOf(row.order) ? String(idOf(row.order)) : null;
     reference = `Order #${orderNo ?? snapshot ?? ''}`.trim();
     if (orderNo == null && !snapshot) reference = 'Order';
+  } else if (snapshot && JOB_MOVEMENTS.has(row.type)) {
+    // A job's own draw, or its return: the number on the row is the
+    // job's. Shown bare ("#12") it read as an order's.
+    reference = /^j-?\d/i.test(snapshot) ? snapshot : `Job J-${snapshot}`;
   } else if (snapshot) {
     // No live reference left — the document is gone, but the number it
     // carried was snapshotted precisely so the row still reads.

@@ -204,38 +204,34 @@ async function raiseJobIn(session, body, { actor, userId }) {
     }
 
     // Deduct before the job exists, so a job can never reach the floor
-    // on yarn that was not there. Each deduction is a conditional update,
-    // `stock: { $gte: qty }`, inside the transaction: a shortfall throws
+    // on yarn that was not there. Each deduction is written against the
+    // stock as it was read, inside the transaction: a shortfall throws
     // and the whole raise rolls back, draws already made included.
     //
     // Forced, a short material gives what it has and is left at 0 — the
     // draw records both what was wanted and what left, so the gap is on
-    // the ledger rather than inferred from a balance. The filter on the
-    // stock as read keeps that exact inside the transaction.
+    // the ledger rather than inferred from a balance.
+    //
+    // The stock is SET to the figure worked out here, to the gram, never
+    // subtracted from in place: 999.6 − 0.8 is 998.8000000000001, and
+    // that is what an in-place subtraction left on the shelf.
     const drawn = [];
     if (excessRequirement.length > 0) {
       for (const r of excessRequirement) {
-        const qty = Number(r.requiredWeight) || 0;
+        const qty = r3(r.requiredWeight);
         if (qty <= 0) continue;
-        let updated;
-        let applied = qty;
-        if (forced) {
-          const current = await RawMaterial.findById(r.rawMaterial).select('stock name').session(session).lean();
-          if (!current) throw new ErrorHandler(`Raw material ${r.name || r.rawMaterial} not found`, 404);
-          const have = Math.max(0, Number(current.stock) || 0);
-          applied = r3(Math.min(qty, have));
-          updated = await RawMaterial.findOneAndUpdate(
-            { _id: r.rawMaterial, stock: current.stock },
-            { $set: { stock: r3(Math.max(0, have - qty)) }, $inc: { totalConsumption: applied } },
-            { new: true, session }
-          );
-        } else {
-          updated = await RawMaterial.findOneAndUpdate(
-            { _id: r.rawMaterial, stock: { $gte: qty } },
-            { $inc: { stock: -qty, totalConsumption: qty } },
-            { new: true, session }
-          );
-        }
+        const current = await RawMaterial.findById(r.rawMaterial).select('stock name').session(session).lean();
+        if (!current && forced) throw new ErrorHandler(`Raw material ${r.name || r.rawMaterial} not found`, 404);
+        const have = Math.max(0, Number(current?.stock) || 0);
+        const applied = forced ? r3(Math.min(qty, have)) : qty;
+        // Not forced, the yarn has to be there — all of it.
+        const updated = current && (forced || have >= qty)
+          ? await RawMaterial.findOneAndUpdate(
+              { _id: r.rawMaterial, stock: current.stock },
+              { $set: { stock: r3(Math.max(0, have - applied)) }, $inc: { totalConsumption: applied } },
+              { new: true, session }
+            )
+          : null;
         if (!updated) {
           const err = new ErrorHandler(
             `Raw material ran out while raising this job (${r.name || 'material'}) — nothing was deducted. Try again.`,
@@ -321,7 +317,10 @@ async function raiseJobIn(session, body, { actor, userId }) {
         elasticCount:  elastics.length,
         totalQuantity: elastics.reduce((s, e) => s + (e.quantity || 0), 0),
         excessLines:   excessRows.length,
+        // The order's over-plan after this job, and the part of it this
+        // job adds — the part its yarn was drawn for.
         excessQuantity: excessRows.reduce((s, r) => s + r.excess, 0),
+        ownExcessQuantity: r3(excessRows.reduce((s, r) => s + (r.ownExcess || 0), 0)),
         excessReason:  excessReason || undefined,
         excessMaterialDrawn: drawn.map((d) => `${d.name} ${d.quantity}`),
         ...(forced ? { forced: true, forceReason, shortfalls } : {}),
