@@ -188,18 +188,21 @@ router.get("/list", catchAsyncErrors(async (req, res, next) => {
     filter.status = status;
   }
 
-  if (search) {
-    const num = parseInt(search, 10);
-    if (!isNaN(num)) {
-      const jobs = await JobOrder.find({ jobOrderNo: num }).select("_id");
-      if (!jobs.length) {
-        return res.json({
-          success: true, data: [],
-          pagination: { total: 0, page, limit, hasMore: false },
-        });
-      }
-      filter.job = { $in: jobs.map((j) => j._id) };
+  // By job number. Anything else is no job's number: it used to be
+  // dropped, and every warping came back as though it had matched
+  // ("12abc" found job 12).
+  const wanted = String(search || "").trim();
+  if (wanted) {
+    const jobs = /^\d+$/.test(wanted)
+      ? await JobOrder.find({ jobOrderNo: Number(wanted) }).select("_id")
+      : [];
+    if (!jobs.length) {
+      return res.json({
+        success: true, data: [],
+        pagination: { total: 0, page, limit, hasMore: false },
+      });
     }
+    filter.job = { $in: jobs.map((j) => j._id) };
   }
 
   const [warpings, total] = await Promise.all([

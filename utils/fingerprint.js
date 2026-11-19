@@ -70,6 +70,10 @@ const ACTION_CODES = Object.freeze({
   COVERING_COMPLETED:       'COVERING_COMPLETED',
   COVERING_CANCELLED:       'COVERING_CANCELLED',
   COVERING_BEAM_ENTRY:      'COVERING_BEAM_ENTRY',
+  // Taking a recorded beam weight off again. Adding one was on the job's
+  // trail and removing one was not — and a weight is corrected by
+  // removing the entry and adding it again.
+  COVERING_BEAM_REMOVED:    'COVERING_BEAM_REMOVED',
   SHIFT_PRODUCTION_ENTERED:   'SHIFT_PRODUCTION_ENTERED',
   SHIFT_PRODUCTION_VERIFIED:  'SHIFT_PRODUCTION_VERIFIED',
   PACKING_CREATED:          'PACKING_CREATED',
@@ -191,6 +195,7 @@ const ACTION_LABELS = Object.freeze({
   COVERING_COMPLETED:       'Covering Completed',
   COVERING_CANCELLED:       'Covering Cancelled',
   COVERING_BEAM_ENTRY:      'Covering Beam Entry',
+  COVERING_BEAM_REMOVED:    'Covering Beam Removed',
   SHIFT_PRODUCTION_ENTERED:   'Shift Production Entered',
   SHIFT_PRODUCTION_VERIFIED:  'Shift Production Verified',
   PACKING_CREATED:          'Packing Recorded',

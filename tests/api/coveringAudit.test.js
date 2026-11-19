@@ -261,3 +261,107 @@ describe('listing coverings', () => {
     expect(res.status).toBe(400);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading api/covering.js line by line.
+// ══════════════════════════════════════════════════════════════════
+describe('the covered weight of a job', () => {
+  it('is the sum of its beams to the gram, through adding and removing', async () => {
+    const { covering } = await seed();
+    // 41.7 + 38.4 + 42.3 is 122.39999999999999, and it was stored like that.
+    let last;
+    for (const [beamNo, weight] of [[1, 41.7], [2, 38.4], [3, 42.3]]) {
+      last = await addBeam(covering._id, { beamNo, weight });
+      expect(last.status).toBe(201);
+    }
+    expect(last.body.producedWeight).toBe(122.4);
+    expect(await weightOf(covering._id)).toBe(122.4);
+
+    // Without the first: 38.4 + 42.3 is 80.69999999999999.
+    const fresh = await Covering.findById(covering._id).lean();
+    expect((await dropBeam(covering._id, fresh.beamEntries[0]._id)).body.producedWeight).toBe(80.7);
+    expect(await weightOf(covering._id)).toBe(80.7);
+  });
+
+  it('keeps a beam\'s weight to the gram, as a sheet of them is kept', async () => {
+    const { covering } = await seed();
+    const res = await addBeam(covering._id, { beamNo: 1, weight: 41.23456 });
+    expect(res.status).toBe(201);
+    expect(res.body.beamEntry.weight).toBe(41.235);
+    expect(await weightOf(covering._id)).toBe(41.235);
+  });
+});
+
+describe('removing a beam entry', () => {
+  it('is recorded on the job: which beam, at what weight, and what the total became', async () => {
+    const { covering, job } = await seed();
+    await addBeam(covering._id, { beamNo: 1, weight: 40 });
+    await addBeam(covering._id, { beamNo: 2, weight: 35 });
+    const fresh = await Covering.findById(covering._id).lean();
+
+    expect((await dropBeam(covering._id, fresh.beamEntries[0]._id)).status).toBe(200);
+
+    // Before: nothing. Adding a beam was on the trail; taking one off was not,
+    // and correcting a weight is done by removing the entry and adding it again.
+    const trail = (await JobOrder.findById(job._id).lean()).fingerprints;
+    const removed = trail.filter((f) => f.code === 'COVERING_BEAM_REMOVED');
+    expect(removed).toHaveLength(1);
+    expect(removed[0].meta).toMatchObject({
+      coveringId: String(covering._id), beamNo: 1, weight: 40, unit: 'kg', producedWeight: 35, totalBeams: 1,
+    });
+    expect(removed[0].actor).toMatchObject({ name: 'Owner' });
+  });
+
+  it('records nothing when there was nothing to remove', async () => {
+    const { covering, job } = await seed();
+    expect((await dropBeam(covering._id, new mongoose.Types.ObjectId())).status).toBe(404);
+    expect((await JobOrder.findById(job._id).lean()).fingerprints.filter((f) => f.code === 'COVERING_BEAM_REMOVED')).toEqual([]);
+  });
+});
+
+describe('a note or a remark that is not text', () => {
+  it('is taken as what was typed, not answered with a server error', async () => {
+    const { covering } = await seed();
+    // Before: 500 — "note.trim is not a function".
+    const beam = await addBeam(covering._id, { beamNo: 1, weight: 40, note: 7 });
+    expect(beam.status).toBe(201);
+    expect(beam.body.beamEntry.note).toBe('7');
+
+    const done = await request(app).post('/api/v2/covering/complete').set('Cookie', cookie())
+      .send({ id: String(covering._id), remarks: 12 });
+    expect(done.status).toBe(200);
+    expect((await Covering.findById(covering._id).lean()).remarks).toBe('12');
+  });
+});
+
+describe('searching the covering and warping lists', () => {
+  const list = (what, search) =>
+    request(app).get(`/api/v2/${what}/list?status=all&search=${encodeURIComponent(search)}`).set('Cookie', cookie());
+
+  it('is by job number: that job\'s, and for text that is no number, none', async () => {
+    const Warping = require('../../models/Warping');
+    const a = await seed();
+    const b = await seed();
+    for (const s of [a, b]) {
+      await Warping.create({ date: new Date(), job: s.job._id, status: 'open', elasticOrdered: [{ elastic: elastic._id, quantity: 1000 }] });
+    }
+    const number = (await JobOrder.findById(a.job._id).lean()).jobOrderNo;
+
+    for (const what of ['covering', 'warping']) {
+      const all = await list(what, '');
+      expect(all.body.data).toHaveLength(2);
+
+      const one = await list(what, String(number));
+      expect(one.body.data.map((r) => String(r.job._id))).toEqual([String(a.job._id)]);
+
+      // Before: both, as though "acme" had matched them.
+      const none = await list(what, 'acme');
+      expect(none.status).toBe(200);
+      expect(none.body.data).toEqual([]);
+      expect(none.body.pagination.total).toBe(0);
+
+      // "12abc" is not job 12.
+      expect((await list(what, `${number}abc`)).body.data).toEqual([]);
+    }
+  });
+});

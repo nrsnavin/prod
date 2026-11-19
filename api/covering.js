@@ -13,6 +13,16 @@ const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { checkAndAdvanceToWeaving } = require("../utils/jobStatusHelper");
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require("../utils/fingerprint");
 const { isAuthenticated, isAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
+const { round3 } = require("../utils/quantity");
+
+/** What was typed in a note or a remark, as text: a number sent there is "7", not a crash on .trim(). */
+const typed = (v, max = 500) => (v == null ? "" : String(v).trim().slice(0, max));
+
+/**
+ * The covered weight: the sum of the beams, to the gram. Summed as it
+ * stood, 41.7 + 38.4 + 42.3 kg was stored as 122.39999999999999.
+ */
+const weightOfBeams = (entries) => round3((entries || []).reduce((sum, e) => sum + (Number(e.weight) || 0), 0));
 
 // All covering routes require login. Workers in the `covering` (and
 // `warping`) departments need to read /list and /detail to monitor
@@ -57,12 +67,15 @@ router.get(
       filter.status = status;
     }
 
-    if (search && search.trim()) {
-      const jobNo = parseInt(search.trim(), 10);
-      if (!isNaN(jobNo)) {
-        const matchedJobs = await JobOrder.find({ jobOrderNo: jobNo }).select("_id");
-        filter.job = { $in: matchedJobs.map((j) => j._id) };
-      }
+    // By job number. Anything else is no job's number: it used to be
+    // dropped, and every covering came back as though it had matched
+    // ("12abc" found job 12).
+    const wanted = String(search || "").trim();
+    if (wanted) {
+      const matchedJobs = /^\d+$/.test(wanted)
+        ? await JobOrder.find({ jobOrderNo: Number(wanted) }).select("_id")
+        : [];
+      filter.job = { $in: matchedJobs.map((j) => j._id) };
     }
 
     const [data, total] = await Promise.all([
@@ -254,7 +267,7 @@ router.post(
 
         covering.status        = "completed";
         covering.completedDate = new Date();
-        if (remarks?.trim()) covering.remarks = remarks.trim();
+        if (typed(remarks)) covering.remarks = typed(remarks);
         await covering.save({ session });
 
         // FIX: pass the session so the helper sees the just-written
@@ -345,7 +358,7 @@ router.post(
 
         const previous = covering.status;
         covering.status = "cancelled";
-        if (remarks?.trim()) covering.remarks = remarks.trim();
+        if (typed(remarks)) covering.remarks = typed(remarks);
         await covering.save({ session });
 
         // Cancelling is the one covering transition that left no mark.
@@ -360,7 +373,7 @@ router.post(
             meta: {
               coveringId: covering._id.toString(),
               previousStatus: previous,
-              remarks: remarks?.trim() || undefined,
+              remarks: typed(remarks) || undefined,
             },
           }));
           await job.save({ session });
@@ -379,7 +392,8 @@ router.post(
 router.post(
   "/beam-entry",
   catchAsyncErrors(async (req, res, next) => {
-    const { id, beamNo, weight, note = "" } = req.body;
+    const { id, beamNo, weight } = req.body;
+    const note = typed(req.body.note, 200);
 
     if (!id)     return next(new ErrorHandler("Covering ID required", 400));
     if (!beamNo) return next(new ErrorHandler("beamNo is required", 400));
@@ -391,8 +405,9 @@ router.post(
       return next(new ErrorHandler("beamNo must be a positive whole number", 400));
     }
 
-    const w = Number(weight);
-    if (isNaN(w) || w <= 0) {
+    // To the gram, as a sheet of beams is kept (/:id/beam-entries).
+    const w = round3(weight);
+    if (!Number.isFinite(Number(weight)) || w <= 0) {
       return next(new ErrorHandler("weight must be a positive number (kg)", 400));
     }
     // A warp beam this size does not exist. The cap is the same idea as
@@ -434,15 +449,12 @@ router.post(
         covering.beamEntries.push({
           beamNo:    beam,
           weight:    w,
-          note:      note?.trim() || "",
+          note,
           enteredAt: new Date(),
           enteredBy: req.user?._id || undefined,
         });
 
-        covering.producedWeight = covering.beamEntries.reduce(
-          (sum, e) => sum + e.weight,
-          0
-        );
+        covering.producedWeight = weightOfBeams(covering.beamEntries);
 
         await covering.save({ session });
 
@@ -456,7 +468,7 @@ router.post(
             unit:           'kg',
             producedWeight: covering.producedWeight,
             totalBeams:     covering.beamEntries.length,
-            note:           note?.trim() || undefined,
+            note:           note || undefined,
           },
         });
         const job = await JobOrder.findById(covering.job).session(session);
@@ -546,21 +558,40 @@ router.delete(
             "Covering changed status before delete could apply", 409
           );
         }
-        const existed = (before.beamEntries || []).some(
+        const removed = (before.beamEntries || []).find(
           (e) => e._id?.toString() === String(entryId)
         );
-        if (!existed) {
+        if (!removed) {
           throw new ErrorHandler("Beam entry not found", 404);
         }
 
         const updated = await Covering.findById(coveringId).session(session);
         if (!updated) throw new ErrorHandler("Covering not found", 404);
 
-        updated.producedWeight = updated.beamEntries.reduce(
-          (sum, e) => sum + (e.weight || 0),
-          0
-        );
+        updated.producedWeight = weightOfBeams(updated.beamEntries);
         await updated.save({ session });
+
+        // On the job's trail, like the entry it undoes. A beam's weight is
+        // corrected by removing it and adding it again, and the removal
+        // left nothing: the trail showed the beam entered twice, at two
+        // weights, and not that one of them had been taken back.
+        const job = await JobOrder.findById(updated.job).session(session);
+        if (job) {
+          job.fingerprints.push(buildFingerprint(ACTION_CODES.COVERING_BEAM_REMOVED, {
+            entityId: updated.job,
+            actor:    actorFromRequest(req),
+            meta: {
+              coveringId:     updated._id.toString(),
+              beamNo:         removed.beamNo,
+              weight:         removed.weight,
+              unit:           "kg",
+              producedWeight: updated.producedWeight,
+              totalBeams:     updated.beamEntries.length,
+              note:           removed.note || undefined,
+            },
+          }));
+          await job.save({ session });
+        }
 
         resp = {
           success:        true,
@@ -605,7 +636,6 @@ const beamSheetUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 8 * 1024 * 1024, files: MAX_PAGES },
 });
-const round3 = (n) => Math.round(n * 1000) / 1000;
 const dayLabel = (d) => (d ? indiaDay(d, { day: "2-digit", month: "short", year: "numeric" }) : "");
 
 /** Each read row, marked against what is already recorded on the covering. */
@@ -755,7 +785,7 @@ router.post(
         for (const b of adding) {
           covering.beamEntries.push({ ...b, enteredAt: now, enteredBy: req.user?._id || undefined });
         }
-        covering.producedWeight = covering.beamEntries.reduce((sum, e) => sum + (e.weight || 0), 0);
+        covering.producedWeight = weightOfBeams(covering.beamEntries);
         await covering.save({ session });
 
         if (adding.length) {
@@ -789,7 +819,7 @@ router.post(
             _id: String(e._id), beamNo: e.beamNo, weight: e.weight, note: e.note || "",
           })),
           skipped,
-          producedWeight: round3(covering.producedWeight),
+          producedWeight: covering.producedWeight,
           totalBeams: covering.beamEntries.length,
         };
       });
