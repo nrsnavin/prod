@@ -51,6 +51,11 @@ const WastageSchema = new mongoose.Schema(
       required: true,
     },
 
+    // Who entered it. A penalty is taken from somebody's pay, and the
+    // record of it did not say who put it there (api/wastage.js).
+    recordedBy:     { type: mongoose.Types.ObjectId, ref: "User" },
+    recordedByName: { type: String, default: "" },
+
   },
   { timestamps: true }
 );

@@ -20,7 +20,8 @@ const Machine       = require("../models/Machine");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient");
 const { enqueue }   = require("../utils/outbox");
 const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
-const { resolveEmployeeId } = require("../utils/resolveEmployee");
+const factoryDay = require("../utils/factoryDay");
+const { parseMoney } = require("../utils/money");
 const { applyMovement } = require("../utils/elasticStock");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { requireReason } = require("../utils/auditReason");
@@ -39,6 +40,28 @@ router.use((req, res, next) => {
   }
   return requireFeatureRead('/wastage')(req, res, next);
 });
+
+/** A penalty is a rupee amount from nothing to this; more is a slipped decimal point. */
+const MAX_PENALTY = 100000;
+
+/**
+ * The penalty as sent: none is ₹0. It is taken from somebody's pay, and
+ * it was stored as it came — a negative one, or any amount at all.
+ * @throws {ErrorHandler} 400
+ */
+function readPenalty(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  const read = parseMoney(value, { max: MAX_PENALTY, label: "The penalty" });
+  if (!read.ok) throw new ErrorHandler(read.reason, 400);
+  return read.value;
+}
+
+/** The last N days (1 to 365, 30 when none is asked for), as { days, since }. */
+function windowOf(raw) {
+  const asked = Math.floor(Number(raw));
+  const days = Math.min(Math.max(Number.isFinite(asked) && asked >= 1 ? asked : 30, 1), 365);
+  return { days, since: new Date(Date.now() - days * 86_400_000) };
+}
 
 // ═══════════════════════════════════════════════════════════
 //  ADD WASTAGE — P0-4: wastage no longer deducts elastic stock.
@@ -72,21 +95,46 @@ router.post(
       }
     }
 
-    // Non-admins may only record wastage under their own employee id;
-    // admins may attribute it to anyone. This route's legacy field is
-    // `employee`, so map it onto the resolver's `employeeId` input.
-    if (req.user?.role === "admin" && req.body.employee) {
-      req.body.employeeId = req.body.employee;
-    }
-    const employeeId = resolveEmployeeId(req);
+    // Whose wastage it is: the operator picked on the form, else the
+    // login's own employee.
+    //
+    // Wastage is recorded BY a supervisor or checker ABOUT an operator;
+    // both forms have always sent the operator. The name was taken only
+    // from the admin and ignored from anybody else, so a supervisor's
+    // entry — and its penalty, which payroll deducts — was put on the
+    // supervisor's own record, and a supervisor's login with no employee
+    // linked was refused outright.
+    //
+    // So the name is taken — from the admin, anybody's; from anyone else,
+    // an operator who ran this job (the list both forms offer, checked
+    // below) or themselves. And who entered it is kept on the record.
+    const named = req.body.employee ?? req.body.employeeId;
+    const ownEmployee = req.user?.employee ? String(req.user.employee) : null;
+    const employeeId = named ? String(named) : ownEmployee;
 
     if (!jobId)      return next(new ErrorHandler("job is required", 400));
     if (!elasticId)  return next(new ErrorHandler("elastic is required", 400));
-    if (!employeeId) return next(new ErrorHandler("Cannot determine employee — your account has no linked employee", 403));
+    if (!mongoose.Types.ObjectId.isValid(String(jobId))) return next(new ErrorHandler("That is not a valid job", 400));
+    if (!employeeId) return next(new ErrorHandler("Say whose wastage this is: pick the employee", 400));
+    if (!mongoose.Types.ObjectId.isValid(employeeId)) return next(new ErrorHandler("That is not a valid employee", 400));
     if (!reason?.trim()) return next(new ErrorHandler("reason is required", 400));
     const happenedOn = dateFrom(incidentDate, "incidentDate", new Date());
     if (typeof quantity !== "number" || quantity <= 0)
       return next(new ErrorHandler("quantity must be a positive number", 400));
+    let penaltyAmount;
+    try { penaltyAmount = readPenalty(penalty); } catch (err) { return next(err); }
+
+    // Only the admin puts wastage — and a penalty — on somebody who has
+    // no shift on the job.
+    if (req.user?.role !== "admin" && employeeId !== ownEmployee) {
+      const ranIt = await ShiftDetail.exists({ job: jobId, employee: employeeId });
+      if (!ranIt) {
+        return next(new ErrorHandler(
+          "That employee has no shift on this job. Pick one of its operators — only the admin can record wastage against anybody else",
+          403
+        ));
+      }
+    }
 
     const session = await mongoose.startSession();
     try {
@@ -117,7 +165,8 @@ router.post(
 
         const [wastage] = await Wastage.create([{
           job: jobId, elastic: elasticId, employee: employeeId,
-          quantity, penalty: penalty || 0, reason: reason.trim(),
+          quantity, penalty: penaltyAmount, reason: reason.trim(),
+          recordedBy: req.user?._id, recordedByName: req.user?.name || "",
           // When the wastage happened — drives which payroll month the
           // penalty lands in. Defaults to now if the client doesn't send it.
           incidentDate: happenedOn,
@@ -143,18 +192,10 @@ router.post(
         wastageId = wastage._id;
       });
 
-      const employee = await Employee.findById(employeeId);
-      const [totalWastage] = await Promise.all([
-        Wastage.aggregate([
-          { $match: { employee: employee._id } },
-          { $group: { _id: null, total: { $sum: "$quantity" } } },
-        ]),
-      ]);
-      const tw = totalWastage[0]?.total || 0;
-      if (employee.performance !== undefined && tw > 0) {
-        employee.performance = Math.round(tw * 10) / 10;
-        await employee.save();
-      }
+      // The employee's performance is left alone. It is a score out of 100
+      // that the admin sets (PATCH /employee/performance); this used to
+      // overwrite it, after every entry, with the employee's all-time
+      // wastage in metres — 3,450 m wasted read as "performance 3450.5".
 
       const populated = await Wastage.findById(wastageId)
         .populate("job",      "jobOrderNo status")
@@ -240,8 +281,11 @@ router.put(
         }
 
         wastage.quantity = newQty;
-        if (penalty != null) wastage.penalty = Number(penalty);
-        if (reason != null) wastage.reason = String(reason);
+        if (penalty != null) wastage.penalty = readPenalty(penalty);
+        if (reason != null) {
+          if (!String(reason).trim()) throw new ErrorHandler("reason is required", 400);
+          wastage.reason = String(reason).trim();
+        }
         await wastage.save({ session });
 
         if (job) {
@@ -424,7 +468,10 @@ router.get(
 
     const filter = { _id: { $in: jobIds } };
     if (status) filter.status = status;
-    if (search) filter.jobOrderNo = Number(search) || undefined;
+    // A job number. Anything else is no job's number — it used to be
+    // dropped, and every job came back as though it had matched.
+    const wanted = String(search || "").trim();
+    if (wanted) filter.jobOrderNo = /^\d+$/.test(wanted) ? Number(wanted) : -1;
 
     const jobs = await JobOrder.find(filter)
       .populate("customer",         "name")
@@ -492,12 +539,16 @@ router.get(
   "/analytics",
   isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
-    const days  = Math.min(Number(req.query.days) || 30, 365);
-    const since = moment().subtract(days, "days").toDate();
+    const { days, since } = windowOf(req.query.days);
+    // The days chosen, on every figure. Only the trend was cut to them:
+    // the totals, the top employees and the top elastics were all time,
+    // under a switch that says 7, 30 or 90 days.
+    const inWindow = { $match: { createdAt: { $gte: since } } };
 
     const [topEmployees, byElastic, byStatus, trend, grandTotal] =
       await Promise.all([
         Wastage.aggregate([
+          inWindow,
           {
             $group: {
               _id:      "$employee",
@@ -513,6 +564,7 @@ router.get(
           { $project: { name: "$emp.name", department: "$emp.department", total: 1, count: 1, avgPenalty: 1 } },
         ]),
         Wastage.aggregate([
+          inWindow,
           { $group: { _id: "$elastic", total: { $sum: "$quantity" }, count: { $sum: 1 } } },
           { $sort: { total: -1 } },
           { $limit: 10 },
@@ -521,17 +573,21 @@ router.get(
           { $project: { name: { $ifNull: ["$el.name", "Unknown"] }, total: 1, count: 1 } },
         ]),
         Wastage.aggregate([
+          inWindow,
           { $lookup: { from: "joborders", localField: "job", foreignField: "_id", as: "jobDoc" } },
           { $unwind: "$jobDoc" },
           { $group: { _id: "$jobDoc.status", total: { $sum: "$quantity" }, count: { $sum: 1 } } },
         ]),
         Wastage.aggregate([
-          { $match: { createdAt: { $gte: since } } },
-          { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, total: { $sum: "$quantity" }, count: { $sum: 1 } } },
+          inWindow,
+          // The day in India: at UTC, wastage logged before 05:30 was
+          // counted on the day before.
+          { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "Asia/Kolkata" } }, total: { $sum: "$quantity" }, count: { $sum: 1 } } },
           { $sort: { _id: 1 } },
           { $project: { date: "$_id", total: 1, count: 1, _id: 0 } },
         ]),
         Wastage.aggregate([
+          inWindow,
           { $group: { _id: null, totalQty: { $sum: "$quantity" }, totalPenalty: { $sum: "$penalty" }, count: { $sum: 1 } } },
         ]),
       ]);
@@ -564,17 +620,19 @@ router.get(
     if (!end.isValid()) {
       return next(new ErrorHandler("less must be a YYYY-MM-DD date", 400));
     }
+    // The days as India has them: from 00:00 there on the first to the
+    // end of the last. They were cut at UTC midnight, and each entry was
+    // filed under its UTC date — before 05:30, the day before.
     const wastages = await Wastage.find({
       createdAt: {
-        $gte: start.toDate(),
-        $lte: end.add(1, "days").toDate(),
+        $gte: factoryDay.dayStart(req.query.start),
+        $lte: factoryDay.dayEnd(req.query.less),
       },
     }).limit(5000);
 
     const p = new Map();
     wastages.forEach((e) => {
-      const date = new Date(e.createdAt)
-        .toISOString().slice(0, 10).split("-").reverse().join("-");
+      const date = factoryDay.ymd(e.createdAt).split("-").reverse().join("-");
       p.set(date, (p.get(date) || 0) + e.quantity);
     });
 
@@ -616,8 +674,7 @@ router.get(
   "/root-cause",
   isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res) => {
-    const days  = Math.min(Number(req.query.days) || 30, 365);
-    const since = moment().subtract(days, "days").toDate();
+    const { days, since } = windowOf(req.query.days);
     const reasonExpr = { $trim: { input: { $ifNull: ["$reason", "(no reason given)"] } } };
     const base    = [{ $match: { createdAt: { $gte: since } } }];
     const withJob = [...base,
