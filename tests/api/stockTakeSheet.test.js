@@ -108,6 +108,21 @@ describe('the filled sheet', () => {
     expect((await RawMaterial.findById(s.nylon._id).lean()).stock).toBe(100);
   });
 
+  it('reads a count to the gram, as stock is kept', async () => {
+    const s = await seed();
+    // 100.0004 on the rack against 100 in the system is no difference;
+    // 250.5126 against 250.5 is 13 grams.
+    const res = await preview(await filled({ 'Nylon 70D': 100.0004, 'Spandex 40D': 250.5126 }));
+    expect(res.body.rows.map((r) => [r.name, r.counted, r.adjustment])).toEqual([
+      ['Nylon 70D', 100, 0],
+      ['Spandex 40D', 250.513, 0.013],
+    ]);
+    // Before: 2 — a row marked changed by 0.0004 that the posting then
+    // rounded to nothing.
+    expect(res.body.changed).toBe(1);
+    expect(String(s.nylon._id)).toBeTruthy();
+  });
+
   it('refuses a sheet without the columns, or that is not a workbook', async () => {
     await seed();
     const wb = new ExcelJS.Workbook();

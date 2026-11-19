@@ -22,6 +22,8 @@ const ErrorHandler      = require("../utils/ErrorHandler");
 const catchAsyncErrors  = require("../middleware/catchAsyncErrors");
 const { recipeMaterialFilters } = require("../utils/recipeMaterials");
 const { maybeFirePriceChangeAlert } = require("../utils/inventoryAlerts");
+const factoryDay = require("../utils/factoryDay");
+const { round3 } = require("../utils/quantity");
 // ══════════════════════════════════════════════════════════════════
 //  STOCK TAKE ON A SHEET
 //
@@ -105,25 +107,38 @@ router.get(
 router.post(
   "/bulk-update-prices",
   catchAsyncErrors(async (req, res, next) => {
-    const { updates = [], reason = "Bulk price update" } = req.body;
-
-    if (updates.length > 500) {
-      return next(new ErrorHandler("updates exceeds the 500-item limit per request", 400));
-    }
-
+    const updates = req.body?.updates;
     if (!Array.isArray(updates) || updates.length === 0) {
       return next(new ErrorHandler("updates array is required", 400));
     }
+    if (updates.length > 500) {
+      return next(new ErrorHandler("updates exceeds the 500-item limit per request", 400));
+    }
+    // Whatever was sent for the reason, as text.
+    const reason = String(req.body?.reason ?? "").trim() || "Bulk price update";
 
-    // Validate all entries first
+    // Validate ALL entries first, so nothing is written unless all of it
+    // can be. An id that is not one used to fail the request only once
+    // it was looked up — by which time the other prices had been set.
+    const seen = new Set();
     for (const u of updates) {
-      if (!u._id) return next(new ErrorHandler("Each update must have _id", 400));
-      if (u.price === undefined || u.price === null || isNaN(Number(u.price))) {
-        return next(new ErrorHandler(`Invalid price for material ${u._id}`, 400));
+      if (!u || !u._id) return next(new ErrorHandler("Each update must have _id", 400));
+      const id = String(u._id);
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        return next(new ErrorHandler(`"${id}" is not a material id`, 400));
+      }
+      if (u.price === undefined || u.price === null || u.price === "" || isNaN(Number(u.price))) {
+        return next(new ErrorHandler(`Invalid price for material ${id}`, 400));
       }
       if (Number(u.price) < 0) {
-        return next(new ErrorHandler(`Price cannot be negative for ${u._id}`, 400));
+        return next(new ErrorHandler(`Price cannot be negative for ${id}`, 400));
       }
+      // Twice on one list was two history lines from the same starting
+      // price, and whichever write landed last as the price.
+      if (seen.has(id)) {
+        return next(new ErrorHandler("A material is on the list more than once — give each one price", 400));
+      }
+      seen.add(id);
     }
 
     const results  = [];
@@ -132,26 +147,33 @@ router.post(
     // Process in parallel
     await Promise.all(
       updates.map(async (u) => {
-        const material = await RawMaterial.findById(u._id).select("name price priceHistory");
+        const material = await RawMaterial.findById(u._id).select("name price");
         if (!material) { skipped++; return; }
 
         const newPrice = Number(u.price);
-        const oldPrice = Number(material.price);
+        const oldPrice = Number(material.price) || 0;
 
         // Skip if price hasn't changed
         if (newPrice === oldPrice) { skipped++; return; }
 
-        await RawMaterial.findByIdAndUpdate(u._id, {
-          $set:  { price: newPrice },
-          $push: {
-            priceHistory: {
-              price:     newPrice,
-              oldPrice,
-              changedAt: new Date(),
-              reason:    reason.trim() || "Bulk price update",
+        // On the price just read, so the history line's "from" is what
+        // the price really was; and the record's version moves, so a
+        // material form opened before this is told the record changed
+        // instead of saving the old price back (it sends the price it
+        // loaded with every save — see noteLatestPrice for the other
+        // writer that had the same gap).
+        const written = await RawMaterial.updateOne(
+          material.price === undefined ? { _id: material._id } : { _id: material._id, price: material.price },
+          {
+            $set:  { price: newPrice },
+            $push: {
+              priceHistory: { price: newPrice, oldPrice, changedAt: new Date(), reason },
             },
-          },
-        });
+            $inc:  { __v: 1 },
+          }
+        );
+        // Changed by somebody else between the two lines above.
+        if (!written.modifiedCount) { skipped++; return; }
 
         results.push({
           _id:      u._id,
@@ -161,12 +183,7 @@ router.post(
           change:   +(newPrice - oldPrice).toFixed(4),
         });
 
-        maybeFirePriceChangeAlert({
-          material,
-          oldPrice,
-          newPrice,
-          reason: reason || "Bulk price update",
-        });
+        maybeFirePriceChangeAlert({ material, oldPrice, newPrice, reason });
       })
     );
 
@@ -221,7 +238,8 @@ router.get(
       row.getCell("counted").fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF4CC" } };
       row.getCell("ref").font = { color: { argb: "FF888888" }, size: 9 };
     }
-    const stamp = new Date().toISOString().slice(0, 10);
+    // The factory's date: before 05:30 the server's own is still yesterday.
+    const stamp = factoryDay.ymd();
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="stock-take-${stamp}.xlsx"`);
     res.send(Buffer.from(await wb.xlsx.writeBuffer()));
@@ -287,8 +305,11 @@ router.post(
       const systemStock = Number(m.stock) || 0;
       rows.push({
         _id: String(m._id), name: m.name, category: m.category || "", unit: m.unit || "kg", archived: !!m.archived,
-        systemStock, counted: Math.round(counted * 10000) / 10000,
-        adjustment: Math.round((counted - systemStock) * 10000) / 10000,
+        // To the gram, as stock is kept: the difference is posted through
+        // /bulk-adjust-stock, which rounds to three places, so a fourth
+        // here was a "changed" row that then changed nothing.
+        systemStock, counted: round3(counted),
+        adjustment: round3(round3(counted) - systemStock),
       });
     });
 

@@ -224,6 +224,11 @@ async function noteLatestPrice(materialId, boughtAt, reason, session = null) {
     {
       $set: { price },
       $push: { priceHistory: { price, oldPrice, changedAt: new Date(), reason } },
+      // The record's version moves with its price. The material's edit
+      // form sends the price it loaded with every save; without this, a
+      // form opened before the receipt saved the OLD price back, and the
+      // "somebody else changed this" check never saw the receipt.
+      $inc: { __v: 1 },
     },
     { session }
   );
