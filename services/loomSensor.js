@@ -80,6 +80,16 @@ async function addDevice({ machine, name = '' }, userId = null) {
 
 async function rotateKey(id) {
   if (!mongoose.isValidObjectId(String(id))) throw new ErrorHandler('Sensor not found', 404);
+  // A new key turns a removed board back on. Not beside the board that
+  // replaced it: a shift's run time is the rise in ONE running total, and
+  // with two boards posting for a loom each one's figure reads as the
+  // other's restart — the loom "runs" every minute between two posts.
+  const was = await LoomDevice.findById(id).select('machine active').lean();
+  if (!was) throw new ErrorHandler('Sensor not found', 404);
+  if (!was.active && (await LoomDevice.exists({ machine: was.machine, active: true, _id: { $ne: was._id } }))) {
+    const loom = await Machine.findById(was.machine).select('ID').lean();
+    throw new ErrorHandler(`${loom?.ID || 'This loom'} has another sensor now, and this one was removed. Make the new key for the sensor that is on it.`, 409);
+  }
   const k = newKey();
   const d = await LoomDevice.findOneAndUpdate({ _id: id }, { $set: { keyId: k.keyId, keyHash: k.keyHash, active: true } }, { new: true }).lean();
   if (!d) throw new ErrorHandler('Sensor not found', 404);

@@ -203,6 +203,29 @@ describe('suppliers\' price lists', () => {
     const rates = await request(app).get(`/api/v2/supplier/price-lists?supplier=${sriYarn._id}`).set('Cookie', as);
     expect(rates.body.rates.map((x) => x.rate)).toEqual([305, 900]);
   });
+
+  // Found reading services/priceLists.js line by line. Every material was
+  // offered to the match, the retired ones too — and merging a duplicate
+  // retires it under a name one character from the one that was kept.
+  it('a line is put against a material in use, never one that has been retired', async () => {
+    const live = await M.RawMaterial.create({ name: 'Polyester 150D DTY', category: 'yarn', unit: 'kg' });
+    const twin = await M.RawMaterial.create({ name: 'Polyester 150D DTY.', category: 'yarn', unit: 'kg', archived: true });
+    const gone = await M.RawMaterial.create({ name: 'Covered rubber 42s', category: 'rubber', unit: 'kg', archived: true });
+    try {
+      replies.price = { problem: null, kind: 'price_list', supplierName: 'Sri Yarn Traders', supplierGstin: '33AAAPS0001F1Z5', ref: 'PL-Jan', date: '2026-11-10', validUntil: null,
+        lines: [{ description: 'Polyester 150D DTY', rate: 142, unit: 'kg' }, { description: 'Covered rubber 42s', rate: 410, unit: 'kg' }] };
+      const r = (await upload('/accounts/price-lists/read')).body;
+      // Before: left unmatched (two names it could not tell apart), or put on the retired twin.
+      expect(r.rows[0]).toMatchObject({ rawMaterial: String(live._id), materialName: 'Polyester 150D DTY' });
+      // Before: put against the retired material — a rate nobody would ever meet on a PO.
+      expect(r.rows[1].rawMaterial).toBeNull();
+      const offered = r.rows.flatMap((x) => x.candidates.map((c) => c.id));
+      expect(offered).not.toContain(String(twin._id));
+      expect(offered).not.toContain(String(gone._id));
+    } finally {
+      await M.RawMaterial.deleteMany({ _id: { $in: [live._id, twin._id, gone._id] } });
+    }
+  });
 });
 
 describe('power cost per metre', () => {

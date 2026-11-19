@@ -23,6 +23,7 @@ const { getDocumentSettings } = require("../services/documentSettings");
 const collections   = require("../services/collections");
 const { sendWhatsApp, isConfigured: whatsappConfigured } = require("../utils/whatsapp");
 const { isId, r2, readDate } = require("../services/accountsHelpers");
+const Customer = require("../models/Customer");
 const router = express.Router();
 
 // ══════════════════════════════════════════════════════════════════
@@ -65,9 +66,11 @@ router.post("/collections/send", catchAsyncErrors(async (req, res, next) => {
   // number typed in: a reminder goes to a customer's or supplier's number.
   if (!(await collections.knownPhone(to))) return next(new ErrorHandler("That number is not on any customer or supplier on file — add it to the party first", 400));
   const result = await sendWhatsApp(to, message.slice(0, 1500));
-  // Remembered against the customer, so tomorrow's list knows.
-  if (isId(req.body?.customer)) {
-    await collections.log({ customer: req.body.customer, kind: "reminder", channel: "whatsapp", tone: String(req.body?.tone || ""), to, message, result: result.sent ? "sent" : result.dryRun ? "dry run" : String(result.error || "failed"), user: req.user });
+  // Remembered against the customer, so tomorrow's list knows — and
+  // knows whether it went: a send the provider refused is kept as one
+  // that failed (services/collections.js), not as contact made.
+  if (isId(req.body?.customer) && (await Customer.exists({ _id: req.body.customer }))) {
+    await collections.log({ customer: req.body.customer, kind: "reminder", channel: "whatsapp", tone: String(req.body?.tone || ""), to, message, result: result.sent ? "sent" : result.dryRun ? "dry run" : collections.failedResult(result.error), user: req.user });
   }
   res.json({ success: true, ...result, to });
 }));
@@ -81,7 +84,16 @@ router.post("/collections/log", catchAsyncErrors(async (req, res, next) => {
   try { promiseDate = readDate(b.promiseDate, "promiseDate", null); } catch (err) { return next(err); }
   if (b.kind === "promise" && !promiseDate) return next(new ErrorHandler("When did they promise to pay?", 400));
   if (b.kind !== "promise" && String(b.note || "").trim().length < 3) return next(new ErrorHandler("Say what happened", 400));
-  const note = await collections.log({ customer: b.customer, kind: b.kind, channel: String(b.channel || (b.kind === "call" ? "phone" : "")), note: b.note, promiseDate, promiseAmount: b.promiseAmount, user: req.user });
+  // An amount is optional ("will pay by Friday"); when given it is one.
+  let promiseAmount = 0;
+  if (b.promiseAmount != null && b.promiseAmount !== "") {
+    promiseAmount = Number(b.promiseAmount);
+    if (!Number.isFinite(promiseAmount) || promiseAmount < 0) return next(new ErrorHandler("The amount promised must be a number, 0 or more", 400));
+  }
+  // Against a customer on file: any well-formed id used to be taken, and
+  // the note belonged to nobody.
+  if (!(await Customer.exists({ _id: b.customer }))) return next(new ErrorHandler("Customer not found", 404));
+  const note = await collections.log({ customer: b.customer, kind: b.kind, channel: String(b.channel || (b.kind === "call" ? "phone" : "")), note: b.note, promiseDate, promiseAmount, user: req.user });
   res.status(201).json({ success: true, note });
 }));
 

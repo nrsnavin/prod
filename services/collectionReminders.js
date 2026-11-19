@@ -35,7 +35,9 @@ function factoryNow(now = new Date()) {
 async function due(cfg, now = new Date()) {
   const rows = await collections.overdue({ includeHeld: true });
   const since = new Date(now.getTime() - (cfg.everyDays || 7) * 86_400_000);
-  const recent = new Set((await CollectionNote.find({ createdAt: { $gte: since } }).distinct('customer')).map(String));
+  // Contact made — not a reminder the provider refused: that one is
+  // tried again (services/collections.js REACHED).
+  const recent = new Set((await CollectionNote.find({ createdAt: { $gte: since }, ...collections.REACHED }).distinct('customer')).map(String));
   const send = [];
   const skip = [];
   for (const r of rows) {
@@ -75,7 +77,7 @@ async function run({ now = new Date(), force = false } = {}) {
     const to = collections.e164(r.contact.phone || r.contact.accountantPhone);
     const { message } = await collections.draft(r, { company, tone: r.next.tone });
     const res = await sendWhatsApp(to, message);
-    const result = res.sent ? 'sent' : res.dryRun ? 'dry_run' : `error: ${res.error || 'not sent'}`;
+    const result = res.sent ? 'sent' : res.dryRun ? 'dry_run' : collections.failedResult(res.error);
     await collections.log({ customer: r.party, kind: 'reminder', channel: 'whatsapp', tone: r.next.tone, to, message, result, user: { _id: null, name: 'Scheduled reminder' } });
     out.push({ party: r.party, partyName: r.partyName, to, overdue: r.overdue, result });
   }

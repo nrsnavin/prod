@@ -23,6 +23,23 @@ const { r2 } = require('../utils/money');
 const inr = (n) => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const day = (d) => indiaDay(d, { day: '2-digit', month: 'short', year: 'numeric' });
 
+// ── Did a reminder go? ─────────────────────────────────────────────
+// Every send is kept in the customer's history with what it came back
+// with: "sent"; a dry run when WhatsApp is not connected (the office
+// copies the message and sends it itself); or the provider's refusal.
+// A note kept by hand — a call, a promise — has no result at all.
+//
+// A refused send is not contact. It used to count as one: "contacted in
+// the last 7 days" looked for any note, so a reminder that never left
+// stood the customer down for a week — off the scheduled run, and
+// "give them the week" on the office's list.
+const WENT = ['sent', 'dry run', 'dry_run', '', null];
+/** Notes that are contact made: everything but a reminder that did not go. */
+const REACHED = Object.freeze({ $or: [{ kind: { $ne: 'reminder' } }, { result: { $in: WENT } }] });
+const sendFailed = (note) => !!note && note.kind === 'reminder' && !WENT.includes(note.result ?? '');
+/** What is kept as the result of a send the provider refused. */
+const failedResult = (error) => `error: ${String(error || 'not sent').slice(0, 300)}`;
+
 /**
  * The escalation ladder: a gentle reminder first, a firm one at three
  * weeks past due, a phone call past six — and past ninety days, the
@@ -44,16 +61,23 @@ async function overdue({ includeHeld = false } = {}) {
   // opening advance): a customer whose money on account covers what is
   // overdue owes nothing — the office sets it off; no one chases them.
   const ahead = await require('./credits').byParty('customer');
-  const [customers, notes] = await Promise.all([
+  const [customers, notes, reached] = await Promise.all([
     Customer.find({ _id: { $in: ids } }).select('name phoneNumber contactName email accountant purchase paymentTerms').lean(),
     CollectionNote.aggregate([
       { $match: { customer: { $in: ids } } },
       { $sort: { createdAt: -1 } },
-      { $group: { _id: '$customer', last: { $first: '$$ROOT' }, promises: { $push: { $cond: [{ $eq: ['$kind', 'promise'] }, '$$ROOT', '$$REMOVE'] } } } },
+      { $group: { _id: '$customer', newest: { $first: '$$ROOT' }, promises: { $push: { $cond: [{ $eq: ['$kind', 'promise'] }, '$$ROOT', '$$REMOVE'] } } } },
+    ]),
+    // The last contact that was one: not a reminder the provider refused.
+    CollectionNote.aggregate([
+      { $match: { customer: { $in: ids }, ...REACHED } },
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: '$customer', last: { $first: '$$ROOT' } } },
     ]),
   ]);
   const byId = new Map(customers.map((c) => [String(c._id), c]));
-  const history = new Map(notes.map((n) => [String(n._id), n]));
+  const lastReached = new Map(reached.map((n) => [String(n._id), n.last]));
+  const history = new Map(notes.map((n) => [String(n._id), { ...n, last: lastReached.get(String(n._id)) || null }]));
   const today = factoryDay.calendarDay();
   const out = groups.map((g) => {
     const c = byId.get(String(g.party)) || {};
@@ -71,6 +95,11 @@ async function overdue({ includeHeld = false } = {}) {
       promise: promise ? { date: promise.promiseDate, amount: promise.promiseAmount || 0, note: promise.note || '', live: promiseLive, broken: !promiseLive } : null,
       // Contacted in the last 7 days: give them the week.
       recentlyContacted: !!(h?.last && Date.now() - new Date(h.last.createdAt).getTime() < 7 * 86_400_000),
+      // The latest thing tried was a reminder that did not go: the office
+      // should know, and should not take it for a contact.
+      failedSend: sendFailed(h?.newest)
+        ? { at: h.newest.createdAt, to: h.newest.to || '', result: String(h.newest.result || '').replace(/^error:\s*/i, '') }
+        : null,
       held: promiseLive,
       onAccount: r2(ahead.get(String(g.party))?.available || 0),
       covered: (ahead.get(String(g.party))?.available || 0) + 0.005 >= g.overdue,
@@ -152,11 +181,18 @@ async function draft(entry, { company = 'Balu Elastics', tone = 'gentle' } = {})
   }
 }
 
-/** "9677707535" → "+919677707535"; already-international numbers kept. */
+/**
+ * "9677707535" → "+919677707535"; already-international numbers kept.
+ * "09677707535" is the same phone written with its trunk 0 — how a
+ * number is often kept in India. It used to become "+09677707535": a
+ * number that does not exist to send to, and one the customer's own
+ * reply (from +91 96777 07535) never matched.
+ */
 function e164(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
   if (!digits) return '';
   if (digits.length === 10) return `+91${digits}`;
+  if (digits.length === 11 && digits.startsWith('0')) return `+91${digits.slice(1)}`;
   if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
   return `+${digits}`;
 }
@@ -181,4 +217,4 @@ async function knownPhone(phone) {
   return numbers.includes(want);
 }
 
-module.exports = { overdue, draft, template, e164, log, historyOf, nextStep, knownPhone };
+module.exports = { overdue, draft, template, e164, log, historyOf, nextStep, knownPhone, REACHED, sendFailed, failedResult };

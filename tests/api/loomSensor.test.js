@@ -81,6 +81,39 @@ describe('the boards', () => {
     expect((await post(rotated.body.key, { runSecondsTotal: 200 })).status).toBe(401);
   });
 
+  // Found reading services/loomSensor.js line by line. A new key turns a
+  // board back on — also one that was removed and has since been replaced
+  // (a page left open still shows it, with its "New key" button). Two
+  // boards then post for one loom, and a shift's run time is the rise in
+  // ONE running total: each board's figure reads as the other's restart,
+  // and the loom "ran" for every minute between two posts.
+  it('a removed board is not turned back on beside the one that replaced it', async () => {
+    const m = await loom();
+    const first = (await as(admin).post('/loom-sensor/devices', { machine: String(m._id) })).body;
+    await as(admin).del(`/loom-sensor/devices/${first.device.id}`);
+    const second = (await as(admin).post('/loom-sensor/devices', { machine: String(m._id) })).body;
+
+    const res = await as(admin).post(`/loom-sensor/devices/${first.device.id}/key`);
+    // Before: 200, and two live boards on the loom.
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(new RegExp(`${m.ID} has another sensor now`));
+    expect(res.body.key).toBeUndefined();
+    expect(await M.LoomDevice.countDocuments({ machine: m._id, active: true })).toBe(1);
+    // The replacement is untouched.
+    expect((await post(second.key, { runSecondsTotal: 10 })).status).toBe(200);
+  });
+
+  it('a removed board with nothing in its place is turned back on by a new key (unchanged)', async () => {
+    const m = await loom();
+    const first = (await as(admin).post('/loom-sensor/devices', { machine: String(m._id) })).body;
+    await as(admin).del(`/loom-sensor/devices/${first.device.id}`);
+    const res = await as(admin).post(`/loom-sensor/devices/${first.device.id}/key`);
+    expect(res.status).toBe(200);
+    expect(res.body.device.active).toBe(true);
+    expect((await post(res.body.key, { runSecondsTotal: 10 })).status).toBe(200);
+    expect((await as(admin).post('/loom-sensor/devices/not-an-id/key')).status).toBe(404);
+  });
+
   it('send a batch kept offline; a repeat is one reading; a bad one is refused on its own', async () => {
     const m = await loom();
     const { body } = await as(admin).post('/loom-sensor/devices', { machine: String(m._id) });

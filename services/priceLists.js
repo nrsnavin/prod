@@ -77,7 +77,11 @@ async function fromPhoto({ pages, supplier = null } = {}) {
   // list is far more likely what we buy from them than a namesake.
   const theirs = party ? await PurchaseOrder.distinct('items.rawMaterial', { supplier: party._id }) : [];
   const theirSet = new Set(theirs.map(String));
-  const materials = await RawMaterial.find({}).select('name unit').limit(5000).lean();
+  // The materials in use. Retired ones were offered too — and merging a
+  // duplicate retires it under a name one character from the one kept, so
+  // a line either could not be told between the two or went to the one
+  // no purchase order will ever name.
+  const materials = await RawMaterial.find({ archived: { $ne: true } }).select('name unit').limit(5000).lean();
   const choices = materials.map((m) => ({ id: String(m._id), label: m.name, unit: m.unit || '' }));
   const live = party ? await liveRates(party._id) : new Map();
   const rows = fields.lines.map((l) => {
