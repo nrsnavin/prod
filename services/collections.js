@@ -10,6 +10,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require('../utils/factoryDay');
+const { indiaDay } = require('../utils/indiaLabel');
 const Customer = require('../models/Customer');
 const CollectionNote = require('../models/CollectionNote');
 const outstanding = require('./outstanding');
@@ -20,7 +21,7 @@ const ledger = require('./aiLedger');
 const money = (n) => (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const { r2 } = require('../utils/money');
 const inr = (n) => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const day = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+const day = (d) => indiaDay(d, { day: '2-digit', month: 'short', year: 'numeric' });
 
 /**
  * The escalation ladder: a gentle reminder first, a firm one at three

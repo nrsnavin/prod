@@ -13,6 +13,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express = require('express');
+const { indiaDay } = require('../utils/indiaLabel');
 const mongoose = require('mongoose');
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const ErrorHandler     = require('../utils/ErrorHandler');
@@ -175,7 +176,7 @@ router.get('/', async (req, res) => {
       success: true, total, page: +page, pages: Math.ceil(total / +limit),
       data: jobs.map(j => ({
         id: j._id, jobOrderNo: j.jobOrderNo, jobNo: `J-${j.jobOrderNo}`,
-        date: new Date(j.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+        date: indiaDay(j.date, { day: '2-digit', month: 'short', year: 'numeric' }),
         status: j.status, customerName: j.customer?.name || '-',
         totalPlanned: (j.elastics || []).reduce((s, e) => s + (e.quantity || 0), 0),
         totalProduced: (j.producedElastic || []).reduce((s, e) => s + (e.quantity || 0), 0),

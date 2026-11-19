@@ -21,6 +21,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require('../utils/factoryDay');
+const { indiaDay } = require('../utils/indiaLabel');
 const AccountsSettings = require('../models/AccountsSettings');
 const BooksLockEvent = require('../models/BooksLockEvent');
 const { settingsDoc } = require('../utils/settingsDoc');
@@ -66,7 +67,7 @@ async function assertOpen(date, req, { cancelling = false } = {}) {
     req.lockOverrideUsed = reason.slice(0, 300);
     return reason;
   }
-  const when = new Date(lock).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  const when = indiaDay(lock, { day: '2-digit', month: 'short', year: 'numeric' });
   const err = new ErrorHandler(
     `The books are closed up to ${when} — this ${cancelling ? 'cancellation' : 'entry'} is dated inside the closed period. An admin can override with a reason.`,
     409

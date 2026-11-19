@@ -1,5 +1,7 @@
 "use strict";
 
+const { indiaDay } = require("../../utils/indiaLabel");
+
 // ══════════════════════════════════════════════════════════════
 //  QUOTATION → template render context
 //
@@ -17,7 +19,7 @@ function fmtDate(d) {
   if (!d) return "";
   const dt = new Date(d);
   if (isNaN(dt.getTime())) return "";
-  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  return indiaDay(dt, { day: "2-digit", month: "short", year: "numeric" });
 }
 
 // "Rs." not ₹ — the built-in PDF font cannot encode U+20B9 and renders

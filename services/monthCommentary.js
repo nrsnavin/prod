@@ -15,6 +15,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Invoice = require('../models/Invoice');
+const { indiaDay } = require('../utils/indiaLabel');
 const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
 const MaterialOutward = require('../models/MaterialOut.cjs');
@@ -38,7 +39,7 @@ function shift(month, by) {
   const d = new Date(Date.UTC(y, m - 1 + by, 1));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
 }
-const label = (month) => new Date(`${month}-15T00:00:00Z`).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+const label = (month) => indiaDay(`${month}-15T00:00:00Z`, { month: 'long', year: 'numeric' });
 
 async function salesOf(month) {
   const { from, to } = bounds(month);

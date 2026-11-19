@@ -24,6 +24,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Complaint = require('../models/Complaints');
+const { indiaDay } = require('../utils/indiaLabel');
 const { CATEGORIES } = require('../models/Complaints');
 const JobOrder = require('../models/JobOrder');
 const Customer = require('../models/Customer');
@@ -53,7 +54,7 @@ function keywordCategory(text) {
 // The object in the model's reply, or null (utils/modelJson.js).
 const { parseJson } = require('../utils/modelJson');
 
-const dmy = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+const dmy = (d) => indiaDay(d, { day: '2-digit', month: 'short', year: 'numeric' });
 
 /** The customer's recent jobs, newest first, with the elastics on each. */
 async function candidates(customer, { days = 240 } = {}) {

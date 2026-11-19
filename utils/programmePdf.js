@@ -22,6 +22,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const PDFDocument = require('pdfkit');
+const { indiaDateTime } = require('./indiaLabel');
 const {
   INK, MUTED, RULE, HEADER_BG,
   boxLabel, boxValue, box, titleBox, signatureStrip,
@@ -242,7 +243,7 @@ function finish(f, labels) {
 
   const { doc, left, width } = f;
   const range = doc.bufferedPageRange();
-  const gen = `Generated ${new Date().toLocaleString('en-IN', {
+  const gen = `Generated ${indiaDateTime(new Date(), {
     day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
   })}`;
   for (let i = 0; i < range.count; i++) {

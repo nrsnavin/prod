@@ -13,6 +13,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express  = require("express");
+const { indiaDay } = require("../utils/indiaLabel");
 const mongoose = require("mongoose");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler     = require("../utils/ErrorHandler");
@@ -110,7 +111,7 @@ router.post("/notes", catchAsyncErrors(async (req, res, next) => {
     if (kind === "credit" && docType === "Invoice") {
       const lim = creditNoteLimit.check(target.invoiceDate, date);
       if (lim.past && !b.financial) {
-        const err = new ErrorHandler(`A GST credit note against ${target.invoiceNumber} could be declared only until ${lim.limit.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })} (s.34(2)). Issue it as a financial credit note instead: the customer's account comes down, no GST moves.`, 400);
+        const err = new ErrorHandler(`A GST credit note against ${target.invoiceNumber} could be declared only until ${indiaDay(lim.limit, { day: "2-digit", month: "short", year: "numeric" })} (s.34(2)). Issue it as a financial credit note instead: the customer's account comes down, no GST moves.`, 400);
         err.code = "CN_TIME_LIMIT"; err.details = { limit: lim.limit };
         throw err;
       }

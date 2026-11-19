@@ -6,6 +6,7 @@
 // (date,shift)) so re-marking the same shift doesn't spam.
 
 const factoryDay = require("./factoryDay");
+const { indiaDay } = require("./indiaLabel");
 const Attendance = require("../models/Attendence.js");
 const { notify } = require("./notify.js");
 
@@ -60,8 +61,7 @@ async function maybeFireAttendanceCrashed({ date, shift }) {
 
     const dateKey = day.toISOString().slice(0, 10);
     await notify("attendanceCrashedToday", {
-      dateLabel:         day.toLocaleDateString("en-IN",
-                           { day: "2-digit", month: "short", year: "numeric" }),
+      dateLabel:         indiaDay(day, { day: "2-digit", month: "short", year: "numeric" }),
       shift,
       present:           today,
       baseline:          Math.round(baseline * 10) / 10,

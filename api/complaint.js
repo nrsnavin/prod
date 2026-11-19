@@ -29,6 +29,7 @@
 "use strict";
 
 const express  = require("express");
+const { indiaDay } = require("../utils/indiaLabel");
 const mongoose = require("mongoose");
 const router   = express.Router();
 
@@ -231,7 +232,7 @@ router.post(
     if (text.length < 10) return next(new ErrorHandler("The reply is empty", 400));
     const c = await Complaint.findById(req.params.id).select("feedback").lean();
     if (!c) return next(new ErrorHandler("Complaint not found", 404));
-    const stamp = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    const stamp = indiaDay(new Date(), { day: "2-digit", month: "short", year: "numeric" });
     const note = `Reply sent ${stamp}${req.user?.name ? ` by ${req.user.name}` : ""}:\n${text.slice(0, 2000)}`;
     const feedback = c.feedback ? `${c.feedback}\n\n${note}` : note;
     await Complaint.updateOne({ _id: c._id }, { $set: { feedback } });

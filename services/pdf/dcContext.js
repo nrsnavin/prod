@@ -1,5 +1,7 @@
 "use strict";
 
+const { indiaDay } = require("../../utils/indiaLabel");
+
 // ══════════════════════════════════════════════════════════════
 //  DELIVERY-CHALLAN → template render context
 //
@@ -13,7 +15,7 @@ function fmtDate(d) {
   if (!d) return "";
   const dt = new Date(d);
   if (isNaN(dt.getTime())) return "";
-  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  return indiaDay(dt, { day: "2-digit", month: "short", year: "numeric" });
 }
 
 function dcToContext(dc, branding = {}) {

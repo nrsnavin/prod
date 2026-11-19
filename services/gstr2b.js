@@ -21,6 +21,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Gstr2bEntry = require('../models/Gstr2bEntry');
+const { indiaDay } = require('../utils/indiaLabel');
 const cal = require('../utils/bizDates');
 const SupplierBill = require('../models/SupplierBill');
 const AccountNote = require('../models/AccountNote');
@@ -192,7 +193,7 @@ async function summary(period) {
  */
 async function followUps(period) {
   const [y, m] = period.split('-').map(Number);
-  const month = new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const month = indiaDay(new Date(Date.UTC(y, m - 1, 1)), { month: 'long', year: 'numeric' });
   const bills = await SupplierBill.find({ status: { $ne: 'cancelled' }, 'gstr2b.period': period, 'gstr2b.status': { $in: ['missing', 'mismatch'] } })
     .select('billNo supplierBillNo supplier supplierName supplierGstin billDate totals gstr2b').sort({ billDate: 1 }).lean();
   const Supplier = require('../models/Supplier');
@@ -209,7 +210,7 @@ async function followUps(period) {
   for (const [id, list] of groups) {
     const sup = await Supplier.findById(id).select('name phoneNumber email contactPerson').lean();
     const tax = r2(list.reduce((t, b) => t + taxOf(b.totals), 0));
-    const lines = list.map((b) => `• ${b.supplierBillNo} dated ${new Date(b.billDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })} — ₹${(b.totals?.grand || 0).toLocaleString('en-IN')} (GST ₹${taxOf(b.totals).toLocaleString('en-IN')})${b.gstr2b.status === 'mismatch' ? `: ${b.gstr2b.note || 'reported differently'}` : ': not reported'}`);
+    const lines = list.map((b) => `• ${b.supplierBillNo} dated ${indiaDay(b.billDate, { day: '2-digit', month: 'short', year: 'numeric' })} — ₹${(b.totals?.grand || 0).toLocaleString('en-IN')} (GST ₹${taxOf(b.totals).toLocaleString('en-IN')})${b.gstr2b.status === 'mismatch' ? `: ${b.gstr2b.note || 'reported differently'}` : ': not reported'}`);
     const hello = sup?.contactPerson ? `Dear ${sup.contactPerson},` : `Dear ${sup?.name || list[0].supplierName},`;
     out.push({
       supplier: id, name: sup?.name || list[0].supplierName, gstin: list[0].supplierGstin,

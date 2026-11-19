@@ -15,6 +15,7 @@
 // testable without a provider or a DB — see tests/utils/notify.test.js.
 
 const crypto               = require("crypto");
+const { indiaDay } = require("./indiaLabel");
 const mongoose             = require("mongoose");
 const NotificationSettings = require("../models/NotificationSettings.js");
 const Notification         = require("../models/Notification.js");
@@ -653,7 +654,7 @@ function _num(n) {
 function _date(d) {
   try {
     const dt = new Date(d);
-    return dt.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+    return indiaDay(dt, { day: "numeric", month: "short", year: "numeric" });
   } catch (_) {
     return String(d);
   }

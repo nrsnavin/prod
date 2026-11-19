@@ -11,6 +11,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express = require('express');
+const { indiaDay } = require('../utils/indiaLabel');
 const mongoose = require('mongoose');
 const { sendError } = require('../utils/routeError');
 const JobOrder    = require('../models/JobOrder');
@@ -316,7 +317,7 @@ router.get('/:jobId', async (req, res) => {
       .sort({ date: 1, _id: 1 })
       .lean();
 
-    const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : null;
+    const fmtDate = d => d ? indiaDay(d, { day: '2-digit', month: 'short', year: 'numeric' }) : null;
     const mapElasticQty = arr => (arr || []).map(e => ({ elasticId: e.elastic?._id || null, elasticName: e.elastic?.name || 'Unknown', quantity: e.quantity || 0 }));
     const fpUser = u => u ? { name: u.name, role: u.role } : null;
 

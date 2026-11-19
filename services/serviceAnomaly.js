@@ -59,6 +59,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Machine = require('../models/Machine');
+const { indiaDay } = require('../utils/indiaLabel');
 const MachineServiceBill = require('../models/MachineServiceBill');
 const ServiceAnomalyFeedback = require('../models/ServiceAnomalyFeedback');
 
@@ -479,7 +480,7 @@ function duplicateBills(logs) {
       title:   `${rows.length} identical amounts from one vendor on one day`,
       detail:
         `₹${Math.round(Number(rows[0].bill.amount) || 0).toLocaleString('en-IN')} from ` +
-        `${rows[0].bill.vendor} on ${new Date(rows[0].bill.billDate).toLocaleDateString('en-IN')}, ` +
+        `${rows[0].bill.vendor} on ${indiaDay(rows[0].bill.billDate, {})}, ` +
         `filed ${rows.length} times.`,
       innocent:
         'A vendor doing the same job on several looms in a day bills the ' +

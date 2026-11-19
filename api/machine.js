@@ -1,6 +1,7 @@
 "use strict";
 
 const express = require("express");
+const { indiaDay } = require("../utils/indiaLabel");
 const { refreshOpenShiftHeads } = require("../utils/machineHeads");
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { renderPdf } = require("../utils/renderPdf");
@@ -1430,11 +1431,11 @@ router.get(
       if (serviceOverdue) {
         score -= 20;
         reasons.push({ severity: "high", label: "Service overdue",
-          detail: `Was due ${nextService.toLocaleDateString("en-IN")}.` });
+          detail: `Was due ${indiaDay(nextService, {})}.` });
       } else if (serviceDueSoon) {
         score -= 8;
         reasons.push({ severity: "low", label: "Service due soon",
-          detail: `Due ${nextService.toLocaleDateString("en-IN")}.` });
+          detail: `Due ${indiaDay(nextService, {})}.` });
       }
       if (m.status === "maintenance") {
         score -= 10;
@@ -1521,7 +1522,7 @@ router.get(
       `Machine ${machine.ID} (${machine.manufacturer || "?"}, ${machine.NoOfHead || "?"} heads), status: ${machine.status}.`,
       recentAvg != null ? `Recent 7d avg ${recentAvg} m/shift vs ${baseAvg} m baseline (${dropPct}% ${dropPct > 0 ? "drop" : "change"}).` : "No recent production data.",
       `Issues in last 30d: ${issues.length}${issues.length ? " — " + issues.map((i) => `${i.title} [${i.severity}/${i.status}]`).join("; ") : ""}.`,
-      nextService ? `Next service ${nextService.toLocaleDateString("en-IN")}${serviceOverdue ? " (OVERDUE)" : ""}.` : "No scheduled service.",
+      nextService ? `Next service ${indiaDay(nextService, {})}${serviceOverdue ? " (OVERDUE)" : ""}.` : "No scheduled service.",
     ].join("\n");
 
     const claude = anthropic();

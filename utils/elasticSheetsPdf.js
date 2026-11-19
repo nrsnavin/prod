@@ -14,6 +14,7 @@
 // price list prints the rate it is offered at, worked out by the route.
 
 const PDFDocument = require('pdfkit');
+const { indiaDay } = require('./indiaLabel');
 const { INK, MUTED, RULE, HEADER_BG, boxLabel, boxValue, box, titleBox } = require('./sapForm');
 
 const _num = (v, dp = 2) => {
@@ -30,7 +31,7 @@ const _money = (v) => {
 const _date = (d) => {
   const dt = d ? new Date(d) : new Date();
   return Number.isNaN(dt.getTime()) ? '—'
-    : dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    : indiaDay(dt, { day: '2-digit', month: 'short', year: 'numeric' });
 };
 
 function _buffer(doc) {

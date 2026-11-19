@@ -1,6 +1,7 @@
 "use strict";
 
 const express          = require("express");
+const { indiaDay } = require("../utils/indiaLabel");
 const router           = express.Router();
 const mongoose         = require("mongoose");
 
@@ -228,7 +229,7 @@ router.get("/list", catchAsyncErrors(async (req, res, next) => {
 const { renderPdf } = require("../utils/renderPdf");
 const { getPdfBranding } = require("../services/documentSettings.js");
 
-const dateLabel = (d) => (d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
+const dateLabel = (d) => (d ? indiaDay(d, { day: "2-digit", month: "short", year: "numeric" }) : "");
 const statusLabel = (s) => String(s || "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 router.get("/:id/programme.pdf", catchAsyncErrors(async (req, res, next) => {

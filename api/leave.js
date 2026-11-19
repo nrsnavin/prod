@@ -15,6 +15,7 @@
 // ══════════════════════════════════════════════════════════════
 'use strict';
 const factoryDay = require('../utils/factoryDay');
+const { indiaDay } = require('../utils/indiaLabel');
 const express      = require('express');
 const { sendError } = require('../utils/routeError');
 const ErrorHandler = require('../utils/ErrorHandler');
@@ -67,8 +68,7 @@ router.use(ownRecordsOr({
 
 function toISODate(d)   { return new Date(d).toISOString().split('T')[0]; }
 function toDateLabel(d) {
-  return new Date(d).toLocaleDateString('en-IN',
-    { day:'2-digit', month:'short', year:'numeric' });
+  return indiaDay(d, { day:'2-digit', month:'short', year:'numeric' });
 }
 
 function fmtLeave(l) {

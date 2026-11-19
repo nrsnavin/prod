@@ -18,6 +18,7 @@
 // arithmetic can be followed down the page with a finger.
 
 const PDFDocument = require('pdfkit');
+const { indiaDateTime, indiaDay } = require('./indiaLabel');
 const {
   INK, MUTED, RULE, HEADER_BG, ALERT_BG, ALERT_INK,
   boxLabel, boxValue, box, titleBox, signatureStrip,
@@ -39,7 +40,7 @@ const _date = (d) => {
   if (!d) return '—';
   const dt = new Date(d);
   if (Number.isNaN(dt.getTime())) return '—';
-  return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' });
+  return indiaDay(dt, { day: '2-digit', month: 'short', year: '2-digit' });
 };
 
 /** "01 Mar 25 — 31 Mar 25", or an honest phrase when an end is open. */
@@ -315,7 +316,7 @@ async function buildMaterialLedgerPdf(data) {
 
   // ── Footer on every page ────────────────────────────────────────
   const range = doc.bufferedPageRange();
-  const genLabel = `Generated ${new Date().toLocaleString('en-IN', {
+  const genLabel = `Generated ${indiaDateTime(new Date(), {
     day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
   })}`;
   for (let i = 0; i < range.count; i++) {

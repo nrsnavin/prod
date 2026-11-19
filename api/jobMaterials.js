@@ -14,6 +14,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express = require('express');
+const { indiaDay } = require('../utils/indiaLabel');
 const { renderPdf } = require('../utils/renderPdf');
 const { onceAtATime }  = require('../utils/onceAtATime');
 const { sendError } = require('../utils/routeError');
@@ -161,13 +162,11 @@ async function _buildMrpData(jobId) {
     orderNo:         job.order?.orderNo ?? null,
     customerPo:      job.order?.po || "",
     supplyDateLabel: job.order?.supplyDate
-      ? new Date(job.order.supplyDate).toLocaleDateString("en-IN",
-          { day: "2-digit", month: "short", year: "numeric" })
+      ? indiaDay(job.order.supplyDate, { day: "2-digit", month: "short", year: "numeric" })
       : "",
     customerName:    job.customer?.name || "",
     dateLabel:       job.date
-      ? new Date(job.date).toLocaleDateString("en-IN",
-          { day: "2-digit", month: "short", year: "numeric" })
+      ? indiaDay(job.date, { day: "2-digit", month: "short", year: "numeric" })
       : "",
     status:          job.status,
     productionMode:  job.productionMode || "in_house",

@@ -15,6 +15,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const PDFDocument = require('pdfkit');
+const { indiaDay } = require('../utils/indiaLabel');
 const { latin1 } = require('../utils/pdfLatin');
 const { drawLine, hasOtherScript } = require('../utils/pdfScripts');
 
@@ -42,7 +43,7 @@ function writeBonusCertificate(record, config, year, out) {
   }
   if (config?.bonusDate) {
     doc.text(
-      `Payout date: ${new Date(config.bonusDate).toLocaleDateString("en-IN", { day:"2-digit", month:"long", year:"numeric" })}`,
+      `Payout date: ${indiaDay(config.bonusDate, { day:"2-digit", month:"long", year:"numeric" })}`,
       50, 86
     );
   }
@@ -108,7 +109,7 @@ function writeBonusCertificate(record, config, year, out) {
      .text(`Status: ${record.status?.toUpperCase() || "PENDING"}`, 50, statusY);
   if (record.status === "paid" && record.paidAt) {
     doc.fillColor("#475569").font("Helvetica").fontSize(10)
-       .text(`Paid on ${new Date(record.paidAt).toLocaleDateString("en-IN", { day:"2-digit", month:"short", year:"numeric" })}`,
+       .text(`Paid on ${indiaDay(record.paidAt, { day:"2-digit", month:"short", year:"numeric" })}`,
             50, statusY + 16);
   }
 

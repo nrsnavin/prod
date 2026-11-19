@@ -19,6 +19,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require("../utils/factoryDay");
+const { indiaDay } = require("../utils/indiaLabel");
 const cal = require("../utils/bizDates");
 const express = require("express");
 const router = express.Router();
@@ -47,7 +48,7 @@ const { contentDisposition } = require("../utils/sendFile");
 const IRN_RE = /^[0-9a-f]{64}$/i;
 const fileName = (s) => String(s || "document").replace(/[\/\\]/g, "-").replace(/"/g, "");
 const money = (n) => (Number(n) || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const dmy = (d) => new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+const dmy = (d) => indiaDay(d, { day: "2-digit", month: "short", year: "numeric" });
 
 async function loadNote(req, next) {
   if (!isId(req.params.id)) { next(new ErrorHandler("Note not found", 404)); return null; }

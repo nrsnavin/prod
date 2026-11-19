@@ -1,4 +1,6 @@
 "use strict";
+
+const { indiaDay } = require("./indiaLabel");
 // ═════════════════════════════════════════════════════════════════
 //  Production analytics — pure stat + gamification helpers.
 //
@@ -42,11 +44,10 @@ function toISODate(d) {
   return `${x.getFullYear()}-${m}-${day}`;
 }
 function toDateLabel(d)  {
-  return new Date(d).toLocaleDateString('en-IN',
-    { day:'2-digit', month:'short', year:'numeric' });
+  return indiaDay(d, { day:'2-digit', month:'short', year:'numeric' });
 }
 function toDayOfWeek(d)  {
-  return new Date(d).toLocaleDateString('en-IN', { weekday:'short' });
+  return indiaDay(d, { weekday:'short' });
 }
 function getDayIndex(d)  { return new Date(d).getDay(); } // 0=Sun
 

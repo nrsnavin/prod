@@ -19,6 +19,7 @@
 //   S ≥ 90% → ×1.00   A ≥ 75% → ×0.75   B ≥ 60% → ×0.50   C < 60% → ×0.25
 
 const express        = require("express");
+const { indiaDay } = require("../utils/indiaLabel");
 const router         = express.Router();
 const mongoose       = require("mongoose");
 
@@ -330,7 +331,7 @@ router.post(
     if (!isDiwaliMonth(cfg)) {
       const d = new Date(cfg.bonusDate);
       return next(new ErrorHandler(
-        `Bonus can only be generated in the Diwali month (${d.toLocaleString("en-IN", { month: "long", year: "numeric" })}). Use the preview until then.`,
+        `Bonus can only be generated in the Diwali month (${indiaDay(d, { month: "long", year: "numeric" })}). Use the preview until then.`,
         400
       ));
     }

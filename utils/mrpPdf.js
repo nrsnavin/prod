@@ -13,6 +13,7 @@
 //   • Signature block: Prepared by / Approved by / Received by
 
 const PDFDocument = require("pdfkit");
+const { indiaDateTime } = require("./indiaLabel");
 const {
   INK, MUTED, RULE, HEADER_BG, ALERT_BG, ALERT_INK,
   boxLabel, boxValue, box, titleBox, signatureStrip,
@@ -304,7 +305,7 @@ async function buildMrpPdf(data) {
 
   // ── Footer on every page: generated timestamp + page numbers ────
   const range = doc.bufferedPageRange();
-  const genLabel = `Generated ${new Date().toLocaleString("en-IN", {
+  const genLabel = `Generated ${indiaDateTime(new Date(), {
     day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
   })}`;
   for (let i = 0; i < range.count; i++) {

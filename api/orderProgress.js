@@ -16,6 +16,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
+const { indiaDay } = require("../utils/indiaLabel");
 const { renderPdf } = require("../utils/renderPdf");
 const { isAuthenticated, isAdmin } = require("../middleware/auth.js");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors.js");
@@ -320,7 +321,7 @@ router.post(
 //  instead of chasing manually.
 // ═════════════════════════════════════════════════════════════════
 function _fmtDate(d) {
-  return d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '';
+  return d ? indiaDay(d, { day: '2-digit', month: 'short', year: 'numeric' }) : '';
 }
 function _draftCustomerUpdate({ customerName, orderNo, expectedDate, promised, lateWorkingDays }) {
   const name = customerName && customerName !== '—' ? customerName : 'Sir/Madam';

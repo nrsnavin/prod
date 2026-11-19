@@ -16,6 +16,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require('../utils/factoryDay');
+const { indiaDay } = require('../utils/indiaLabel');
 const cal = require('../utils/bizDates');
 const mongoose = require('mongoose');
 const SupplierBill = require('../models/SupplierBill');
@@ -42,7 +43,7 @@ const { getSettings } = require('./booksLock');
 const DAY = 86_400_000;
 const { r2 } = require('../utils/money');
 const fmt = (n) => (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
-const dmy = (d) => new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+const dmy = (d) => indiaDay(d, { day: '2-digit', month: 'short', year: 'numeric' });
 
 /** The last day ITC on an invoice of this date can be claimed: 30 Nov after its financial year. */
 function itcDeadline(date) {
@@ -295,7 +296,7 @@ function netCredits(rows, credit) {
   }).filter((r) => r.outstanding > 0.005);
 }
 
-const monthName = (y, m) => new Date(y, m, 1).toLocaleDateString('en-IN', { month: 'short', year: 'numeric' });
+const monthName = (y, m) => indiaDay(new Date(Date.UTC(y, m, 1)), { month: 'short', year: 'numeric' });
 
 /**
  * The day of the month salaries are usually paid, from the last six
@@ -552,7 +553,7 @@ async function closeChecklist(month) {
 
 /** The checklist as one WhatsApp message. */
 function checklistText(c, company = 'Balu Elastics') {
-  const monthName = new Date(c.from).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  const monthName = indiaDay(c.from, { month: 'long', year: 'numeric' });
   return [
     `*${company} — closing ${monthName}*`,
     `${c.done} of ${c.total} done`,

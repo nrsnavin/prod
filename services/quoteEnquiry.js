@@ -21,6 +21,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Elastic = require('../models/Elastic');
+const { indiaDay } = require('../utils/indiaLabel');
 const Customer = require('../models/Customer');
 const Quote = require('../models/Quote');
 const { rank } = require('../utils/fuzzyMatch');
@@ -113,7 +114,7 @@ function coverNote({ customerName, lines, neededBy }) {
     'Thank you for your enquiry. Our rates:',
     list || '• (rates to follow)',
     '',
-    neededBy ? `We will confirm delivery for ${new Date(`${neededBy}T00:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} once the order is placed.` : 'Delivery will be confirmed with the order.',
+    neededBy ? `We will confirm delivery for ${indiaDay(`${neededBy}T00:00:00`, { day: 'numeric', month: 'short' })} once the order is placed.` : 'Delivery will be confirmed with the order.',
     'Rates are valid for 30 days. We can send a sample on request.',
   ].join('\n');
 }

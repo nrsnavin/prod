@@ -23,6 +23,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const Customer = require('../models/Customer');
+const { indiaDay } = require('../utils/indiaLabel');
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 const ledger = require('./aiLedger');
 const { promptVersion } = require('../utils/aiPrompts');
@@ -141,7 +142,7 @@ async function readReply(text, { today = new Date(), refId = null } = {}) {
 }
 
 const WORDS = {
-  promise: (r) => `promises to pay${r.amount ? ` ₹${money(r.amount)}` : ''}${r.date ? ` by ${new Date(r.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}` : ''}`,
+  promise: (r) => `promises to pay${r.amount ? ` ₹${money(r.amount)}` : ''}${r.date ? ` by ${indiaDay(r.date, { day: '2-digit', month: 'short' })}` : ''}`,
   paid: (r) => `says it is paid${r.reference ? ` (ref ${r.reference})` : ''} — match it on the bank statement`,
   dispute: () => 'questions an invoice — call them',
   statement: () => 'asks for the statement',
@@ -168,7 +169,7 @@ async function handle({ from, text, customer, today = new Date() }) {
 
   const settings = await require('./booksLock').getSettings().catch(() => null);
   if (!settings?.collections?.acknowledgeReplies) return { read, ack: '' };
-  const ack = read.kind === 'promise' && read.date ? `Thank you — noted${read.amount ? ` ₹${money(read.amount)}` : ' your payment'} by ${new Date(read.date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}.`
+  const ack = read.kind === 'promise' && read.date ? `Thank you — noted${read.amount ? ` ₹${money(read.amount)}` : ' your payment'} by ${indiaDay(read.date, { day: '2-digit', month: 'short', year: 'numeric' })}.`
     : read.kind === 'paid' ? 'Thank you — we will match it with our bank and confirm.'
       : read.kind === 'statement' ? 'Thank you — our accounts team will send the statement shortly.'
         : read.kind === 'dispute' ? 'Thank you — our accounts team will look into it and call you.'

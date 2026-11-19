@@ -12,6 +12,7 @@
 // on the cadence the settings allow.
 
 const factoryDay = require("./factoryDay");
+const { indiaDay } = require("./indiaLabel");
 const Wastage         = require("../models/Wastage.js");
 const RawMaterial     = require("../models/RawMaterial.js");
 const MaterialOutward = require("../models/MaterialOut.cjs");
@@ -118,8 +119,7 @@ async function checkWastageAnomalyDay(now = new Date()) {
       { $group: { _id: "$reason", n: { $sum: 1 } } },
       { $sort: { n: -1 } }, { $limit: 1 },
     ]);
-    const dateLabel = startYday.toLocaleDateString("en-IN",
-      { day: "2-digit", month: "short", year: "numeric" });
+    const dateLabel = indiaDay(startYday, { day: "2-digit", month: "short", year: "numeric" });
 
     await notify("wastageAnomalyDay", {
       dateLabel,
@@ -127,7 +127,9 @@ async function checkWastageAnomalyDay(now = new Date()) {
       baseline:        Math.round(baseline),
       multiplier,
       topReason:       topReasonRows[0]?._id || null,
-      _entity: { type: "WastageDay", id: startYday.toISOString().slice(0, 10) },
+      // The India day, like the label: `startYday` is 18:30 UTC the
+      // evening before, so its UTC date named the day before that.
+      _entity: { type: "WastageDay", id: factoryDay.ymd(startYday) },
     });
   } catch (err) {
     console.warn(`[dailyAnomalyAlerts] wastageAnomalyDay: ${err.message}`);

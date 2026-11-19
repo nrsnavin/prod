@@ -11,6 +11,7 @@
 // can disagree is worse than having only one of them.
 
 const factoryDay = require('../utils/factoryDay');
+const { indiaDay } = require('../utils/indiaLabel');
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const JobOrder = require('../models/JobOrder');
@@ -18,7 +19,7 @@ const Elastic = require('../models/Elastic');
 
 const fmtDate = (d) =>
   d
-    ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+    ? indiaDay(d, { day: '2-digit', month: 'short', year: 'numeric' })
     : '';
 
 const num = (n) => Number(n) || 0;

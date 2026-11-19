@@ -1,6 +1,7 @@
 "use strict";
 
 const express           = require("express");
+const { indiaDay } = require("../utils/indiaLabel");
 const router            = express.Router();
 const mongoose          = require("mongoose");
 const Covering          = require("../models/Covering");
@@ -120,7 +121,7 @@ router.get(
       jobOrderNo: covering.job?.jobOrderNo ?? null,
       customerName: covering.job?.customer?.name || "",
       orderNo: covering.job?.order?.orderNo ?? null,
-      dateLabel: d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "",
+      dateLabel: d ? indiaDay(d, { day: "2-digit", month: "short", year: "numeric" }) : "",
       status: String(covering.status || "").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()),
       sheetRef: sheetRefOf(covering._id),
       remarks: covering.remarks || "",
@@ -605,7 +606,7 @@ const beamSheetUpload = multer({
   limits: { fileSize: 8 * 1024 * 1024, files: MAX_PAGES },
 });
 const round3 = (n) => Math.round(n * 1000) / 1000;
-const dayLabel = (d) => (d ? new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "");
+const dayLabel = (d) => (d ? indiaDay(d, { day: "2-digit", month: "short", year: "numeric" }) : "");
 
 /** Each read row, marked against what is already recorded on the covering. */
 function markRows(rows, recorded) {
