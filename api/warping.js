@@ -15,7 +15,7 @@ const { nextNumber }   = require("../utils/sequence");
 const { drawFromLot, returnToLot } = require("../services/yarnLotService");
 const { buildBeamsFromTemplates } = require("../services/warpingTemplate");
 const { plannedLotsForJob, distinctLots } = require("../services/yarnLotTrail");
-const { earmarksForJob, consumeEarmark } = require("../services/lotAllocation");
+const { earmarksForJob, spendEarmark, restoreEarmark } = require("../services/lotAllocation");
 const { checkWarpingIssued } = require("../services/warpingIssueReadiness");
 const ErrorHandler     = require("../utils/ErrorHandler");
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
@@ -1432,6 +1432,7 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
   // choosing.
   const jobForOrder = await JobOrder.findById(warping.job).select("order").lean();
   const earmarks = await earmarksForJob(jobForOrder);
+  let lotOverride = null;
 
   if (earmarks.size > 0) {
     const offMark = [];
@@ -1460,19 +1461,13 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
         err.details = { offMark };
         return next(err);
       }
-      // Recorded on the job's audit trail, where a shade query starts.
-      try {
-        await JobOrder.updateOne(
-          { _id: warping.job },
-          { $push: { fingerprints: buildFingerprint(ACTION_CODES.WARPING_STARTED, {
-            entityId: warping.job,
-            actor: actorFromRequest(req),
-            meta: { lotOverride: true, reason, detail: offMark },
-          }) } }
-        );
-      } catch (fpErr) {
-        console.warn("Lot override fingerprint failed:", fpErr.message);
-      }
+      // Recorded on the job's audit trail, where a shade query starts —
+      // but with the batch, below, not here. Written at this point it
+      // went on the trail before the batch existed, so a batch that was
+      // then refused (a beam already on another batch) left the job
+      // saying a lot had been drawn off the earmark for a batch nobody
+      // can find.
+      lotOverride = { reason, detail: offMark };
     }
   }
 
@@ -1583,6 +1578,18 @@ router.post("/batch/create", isAdmin("admin", "production"), catchAsyncErrors(as
         createdBy: req.user?._id,
       }], { session });
       batch = created;
+
+      if (lotOverride) {
+        await JobOrder.updateOne(
+          { _id: warping.job },
+          { $push: { fingerprints: buildFingerprint(ACTION_CODES.WARPING_LOT_OVERRIDE, {
+            entityId: warping.job,
+            actor: actorFromRequest(req),
+            meta: { lotOverride: true, batchNo: created.batchNo, reason: lotOverride.reason, detail: lotOverride.detail },
+          }) } },
+          { session }
+        );
+      }
     });
   } catch (err) {
     return next(err);
@@ -1650,15 +1657,19 @@ router.post("/batch/:id/issue", isAdmin("admin", "production"), catchAsyncErrors
         .select("order").session(session).lean();
       const orderId = jobRef?.order;
       if (orderId) {
+        let spentAny = false;
         for (const a of claimed.allocations) {
-          await consumeEarmark(orderId, a.rawMaterial, a.yarnLot, a.quantity, session);
+          // Kept on the batch: cancelling it gives the order this back.
+          a.earmarkSpent = await spendEarmark(orderId, a.rawMaterial, a.yarnLot, a.quantity, session);
+          if (a.earmarkSpent > 0) spentAny = true;
         }
+        if (spentAny) await claimed.save({ session });
       }
 
       batch = claimed;
     });
 
-    const fp = buildFingerprint(ACTION_CODES.WARPING_STARTED, {
+    const fp = buildFingerprint(ACTION_CODES.WARPING_BATCH_ISSUED, {
       entityId: batch.job,
       actor: actorFromRequest(req),
       meta: {
@@ -1706,6 +1717,14 @@ router.post("/batch/:id/complete", isAdmin("admin", "production"), catchAsyncErr
 // ── PATCH /warping/batch/:id/cancel ───────────────────────────
 // Cancelling a batch that was issued puts the yarn back on the rack.
 // A completed batch is history and cannot be cancelled — the beams exist.
+//
+// Nor can an issued batch whose WARPING is completed, for the same
+// reason. Completing a warping is refused until its yarn has been
+// issued (services/warpingIssueReadiness.js), because otherwise the lot
+// ledger claims yarn that is physically in the beams. This route was
+// the way round that rule: complete the warping, then cancel its batch,
+// and the yarn was back "on the rack" behind beams that were built from
+// it. One rule, two doors; now both are checked.
 router.patch("/batch/:id/cancel", isAdmin("admin", "production"), catchAsyncErrors(async (req, res, next) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     return next(new ErrorHandler("Invalid batch id", 400));
@@ -1731,15 +1750,60 @@ router.patch("/batch/:id/cancel", isAdmin("admin", "production"), catchAsyncErro
       // no longer say whether the yarn ever left the rack. `issuedDate`
       // survives the update untouched and answers that instead.
       if (claimed.issuedDate) {
+        const parent = await Warping.findById(claimed.warping).select("status").session(session).lean();
+        if (parent?.status === "completed") {
+          const err = new ErrorHandler(
+            `The warping is completed, so the yarn on batch ${claimed.batchNo} is in beams that are built ` +
+            `and cannot be put back on the rack. If a lot's figure is wrong, correct the lot.`,
+            409
+          );
+          err.code = "WARPING_COMPLETED";
+          throw err;
+        }
+
         for (const a of claimed.allocations) {
           await returnToLot(a.yarnLot, a.quantity, session, {
             warpingBatch: claimed._id, refNo: claimed.batchNo,
             reason: 'batch cancelled',
           });
         }
+
+        // The yarn is back, and the order still needs it: give it the
+        // promise the issue spent. See restoreEarmark.
+        const jobRef = await JobOrder.findById(claimed.job).select("order").session(session).lean();
+        if (jobRef?.order) {
+          for (const a of claimed.allocations) {
+            if (!(a.earmarkSpent > 0)) continue;
+            await restoreEarmark(
+              jobRef.order, a.rawMaterial, a.yarnLot, a.earmarkSpent,
+              { lotNo: a.lotNo, shade: a.shade }, session
+            );
+          }
+        }
       }
       batch = claimed;
     });
+
+    // On the job's trail, like the issue: a cancelled batch is yarn that
+    // went back, and that is asked about. Best-effort for the same
+    // reason — the yarn has moved either way.
+    const reason = String(req.body?.reason || req.body?.remarks || "").trim();
+    try {
+      await JobOrder.updateOne({ _id: batch.job }, { $push: { fingerprints: buildFingerprint(ACTION_CODES.WARPING_BATCH_CANCELLED, {
+        entityId: batch.job,
+        actor: actorFromRequest(req),
+        meta: {
+          batchNo: batch.batchNo,
+          beamNos: batch.beamNos,
+          yarnReturned: !!batch.issuedDate,
+          ...(batch.issuedDate ? { lots: batch.allocations.map((a) => `${a.lotNo} (${a.quantity})`) } : {}),
+          ...(reason ? { reason } : {}),
+        },
+      }) } });
+    } catch (fpErr) {
+      console.warn("Batch cancel fingerprint failed:", fpErr.message);
+    }
+
     res.json({ success: true, batch });
   } catch (err) {
     return next(err);

@@ -59,6 +59,13 @@ const ACTION_CODES = Object.freeze({
   // cancel routes wrote nothing to the trail — the job simply sat in
   // preparatory with no record of why.
   WARPING_CANCELLED:        'WARPING_CANCELLED',
+  // A warping batch is where yarn actually leaves a dye lot, or goes
+  // back to it. These three were all written as WARPING_STARTED, so a
+  // job's trail read "Warping Started" once for the start and again for
+  // every batch issued and every lot drawn off the order's earmark.
+  WARPING_BATCH_ISSUED:     'WARPING_BATCH_ISSUED',
+  WARPING_BATCH_CANCELLED:  'WARPING_BATCH_CANCELLED',
+  WARPING_LOT_OVERRIDE:     'WARPING_LOT_OVERRIDE',
   COVERING_STARTED:         'COVERING_STARTED',
   COVERING_COMPLETED:       'COVERING_COMPLETED',
   COVERING_CANCELLED:       'COVERING_CANCELLED',
@@ -173,6 +180,9 @@ const ACTION_LABELS = Object.freeze({
   WARPING_STARTED:          'Warping Started',
   WARPING_COMPLETED:        'Warping Completed',
   WARPING_CANCELLED:        'Warping Cancelled',
+  WARPING_BATCH_ISSUED:     'Yarn Issued to Warping',
+  WARPING_BATCH_CANCELLED:  'Warping Batch Cancelled',
+  WARPING_LOT_OVERRIDE:     'Lot Drawn Off the Earmark',
   COVERING_STARTED:         'Covering Started',
   COVERING_COMPLETED:       'Covering Completed',
   COVERING_CANCELLED:       'Covering Cancelled',

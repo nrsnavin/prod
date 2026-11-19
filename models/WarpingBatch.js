@@ -39,6 +39,14 @@ const AllocationSchema = new mongoose.Schema(
 
     /** Kg drawn from this lot for this batch. */
     quantity: { type: Number, required: true, min: 0 },
+
+    /**
+     * Kg of the order's earmark on this lot that issuing the batch
+     * spent (services/lotAllocation.js). Kept so that cancelling the
+     * batch gives the order back exactly that much: a draw can be more
+     * than was promised, so the quantity above does not say.
+     */
+    earmarkSpent: { type: Number, default: 0, min: 0 },
   },
   { _id: false }
 );

@@ -244,29 +244,34 @@ async function earmarksForJob(job, session) {
  * bag), and that overdraw is a fact about the lot, not a negative
  * promise. It shows up as consumption, which is where it belongs.
  *
- * Best effort by design — returns false when there is nothing to
+ * Best effort by design — spends nothing when there is nothing to
  * spend, which is the ordinary case for an order that never earmarked
  * anything.
+ *
+ * @returns {Promise<number>} kg of the promise spent (0 when none). The
+ *   batch keeps this figure, so that cancelling it can give the order
+ *   exactly that much back — see restoreEarmark.
  */
-async function consumeEarmark(orderId, materialId, lotId, quantity, session) {
+async function spendEarmark(orderId, materialId, lotId, quantity, session) {
   const qty = Number(quantity) || 0;
-  if (qty <= 0) return false;
-  if (!orderId || !mongoose.Types.ObjectId.isValid(String(orderId))) return false;
+  if (qty <= 0) return 0;
+  if (!orderId || !mongoose.Types.ObjectId.isValid(String(orderId))) return 0;
 
   const q = Order.findById(orderId).session(session || null);
   const order = await q;
-  if (!order) return false;
+  if (!order) return 0;
 
   const rm = (order.rawMaterialRequired || []).find(
     (r) => String(r.rawMaterial) === String(materialId)
   );
-  if (!rm || !rm.lots?.length) return false;
+  if (!rm || !rm.lots?.length) return 0;
 
   const row = rm.lots.find((l) => String(l.yarnLot) === String(lotId));
-  if (!row) return false;
+  if (!row) return 0;
 
-  const next = round3(Math.max(0, (Number(row.quantity) || 0) - qty));
-  if (next === Number(row.quantity)) return false;
+  const had = round3(row.quantity);
+  const next = round3(Math.max(0, had - qty));
+  if (next === had) return 0;
 
   row.quantity = next;
   // A promise drawn to nothing is not a promise. Leaving a 0 kg row on
@@ -276,7 +281,68 @@ async function consumeEarmark(orderId, materialId, lotId, quantity, session) {
     rm.lots = rm.lots.filter((l) => String(l.yarnLot) !== String(lotId));
   }
   await order.save({ session });
-  return true;
+  return round3(had - next);
+}
+
+/** spendEarmark, answering only whether anything was spent. */
+async function consumeEarmark(orderId, materialId, lotId, quantity, session) {
+  return (await spendEarmark(orderId, materialId, lotId, quantity, session)) > 0;
+}
+
+/**
+ * Give an order back the promise a cancelled batch had spent.
+ *
+ * Issuing a batch spends the earmark down, because the yarn has left
+ * the rack. Cancelling that batch puts the yarn back — and the order
+ * still needs it, for the batch that will be raised in its place. With
+ * nothing here, the kilos went back to the lot as FREE: any other order
+ * could be promised them, the order's own panel showed less set aside
+ * than its planner had chosen, and drawing the very same lot again was
+ * refused as "not one of the lots this order set aside".
+ *
+ * Only what the batch spent comes back (`quantity` is the figure
+ * spendEarmark returned), only to an order that still holds yarn, and
+ * never past what the order needs of the material: if its planner has
+ * since earmarked other lots up to the requirement, there is no room
+ * left and nothing is added.
+ *
+ * @param {{lotNo?: string, shade?: string}} snap  for a row that had
+ *   been spent to nothing and removed
+ * @returns {Promise<number>} kg restored
+ */
+async function restoreEarmark(orderId, materialId, lotId, quantity, snap = {}, session) {
+  const qty = round3(quantity);
+  if (qty <= 0) return 0;
+  if (!orderId || !mongoose.Types.ObjectId.isValid(String(orderId))) return 0;
+
+  const order = await Order.findById(orderId).session(session || null);
+  if (!order || !LIVE_ORDER_STATUSES.includes(order.status)) return 0;
+
+  const rm = (order.rawMaterialRequired || []).find(
+    (r) => String(r.rawMaterial) === String(materialId)
+  );
+  if (!rm) return 0;
+
+  const held = (rm.lots || []).reduce((t, l) => round3(t + (Number(l.quantity) || 0)), 0);
+  const required = round3(rm.requiredWeight);
+  const room = required > 0 ? Math.max(0, round3(required - held)) : qty;
+  const give = Math.min(qty, room);
+  if (!(give > 0)) return 0;
+
+  const row = (rm.lots || []).find((l) => String(l.yarnLot) === String(lotId));
+  if (row) {
+    row.quantity = round3((Number(row.quantity) || 0) + give);
+  } else {
+    rm.lots.push({
+      yarnLot: lotId,
+      lotNo: snap.lotNo || '',
+      shade: snap.shade || '',
+      quantity: give,
+      assignedAt: new Date(),
+    });
+  }
+  await order.save({ session });
+  return give;
 }
 
 /**
@@ -469,6 +535,8 @@ module.exports = {
   earmarksForOrder,
   earmarksForJob,
   consumeEarmark,
+  spendEarmark,
+  restoreEarmark,
   releaseAllEarmarks,
   carryEarmarksForward,
   assignableLots,
