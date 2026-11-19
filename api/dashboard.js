@@ -122,8 +122,15 @@ async function computeKpis() {
     // `$expr` comparing two fields of the same document cannot use an
     // index, so this is a collection scan whatever is done — and it
     // used to be two identical ones, a find and a count, side by side.
+    //
+    // Not the retired ones. A material is retired at nothing in stock,
+    // and nothing is at or under any minimum: every yarn the mill had
+    // stopped buying stayed in this count for good, and — lowest stock
+    // first — led the five names under it. The rule is the materials
+    // list's own (stock at or under minimum, less what is retired), so
+    // the tile says what that list shows.
     RawMaterial.aggregate([
-      { $match: { $expr: { $lte: ["$stock", "$minStock"] } } },
+      { $match: { archived: { $ne: true }, $expr: { $lte: ["$stock", "$minStock"] } } },
       {
         $facet: {
           items: [

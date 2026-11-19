@@ -199,8 +199,11 @@ async function overview(role, { now = new Date() } = {}) {
       want('latePos') ? require('./poChaser').overdue({ now }).catch(() => []) : [],
       want('lowStock')
         ? RawMaterial.aggregate([
-            { $match: { $expr: { $lte: ['$stock', '$minStock'] } } },
-            { $facet: { items: [{ $sort: { stock: 1 } }, { $limit: 3 }, { $project: { name: 1, stock: 1, minStock: 1 } }], total: [{ $count: 'n' }] } },
+            // As the materials list flags them — stock at or under the
+            // minimum — and, like that list, not the retired ones: they
+            // sit at nothing for good and led this card (api/dashboard.js).
+            { $match: { archived: { $ne: true }, $expr: { $lte: ['$stock', '$minStock'] } } },
+            { $facet: { items: [{ $sort: { stock: 1, name: 1 } }, { $limit: 3 }, { $project: { name: 1, stock: 1, minStock: 1 } }], total: [{ $count: 'n' }] } },
           ])
         : [],
     ]),
@@ -252,9 +255,17 @@ async function overview(role, { now = new Date() } = {}) {
     items: latePos.slice(0, 3).map((p) => ({ title: `PO #${p.poNo} · ${p.supplier?.name || ''}`.trim(), detail: `${p.daysLate} day${p.daysLate === 1 ? '' : 's'} late${p.state === 'promised' && p.promisedDate ? `, promised ${fmt(p.promisedDate)}` : ''}`, to: `/purchase-orders/${p._id}` })),
   });
   const lowItems = low[0]?.items || [];
+  const whole = (n) => Math.round(Number(n) || 0).toLocaleString('en-IN');
   push({
-    key: 'lowStock', label: 'Materials below minimum', count: low[0]?.total?.[0]?.n || 0, tone: 'warning', to: '/materials',
-    items: lowItems.map((x) => ({ title: x.name, detail: `${Math.round(x.stock).toLocaleString('en-IN')} of ${Math.round(x.minStock).toLocaleString('en-IN')} minimum`, to: `/materials/${x._id}` })),
+    // Opens the list already narrowed to these, so the count is the page's.
+    key: 'lowStock', label: 'Materials at or below minimum', count: low[0]?.total?.[0]?.n || 0, tone: 'warning', to: '/materials?low=1',
+    items: lowItems.map((x) => ({
+      title: x.name,
+      // A material with no minimum is not "0 of 0 minimum": it has run
+      // out, and nobody has said how much of it to keep.
+      detail: Number(x.minStock) > 0 ? `${whole(x.stock)} of ${whole(x.minStock)} minimum` : 'Out of stock — no minimum set',
+      to: `/materials/${x._id}`,
+    })),
   });
 
   const out = { role: s.role, generatedAt: now, attention, ordersAtRisk: { count: risk.length, late: risk.filter((r) => r.state === 'late').length, top: risk[0] ? { orderNo: risk[0].orderNo, orderId: risk[0].orderId, detail: orderDetail(risk[0]) } : null } };
