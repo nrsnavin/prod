@@ -129,6 +129,64 @@ describe('joining the queue', () => {
     expect(await DispatchItem.countDocuments({ sample: s._id })).toBe(1);
     expect((await DispatchItem.findOne({ sample: s._id }).lean()).status).toBe('awaiting_urgency');
   });
+
+  // ── Found reading services/dispatchQueue.js line by line ──────────
+  //  A sample goes out, the customer sends it back, it is made again
+  //  and finished a second time. That is a second parcel. The entry was
+  //  "revived" only from cancelled, so the one that had GONE stayed
+  //  gone, and the second sample was never on the queue at all.
+  describe('a sample that goes out twice', () => {
+    let s, status, markGone;
+    beforeEach(async () => {
+      s = await SampleRequest.create({ sampleNo: 14, title: 'Hanger elastic', details: 'white', customerName: 'Fellows', status: 'in_progress' });
+      status = (st, note = 'done') => request(app).put(`/api/v2/sample/${s._id}/status`).set('Cookie', cookie(admin)).send({ status: st, note });
+      markGone = async () => {
+        const item = await DispatchItem.findOne({ sample: s._id });
+        return request(app).post(`/api/v2/dispatch/${item._id}/dispatched`).set('Cookie', cookie(packer)).send({ note: 'by courier' });
+      };
+      expect((await status('completed')).status).toBe(200);
+      expect((await markGone()).status).toBe(200);
+    });
+
+    test('sent back, reworked and finished again, it is to be sent again', async () => {
+      await status('in_progress', 'customer wants it softer');
+      // What went, went: taking the sample back does not unsend it.
+      expect((await DispatchItem.findOne({ sample: s._id }).lean()).status).toBe('dispatched');
+
+      expect((await status('completed', 'second trial')).status).toBe(200);
+      const again = await DispatchItem.findOne({ sample: s._id }).lean();
+      // Before: still "dispatched" — nothing told dispatch there was a second one.
+      expect(again).toMatchObject({ status: 'awaiting_urgency', urgency: null, dueAt: null, dispatchedAt: null, dispatchNote: '' });
+      expect(await DispatchItem.countDocuments({ sample: s._id })).toBe(1);
+      expect((await queue()).body.items.map((i) => i.ref)).toContain('Sample #14');
+    });
+
+    test('the first sending stays on its record', async () => {
+      await status('in_progress', 'customer wants it softer');
+      await status('completed', 'second trial');
+      const again = await DispatchItem.findOne({ sample: s._id }).lean();
+      expect(again.history.map((h) => h.action)).toEqual(['created', 'dispatched', 'reopened']);
+      expect(again.history[1]).toMatchObject({ note: 'by courier', byName: 'pandi' });
+      expect(again.history[2].note).toMatch(/finished again/i);
+    });
+
+    test('closing it and correcting that back to completed does not send it twice', async () => {
+      // Nothing was made again: an admin filed it closed, then put it back.
+      await status('closed', 'filed');
+      await status('completed', 'closed by mistake');
+      expect((await DispatchItem.findOne({ sample: s._id }).lean()).status).toBe('dispatched');
+    });
+  });
+
+  test('a job completed after its goods have gone stays gone', async () => {
+    const job = await jobAt('checking');
+    await advance(job, 'packing');
+    const item = await DispatchItem.findOne({ job: job._id });
+    await request(app).post(`/api/v2/dispatch/${item._id}/dispatched`).set('Cookie', cookie(packer)).send({});
+    expect((await advance(job, 'completed')).status).toBe(200);
+    // Completing is paperwork on the same goods, not a second lorry.
+    expect((await DispatchItem.findOne({ job: job._id }).lean()).status).toBe('dispatched');
+  });
 });
 
 describe('asking for the urgency', () => {

@@ -660,7 +660,10 @@ router.put(
     // anywhere else (reopened, closed unsent), it comes off it again —
     // unless it has already gone.
     if (status === 'completed') {
-      await dispatchQueue.enqueueSample(doc, { actor: who });
+      // Finished from a live status is work done (again): one already sent
+      // is to be sent again. Put back to completed from "closed" is a
+      // filing correction, and sends nothing twice.
+      await dispatchQueue.enqueueSample(doc, { actor: who, reworked: !TERMINAL_STATUSES.includes(from) });
     } else if (from === 'completed') {
       await dispatchQueue.cancelForSample(doc._id, `Sample ${status === 'closed' ? 'closed' : 'reopened'}`, { actor: who });
     }

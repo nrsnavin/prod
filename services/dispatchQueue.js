@@ -7,6 +7,14 @@
 //  request joins when it is completed. Each joins once: reaching the
 //  stage again revives the same entry rather than adding a second.
 //
+//  ── Gone is gone, except for a sample made again ─────────────────
+//  An entry that has been dispatched is left alone when its job reaches
+//  the stage again: completing a job after its goods left is paperwork on
+//  the same goods, not a second lorry. A SAMPLE is different. It goes
+//  out, the customer sends it back, it is reworked and finished a second
+//  time — that is a second parcel, and it waits for an urgency again
+//  (`reworked`). The first sending stays in the entry's history.
+//
 //  Called inside the job's own transaction (pass `session`), so a status
 //  change that fails leaves no queue entry behind, and one that succeeds
 //  always has one.
@@ -20,9 +28,13 @@ const Elastic = require('../models/Elastic');
 
 const who = (actor) => ({ by: actor?.by ?? null, byName: actor?.byName ?? '' });
 
-/** A cancelled entry back to waiting for an urgency; anything else left alone. */
-async function revive(item, actor, session) {
-  if (item.status !== 'cancelled') return item;
+/**
+ * A cancelled entry back to waiting for an urgency — and, with `resend`,
+ * one that has already gone. Anything else is left alone.
+ */
+async function revive(item, actor, session, { resend = false } = {}) {
+  const gone = item.status === 'dispatched';
+  if (item.status !== 'cancelled' && !(gone && resend)) return item;
   item.status = 'awaiting_urgency';
   item.urgency = null;
   item.dueAt = null;
@@ -30,8 +42,16 @@ async function revive(item, actor, session) {
   item.urgencySetByName = '';
   item.urgencySetAt = null;
   item.cancelReason = '';
+  if (gone) {
+    // The sending itself is in the history, with who and when.
+    item.dispatchedAt = null;
+    item.dispatchedByName = '';
+    item.dispatchNote = '';
+  }
   item.readyAt = new Date();
-  item.history.push({ action: 'reopened', ...who(actor), at: new Date() });
+  item.history.push({
+    action: 'reopened', note: gone ? 'Finished again after it was sent' : '', ...who(actor), at: new Date(),
+  });
   await item.save({ session });
   return item;
 }
@@ -66,10 +86,14 @@ async function enqueueJob(job, { session = null, actor = null } = {}) {
   return item;
 }
 
-/** A sample request has been completed and is to be sent. */
-async function enqueueSample(sample, { actor = null } = {}) {
+/**
+ * A sample request has been completed and is to be sent.
+ * `reworked`: it was taken back and worked on again before this — so one
+ * that has already gone is to go again.
+ */
+async function enqueueSample(sample, { actor = null, reworked = false } = {}) {
   const existing = await DispatchItem.findOne({ sample: sample._id });
-  if (existing) return revive(existing, actor, null);
+  if (existing) return revive(existing, actor, null, { resend: reworked });
   return DispatchItem.create({
     kind: 'sample',
     sample: sample._id,
