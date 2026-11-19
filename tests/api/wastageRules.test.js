@@ -200,6 +200,38 @@ describe('the penalty on a wastage entry', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+describe("a job's wastage total", () => {
+  const totalOf = async (s) => (await M.JobOrder.findById(s.job._id).lean()).wastageElastic[0].quantity;
+
+  it('is the sum of its entries to the millimetre, through an add, an edit and a delete', async () => {
+    const s = await scene();
+    const first  = await as(admin).post('/add-wastage', entry(s, { quantity: 0.1, penalty: 0 }));
+    const second = await as(admin).post('/add-wastage', entry(s, { quantity: 0.2, penalty: 0 }));
+    expect([first.status, second.status]).toEqual([201, 201]);
+    // Before: 0.30000000000000004.
+    expect(await totalOf(s)).toBe(0.3);
+
+    const edited = await as(admin).put(`/${second.body.wastage._id}`, { quantity: 0.7, auditReason: 'measured again' });
+    expect(edited.status).toBe(200);
+    expect(await totalOf(s)).toBe(0.8);
+
+    const gone = await request(app).delete(`/api/v2/wastage/${first.body.wastage._id}?auditReason=entered%20twice`).set('Cookie', cookieOf(admin));
+    expect(gone.status).toBe(200);
+    // Before: 0.7000000000000001.
+    expect(await totalOf(s)).toBe(0.7);
+  });
+
+  it('a quantity is kept to the millimetre, and one that is not a number is refused', async () => {
+    const s = await scene();
+    const made = await as(admin).post('/add-wastage', entry(s, { quantity: 12.34567, penalty: 0 }));
+    expect(made.body.wastage.quantity).toBe(12.346);
+    const bad = await as(admin).put(`/${made.body.wastage._id}`, { quantity: 'twelve', auditReason: 'measured again' });
+    expect(bad.status).toBe(400);
+    expect((await M.Wastage.findById(made.body.wastage._id).lean()).quantity).toBe(12.346);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 describe('the jobs with wastage, searched', () => {
   it('a job number finds that job, and text that is no number finds none', async () => {
     const a = await scene();

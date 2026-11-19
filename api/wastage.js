@@ -22,7 +22,7 @@ const { enqueue }   = require("../utils/outbox");
 const { isAuthenticated, isAdmin, selfOrAdmin, requireFeature, requireFeatureRead } = require("../middleware/auth");
 const factoryDay = require("../utils/factoryDay");
 const { parseMoney } = require("../utils/money");
-const { applyMovement } = require("../utils/elasticStock");
+const { applyMovement, round3 } = require("../utils/elasticStock");
 const { stampFingerprint, ACTION_CODES } = require("../utils/fingerprint");
 const { requireReason } = require("../utils/auditReason");
 
@@ -76,7 +76,9 @@ router.post(
   "/add-wastage",
   catchAsyncErrors(async (req, res, next) => {
     const { job: jobId, elastic: elasticId,
-            quantity, penalty, reason, requestId, incidentDate } = req.body;
+            penalty, reason, requestId, incidentDate } = req.body;
+    // Metres, to the millimetre — as every other quantity is kept.
+    const quantity = typeof req.body.quantity === "number" ? round3(req.body.quantity) : req.body.quantity;
 
     // Idempotency: a retried submit must not record the wastage (and
     // its penalty) twice. Fast path here; the unique index on
@@ -173,7 +175,9 @@ router.post(
           ...(requestId ? { requestId } : {}),
         }], { session });
 
-        job.wastageElastic[idx].quantity += quantity;
+        // Rounded, because sums of decimals are not exact: 0.1 m and
+        // 0.2 m of wastage made the job's total 0.30000000000000004.
+        job.wastageElastic[idx].quantity = round3((job.wastageElastic[idx].quantity || 0) + quantity);
         job.wastages.push(wastage._id);
         await job.save({ session });
 
@@ -265,9 +269,9 @@ router.put(
         if (!wastage) throw new ErrorHandler("Wastage record not found", 404);
 
         const before = { quantity: wastage.quantity, penalty: wastage.penalty, reason: wastage.reason };
-        const newQty = quantity != null ? Number(quantity) : wastage.quantity;
-        if (!Number.isFinite(newQty) || newQty <= 0) throw new ErrorHandler("Quantity must be > 0", 400);
-        const delta = newQty - Number(wastage.quantity || 0);
+        const newQty = quantity != null ? round3(quantity) : wastage.quantity;
+        if (!Number.isFinite(Number(quantity ?? newQty)) || newQty <= 0) throw new ErrorHandler("Quantity must be > 0", 400);
+        const delta = round3(newQty - Number(wastage.quantity || 0));
 
         // Re-derive the job counter by the delta.
         const job = await JobOrder.findById(wastage.job).session(session);
@@ -276,14 +280,14 @@ router.put(
             (x) => x.elastic.toString() === wastage.elastic.toString()
           );
           if (idx >= 0) {
-            job.wastageElastic[idx].quantity = Math.max(0, (job.wastageElastic[idx].quantity || 0) + delta);
+            job.wastageElastic[idx].quantity = Math.max(0, round3((job.wastageElastic[idx].quantity || 0) + delta));
           }
         }
 
         wastage.quantity = newQty;
         if (penalty != null) wastage.penalty = readPenalty(penalty);
         if (reason != null) {
-          if (!String(reason).trim()) throw new ErrorHandler("reason is required", 400);
+          if (!String(reason).trim()) throw new ErrorHandler("The cause of the wastage cannot be left blank", 400);
           wastage.reason = String(reason).trim();
         }
         await wastage.save({ session });
@@ -336,7 +340,7 @@ router.delete(
             (x) => x.elastic.toString() === wastage.elastic.toString()
           );
           if (idx >= 0) {
-            const next = (job.wastageElastic[idx].quantity || 0) - Number(wastage.quantity || 0);
+            const next = round3((job.wastageElastic[idx].quantity || 0) - Number(wastage.quantity || 0));
             job.wastageElastic[idx].quantity = Math.max(0, next);
           }
           job.wastages = (job.wastages || []).filter(
