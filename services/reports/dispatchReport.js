@@ -16,7 +16,7 @@ const DeliveryChallan = require("../../models/DeliveryChallan.js");
 const { previousWindow } = require("./range.js");
 
 const GROUP_BYS = ["customer", "elastic", "day"];
-const DISPATCHED = ["dispatched", "delivered"]; // real, non-cancelled movements
+const { LEFT: DISPATCHED } = require("../../domain/challanStatus"); // real movements: not a draft, not cancelled
 
 function round(n, dp = 0) {
   const f = 10 ** dp;

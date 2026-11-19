@@ -39,6 +39,7 @@ const DeliveryChallan = require("../../models/DeliveryChallan.js");
 const { previousWindow } = require("./range.js");
 const factoryDay = require("../../utils/factoryDay");
 const { STILL_OWED_EXPR } = require("../deliveryRisk.js");
+const challan = require("../../domain/challanStatus");
 
 const GROUP_BYS = ["customer", "status", "supplyMonth"];
 const OPEN_STATUSES = ["Open", "Approved", "InProgress"];
@@ -96,12 +97,16 @@ async function _summary(from, to, now) {
   };
 }
 
-// On-time delivery over the window: non-cancelled, order-linked DCs
-// dispatched in [from, to), on time when dispatchDate ≤ order.supplyDate.
+// On-time delivery over the window: order-linked DCs that LEFT in
+// [from, to), on time when dispatchDate ≤ order.supplyDate.
+//
+// Not a draft: its `dispatchDate` is the moment it was keyed, which is
+// not a despatch at all, and it scored — on time — in this figure while
+// /dc/otd-stats, which this says it follows, left it out.
 async function _otd(from, to) {
   const dcs = await DeliveryChallan.find({
     order: { $ne: null },
-    status: { $ne: "cancelled" },
+    status: { $in: challan.LEFT },
     dispatchDate: { $gte: from, $lt: to },
   })
     .populate("order", "supplyDate")

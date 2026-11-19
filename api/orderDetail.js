@@ -18,6 +18,7 @@ const RawMaterial     = require("../models/RawMaterial.js");
 const mongoose        = require("mongoose");
 const DeliveryChallan      = require("../models/DeliveryChallan.js");
 const { draftedForJobs }   = require("../services/floorDrafts.js");
+const challan = require("../domain/challanStatus");
 const router = express.Router();
 
 // ════════════════════════════════════════════════════════════════
@@ -96,22 +97,27 @@ router.get(
     // number, because a note carries both and older rows can have one
     // without the other. Cancelled notes are excluded: nothing left the
     // building on them.
+    //
+    // Nor on a DRAFT. A challan is made out before the goods go, and it
+    // was counted here as delivered the moment it was keyed — so the
+    // page said "1,000 of 1,000 delivered", and the check before an
+    // order is completed agreed, with the goods still on the floor. A
+    // draft is reported beside the figure instead (domain/challanStatus).
     const dcMatch = [{ order: order._id }];
     if (order.orderNo != null) dcMatch.push({ orderNo: order.orderNo });
     const orderDcs = await DeliveryChallan.find({
       $or: dcMatch,
-      status: { $ne: "cancelled" },
-    }).select("items").lean();
+      status: { $in: [...challan.LEFT, challan.DRAFT] },
+    }).select("items status").lean();
 
     const deliveredByElastic = new Map();
+    const onDraftByElastic = new Map();
     for (const dc of orderDcs) {
+      const into = challan.hasLeft(dc.status) ? deliveredByElastic : onDraftByElastic;
       for (const item of dc.items || []) {
         if (!item.elastic) continue;
         const key = String(item.elastic);
-        deliveredByElastic.set(
-          key,
-          (deliveredByElastic.get(key) || 0) + (Number(item.quantity) || 0)
-        );
+        into.set(key, (into.get(key) || 0) + (Number(item.quantity) || 0));
       }
     }
     const round3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
@@ -156,6 +162,8 @@ router.get(
         // `packed` because the two are a step apart and are constantly
         // read as one.
         delivered: round3(deliveredByElastic.get(id) || 0),
+        // On a challan that has been made out and not yet sent.
+        onDraftChallan: round3(onDraftByElastic.get(id) || 0),
         // Ordered minus delivered — what the customer is still waiting
         // for, as against `pendingDelivery` which stops at packed.
         // Negative would mean an over-despatch, which happens and is

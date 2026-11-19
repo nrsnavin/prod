@@ -62,7 +62,7 @@ const OPEN = ['Open', 'Approved', 'InProgress'];
 const CLOSED = ['Completed', 'Cancelled'];
 // A challan has left once it is dispatched; a draft has not, a cancelled
 // one carried nothing. Machine-part challans go to repairers, not customers.
-const LEFT = ['dispatched', 'delivered'];
+const { LEFT } = require('../../domain/challanStatus');
 
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v || '')) && /^[a-f\d]{24}$/i.test(String(v));
 const qty = (n) => Math.round((Number(n) || 0) * 1000) / 1000;

@@ -57,6 +57,7 @@ const JobOrder         = require('../models/JobOrder');
 const ShiftDetail      = require('../models/ShiftDetail');
 const MaterialOutward  = require('../models/MaterialOut.cjs');
 const DeliveryChallan  = require('../models/DeliveryChallan');
+const { LEFT: CHALLAN_LEFT } = require('../domain/challanStatus');
 const CostSettings     = require('../models/CostSettings');
 const { shiftHours }   = require('../utils/shiftHours');
 const costCentres      = require('./costCentres');
@@ -152,9 +153,13 @@ async function orderPnl(orderId) {
 
   // Invoiced-so-far, from the challans. Reported beside the order
   // value, not as a substitute for it.
+  //
+  // The challans that have LEFT: a draft is not billable — the invoice
+  // form will not take one ("draft challans have not left") — and its
+  // value was counted here as invoiced.
   const challans = await DeliveryChallan.find({
     order:  order._id,
-    status: { $ne: 'cancelled' },
+    status: { $in: CHALLAN_LEFT },
   }).select('dcNumber dispatchDate status totalQuantity totalAmount').lean();
 
   const invoiced = {

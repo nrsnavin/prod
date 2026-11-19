@@ -55,7 +55,7 @@ const WarpingBatch    = require('../models/WarpingBatch');
 const DeliveryChallan = require('../models/DeliveryChallan');
 
 /** Challan statuses that mean goods have left the building. */
-const GONE = ['dispatched', 'delivered'];
+const { LEFT: GONE } = require('../domain/challanStatus');
 
 /** A job at or past this point has finished production. */
 const FINISHED = ['completed'];

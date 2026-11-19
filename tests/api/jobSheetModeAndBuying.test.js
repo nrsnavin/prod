@@ -164,7 +164,8 @@ describe('Raise PO on a job\'s sheet', () => {
 
 // ══════════════════════════════════════════════════════════════════
 describe('a job\'s share of its order\'s approval draw', () => {
-  const { shareForJob } = require('../../services/orderIssuance');
+  // Required when used: see app.js — models are set up as the server starts.
+  const shareForJob = (...args) => require('../../services/orderIssuance').shareForJob(...args);
   const row = (requiredWeight) => [{ rawMaterial: 'm1', requiredWeight }];
 
   it('is never more than the order drew', () => {

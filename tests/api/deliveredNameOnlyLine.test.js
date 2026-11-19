@@ -94,6 +94,18 @@ const deliveredOn = async (order) => {
   return res.body.data.elastics[0].delivered;
 };
 
+/** What the order page shows as made out on a challan that has not been sent. */
+const onDraftFor = async (order) => {
+  const res = await orderDetail(order);
+  expect(res.status).toBe(200);
+  return res.body.data.elastics[0].onDraftChallan;
+};
+
+/** The goods go: a challan is made out as a draft and marked dispatched when they leave. */
+const dispatch = (dcId) =>
+  request(app).patch('/api/v2/dc/update-status').set('Cookie', adminCookie())
+    .send({ id: String(dcId), status: 'dispatched' });
+
 // ══════════════════════════════════════════════════════════════════
 describe('a line that carries the elastic id', () => {
   it('counts as delivered on the order', async () => {
@@ -107,7 +119,15 @@ describe('a line that carries the elastic id', () => {
     });
     expect(res.status).toBe(201);
 
+    // Made out, not yet sent: on a draft challan, and not delivered
+    // (tests/api/draftChallanIsNotDespatch.test.js). It used to count as
+    // delivered from the moment it was keyed.
+    expect(await deliveredOn(order)).toBe(0);
+    expect(await onDraftFor(order)).toBe(400);
+
+    expect((await dispatch(res.body.dc._id)).status).toBe(200);
     expect(await deliveredOn(order)).toBe(400);
+    expect(await onDraftFor(order)).toBe(0);
   });
 
   it('takes the goods off the shelf', async () => {

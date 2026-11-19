@@ -30,6 +30,7 @@ const { applyLotAssignments } = require("../services/orderService.js");
 const WarpingBatch         = require("../models/WarpingBatch.js");
 const DeliveryChallan      = require("../models/DeliveryChallan.js");
 const { plannedLotsByJob, distinctLots, emptyTrail } = require("../services/yarnLotTrail.js");
+const challan = require("../domain/challanStatus");
 const router = express.Router();
 
 // ══════════════════════════════════════════════════════════════
@@ -208,6 +209,11 @@ router.get(
 //  They are part of the history of the order — somebody raised them,
 //  and "why is there a gap in the DC numbers" has to have an answer —
 //  but nothing left the building on them.
+//
+//  Nor on a DRAFT, which was counted as despatched from the moment it
+//  was keyed. A draft is made out and its goods set aside, so it is
+//  shown as that — `drafted`, beside `dispatched` — and what is left
+//  with no note at all is `pending` (domain/challanStatus.js).
 // ══════════════════════════════════════════════════════════════
 router.get(
   '/:id/delivery-challans',
@@ -230,37 +236,44 @@ router.get(
       .sort({ createdAt: -1 })
       .lean();
 
-    const LIVE = (dc) => dc.status !== 'cancelled';
+    const LIVE = (dc) => dc.status !== challan.CANCELLED;
+    const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
 
-    // What has gone out, per elastic, so the panel can sit the despatched
-    // quantity next to what was ordered rather than leaving the reader to
-    // add up the notes themselves.
-    const dispatchedByElastic = new Map();
+    // What has gone out, and what is on a note not yet sent, per
+    // elastic — so the panel can sit them next to what was ordered
+    // rather than leaving the reader to add up the notes themselves.
+    const byElastic = new Map();
     for (const dc of dcs) {
       if (!LIVE(dc)) continue;
+      const which = challan.hasLeft(dc.status) ? 'dispatched' : 'drafted';
       for (const item of dc.items || []) {
         if (!item.elastic) continue;
         const key = String(item.elastic);
-        const row = dispatchedByElastic.get(key) || { quantity: 0, name: item.elasticName || '' };
-        row.quantity += Number(item.quantity) || 0;
+        const row = byElastic.get(key) || { dispatched: 0, drafted: 0, name: item.elasticName || '' };
+        row[which] += Number(item.quantity) || 0;
         if (!row.name && item.elasticName) row.name = item.elasticName;
-        dispatchedByElastic.set(key, row);
+        byElastic.set(key, row);
       }
     }
 
     const lines = (order.elasticOrdered || []).map((l) => {
       const key = String(l.elastic?._id || l.elastic);
-      const sent = dispatchedByElastic.get(key);
+      const sent = byElastic.get(key);
       const ordered = Number(l.quantity) || 0;
-      const dispatched = sent ? sent.quantity : 0;
+      // Figures, not floats: 0.1 m and 0.2 m on two notes were
+      // 0.30000000000000004 despatched.
+      const dispatched = r3(sent?.dispatched);
+      const drafted = r3(sent?.drafted);
       return {
         elasticId:   key,
         elasticName: l.elastic?.name || sent?.name || '',
         ordered,
         dispatched,
-        // Negative would mean more went out than was ordered, which
-        // happens and is worth seeing rather than clamping away.
-        pending: Math.round((ordered - dispatched) * 1000) / 1000,
+        drafted,
+        // What has no note at all. Negative would mean more went out
+        // than was ordered, which happens and is worth seeing rather
+        // than clamping away.
+        pending: r3(ordered - dispatched - drafted),
       };
     });
 
@@ -296,8 +309,9 @@ router.get(
           count:      dcs.length,
           cancelled:  dcs.length - live.length,
           quantity:   Math.round(live.reduce((s, d) => s + (Number(d.totalQuantity) || 0), 0) * 1000) / 1000,
-          ordered:    lines.reduce((s, l) => s + l.ordered, 0),
-          dispatched: Math.round(lines.reduce((s, l) => s + l.dispatched, 0) * 1000) / 1000,
+          ordered:    r3(lines.reduce((s, l) => s + l.ordered, 0)),
+          dispatched: r3(lines.reduce((s, l) => s + l.dispatched, 0)),
+          drafted:    r3(lines.reduce((s, l) => s + l.drafted, 0)),
         },
       },
     });
