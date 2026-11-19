@@ -41,6 +41,20 @@ const { floorSheetNo } = require("../utils/floorSheetPdf");
 const { headsInUse } = require("../utils/machineHeads");
 const { pinFor, rotatePin, shapePin, previousReadingFor } = require("../services/floorEntry");
 
+/**
+ * What a shift says about its operator: who they are on the floor.
+ *
+ * Ten lookups in this file populated the employee whole. A shift then
+ * carried that person's HR file — pay rate, bonus percentage, date of
+ * birth, home address, the last four of their Aadhaar and the name on
+ * the card, their offboarding notes — to anyone who could open the
+ * shift: every production login, and on GET /shiftDetail any login with
+ * a shift screen at all. Nothing on either app reads more than the
+ * name, department and role. The phone number stays: a supervisor
+ * rings the operator.
+ */
+const OPERATOR_FIELDS = "-hourlyRate -bonusPercent -dob -gender -address -pincode -aadhaarCheck -offboarding -pastOffboardings -performance -shifts";
+
 /** A shift whose machine was being loaded: nothing to enter or verify. */
 const LOADING_SHIFT = "This machine was being loaded this shift — there is no production to enter. Mark the machine running and production counts from then.";
 const { getPdfBranding } = require("../services/documentSettings.js");
@@ -112,7 +126,7 @@ router.get(
         path: "plan",
         populate: [
           { path: "machine"  },
-          { path: "employee" },
+          { path: "employee", select: OPERATOR_FIELDS },
         ],
       })
       .lean();
@@ -180,7 +194,7 @@ router.get(
       .populate({
         path: "plan",
         populate: [
-          { path: "employee", model: "Employee" },
+          { path: "employee", model: "Employee", select: OPERATOR_FIELDS },
           { path: "machine",  model: "Machine"  },
         ],
       })
@@ -201,7 +215,7 @@ router.get(
       path: "plan",
       populate: [
         { path: "machine",  model: "Machine"  },
-        { path: "employee", model: "Employee" },
+        { path: "employee", model: "Employee", select: OPERATOR_FIELDS },
       ],
     });
 
@@ -377,7 +391,7 @@ router.get(
       .populate({
         path: "plan",
         populate: [
-          { path: "employee", model: "Employee" },
+          { path: "employee", model: "Employee", select: OPERATOR_FIELDS },
           { path: "machine",  model: "Machine"  },
         ],
       })
@@ -799,19 +813,21 @@ router.get(
   "/shiftDetail",
   catchAsyncErrors(async (req, res, next) => {
     const { id } = req.query;
-     console.log(id);
     if (!id) return next(new ErrorHandler("id is required", 400));
 
+    // Two console.log calls stood here: the id, and then the whole
+    // populated shift — operator's record and all — written to the
+    // server log every time anyone opened a shift.
     const shift = await ShiftDetail.findById(id)
-      .populate("employee")
+      .populate("employee", OPERATOR_FIELDS)
       .populate({ path: "elastics", populate: { path: "elastic" } })
       .populate({
         path: "machine",
-        populate: { path: "orderRunning",populate: { path: "jobOrderNo" } },
+        // (jobOrderNo is a number on the job, not a reference: there was
+        // a populate of it under this one that did nothing.)
+        populate: { path: "orderRunning" },
       })
       .exec();
-
-    console.log(shift);
 
     if (!shift) return next(new ErrorHandler("Shift detail not found", 404));
 
@@ -824,7 +840,7 @@ router.get(
   isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const shifts = await ShiftDetail.find({ status: "open" })
-      .populate("employee")
+      .populate("employee", OPERATOR_FIELDS)
       .populate("machine")
       .populate("job")
       .exec();
@@ -838,7 +854,7 @@ router.get(
   isAdmin('admin', 'production'),
   catchAsyncErrors(async (req, res, next) => {
     const shifts = await ShiftDetail.find({ status: "open" })
-      .populate("employee")
+      .populate("employee", OPERATOR_FIELDS)
       .populate({ path: "machine", populate: { path: "orderRunning" } })
       .sort({ date: -1 });
 
@@ -861,7 +877,7 @@ router.get(
       status: { $in: ["open", "pending_verification"] },
       employee: id,
     })
-      .populate("employee")
+      .populate("employee", OPERATOR_FIELDS)
       .populate("machine")
       .populate("job")
       .exec();
@@ -881,7 +897,7 @@ router.get(
     const shifts = await ShiftDetail.find({ status: "closed", employee: id })
       .sort({ createdAt: -1 })
       .limit(30)
-      .populate("employee")
+      .populate("employee", OPERATOR_FIELDS)
       .populate("machine")
       .populate("job")
       .exec();
@@ -946,8 +962,11 @@ router.get(
   })
 );
 
+// selfOrAdmin, as on /active-jobs/:empId just above: this is the same
+// lookup for one shift, and was left open when that one was closed.
 router.get(
   "/active-job/:empId",
+  selfOrAdmin,
   catchAsyncErrors(async (req, res, next) => {
     const { empId } = req.params;
     if (!empId) return next(new ErrorHandler("empId is required", 400));
@@ -1012,7 +1031,7 @@ router.get(
       .populate({
         path: "plan",
         populate: [
-          { path: "employee", model: "Employee" },
+          { path: "employee", model: "Employee", select: OPERATOR_FIELDS },
           { path: "machine",  model: "Machine"  },
         ],
       })
@@ -1044,13 +1063,45 @@ router.delete(
     try {
       await session.withTransaction(async () => {
         found = true;
-        const sp = await ShiftPlan.findById(id).select("plan").session(session);
+        const sp = await ShiftPlan.findById(id).select("plan finalized").session(session);
         if (!sp) { found = false; return; }
+
+        // A finalised shift is locked "for payroll and reports": a
+        // verified entry on it cannot be corrected or deleted until it is
+        // reopened. Deleting the whole plan went straight past that.
+        if (sp.finalized) {
+          const err = new ErrorHandler(
+            "This shift is finalised — its production is locked for payroll and reports. " +
+            "Reopen (unfinalise) it before deleting the plan.", 409
+          );
+          err.code = "PLAN_FINALISED";
+          throw err;
+        }
 
         const detailIds = sp.plan || [];
         if (detailIds.length) {
           const details = await ShiftDetail.find({ _id: { $in: detailIds } })
-            .select("machine employee").session(session).lean();
+            .select("machine employee status").session(session).lean();
+
+          // A verified entry's metres are already on its job and its
+          // order. Deleting the entry on its own takes them back off
+          // (DELETE /production-entry/:id, with a reason). Deleting the
+          // plan removed the entries and left the metres: the job and the
+          // order went on counting production no shift accounts for, and
+          // a plan made again for the same day counted it a second time.
+          const verified = details.filter((d) => d.status === "closed").length;
+          if (verified > 0) {
+            const err = new ErrorHandler(
+              `${verified} ${verified === 1 ? "entry" : "entries"} on this plan ${verified === 1 ? "is" : "are"} verified, ` +
+              `so ${verified === 1 ? "its" : "their"} metres are already counted on the jobs and orders. ` +
+              `Delete ${verified === 1 ? "that entry" : "those entries"} first — that takes the metres back off — and then the plan.`,
+              409
+            );
+            err.code = "PLAN_HAS_VERIFIED_PRODUCTION";
+            err.details = { verified };
+            throw err;
+          }
+
           const machines = [...new Set(details.map((d) => String(d.machine)).filter(Boolean))];
           const employees = [...new Set(details.map((d) => String(d.employee)).filter(Boolean))];
           const pull = { $pull: { shifts: { $in: detailIds } } };
@@ -1158,31 +1209,43 @@ router.get("/production-anomalies", isAdmin('admin', 'production'), async (req, 
       .select("machine date productionMeters")
       .lean();
 
-    // Bucket per machine into { today: meters, trailing: [meters...] }
+    // Bucket per machine into { today, todayShifts, trailing: [meters...] }
     const buckets = new Map();
     for (const s of shifts) {
       if (!s.machine) continue;
       const key = String(s.machine);
-      if (!buckets.has(key)) buckets.set(key, { today: 0, trailing: [] });
+      if (!buckets.has(key)) buckets.set(key, { today: 0, todayShifts: 0, trailing: [] });
       const b = buckets.get(key);
       if (new Date(s.date) >= today) {
         b.today += s.productionMeters || 0;
+        b.todayShifts += 1;
       } else {
         b.trailing.push(s.productionMeters || 0);
       }
     }
 
+    // A shift is "closed" when it is verified, which is usually after it
+    // has run. So for most of the day no machine has a closed shift today
+    // — and today's total read 0, a 100% drop, for every loom with a
+    // month of history: the advisor said "42 machines producing below
+    // trend" each morning until the first shift was verified. A machine
+    // is compared only once something of today's is verified, and
+    // shift for shift: two verified shifts today were being held, summed,
+    // against the average of ONE.
     const anomalyIds = [];
     const meta       = new Map();
-    for (const [mid, { today: t, trailing }] of buckets) {
+    for (const [mid, { today: t, todayShifts, trailing }] of buckets) {
+      if (todayShifts === 0) continue;
       if (trailing.length < minShifts) continue;
       const avg = trailing.reduce((a, b) => a + b, 0) / trailing.length;
       if (avg <= 0) continue;
-      const drop = ((avg - t) / avg) * 100;
+      const perShift = t / todayShifts;
+      const drop = ((avg - perShift) / avg) * 100;
       if (drop > dropPct) {
         anomalyIds.push(mid);
         meta.set(mid, {
-          today:       Math.round(t),
+          today:       Math.round(perShift),
+          todayShifts,
           avg:         parseFloat(avg.toFixed(1)),
           dropPct:     parseFloat(drop.toFixed(1)),
           sampleSize:  trailing.length,
