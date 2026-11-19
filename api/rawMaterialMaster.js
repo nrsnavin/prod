@@ -211,16 +211,20 @@ router.get(
     // value and must read as active.
     if (req.query.includeArchived !== "true") filter.archived = { $ne: true };
 
-    // Filter by group id (what the web now sends) or by category name
-    // (what mobile and every older client send). The name match is
-    // case-INSENSITIVE: a chip labelled "Rubber" must find the rows a
-    // client wrote as "rubber", which is the split this whole feature
-    // exists to end and which an exact match would preserve forever.
+    // Filter by group id (what the web sends) or by category name (what
+    // mobile and every older client send).
+    //
+    // A group is the LINK and only the link — the rule the group's own
+    // page and its count go by (api/materialGroup.js, memberFilter).
+    // This filter still added "or its category is spelt like the group's
+    // name", from when the two were one field: a group called "Rubber"
+    // listed every rubber material in the mill, under a count that said
+    // how many had actually been filed there.
+    //
+    // The category match is case-INSENSITIVE: a chip labelled "Rubber"
+    // must find the rows a client wrote as "rubber".
     if (group && mongoose.Types.ObjectId.isValid(group)) {
-      const g = await MaterialGroup.findById(group).select("name").lean();
-      filter.$or = g
-        ? [{ group: g._id }, { category: new RegExp(`^${escapeRegex(g.name)}$`, "i") }]
-        : [{ group }];
+      filter.group = group;
     } else if (category) {
       filter.category = new RegExp(`^${escapeRegex(String(category))}$`, "i");
     }

@@ -33,6 +33,7 @@ const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const ErrorHandler     = require('../utils/ErrorHandler');
 const { isAuthenticated, isAdmin } = require('../middleware/auth');
 const { escapeRegex } = require('../utils/escapeRegex');
+const { canonicalCategory } = require('../utils/materialCategories');
 const { buildFingerprint, ACTION_CODES, actorFromRequest } = require('../utils/fingerprint');
 
 const MaterialGroup = require('../models/MaterialGroup');
@@ -268,7 +269,8 @@ router.post(
 // ─────────────────────────────────────────────────────────────
 //  PUT /update
 //
-//  A rename cascades to every member's `category`. See the header.
+//  A rename changes the group's name and nothing on its members: they
+//  are members by the link. See the header.
 // ─────────────────────────────────────────────────────────────
 router.put(
   '/update',
@@ -310,10 +312,18 @@ router.put(
         // What still needs doing is adopting the LINK for rows filed
         // under this group by name alone, before the link existed.
         // One-way tidy-up: sets `group`, leaves `category` alone.
-        const moved = await RawMaterial.updateMany(
-          { group: null, category: new RegExp(`^${escapeRegex(oldName)}$`, 'i') },
-          { $set: { group: group._id } }
-        );
+        //
+        // Not when the old name is one of the system's own categories.
+        // "Rubber" in a material's category then means the CATEGORY, and
+        // says nothing about the group (memberFilter, above) — reading
+        // it as "filed here by name" quietly filed every unfiled rubber
+        // material in the mill under a group somebody was only renaming.
+        const moved = canonicalCategory(oldName)
+          ? { modifiedCount: 0 }
+          : await RawMaterial.updateMany(
+              { group: null, category: new RegExp(`^${escapeRegex(oldName)}$`, 'i') },
+              { $set: { group: group._id } }
+            );
         renamedCount = moved.modifiedCount || 0;
         group.name = name;
         // `code` is deliberately NOT recomputed. It is the handle that
@@ -350,8 +360,8 @@ router.put(
 //
 //  The same rule the three masters follow, for the same reason: a
 //  group named by a material is part of how that material reads, and
-//  removing it leaves a material whose category points at nothing. A
-//  group created by mistake five minutes ago has no such history.
+//  removing it leaves a material filed under a group that is not there.
+//  A group created by mistake five minutes ago has no such history.
 // ─────────────────────────────────────────────────────────────
 router.delete(
   '/:id',
@@ -441,10 +451,7 @@ router.get(
     const group = await MaterialGroup.findById(id).lean();
     if (!group) return next(new ErrorHandler('Group not found', 404));
 
-    // By link OR by name: a material tidied into the group has the
-    // link, one that predates the migration may only carry the name,
-    // and the screen has to show both or it looks like the group lost
-    // its contents.
+    // By the link, as the count on the group's row is (memberFilter).
     const materials = await RawMaterial.find({
       ...memberFilter(group),
       archived: { $ne: true },

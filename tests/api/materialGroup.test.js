@@ -530,3 +530,83 @@ describe('the elastic recipe picker', () => {
     expect(res.body.warp).toHaveLength(0);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  A GROUP NAMED LIKE A CATEGORY
+//
+//  Found reading api/materialGroup.js line by line. Groups began life as
+//  the category names, so a mill has groups called "Rubber" and "warp".
+//  The group's own page and its count go by the LINK ("it is the link,
+//  and only the link" — a material whose category is Rubber says nothing
+//  about whether anybody filed it under a group of that name). Two
+//  places still read the category as membership:
+//
+//    • the material list filtered by a group — "Rubber (1)" on the group
+//      screen opened a list of every rubber material in the mill;
+//    • renaming a group — every unfiled material whose category matched
+//      the old name was quietly filed under it.
+// ══════════════════════════════════════════════════════════════════
+describe('a group named like a category', () => {
+  const list = (query) =>
+    request(app).get(`/api/v2/materials/get-raw-materials${query}`).set('Cookie', cookie());
+  const rename = (g, name) =>
+    request(app).put(`${api}/update`).set('Cookie', cookie()).send({ id: g._id, name });
+
+  it('the list filtered by it shows what was filed under it, and nothing else', async () => {
+    const rubber = (await createGroup({ name: 'Rubber' })).body.group;
+    const other  = (await createGroup({ name: 'Imported' })).body.group;
+    await createMaterial({ name: 'Filed here',      category: 'Rubber', group: rubber._id });
+    await createMaterial({ name: 'Not filed',       category: 'Rubber' });
+    await createMaterial({ name: 'Filed elsewhere', category: 'Rubber', group: other._id });
+
+    const res = await list(`?group=${rubber._id}`);
+    expect(res.status).toBe(200);
+    // Before: all three — while the group's page and its count said one.
+    expect(res.body.materials.map((m) => m.name)).toEqual(['Filed here']);
+
+    const page = await request(app).get(`${api}/${rubber._id}/materials`).set('Cookie', cookie());
+    expect(page.body.materials.map((m) => m.name)).toEqual(['Filed here']);
+  });
+
+  it('the category chip still finds every material of the category (unchanged)', async () => {
+    const rubber = (await createGroup({ name: 'Rubber' })).body.group;
+    await createMaterial({ name: 'Filed here', category: 'Rubber', group: rubber._id });
+    await createMaterial({ name: 'Not filed',  category: 'Rubber' });
+    const res = await list('?category=rubber');
+    expect(res.body.materials.map((m) => m.name).sort()).toEqual(['Filed here', 'Not filed']);
+  });
+
+  it('renaming it files nobody under it', async () => {
+    const rubber = (await createGroup({ name: 'Rubber' })).body.group;
+    await createMaterial({ name: 'Not filed', category: 'Rubber' });
+
+    const res = await rename(rubber, 'Rubber goods');
+    expect(res.status).toBe(200);
+    // Before: materialsRenamed 1 — an unfiled material adopted because
+    // its CATEGORY was spelt like the group's old name.
+    expect(res.body.materialsRenamed).toBe(0);
+    expect((await RawMaterial.findOne({ name: 'Not filed' }).lean()).group).toBeNull();
+  });
+
+  it('a group with a name of its own still gathers rows filed under it by name (unchanged)', async () => {
+    // A row from before groups had links: the old group's NAME sits in
+    // its category. Renaming the group adopts it, as it always has.
+    const tape = (await createGroup({ name: 'Trim Tape' })).body.group;
+    await RawMaterial.collection.insertOne({
+      name: 'Old row', category: 'trim tape', group: null, supplier: supplier._id, stock: 0, minStock: 0, price: 0,
+      createdAt: new Date(), updatedAt: new Date(),
+    });
+
+    const res = await rename(tape, 'Edge Tape');
+    expect(res.body.materialsRenamed).toBe(1);
+    const row = await RawMaterial.findOne({ name: 'Old row' }).lean();
+    expect(String(row.group)).toBe(String(tape._id));
+    expect(row.category).toBe('trim tape');
+  });
+
+  it('a group id that belongs to nothing lists nothing (unchanged)', async () => {
+    await createMaterial({ name: 'A', category: 'warp' });
+    const res = await list(`?group=${new mongoose.Types.ObjectId()}`);
+    expect(res.body.materials).toEqual([]);
+  });
+});
