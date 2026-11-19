@@ -29,6 +29,7 @@ const mongoose        = require("mongoose");
 const { estimateOrderEta } = require("../utils/orderEta.js");
 const factoryDay = require("../utils/factoryDay");
 const { anthropic, TEXT_MODEL } = require("../utils/anthropicClient.js");
+const risk = require("../services/deliveryRisk.js");
 // ETA forecast engine lives in its own service (Phase 4 god-file split).
 // The routes below and utils/digest.js both consume these; keeping them
 // in one module means the digest and the order card show identical numbers.
@@ -68,48 +69,32 @@ router.get(
 
 // ══════════════════════════════════════════════════════════════
 //  GET /delivery-risk?horizonDays=7
-//  Orders whose supplyDate lands inside the horizon and still
-//  have outstanding production (pendingElastic total > 0). Powers
-//  the AIAdvisor "delivery risk" card on the admin dashboard.
+//  Orders whose supplyDate lands inside the horizon with goods the
+//  customer is still owed (ordered less packed). Powers the
+//  AIAdvisor "delivery risk" card on the admin dashboard.
 //
 //  Status filter excludes Completed, Cancelled, Deleted — those
 //  are not going to ship anyway.
+//
+//  What counts, and how the days are counted, is in
+//  services/deliveryRisk.js. (It used to count `pendingElastic` —
+//  what no job has been raised for — so an order planned in full and
+//  not yet made was never on the list.)
 // ══════════════════════════════════════════════════════════════
 router.get('/delivery-risk', async (req, res) => {
   try {
-    const horizon = Math.max(1, parseInt(req.query.horizonDays, 10) || 7);
+    const horizon = risk.readHorizon(req.query.horizonDays);
     const now     = new Date();
-    const cutoff  = new Date(now.getTime() + horizon * 86_400_000);
 
     const orders = await Order.find({
-      status:     { $in: ['Open', 'Approved', 'InProgress'] },
-      supplyDate: { $lte: cutoff },
+      status:     { $in: risk.OPEN_STATUSES },
+      supplyDate: { $lt: risk.fetchBefore(now, horizon) },
     })
-      .select('orderNo customer status supplyDate pendingElastic')
+      .select('orderNo customer status supplyDate elasticOrdered packedElastic pendingElastic')
       .populate('customer', 'name')
       .lean();
 
-    const at_risk = [];
-    for (const o of orders) {
-      const pendingUnits = (o.pendingElastic || []).reduce(
-        (sum, p) => sum + (Number(p.quantity) || 0),
-        0
-      );
-      if (pendingUnits <= 0) continue;
-      const daysToSupply = Math.ceil(
-        (new Date(o.supplyDate).getTime() - now.getTime()) / 86_400_000
-      );
-      at_risk.push({
-        orderId:      o._id,
-        orderNo:      o.orderNo,
-        customerName: o.customer?.name ?? '—',
-        status:       o.status,
-        supplyDate:   o.supplyDate,
-        daysToSupply,
-        pendingUnits,
-      });
-    }
-    at_risk.sort((a, b) => a.daysToSupply - b.daysToSupply);
+    const at_risk = risk.deliveryRisk(orders, { now, horizonDays: horizon });
 
     return res.json({
       success: true,
@@ -250,8 +235,12 @@ router.post(
       .filter((id) => typeof id === "string" && mongoose.Types.ObjectId.isValid(id))
       .map((id) => new mongoose.Types.ObjectId(id));
 
+    // With the lines and what has been made of them: an order nobody has
+    // planned yet is estimated from those (services/etaService.js,
+    // _fallbackEntryTimeEta). Loaded without them, every such order came
+    // back "nothing remaining" in the list while its own page had a date.
     const orders = await Order.find({ _id: { $in: validIds } })
-      .select({ _id: 1, orderNo: 1, status: 1, supplyDate: 1 })
+      .select({ _id: 1, orderNo: 1, status: 1, supplyDate: 1, elasticOrdered: 1, producedElastic: 1 })
       .lean();
     const orderById = new Map(orders.map((o) => [o._id.toString(), o]));
 

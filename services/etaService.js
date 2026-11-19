@@ -138,6 +138,16 @@ async function _computeRunningEtaForOrder(order, plantMetersPerMachineDay, now, 
     });
   }
 
+  // There are jobs, but none is on a loom — still in preparation, or
+  // already off to finishing. The estimate below reads looms and would
+  // answer "no active jobs", so an order lost its date the moment its
+  // first job was raised and got it back when the job reached a loom.
+  // What is left to weave is estimated on the plant's rate instead, as
+  // it is for an order with no job at all.
+  if (jobs.length === 0) {
+    return _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now, freeMachines);
+  }
+
   const result = estimateRunningOrderEta({
     jobs,
     today:      now,
