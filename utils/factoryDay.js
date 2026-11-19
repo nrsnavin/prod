@@ -127,4 +127,19 @@ function ymd(...a) {
   return d ? d.toISOString().slice(0, 10) : null;
 }
 
-module.exports = { DAY, IST, calendarDay, calendarDayEnd, dayStart, dayEnd, shiftDay, moment, ymd };
+/**
+ * Whole days from the day of `from` to the day of `to` (negative when
+ * `to` is the earlier day); null if either is unreadable.
+ *
+ * For "was it on time" and "is it overdue". A promised date is kept as
+ * the first moment of its day, so compared with a MOMENT — when the
+ * lorry left, when the order was closed — anything done on the promised
+ * date itself reads as after it. Compare the days.
+ */
+function daysBetween(from, to) {
+  const a = calendarDay(from);
+  const b = calendarDay(to);
+  return a && b ? Math.round((b.getTime() - a.getTime()) / DAY) : null;
+}
+
+module.exports = { DAY, IST, calendarDay, calendarDayEnd, dayStart, dayEnd, shiftDay, moment, ymd, daysBetween };

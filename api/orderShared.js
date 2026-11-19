@@ -9,6 +9,9 @@ const { computeMaterialRequirement } = require("../utils/materialRequirement.js"
 const { buildFingerprint, ACTION_CODES } = require("../utils/fingerprint.js");
 const { releaseAllReservations } = require("../services/orderReservations");
 const { releaseAllEarmarks } = require("../services/lotAllocation");
+const ErrorHandler = require("../utils/ErrorHandler.js");
+const JobOrder = require("../models/JobOrder.js");
+const { liveJobStatus } = require("../domain/jobStatus");
 
 // ════════════════════════════════════════════════════════════════
 //  SHARED — BOM EXPANSION
@@ -61,7 +64,53 @@ async function _releaseAllReservations(session, order, actor, context) {
   return releaseAllReservations(session, order, actor, context);
 }
 
+// ════════════════════════════════════════════════════════════════
+//  SHARED — AN ORDER IS NOT ENDED OUT FROM UNDER ITS JOBS
+//
+//  Called from /complete and /cancel. Both end the order for good, and
+//  both give back what it was holding; neither may do so while one of
+//  its jobs is still live.
+//
+//  /complete had this rule (an order closed with a job still on a
+//  machine released stock reserved for goods that were still being
+//  made). /cancel did not — and went further: it also put back ALL the
+//  yarn drawn at approval, while the jobs it left running went on
+//  weaving that yarn, holding their machines, with their warping and
+//  covering still open, for an order that no longer existed.
+//
+//  A CANCELLED job counts as finished, like a completed one: it will
+//  never produce anything. An order with no jobs at all passes.
+//
+//  `toDo` is how the message ends: what the caller wants done with the
+//  jobs first.
+// ════════════════════════════════════════════════════════════════
+async function assertNoOpenJobs(order, session, toDo) {
+  const openJobs = await JobOrder.find({
+    order: order._id,
+    status: liveJobStatus(),
+  }).select("jobOrderNo status").session(session).lean();
+  if (openJobs.length === 0) return;
+
+  const one = openJobs.length === 1;
+  const named = openJobs
+    .map((j) => `J-${j.jobOrderNo ?? "?"} (${j.status})`)
+    .join(", ");
+  const err = new ErrorHandler(
+    `This order still has ${openJobs.length} unfinished job${one ? "" : "s"} — ${named}. ` +
+    toDo(one ? "it" : "them"),
+    409
+  );
+  err.code = "ORDER_HAS_OPEN_JOBS";
+  err.details = {
+    jobs: openJobs.map((j) => ({
+      id: String(j._id), jobOrderNo: j.jobOrderNo ?? null, status: j.status,
+    })),
+  };
+  throw err;
+}
+
 module.exports = {
   computeRawMaterialRequired,
   _releaseAllReservations,
+  assertNoOpenJobs,
 };

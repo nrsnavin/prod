@@ -28,7 +28,7 @@ const { receiveAtCost } = require("../utils/materialValuation.js");
 const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
 const { approveOrderTxn }  = require("../services/orderService.js");
-const { _releaseAllReservations } = require("./orderShared");
+const { _releaseAllReservations, assertNoOpenJobs } = require("./orderShared");
 const router = express.Router();
 
 // ════════════════════════════════════════════════════════════════
@@ -356,6 +356,8 @@ router.post(
 // ════════════════════════════════════════════════════════════════
 //  CANCEL ORDER
 //
+//  Refused while a job on the order is still live (assertNoOpenJobs).
+//
 //  Releases any remaining elastic reservations AND refunds raw
 //  materials previously deducted during /approve. The refund walks
 //  the order's MaterialOutward records (which carry the actually-
@@ -383,6 +385,15 @@ router.post(
             400
           );
         }
+
+        // Not while one of its jobs is still live — the rule completing
+        // an order has always had (api/orderShared.js). Cancelling gives
+        // the yarn and the reserved stock back; with a job still running
+        // that yarn is on the loom, not in the store.
+        await assertNoOpenJobs(
+          order, session,
+          (them) => `Cancel or complete ${them} first: cancelling the order does not stop the work on the floor.`
+        );
 
         const previousStatus = order.status;
         const actor = actorFromRequest(req);

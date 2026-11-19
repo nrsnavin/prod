@@ -10,15 +10,29 @@
 //
 //  Group-by: customer / status / supply-month. Orders carry no price,
 //  so this report is quantity-based (meters), not value.
+//
+//  A SUPPLY DATE IS A DAY, NOT A MOMENT
+//
+//  It is kept as the first moment of its day. Compared with a moment:
+//    • a challan cut at nine on the promised date was ceil(0.15 of a
+//      day) = 1 day late — every despatch that hit its date was a miss;
+//    • an order due today was "past its date" from 05:30 that morning.
+//  Both are compared by the day in India now: despatched on or before
+//  the promised DAY is on time, and an order is overdue once its day
+//  has passed — as /dc/otd-stats and the order status report have it.
+//
+//  PENDING is what is still to plan on orders that are still open. A
+//  cancelled or completed order keeps its old figure on the record, but
+//  none of it is open book.
 // ═════════════════════════════════════════════════════════════════
 
 const Order = require("../../models/Order.js");
 const DeliveryChallan = require("../../models/DeliveryChallan.js");
 const { previousWindow } = require("./range.js");
+const factoryDay = require("../../utils/factoryDay");
 
 const GROUP_BYS = ["customer", "status", "supplyMonth"];
 const OPEN_STATUSES = ["Open", "Approved", "InProgress"];
-const DAY_MS = 86_400_000;
 
 function round(n, dp = 0) {
   const f = 10 ** dp;
@@ -28,18 +42,25 @@ function round(n, dp = 0) {
 // Exclude soft-deleted orders from every figure.
 const matchFor = (from, to) => ({ date: { $gte: from, $lt: to }, status: { $nin: ["Deleted"] } });
 
+// What is still to plan on an order — nothing, once it is closed.
+const PENDING_IF_OPEN = {
+  $cond: [{ $in: ["$status", OPEN_STATUSES] }, { $sum: "$pendingElastic.quantity" }, 0],
+};
+
 async function _summary(from, to, now) {
+  // Today, as a calendar date: what a supply date is compared with.
+  const today = factoryDay.calendarDay(now) || now;
   const [agg] = await Order.aggregate([
     { $match: matchFor(from, to) },
     { $group: {
         _id: null,
         orders: { $sum: 1 },
         orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } },
-        pendingQty: { $sum: { $sum: "$pendingElastic.quantity" } },
+        pendingQty: { $sum: PENDING_IF_OPEN },
         open: { $sum: { $cond: [{ $in: ["$status", OPEN_STATUSES] }, 1, 0] } },
         completed: { $sum: { $cond: [{ $eq: ["$status", "Completed"] }, 1, 0] } },
         overdue: { $sum: { $cond: [
-          { $and: [{ $in: ["$status", OPEN_STATUSES] }, { $lt: ["$supplyDate", now] }] }, 1, 0,
+          { $and: [{ $in: ["$status", OPEN_STATUSES] }, { $lt: ["$supplyDate", today] }] }, 1, 0,
         ] } },
     } },
   ]);
@@ -77,8 +98,10 @@ async function _otd(from, to) {
     const due = dc.order?.supplyDate ? new Date(dc.order.supplyDate) : null;
     if (!due) continue;
     considered += 1;
-    // Compare on day granularity: same-day dispatch is on time.
-    const lateDays = Math.ceil((new Date(dc.dispatchDate) - due) / DAY_MS);
+    // By the day in India: a despatch on the promised date is on time,
+    // whatever the hour (see the note at the top).
+    const lateDays = factoryDay.daysBetween(due, dc.dispatchDate);
+    if (lateDays == null) { considered -= 1; continue; }
     if (lateDays <= 0) onTime += 1;
   }
   return {
@@ -94,7 +117,7 @@ async function _rows(from, to, groupBy) {
   if (groupBy === "status") {
     const rows = await Order.aggregate([
       { $match: match },
-      { $group: { _id: "$status", orders: { $sum: 1 }, orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } }, pendingQty: { $sum: { $sum: "$pendingElastic.quantity" } } } },
+      { $group: { _id: "$status", orders: { $sum: 1 }, orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } }, pendingQty: { $sum: PENDING_IF_OPEN } } },
       { $project: { _id: 0, key: "$_id", label: "$_id", orders: 1, orderedQty: 1, pendingQty: 1 } },
       { $sort: { orders: -1 } },
     ]);
@@ -104,7 +127,7 @@ async function _rows(from, to, groupBy) {
   if (groupBy === "supplyMonth") {
     const rows = await Order.aggregate([
       { $match: match },
-      { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$supplyDate", timezone: "Asia/Kolkata" } }, orders: { $sum: 1 }, pendingQty: { $sum: { $sum: "$pendingElastic.quantity" } } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$supplyDate", timezone: "Asia/Kolkata" } }, orders: { $sum: 1 }, pendingQty: { $sum: PENDING_IF_OPEN } } },
       { $project: { _id: 0, key: "$_id", label: "$_id", orders: 1, pendingQty: 1 } },
       { $sort: { label: 1 } },
     ]);
@@ -114,7 +137,7 @@ async function _rows(from, to, groupBy) {
   // customer (default)
   const rows = await Order.aggregate([
     { $match: match },
-    { $group: { _id: "$customer", orders: { $sum: 1 }, orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } }, pendingQty: { $sum: { $sum: "$pendingElastic.quantity" } } } },
+    { $group: { _id: "$customer", orders: { $sum: 1 }, orderedQty: { $sum: { $sum: "$elasticOrdered.quantity" } }, pendingQty: { $sum: PENDING_IF_OPEN } } },
     { $lookup: { from: "customers", localField: "_id", foreignField: "_id", as: "c" } },
     { $unwind: { path: "$c", preserveNullAndEmptyArrays: true } },
     { $project: { _id: 0, key: "$_id", label: { $ifNull: ["$c.name", "—"] }, orders: 1, orderedQty: 1, pendingQty: 1 } },

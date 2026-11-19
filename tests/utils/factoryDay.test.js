@@ -66,3 +66,33 @@ describe('the shift day', () => {
     expect(f.ymd(f.shiftDay('2026-11-08'))).toBe('2026-11-08');
   });
 });
+
+// Found reading api/orderChanges.js and the order book report: a
+// promised date was being compared with the MOMENT something was done.
+describe('days between two days', () => {
+  const due = new Date('2026-11-19T00:00:00.000Z');           // a calendar date, as it is stored
+  const at = (ymd, hhmm) => new Date(`${ymd}T${hhmm}:00+05:30`);
+
+  it('something done on the promised date is no days late, whatever the hour', () => {
+    expect(f.daysBetween(due, at('2026-11-19', '00:10'))).toBe(0);
+    expect(f.daysBetween(due, at('2026-11-19', '10:00'))).toBe(0);
+    expect(f.daysBetween(due, at('2026-11-19', '23:50'))).toBe(0);
+    // As moments, all three are "after" the date.
+    expect(at('2026-11-19', '10:00') <= due).toBe(false);
+  });
+
+  it('the day after is one day late, the day before one day early', () => {
+    expect(f.daysBetween(due, at('2026-11-20', '00:10'))).toBe(1);
+    expect(f.daysBetween(due, at('2026-11-18', '23:50'))).toBe(-1);
+  });
+
+  it('two calendar dates are simply the days apart', () => {
+    expect(f.daysBetween('2026-11-19', '2026-12-01')).toBe(12);
+    expect(f.daysBetween(new Date('2026-11-19T00:00:00.000Z'), new Date('2026-11-12T00:00:00.000Z'))).toBe(-7);
+  });
+
+  it('is not a number when either is unreadable', () => {
+    expect(f.daysBetween('soon', due)).toBeNull();
+    expect(f.daysBetween(due, null)).toBeNull();
+  });
+});

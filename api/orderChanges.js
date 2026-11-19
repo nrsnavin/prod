@@ -9,10 +9,8 @@
 // ══════════════════════════════════════════════════════════════════
 
 const express = require("express");
-const { liveJobStatus } = require('../domain/jobStatus');
 const catchAsyncErrors = require("../middleware/catchAsyncErrors.js");
 const Order = require("../models/Order.js");
-const Job = require("../models/JobOrder.js");
 const Elastic = require("../models/Elastic.js");
 const ErrorHandler = require("../utils/ErrorHandler.js");
 const factoryDay = require("../utils/factoryDay");
@@ -25,7 +23,7 @@ const { carryEarmarksForward } = require("../services/lotAllocation");
 const Customer             = require("../models/Customer.js");
 const { notify }           = require("../utils/notify.js");
 const Notification         = require("../models/Notification.js");
-const { computeRawMaterialRequired, _releaseAllReservations } = require("./orderShared");
+const { computeRawMaterialRequired, _releaseAllReservations, assertNoOpenJobs } = require("./orderShared");
 const router = express.Router();
 
 // ════════════════════════════════════════════════════════════════
@@ -70,29 +68,8 @@ router.post(
         // way to close. An order with no jobs at all passes too — it
         // was fulfilled from stock, and trapping it at InProgress would
         // be a rule with no escape.
-        const openJobs = await Job.find({
-          order: order._id,
-          status: liveJobStatus(),
-        }).select("jobOrderNo status").session(session).lean();
-
-        if (openJobs.length > 0) {
-          const named = openJobs
-            .map((j) => `J-${j.jobOrderNo ?? "?"} (${j.status})`)
-            .join(", ");
-          const err = new ErrorHandler(
-            `This order still has ${openJobs.length} unfinished job` +
-            `${openJobs.length === 1 ? "" : "s"} — ${named}. ` +
-            `Complete or cancel ${openJobs.length === 1 ? "it" : "them"} first.`,
-            409
-          );
-          err.code = "ORDER_HAS_OPEN_JOBS";
-          err.details = {
-            jobs: openJobs.map((j) => ({
-              id: String(j._id), jobOrderNo: j.jobOrderNo ?? null, status: j.status,
-            })),
-          };
-          throw err;
-        }
+        // The rule itself is shared with /cancel: api/orderShared.js.
+        await assertNoOpenJobs(order, session, (them) => `Complete or cancel ${them} first.`);
 
         const actor = actorFromRequest(req);
         const released = await _releaseAllReservations(
@@ -128,7 +105,12 @@ router.post(
           _customer:      order.customer,
           _totalMeters:   (order.elasticOrdered || [])
             .reduce((s, e) => s + (Number(e.quantity) || 0), 0),
-          _onTime:        order.supplyDate ? order.completedAt <= new Date(order.supplyDate) : undefined,
+          // By the day: the supply date is the first moment of its day,
+          // so compared as moments an order completed ON its date — at
+          // any hour after 05:30 — was reported to the owner as late.
+          _onTime:        order.supplyDate
+            ? factoryDay.daysBetween(order.supplyDate, order.completedAt) <= 0
+            : undefined,
           _actorName:     actor?.name || "Admin",
           _orderId:       order._id,
         };
