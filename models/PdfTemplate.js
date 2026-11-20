@@ -17,11 +17,22 @@
 //    box   — a rectangle (stroke, optional fill)
 //    table — the line-items grid; el.columns bind to context.rows,
 //            paginates down the page. At most one table per template.
+//    pageNumber — "Page {{n}} of {{total}}" (el.text), stamped on every
+//            page once the table has finished paginating.
+//
+//  Everything the built-in layouts use (services/pdf/docTypes.js) has to
+//  be storable here: the designer opens on a built-in layout and saves
+//  the whole of it back. This schema had fallen behind them — no page
+//  number, no paise column, none of the table's ruled-form settings — so
+//  saving a built-in layout was refused, and tests/api/pdfTemplates.test.js
+//  now saves each one.
 // ══════════════════════════════════════════════════════════════
 
 const mongoose = require("mongoose");
 
 const HEX = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+const hexOrEmpty = { validator: (v) => !v || HEX.test(v), message: "colour must be hex" };
 
 const columnSchema = new mongoose.Schema(
   {
@@ -29,7 +40,9 @@ const columnSchema = new mongoose.Schema(
     header: { type: String, default: "" },
     width: { type: Number, default: 1 },           // relative weight
     align: { type: String, enum: ["left", "right", "center"], default: "left" },
-    format: { type: String, enum: ["text", "number", "currency"], default: "text" },
+    // currency: whole rupees as they are, paise where there are any;
+    // currency2: always to the paisa (a quotation's rate per metre).
+    format: { type: String, enum: ["text", "number", "currency", "currency2"], default: "text" },
   },
   { _id: false }
 );
@@ -37,7 +50,7 @@ const columnSchema = new mongoose.Schema(
 const elementSchema = new mongoose.Schema(
   {
     id: { type: String, required: true },
-    type: { type: String, enum: ["text", "field", "image", "line", "box", "table"], required: true },
+    type: { type: String, enum: ["text", "field", "image", "line", "box", "table", "pageNumber"], required: true },
     x: { type: Number, default: 40 },
     y: { type: Number, default: 40 },
     w: { type: Number, default: 200 },
@@ -60,6 +73,14 @@ const elementSchema = new mongoose.Schema(
     columns: { type: [columnSchema], default: undefined },
     headerBg: { type: String, default: "#1D6FEB" },
     zebra: { type: Boolean, default: true },
+    // The ruled-form look of the built-in layouts: dark text on a light
+    // header band, column rules and an outer frame. Not set, the renderer
+    // keeps its own defaults (white header text, no rules).
+    headerColor: { type: String, default: undefined, validate: hexOrEmpty },
+    bodyColor: { type: String, default: undefined, validate: hexOrEmpty },
+    gridColor: { type: String, default: undefined, validate: hexOrEmpty },
+    zebraBg: { type: String, default: undefined, validate: hexOrEmpty },
+    grid: { type: Boolean, default: undefined },
   },
   { _id: false }
 );

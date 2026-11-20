@@ -89,4 +89,18 @@ describe('the month in plain words', () => {
     expect(r.by).toBe('rules');
     expect((await request(app).get('/api/v2/accounts/month-review?month=2026-13').set('Cookie', cookie())).status).toBe(400);
   });
+
+  it('a number that only sits inside a bigger figure is not "in the figures"', () => {
+    const { numbersHold } = require('../../services/monthCommentary');
+    const f = { sales: { taxable: 145000, change: 12.5, metres: 20300 }, overdue: { amount: 38000, over60: 0 }, label: 'October 2026' };
+    // What the figures hold, written the way a person writes them.
+    expect(numbersHold('Sales ₹1,45,000, up 12.5% on 20,300 m; ₹38,000 overdue in October 2026', f)).toBe(true);
+    expect(numbersHold('Sales ₹1,45,000.00 — up 12.50%', f)).toBe(true);
+    // "45,000" is the tail of 1,45,000 and "450" the middle of it; "203" the head of
+    // 20,300. Each used to pass, because the figures were searched as one long string.
+    expect(numbersHold('Sales fell to ₹45,000', f)).toBe(false);
+    expect(numbersHold('About 450 m a day', f)).toBe(false);
+    expect(numbersHold('203 invoices raised', f)).toBe(false);
+    expect(numbersHold('₹8,000 overdue', f)).toBe(false);
+  });
 });

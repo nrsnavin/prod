@@ -144,11 +144,15 @@ function byRule(f) {
   return out.slice(0, 6);
 }
 
-/** Every number in `text` must appear in the figures; otherwise the text is not used. */
+/**
+ * Every number in `text` must be one of the figures; otherwise the text is not used.
+ * A whole figure, not a run of its digits: "₹45,000" is not held by ₹1,45,000,
+ * which searching the figures as one long string used to allow.
+ */
 function numbersHold(text, f) {
-  const facts = JSON.stringify(f).replace(/,/g, '');
+  const facts = new Set((JSON.stringify(f).match(/\d+(\.\d+)?/g) || []).map((n) => String(Number(n))));
   const nums = (String(text).match(/\d[\d,]*(\.\d+)?/g) || []).map((n) => n.replace(/,/g, '')).filter((n) => n.length > 1 || Number(n) > 9);
-  return nums.every((n) => facts.includes(n) || facts.includes(String(Number(n))));
+  return nums.every((n) => facts.has(String(Number(n))));
 }
 
 async function byModel(f) {

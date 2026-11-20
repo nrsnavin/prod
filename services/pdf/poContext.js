@@ -18,9 +18,12 @@ function fmtDate(d) {
   return indiaDay(dt, { day: "2-digit", month: "short", year: "numeric" });
 }
 // "Rs." not ₹ — the built-in PDF font cannot encode U+20B9 and renders it
-// as a stray "¹". Matches templateRenderer and the payslip PDF.
+// as a stray "¹". Matches templateRenderer and the payslip PDF: whole
+// rupees as they are, paise kept where there are any.
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 function inr(n) {
-  return "Rs. " + Math.round(Number(n) || 0).toLocaleString("en-IN");
+  const v = r2(n);
+  return "Rs. " + v.toLocaleString("en-IN", Number.isInteger(v) ? {} : { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function poToContext(po, branding = {}) {
@@ -38,11 +41,11 @@ function poToContext(po, branding = {}) {
       unit: (it.rawMaterial && it.rawMaterial.unit) || it.unit || "",
       qty,
       rate,
-      amount: qty * rate,
+      amount: r2(qty * rate),
     };
   });
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
-  const totalAmount = rows.reduce((s, r) => s + r.amount, 0);
+  const totalAmount = r2(rows.reduce((s, r) => s + r.amount, 0));
   const supplier = po.supplier && typeof po.supplier === "object" ? po.supplier : {};
 
   return {

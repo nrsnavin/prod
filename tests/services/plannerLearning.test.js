@@ -225,6 +225,22 @@ describe('being able to see and undo what it learned', () => {
     expect(h.note).toMatch(/changeover cost down/i);
   });
 
+  test('the note gives the real reason when only late days differed', async () => {
+    // The same changeovers, two more late days taken: every other cost rises
+    // against the anchor. The note used to say the accepted plan "had fewer"
+    // changeovers — it had exactly as many.
+    const r = await observe(terms(1, 4, 0), terms(3, 4, 0), 10);
+    expect(r.after.changeover).toBeGreaterThan(r.before.changeover);
+    expect(r.note).toMatch(/changeover cost up/i);
+    expect(r.note).not.toMatch(/fewer of them|more of them/);
+    expect(r.note).toMatch(/more late days/i);
+    // And the other way: late days saved at the same changeovers.
+    await PlannerWeights.deleteMany({});
+    const back = await observe(terms(3, 4, 0), terms(1, 4, 0), 10);
+    expect(back.note).toMatch(/changeover cost down/i);
+    expect(back.note).toMatch(/fewer late days/i);
+  });
+
   test('history is bounded', async () => {
     for (let i = 0; i < learn.HISTORY_LIMIT + 10; i++) {
       await observe(terms(0, 2, 0), terms(0, 3 + (i % 3), 0));

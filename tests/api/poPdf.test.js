@@ -164,3 +164,56 @@ describe('what the purchase order was raised for', () => {
     expect(new Set(DOC_TYPES['purchase-order'].fields.map((f) => f.key)).has('raisedFor')).toBe(true);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading services/pdf line by line: the rate on a purchase order
+//  was printed rounded to the rupee. Yarn bought at Rs. 262.50 a kilo
+//  went to the supplier as "Rs. 263", beside an amount worked out at
+//  262.50 — the paper committing the company to a price it had not agreed.
+// ══════════════════════════════════════════════════════════════════
+describe('a purchase order prints the rate it was raised at', () => {
+  const { pdfText } = require('../helpers/pdfText');
+
+  it('keeps the paise on the rate, the amount and the total; whole rupees stay whole', async () => {
+    const sup = await Supplier.create({ name: 'Paise Yarns', address: 'Erode', phoneNumber: '9000000001' });
+    const m = await RawMaterial.create({ name: 'Polyester 150D', unit: 'kg', category: 'weft' });
+    const withPaise = await PurchaseOrder.create({
+      supplier: sup._id, poNo: 2051, status: 'Open', date: new Date('2026-11-10'),
+      items: [{ rawMaterial: m._id, price: 262.5, quantity: 12.5 }, { rawMaterial: m._id, price: 40, quantity: 10 }],
+    });
+    // On the built-in layout (an earlier test left a one-line design switched on)…
+    await PdfTemplate.deleteMany({ docType: 'purchase-order' });
+    const res = await asPdf(request(app).get(`/api/v2/supplier/po/${withPaise._id}/pdf`).set('Cookie', cookie(admin)));
+    expect(res.status).toBe(200);
+    const text = await pdfText(res.body);
+    expect(text).toContain('Rs. 262.50');           // the rate agreed
+    expect(text).not.toContain('Rs. 263');
+    expect(text).toContain('Rs. 3,281.25');         // 12.5 kg at 262.50
+    expect(text).toContain('Rs. 3,681.25');         // the order's value
+    expect(text).toContain('Rs. 40');               // a whole-rupee rate as it was
+    expect(text).not.toContain('Rs. 40.00');
+
+    // The first order, all whole rupees, prints exactly as before.
+    const whole = await pdfText((await asPdf(request(app).get(`/api/v2/supplier/po/${po._id}/pdf`).set('Cookie', cookie(admin)))).body);
+    expect(whole).toContain('Rs. 320');
+    expect(whole).toContain('Rs. 32,000');
+    expect(whole).toContain('Rs. 42,500');
+    expect(whole).not.toMatch(/Rs\. [\d,]+\.\d/);
+
+    // …and on a design saved before this, whose rate column is still a "currency" cell.
+    const { starterTemplate } = require('../../services/pdf/docTypes.js');
+    const saved = starterTemplate('purchase-order');
+    expect(saved.elements.find((e) => e.type === 'table').columns.find((c) => c.field === 'rate').format).toBe('currency');
+    await PdfTemplate.create({ ...saved, enabled: true });
+    const own = await pdfText((await asPdf(request(app).get(`/api/v2/supplier/po/${withPaise._id}/pdf`).set('Cookie', cookie(admin)))).body);
+    expect(own).toContain('Rs. 262.50');
+    await PdfTemplate.deleteMany({ docType: 'purchase-order' });
+  });
+
+  it('and the mapper says the same total', () => {
+    const { poToContext } = require('../../services/pdf/poContext.js');
+    const ctx = poToContext({ poNo: 7, items: [{ name: 'Yarn', quantity: 3, price: 0.1 }, { name: 'Yarn', quantity: 12.5, price: 262.5 }] }, {});
+    expect(ctx.rows[0].amount).toBe(0.3);           // not 0.30000000000000004
+    expect(ctx.fields.totalAmount).toBe('Rs. 3,281.55');
+  });
+});

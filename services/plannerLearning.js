@@ -157,11 +157,17 @@ function _describe(delta, before, after) {
   const parts = [];
   const say = (name, d, b, a) => {
     if (Math.abs(a - b) < 1e-9) return;
-    const dir = a > b ? 'up' : 'down';
-    parts.push(
-      `${name} ${dir} ${b.toFixed(3)} → ${a.toFixed(3)} (accepted plan had ` +
-      `${d > 0 ? 'more' : 'fewer'} of them)`
-    );
+    const up = a > b;
+    // A cost moves for one of two reasons: the accepted plan took more or
+    // fewer of that thing itself, or it took more or fewer late days —
+    // which moves every other cost against the anchor. Say the one that
+    // happened: "had fewer of them" for a plan with exactly as many is a
+    // reason nobody reading the history could act on.
+    const own = d !== 0 && (d > 0) === !up;
+    const why = own
+      ? `accepted plan had ${d > 0 ? 'more' : 'fewer'} of them`
+      : `accepted plan had ${up ? 'more' : 'fewer'} late days`;
+    parts.push(`${name} ${up ? 'up' : 'down'} ${b.toFixed(3)} → ${a.toFixed(3)} (${why})`);
   };
   say('changeover cost', delta.changeover, before.changeover, after.changeover);
   say('balance cost', delta.balance, before.balance, after.balance);

@@ -593,16 +593,23 @@ const DOC_TYPES = {
   },
 };
 
+// `rowFields`: what a line of the document's table can show. A challan
+// has unit and boxes and no rate; the designer offered one fixed list
+// (sno, description, qty, rate, amount) for every document.
 function listDocTypes() {
-  return Object.entries(DOC_TYPES).map(([id, d]) => ({ id, label: d.label, fields: d.fields }));
+  return Object.entries(DOC_TYPES).map(([id, d]) => ({
+    id, label: d.label, fields: d.fields,
+    rowFields: d.columns.map((c) => ({ key: c.field, label: c.header })),
+  }));
 }
 
+// Own entries only: "constructor" is not a document type.
 function getDocType(id) {
-  return DOC_TYPES[id] || null;
+  return Object.prototype.hasOwnProperty.call(DOC_TYPES, id) ? DOC_TYPES[id] : null;
 }
 
 function starterTemplate(docType) {
-  const d = DOC_TYPES[docType];
+  const d = getDocType(docType);
   return {
     docType,
     name: d ? d.label : docType,

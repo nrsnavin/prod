@@ -31,18 +31,23 @@ function safeColor(c, fallback) {
 // "Rs." rather than ₹ (U+20B9): pdfkit's built-in Helvetica is WinAnsi-only,
 // and the rupee sign is outside that set — it came out as a stray "¹" on
 // every currency cell. Same convention as the payslip PDF (api/payroll.js).
-function inr(n) { return "Rs. " + Math.round(Number(n) || 0).toLocaleString("en-IN"); }
+//
+// Whole rupees print as whole rupees; a figure with paise keeps them. It
+// used to be rounded to the rupee whatever it was, and the RATE column of
+// a purchase order is a `currency` cell: yarn bought at 262.50 a kilo went
+// to the supplier as "Rs. 263", beside an amount worked out at 262.50.
+function inr(n) {
+  const v = Math.round((Number(n) || 0) * 100) / 100;
+  return "Rs. " + v.toLocaleString("en-IN", Number.isInteger(v) ? {} : { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 function num(n) {
   const v = Number(n) || 0;
   return (Math.round(v * 100) / 100).toLocaleString("en-IN");
 }
-// Currency that keeps its paise.
+// Currency that always shows its paise ("Rs. 5.00").
 //
-// `currency` rounds to whole rupees, which suits a purchase order whose
-// line amounts run to thousands. A quotation's line is a RATE PER METRE
-// — around Rs 5 — and rounding that to Rs 5 makes the line contradict
-// its own amount: a buyer multiplying the printed rate by the printed
-// quantity lands nowhere near the printed total. Rates get paise.
+// A quotation's line is a RATE PER METRE — around Rs 5 — and a column of
+// those reads best with every figure to the paisa, whole or not.
 function inr2(n) {
   const v = Number(n) || 0;
   return "Rs. " + v.toLocaleString("en-IN", {
