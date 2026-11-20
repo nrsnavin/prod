@@ -202,7 +202,8 @@ async function prepareVoucher(b, req, opts = {}) {
     }
     const seenSrc = new Set();
     for (const [i, x] of b.refunds.entries()) {
-      const Model = REFUND_SOURCES[x?.sourceType];
+      // (Only the three named: every object also "has" a constructor.)
+      const Model = Object.hasOwn(REFUND_SOURCES, String(x?.sourceType)) ? REFUND_SOURCES[x.sourceType] : null;
       if (!Model) throw new ErrorHandler(`Refund ${i + 1}: sourceType must be Payment, AccountNote or OpeningBalance`, 400);
       if (!isId(x.id) || seenSrc.has(String(x.id))) throw new ErrorHandler(`Refund ${i + 1}: a credit, once`, 400);
       seenSrc.add(String(x.id));

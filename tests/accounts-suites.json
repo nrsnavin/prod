@@ -3,6 +3,7 @@
   "tests/api/accountsAi.test.js",
   "tests/api/accountsAudit.test.js",
   "tests/api/accountsBooks.test.js",
+  "tests/api/accountsInboxFigures.test.js",
   "tests/api/accountsInsights.test.js",
   "tests/api/accountsOtherZone.test.js",
   "tests/api/accountsOutside.test.js",
