@@ -416,7 +416,7 @@ async function sortJob(paperId) {
     if (saved) await tell(saved, out.reply);
     return { kind: saved?.kind || null, status: saved?.status || null };
   } catch (err) {
-    const permanent = err.permanent || err?.response?.status === 404 || ['UNSUPPORTED_TYPE', 'NO_PAGES'].includes(err.code);
+    const permanent = err.permanent || err?.response?.status === 404 || ['UNSUPPORTED_TYPE', 'NO_PAGES', 'TOO_MANY_PAGES'].includes(err.code);
     if (!permanent && paper.attempts < MAX_ATTEMPTS) {
       await WhatsAppPaper.updateOne({ _id: paper._id, status: 'sorting' }, { $set: { status: 'received' } });
       throw err;

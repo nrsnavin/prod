@@ -75,6 +75,41 @@ describe('a width conflict blocks a candidate outright', () => {
   });
 });
 
+// Found reading utils/fuzzyMatch.js line by line. The block fires only
+// when the two names share NO number. Share one — a roll length, a ply —
+// and a different width was scored as half right on its numbers, and its
+// longer name then won on spelling: for "20mm x 100m … white" the 25mm
+// roll was offered FIRST, above the 20mm the customer asked for.
+describe('a number that disagrees earns nothing for the ones that agree', () => {
+  const pick = (query, labels) => F.rank(query, labels.map((label, i) => ({ id: `c${i}`, label })));
+
+  test('the right width comes first, though another width shares the roll length', () => {
+    const r = pick('20mm x 100m knitted elastic white', ['25mm x 100m Knitted Elastic - White', '20mm Knitted Elastic - White']);
+    expect(r.best.label).toBe('20mm Knitted Elastic - White');
+    expect(r.candidates.find((c) => c.label.startsWith('25mm')).score).toBeLessThan(r.best.score);
+  });
+
+  test('and is never preselected, however alike the rest is', () => {
+    for (const [q, c] of [
+      ['20mm x 100m knitted elastic white', '25mm x 100m Knitted Elastic - White'],
+      ['Polyester 150D/48F Black', 'Polyester 150D/36F Black'],
+      ['40s PC Black 2 ply', '30s PC Black 2 ply'],
+      ['25mm Black Art 1042', '25mm Black Art 2051'],
+    ]) {
+      const r = pick(q, [c]);
+      expect(r.confident).toBe(false);
+      for (const x of r.candidates) expect(x.score).toBeLessThan(0.6);
+    }
+  });
+
+  test('a name that only says MORE is not a disagreement', () => {
+    // The customer adds the roll length; the master leaves it out — or the other way round.
+    expect(pick('20mm x 100m knitted elastic white', ['20mm Knitted Elastic - White']).best.score).toBeGreaterThan(0.6);
+    expect(pick('20mm knitted elastic white', ['20mm x 100m Knitted Elastic - White']).best.score).toBeGreaterThan(0.6);
+    expect(pick('40s PC Black', ['40/1 PC Black']).best.score).toBeGreaterThan(0.6);
+  });
+});
+
 // ══════════════════════════════════════════════════════════════════
 //  2. WHEN A MATCH MAY BE PRESELECTED
 // ══════════════════════════════════════════════════════════════════

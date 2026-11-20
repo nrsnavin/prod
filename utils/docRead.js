@@ -22,6 +22,15 @@ async function readJson({ pages, prompt, maxTokens = 1200, maxPages = 3 }) {
   if (!list.length) { const e = new Error('No photo to read.'); e.code = 'NO_PAGES'; throw e; }
   const bad = list.find((p) => !SUPPORTED.has(p.mimetype));
   if (bad) { const e = new Error(`Cannot read a ${bad.mimetype} file. Send a photo or a PDF.`); e.code = 'UNSUPPORTED_TYPE'; throw e; }
+  // Read whole, or not at all. More pages than the reader takes used to be
+  // cut to the first few without a word: five photos of a price list came
+  // back as a draft of four, looking complete. The older readers refuse
+  // (utils/billOcr.js); so does this.
+  if (list.length > maxPages) {
+    const e = new Error(`At most ${maxPages} page${maxPages === 1 ? '' : 's'} can be read here: you sent ${list.length}. Send them as one PDF, or the pages that matter.`);
+    e.code = 'TOO_MANY_PAGES';
+    throw e;
+  }
   const claude = anthropic();
   if (!claude) { const e = new Error('ANTHROPIC_API_KEY not set on the server.'); e.code = 'ANTHROPIC_KEY_MISSING'; throw e; }
   const startedAt = Date.now();
@@ -43,7 +52,7 @@ const str = (v, max = 120) => String(v ?? '').trim().slice(0, max);
 /** Map a route-level failure of readJson to { status, message }. */
 function failure(err, what) {
   if (err.code === 'ANTHROPIC_KEY_MISSING') return { status: 503, message: `Reading ${what} is not set up on this server — type the details in.` };
-  if (err.code === 'NO_PAGES' || err.code === 'UNSUPPORTED_TYPE') return { status: 400, message: err.message };
+  if (err.code === 'NO_PAGES' || err.code === 'UNSUPPORTED_TYPE' || err.code === 'TOO_MANY_PAGES') return { status: 400, message: err.message };
   return { status: 502, message: `The ${what} could not be read: ${err.message}` };
 }
 

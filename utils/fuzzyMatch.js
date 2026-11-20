@@ -120,8 +120,18 @@ function similarity(query, candidate) {
   const wordScore = qWords.length > 0 ? covered / qWords.length : 0;
 
   // Numeric agreement, when both name numbers.
+  //
+  // A number that DISAGREES earns nothing for the ones that agree. The
+  // block above fires only when no number is shared; share one — a roll
+  // length, a ply — and a different width used to score half marks here,
+  // and its longer name then won on spelling: for "20mm x 100m … white"
+  // the 25mm roll was offered first, above the 20mm that was asked for.
+  // One name merely saying MORE than the other ("20mm" against "20mm x
+  // 100m") is not a disagreement: each side's numbers are all the other's.
+  const within = (a, b) => a.every((n) => b.includes(n));
+  const disagree = qNums.length > 0 && cNums.length > 0 && !within(qNums, cNums) && !within(cNums, qNums);
   const numScore = (qNums.length && cNums.length)
-    ? qNums.filter((n) => cNums.includes(n)).length / Math.max(qNums.length, cNums.length)
+    ? (disagree ? 0 : qNums.filter((n) => cNums.includes(n)).length / Math.max(qNums.length, cNums.length))
     : null;
 
   const edit = editRatio(query, candidate);
