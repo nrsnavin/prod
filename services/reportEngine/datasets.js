@@ -203,10 +203,10 @@ const DATASETS = {
 
   dispatch: {
     label: 'Dispatch (challan lines)', access: OPS, dated: true,
-    description: 'Lines of delivery challans dispatched or delivered. Drafts and cancelled challans are left out.',
+    description: 'Lines of delivery challans dispatched or delivered. Drafts, cancelled challans and machine parts sent out are left out.',
     fields: { date: F.date('Date'), month: F.text('Month'), dcNumber: F.text('Challan'), customer: F.text('Customer'), elastic: F.text('Elastic'), status: F.text('Status'), quantity: F.qty('Quantity'), rate: F.num('Rate', 'avg'), amount: F.money('Value') },
     async rows({ from, to }) {
-      const dcs = await model('DeliveryChallan').find({ status: { $in: ['dispatched', 'delivered'] }, dispatchDate: { $gte: from, $lt: to } }).select('dcNumber dispatchDate customerName status items').lean();
+      const dcs = await model('DeliveryChallan').find({ ...require('../../domain/challanStatus').goodsLeft(), dispatchDate: { $gte: from, $lt: to } }).select('dcNumber dispatchDate customerName status items').lean();
       const out = [];
       for (const dc of dcs) for (const it of dc.items || []) out.push({ date: day(dc.dispatchDate), month: month(dc.dispatchDate), dcNumber: dc.dcNumber, customer: dc.customerName, elastic: it.elasticName || it.description || '', status: dc.status, quantity: r3(it.quantity), rate: r2(it.rate), amount: r2(it.amount || (it.quantity || 0) * (it.rate || 0)) });
       return out;

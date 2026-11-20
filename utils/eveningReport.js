@@ -15,7 +15,7 @@ const factoryDay = require("./factoryDay");
 const ShiftPlan       = require("../models/ShiftPlan.js");
 const Wastage         = require("../models/Wastage.js");
 const DeliveryChallan = require("../models/DeliveryChallan.js");
-const { LEFT } = require("../domain/challanStatus");
+const { goodsLeft } = require("../domain/challanStatus");
 
 // ── Pure formatter ───────────────────────────────────────────────
 function formatEveningReport(d) {
@@ -120,9 +120,10 @@ async function _wastage(start, end) {
 // and its value in "today's deliveries" (domain/challanStatus.js; the
 // morning digest's despatch line already held to this).
 async function _deliveries(start, end) {
+  // Goods, not a machine part sent out: its "1" was added to the metres.
   const dcs = await DeliveryChallan.find({
     dispatchDate: { $gte: start, $lte: end },
-    status: { $in: LEFT },
+    ...goodsLeft(),
   })
     .select("dcNumber orderNo customerName totalQuantity totalAmount dispatchDate")
     .sort({ dispatchDate: 1 })

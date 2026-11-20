@@ -20,12 +20,12 @@
 // ══════════════════════════════════════════════════════════════════
 
 const DeliveryChallan = require('../models/DeliveryChallan');
-const { LEFT } = require('../domain/challanStatus');
+const { goodsLeft } = require('../domain/challanStatus');
 const { round3 } = require('../utils/quantity');
 
 /** Challans matching any of `match` that have left (elastic ones: a machine part is not an order's metres). */
 function leftWhere(match) {
-  return DeliveryChallan.find({ $or: match, status: { $in: LEFT }, type: { $ne: 'machine_part' } });
+  return DeliveryChallan.find({ $or: match, ...goodsLeft() });
 }
 
 /** The challans of an order that have left. Older ones carry only its number. */

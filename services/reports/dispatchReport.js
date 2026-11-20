@@ -16,16 +16,18 @@ const DeliveryChallan = require("../../models/DeliveryChallan.js");
 const { previousWindow } = require("./range.js");
 
 const GROUP_BYS = ["customer", "elastic", "day"];
-const { LEFT: DISPATCHED } = require("../../domain/challanStatus"); // real movements: not a draft, not cancelled
+const { goodsLeft } = require("../../domain/challanStatus"); // real movements of goods: not a draft, not cancelled, not a machine part
 
 function round(n, dp = 0) {
   const f = 10 ** dp;
   return Math.round((Number(n) || 0) * f) / f;
 }
 
+// Goods that left in the window — not a machine part sent out, which is
+// neither sales nor metres (domain/challanStatus.js).
 const matchFor = (from, to) => ({
   dispatchDate: { $gte: from, $lt: to },
-  status: { $in: DISPATCHED },
+  ...goodsLeft(),
 });
 
 async function _summary(from, to) {

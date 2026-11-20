@@ -69,3 +69,40 @@ describe("the digest's low-stock count", () => {
     }
   });
 });
+
+// Found reading utils/digest.js line by line. The digest's maintenance
+// section is "the /maintenance-due route's logic" — but its own copy,
+// which compared the service DAY (kept at its first moment) with the
+// moment the digest runs: a service due today was OVERDUE from 05:30
+// that morning, while the app's own page said it was due today.
+describe("the digest's maintenance section", () => {
+  test("a service due today is due today, not overdue", async () => {
+    const db = mongoose.connection;
+    const log = (next) => [{ date: new Date("2026-03-01T00:00:00Z"), type: "preventive", nextServiceDate: new Date(next) }];
+    await db.collection("machines").insertMany([
+      { ID: "L-TODAY", serviceLogs: log("2026-06-21T00:00:00Z") },
+      { ID: "L-TOMORROW", serviceLogs: log("2026-06-22T00:00:00Z") },
+      { ID: "L-LATE", serviceLogs: log("2026-06-19T00:00:00Z") },
+      // Kept the old way, at India's midnight: still the 21st.
+      { ID: "L-TODAY-OLD", serviceLogs: log("2026-06-20T18:30:00Z") },
+    ]);
+    try {
+      const { buildDigestData: build, formatDigest } = require("../../utils/digest.js");
+      const data = await build(new Date("2026-06-21T03:00:00Z"));   // 08:30 on the 21st in India
+      const by = Object.fromEntries(data.maintenance.map((m) => [m.ID, m]));
+      expect(by["L-TODAY"]).toMatchObject({ overdue: false, daysUntil: 0 });
+      expect(by["L-TODAY-OLD"]).toMatchObject({ overdue: false, daysUntil: 0 });
+      expect(by["L-TOMORROW"]).toMatchObject({ overdue: false, daysUntil: 1 });
+      expect(by["L-LATE"]).toMatchObject({ overdue: true, daysUntil: -2 });
+      const text = formatDigest(data);
+      expect(text).toMatch(/L-TODAY: today/);
+      expect(text).toMatch(/L-TOMORROW: in 1d/);
+      expect(text).toMatch(/L-LATE: OVERDUE/);
+      // And the page it mirrors gives the same standing.
+      const { serviceStanding } = require("../../utils/serviceStanding.js");
+      expect(serviceStanding(new Date("2026-06-21T00:00:00Z"), new Date("2026-06-21T03:00:00Z"))).toMatchObject({ overdue: false, daysUntil: 0 });
+    } finally {
+      await db.collection("machines").deleteMany({});
+    }
+  });
+});

@@ -29,4 +29,21 @@ const CANCELLED = 'cancelled';
 
 const hasLeft = (status) => LEFT.includes(status);
 
-module.exports = { LEFT, DRAFT, CANCELLED, hasLeft };
+// ── GOODS, NOT A MACHINE PART ────────────────────────────────────
+// A challan is for elastic going to a customer, or for a machine part
+// going out — to a repairer, say (`type`, api/deliveryChallan.js). Only
+// the first is a despatch of goods: invoices are raised against it alone
+// and the customer's portal shows it alone. The figures that say what was
+// DISPATCHED did not look, so a gearbox sent for repair with a declared
+// value was in the morning digest's rupees, the evening report's metres,
+// and every row of the dispatch report.
+const MACHINE_PART = 'machine_part';
+
+/**
+ * The Mongo match for goods that have left: dispatched or delivered, and
+ * not a machine part. A challan from before challans had a type is goods.
+ * A fresh object each call, to be spread into a larger match.
+ */
+const goodsLeft = () => ({ status: { $in: [...LEFT] }, type: { $ne: MACHINE_PART } });
+
+module.exports = { LEFT, DRAFT, CANCELLED, MACHINE_PART, hasLeft, goodsLeft };

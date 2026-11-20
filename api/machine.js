@@ -116,27 +116,9 @@ function resolveBillType(file) {
   return BILL_EXTENSION_TYPES[ext] ?? null;
 }
 
-/**
- * Where a machine's next service stands against today.
- *
- * A service date is a day, and "now" is a moment. Comparing the two
- * called a service due TODAY overdue from half past five in the morning
- * — 20 points off the machine's health score, "0d overdue" on the list
- * — while counting it as zero days away in the same row. Days are
- * compared with days here, and they are the factory's
- * (utils/factoryDay.js).
- *
- * @returns {{next: Date, daysUntil: number, overdue: boolean}|null}
- *   null when there is no readable date. daysUntil is negative once the
- *   day has passed; 0 is today, which is due and not overdue.
- */
-function serviceStanding(nextServiceDate, now = new Date()) {
-  const next = factoryDay.calendarDay(nextServiceDate);
-  if (!next) return null;
-  const today = factoryDay.calendarDay(now);
-  const daysUntil = Math.round((next.getTime() - today.getTime()) / factoryDay.DAY);
-  return { next, daysUntil, overdue: daysUntil < 0 };
-}
+// Where a machine's next service stands against today, counted in days
+// (utils/serviceStanding.js — shared with the morning digest).
+const { serviceStanding } = require('../utils/serviceStanding');
 
 /** How many past shifts the machine detail page shows. */
 const RECENT_SHIFT_LIMIT = 6;

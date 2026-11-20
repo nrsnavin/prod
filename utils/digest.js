@@ -34,6 +34,7 @@ const EmployeeFeedback= require("../models/EmployeeFeedback.js");
 require("../models/Customer.js");
 const { STILL_OWED_EXPR } = require("../services/deliveryRisk.js");
 const { CONSUMPTION_TYPES } = require("../services/replenishment.js");
+const { serviceStanding } = require("./serviceStanding.js");
 
 // ── Pure formatter ───────────────────────────────────────────────
 function formatDigest(d) {
@@ -144,7 +145,7 @@ function formatDigest(d) {
   lines.push("", "🔧 *Maintenance due*");
   if (d.maintenance.length > 0) {
     for (const m of d.maintenance.slice(0, 5)) {
-      lines.push(`  ${m.ID}: ${m.overdue ? "OVERDUE" : `in ${m.daysUntil}d`}`);
+      lines.push(`  ${m.ID}: ${m.overdue ? "OVERDUE" : m.daysUntil === 0 ? "today" : `in ${m.daysUntil}d`}`);
     }
     if (d.maintenance.length > 5) lines.push(`  +${d.maintenance.length - 5} more`);
   } else {
@@ -423,7 +424,8 @@ async function _commercial(startYday, startToday, now) {
   const today = factoryDay.calendarDay(now) || now;
   const [dcAgg, orderAgg, lowAgg] = await Promise.all([
     DeliveryChallan.aggregate([
-      { $match: { status: { $in: ["dispatched", "delivered"] }, dispatchDate: { $gte: startYday, $lt: startToday } } },
+      // Goods that left — not a machine part sent out (domain/challanStatus.js).
+      { $match: { ...require("../domain/challanStatus").goodsLeft(), dispatchDate: { $gte: startYday, $lt: startToday } } },
       { $group: { _id: null, dcs: { $sum: 1 }, amount: { $sum: "$totalAmount" } } },
     ]),
     Order.aggregate([
@@ -536,7 +538,6 @@ async function _stockouts(now, lookbackDays, horizonDays) {
 
 // Lean version of the /maintenance-due route logic.
 async function _maintenance(now, days) {
-  const horizon = new Date(now.getTime() + days * 86_400_000);
   const machines = await Machine.find().select("ID serviceLogs").lean();
   const due = [];
   for (const m of machines) {
@@ -544,13 +545,12 @@ async function _maintenance(now, days) {
       .filter((l) => l.nextServiceDate)
       .sort((a, b) => new Date(b.date) - new Date(a.date));
     if (dated.length === 0) continue;
-    const next = new Date(dated[0].nextServiceDate);
-    if (Number.isNaN(next.getTime()) || next > horizon) continue;
-    due.push({
-      ID: m.ID,
-      overdue: next < now,
-      daysUntil: Math.ceil((next - now) / 86_400_000),
-    });
+    // By the day, as the machine page counts it (utils/serviceStanding.js):
+    // this compared the day with the moment the digest runs, so a service
+    // due today was OVERDUE.
+    const standing = serviceStanding(dated[0].nextServiceDate, now);
+    if (!standing || standing.daysUntil > days) continue;
+    due.push({ ID: m.ID, overdue: standing.overdue, daysUntil: standing.daysUntil });
   }
   due.sort((a, b) => a.daysUntil - b.daysUntil);
   return due;
