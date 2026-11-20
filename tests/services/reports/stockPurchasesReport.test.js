@@ -114,3 +114,53 @@ describe("stockPurchasesReport series + comparison", () => {
     expect(r.comparison.delta.purchaseValuePct).toBe(375);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading services/reports line by line.
+//
+//  The material rows were moved to average cost (the reason is written
+//  beside them: valued at the newest quote, the shelf was re-priced every
+//  time a supplier moved theirs). The headline above them and the
+//  category rows were not — so "Stock value" was not the total of the
+//  Value column under it, and the two groupings of one shelf disagreed.
+//  And every retired material was still counted, listed, and — if it had
+//  ever had a minimum — reported as low for good.
+// ══════════════════════════════════════════════════════════════════
+describe("one valuation, and the retired left out", () => {
+  const ids = [new mongoose.Types.ObjectId(), new mongoose.Types.ObjectId(), new mongoose.Types.ObjectId()];
+  const total = (rows) => rows.reduce((s, r) => s + r.value, 0);
+
+  beforeAll(async () => {
+    await mongoose.connection.collection("rawmaterials").insertMany([
+      // Bought at 60 on average; the supplier's newest quote is 80.
+      { _id: ids[0], name: "Cotton Old", category: "Yarn", stock: 100, price: 80, avgCost: 60, minStock: 10 },
+      // Retired at nothing. It had a minimum once.
+      { _id: ids[1], name: "Retired Yarn", category: "Yarn", stock: 0, price: 40, minStock: 25, archived: true },
+      // Retired with five kilos still on the shelf: they are worth something.
+      { _id: ids[2], name: "Retired, some left", category: "Rubber", stock: 5, price: 120, avgCost: 100, minStock: 10, archived: true },
+    ]);
+  });
+  afterAll(async () => { await mongoose.connection.collection("rawmaterials").deleteMany({ _id: { $in: ids } }); });
+
+  test("the headline is the total of the rows under it, by material and by category", async () => {
+    const byMaterial = await stockPurchasesReport({ from: FROM, to: TO, groupBy: "material" });
+    const byCategory = await stockPurchasesReport({ from: FROM, to: TO, groupBy: "category" });
+    expect(byMaterial.rows.find((r) => r.label === "Cotton Old")).toMatchObject({ price: 60, value: 6000, latestPrice: 80 });
+    expect(byMaterial.summary.stockValue).toBe(13500);          // 5000 + 2000 + 6000 + 500
+    expect(total(byMaterial.rows)).toBe(13500);
+    expect(total(byCategory.rows)).toBe(13500);
+    expect(byCategory.rows.find((r) => r.label === "Yarn")).toMatchObject({ value: 11000, stock: 200 });
+  });
+
+  test("a retired material is not counted, listed or low — unless it still holds stock, which is valued", async () => {
+    const r = await stockPurchasesReport({ from: FROM, to: TO, groupBy: "material" });
+    expect(r.summary.materials).toBe(4);                        // the three in use, and Cotton Old
+    expect(r.summary.lowStock).toBe(1);                         // Spandex, as before
+    const labels = r.rows.map((x) => x.label);
+    expect(labels).not.toContain("Retired Yarn");
+    expect(r.rows.find((x) => x.label === "Retired, some left")).toMatchObject({ stock: 5, value: 500, low: false });
+    const byCategory = await stockPurchasesReport({ from: FROM, to: TO, groupBy: "category" });
+    expect(byCategory.rows.find((x) => x.label === "Yarn").items).toBe(3);      // Yarn A, Yarn B, Cotton Old
+    expect(byCategory.rows.find((x) => x.label === "Rubber")).toMatchObject({ items: 1, value: 500 });
+  });
+});

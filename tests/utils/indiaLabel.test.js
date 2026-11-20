@@ -119,7 +119,11 @@ describe('every date the server writes names its zone', () => {
     let m;
     while ((m = re.exec(src))) {
       const args = argsAt(src, m.index + m[0].length - 1);
-      const writesADate = m[1] === 'Date' || m[1] === 'Time' || DATE_PART.test(args);
+      // `new Date(…).toLocaleString('en-IN')` writes a date and a time with no
+      // option that says so: known by what it is called on. Two of these got
+      // past the check (a report's "Generated:" line, the skipped-digest notice).
+      const onADate = /new Date\([^()]*(\([^()]*\)[^()]*)*\)\s*$/.test(src.slice(Math.max(0, m.index - 200), m.index));
+      const writesADate = m[1] === 'Date' || m[1] === 'Time' || DATE_PART.test(args) || onADate;
       if (writesADate && !/timeZone/.test(args)) {
         found.push(src.slice(0, m.index).split('\n').length);
       }
@@ -131,8 +135,12 @@ describe('every date the server writes names its zone', () => {
     expect(zoneless("x.toLocaleDateString('en-IN', { day: '2-digit' })")).toEqual([1]);
     expect(zoneless("x.toLocaleString('en-IN', { hour: '2-digit', minute: '2-digit' })")).toEqual([1]);
     expect(zoneless("x.toLocaleTimeString()")).toEqual([1]);
+    expect(zoneless("`Generated: ${new Date().toLocaleString('en-IN')}`")).toEqual([1]);
+    expect(zoneless("new Date(last.createdAt).toLocaleString('en-IN')")).toEqual([1]);
+    expect(zoneless("new Date(Date.now() - 5).toLocaleString()")).toEqual([1]);
     // A number is not a date.
     expect(zoneless("n.toLocaleString('en-IN', { maximumFractionDigits: 2 })")).toEqual([]);
+    expect(zoneless("new Date(x).getTime().toLocaleString('en-IN')")).toEqual([]);
     expect(zoneless("n.toLocaleString('en-IN')")).toEqual([]);
     // A date that names its zone is fine.
     expect(zoneless("x.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit' })")).toEqual([]);

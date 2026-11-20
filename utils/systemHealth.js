@@ -77,7 +77,8 @@ async function checkCronDigestSkipped() {
 
     if (recent) return;       // a recent digest exists → cron is healthy
     if (!last) return;        // no digest ever → fresh install, not a skipped cron
-    const lastSentLabel = new Date(last.createdAt).toLocaleString("en-IN");
+    // On the factory's clock, as every other message is written.
+    const lastSentLabel = require("./indiaLabel").indiaDateTime(last.createdAt);
     await notify("cronDigestSkipped", {
       lastSentLabel,
       _entity: { type: "NotificationHealth", id: "cron" },

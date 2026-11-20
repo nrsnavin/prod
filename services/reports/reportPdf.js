@@ -17,6 +17,7 @@
 
 const PDFDocument = require("pdfkit");
 const { drawLine, hasOtherScript } = require("../../utils/pdfScripts");
+const { indiaDateTime } = require("../../utils/indiaLabel");
 
 const BRAND = "#1D6FEB";
 const INK = "#0D1B2A";
@@ -24,7 +25,12 @@ const MUTE = "#5A6A85";
 const STRIPE = "#F4F7FC";
 const LINE = "#DDE3EE";
 
-function inr(n) { return "₹" + Math.round(Number(n) || 0).toLocaleString("en-IN"); }
+// Whole rupees as they are; a figure with paise keeps them. Rounded to the
+// rupee whatever it was, the stock report's Rate column printed 262.50 as ₹263.
+function inr(n) {
+  const v = Math.round((Number(n) || 0) * 100) / 100;
+  return "₹" + v.toLocaleString("en-IN", Number.isInteger(v) ? {} : { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 function num(n) {
   const v = Number(n) || 0;
   return (Math.round(v * 100) / 100).toLocaleString("en-IN");
@@ -84,7 +90,8 @@ function renderReportPdf({ title, rangeLabel, summaryLine, company = "Balu Elast
       doc.fillColor(INK).font(BOLD).fontSize(15).text(title, left, 62);
       doc.fillColor(MUTE).font(REG).fontSize(9)
         .text(`Period: ${rangeLabel || "—"}`, left, 84)
-        .text(`Generated: ${new Date().toLocaleString("en-IN")}`, left, 96);
+        // On the factory's clock: the server's own is 5½ hours behind it.
+        .text(`Generated: ${indiaDateTime(new Date())}`, left, 96);
       if (summaryLine) {
         doc.fillColor(INK).font(BOLD).fontSize(10).text(summaryLine, left, 114, { width: contentW });
       }

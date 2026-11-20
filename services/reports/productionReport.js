@@ -9,11 +9,17 @@
 //
 //  ShiftDetail.productionMeters is the shift's canonical TOTAL meters,
 //  so machine/shift/operator/day grouping sums it directly. Elastic
-//  grouping fans each shift's meters equally across its head→elastic
-//  snapshot so the elastic rows still reconcile to the grand total
-//  (shifts with no elastic snapshot can't be attributed and are noted).
+//  grouping fans each shift's meters equally across the heads that have
+//  an elastic on them; a shift with none is listed as "Not recorded", so
+//  the elastic rows come to the grand total like every other grouping —
+//  and to what the Reports page's "Production by elastic" shows
+//  (services/reportEngine/datasets.js). They used to be dropped without
+//  a word, and a head with no elastic took a share of the metres.
 //
-//  Wastage is matched on its own createdAt over the same window.
+//  Wastage is counted on the day it happened (incidentDate), as payroll
+//  and the Reports page count it; a record from before that was kept, on
+//  the day it was entered. It used to be the day of entry for all of
+//  them, so wastage keyed in late was set against the wrong week's output.
 //  Everything here is read-only aggregation — no session, no writes.
 // ═════════════════════════════════════════════════════════════════
 
@@ -47,7 +53,7 @@ async function _summary(from, to) {
       { $count: "machineDays" },
     ]),
     Wastage.aggregate([
-      { $match: { createdAt: { $gte: from, $lt: to } } },
+      { $match: { $or: [{ incidentDate: { $gte: from, $lt: to } }, { incidentDate: null, createdAt: { $gte: from, $lt: to } }] } },
       { $group: { _id: null, meters: { $sum: "$quantity" }, penalty: { $sum: "$penalty" }, entries: { $sum: 1 } } },
     ]),
   ]);
@@ -77,11 +83,14 @@ async function _rows(from, to, groupBy) {
   if (groupBy === "elastic") {
     const rows = await ShiftDetail.aggregate([
       { $match: match },
-      { $addFields: { _hc: { $size: { $ifNull: ["$elastics", []] } } } },
-      { $match: { _hc: { $gt: 0 } } },
-      { $unwind: "$elastics" },
+      // The heads with an elastic on them; a shift with none keeps one
+      // part with no elastic, so its metres are still in the rows.
+      { $addFields: { _heads: { $filter: { input: { $ifNull: ["$elastics", []] }, as: "h", cond: { $ne: [{ $ifNull: ["$$h.elastic", null] }, null] } } } } },
+      { $addFields: { _hc: { $size: "$_heads" } } },
+      { $addFields: { _heads: { $cond: [{ $gt: ["$_hc", 0] }, "$_heads", [{ elastic: null }]] }, _hc: { $max: ["$_hc", 1] } } },
+      { $unwind: "$_heads" },
       { $group: {
-          _id: "$elastics.elastic",
+          _id: "$_heads.elastic",
           meters: { $sum: { $divide: ["$productionMeters", "$_hc"] } },
           _shifts: { $addToSet: "$_id" },
       } },
@@ -91,7 +100,7 @@ async function _rows(from, to, groupBy) {
       { $project: {
           _id: 0,
           key: "$_id",
-          label: { $ifNull: ["$e.name", "Unknown elastic"] },
+          label: { $cond: [{ $eq: [{ $ifNull: ["$_id", null] }, null] }, "Not recorded", { $ifNull: ["$e.name", "Unknown elastic"] }] },
           meters: 1, shifts: 1,
       } },
       { $sort: { meters: -1 } },

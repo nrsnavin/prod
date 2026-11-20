@@ -116,8 +116,52 @@ describe("productionReport group-by rows reconcile to the total", () => {
     // el1: 1000/2 + 800 = 1300 ; el2: 1000/2 + 1200 = 1700
     expect(byLabel["20mm"]).toBe(1300);
     expect(byLabel["30mm"]).toBe(1700);
-    // shift #4 (no elastic snapshot, 500m) is not attributable → excluded.
-    expect(sum(r.rows)).toBe(3000);
+    // Shift #4 has no elastic snapshot: its 500 m cannot be put on an elastic.
+    // They used to be left out without a word (the rows came to 3,000 of
+    // 3,500); they are listed as "Not recorded", as the Reports page has them,
+    // so this grouping adds up like every other.
+    expect(byLabel["Not recorded"]).toBe(500);
+    expect(sum(r.rows)).toBe(3500);
+    expect(sum(r.rows)).toBe(r.summary.meters);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading services/reports line by line: this report and the
+//  Reports page's "Production by elastic" / "Wastage" disagreed.
+// ══════════════════════════════════════════════════════════════════
+describe("productionReport agrees with the report engine", () => {
+  const A = new Date("2026-08-03T00:00:00.000Z");
+  const B = new Date("2026-08-10T00:00:00.000Z");
+  const el3 = oid();
+
+  beforeAll(async () => {
+    const db = mongoose.connection;
+    await db.collection("elastics").insertOne({ _id: el3, name: "45mm" });
+    await db.collection("shiftdetails").insertMany([
+      // Two heads on the loom, one of them with no elastic on it: the metres are the one elastic's.
+      { status: "closed", date: new Date("2026-08-04T06:00:00Z"), shift: "DAY", machine: m1, employee: e1, productionMeters: 600, elastics: [{ head: 1, elastic: el3 }, { head: 2, elastic: null }] },
+    ]);
+    await db.collection("wastages").insertMany([
+      // Happened on 4 Aug, keyed in on the 12th (after the window): it is this week's wastage.
+      { incidentDate: new Date("2026-08-04T00:00:00Z"), createdAt: new Date("2026-08-12T05:00:00Z"), quantity: 30, penalty: 3 },
+      // Happened on 30 Jul, keyed in on 5 Aug (inside the window): it is not.
+      { incidentDate: new Date("2026-07-30T00:00:00Z"), createdAt: new Date("2026-08-05T05:00:00Z"), quantity: 70, penalty: 7 },
+      // An older record with no incident day: counted on the day it was entered.
+      { createdAt: new Date("2026-08-06T05:00:00Z"), quantity: 12, penalty: 0 },
+    ]);
+  });
+
+  test("a head with no elastic on it takes none of the metres", async () => {
+    const r = await productionReport({ from: A, to: B, groupBy: "elastic" });
+    expect(r.rows).toEqual([expect.objectContaining({ label: "45mm", meters: 600, shifts: 1 })]);
+  });
+
+  test("wastage is counted on the day it happened", async () => {
+    const r = await productionReport({ from: A, to: B, groupBy: "machine" });
+    expect(r.summary.wastageMeters).toBe(42);      // 30 + 12, not the 70 entered late
+    expect(r.summary.wastagePenalty).toBe(3);
+    expect(r.summary.wastagePct).toBe(7);          // 42 of 600
   });
 });
 

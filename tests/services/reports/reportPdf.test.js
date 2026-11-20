@@ -42,3 +42,29 @@ describe("renderReportPdf", () => {
     expect(pages).toBeGreaterThan(1);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading services/reports line by line.
+// ══════════════════════════════════════════════════════════════════
+describe("what the sheet says", () => {
+  const { pdfText } = require("../../helpers/pdfText");
+
+  test("\"Generated\" is the time in India, not on the server's clock", async () => {
+    // 20 Nov 2026, 01:10 in India — still the 19th, 19:40, in UTC.
+    jest.useFakeTimers({ now: new Date("2026-11-19T19:40:00Z"), doNotFake: ["nextTick", "setImmediate", "clearImmediate", "setTimeout", "clearTimeout", "setInterval", "clearInterval", "queueMicrotask", "hrtime", "performance"] });
+    try {
+      const text = await pdfText(await renderReportPdf({ title: "T", rangeLabel: "Today", columns, rows: [{ label: "Acme", dcs: 1, amount: 100 }] }));
+      expect(text).toMatch(/Generated: 20 Nov 2026, 01:10 am/i);
+    } finally { jest.useRealTimers(); }
+  });
+
+  test("a rate keeps its paise; whole rupees stay whole", async () => {
+    const cols = [{ key: "label", header: "Material", format: "text" }, { key: "price", header: "Rate", format: "currency" }, { key: "value", header: "Value", format: "currency" }];
+    const text = await pdfText(await renderReportPdf({ title: "Stock", rangeLabel: "Today", columns: cols, rows: [{ label: "Spandex", price: 262.5, value: 26250 }, { label: "Yarn", price: 40, value: 4000 }] }));
+    expect(text).toContain("₹262.50");
+    expect(text).not.toContain("₹263");
+    expect(text).toContain("₹26,250");
+    expect(text).toContain("₹40");
+    expect(text).not.toContain("₹40.00");
+  });
+});

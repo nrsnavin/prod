@@ -439,6 +439,9 @@ async function _commercial(startYday, startToday, now) {
       } },
     ]),
     RawMaterial.aggregate([
+      // Not the retired ones: retired at nothing, one that ever had a
+      // minimum is under it for good, and was in this count every morning.
+      { $match: { archived: { $ne: true } } },
       { $group: { _id: null, low: { $sum: { $cond: [{ $and: [{ $gt: ["$minStock", 0] }, { $lte: ["$stock", "$minStock"] }] }, 1, 0] } } } },
     ]),
   ]);

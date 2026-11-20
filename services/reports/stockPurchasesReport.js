@@ -3,8 +3,12 @@
 //  Stock & purchases report.
 //
 //  Two concerns in one view:
-//    • Stock valuation — a SNAPSHOT (as of now) of raw-material stock ×
-//      current price, plus a low-stock count (stock ≤ minStock).
+//    • Stock valuation — a SNAPSHOT (as of now) of raw-material stock at
+//      what it cost (COST below), plus a low-stock count (a minimum is
+//      set and stock ≤ it). One valuation for the headline, the material
+//      rows and the category rows: the headline is the total of either.
+//      Retired materials are not counted or flagged; one that still holds
+//      stock is listed and valued, because the stock is still there.
 //    • Purchases — WINDOWED: PO value placed in the period (excluding
 //      cancelled) and how much of it is still pending receipt.
 //
@@ -33,14 +37,28 @@ const ORDERED_VALUE = { $sum: { $multiply: ["$items.price", "$items.quantity"] }
 
 const poMatch = (from, to) => ({ date: { $gte: from, $lt: to }, status: { $ne: "Cancelled" } });
 
+// Valued at the weighted average of what the stock cost, not at the
+// latest purchase price. Priced at the newest quote, this figure
+// jumped every time a supplier moved theirs — revaluing yarn bought
+// months earlier — and it is the number the whole shelf is worth.
+// `price` is the fallback for material that has not been received
+// since averaging existed, which is what it was valued at anyway.
+const COST = { $cond: [{ $gt: [{ $ifNull: ["$avgCost", 0] }, 0] }, "$avgCost", { $ifNull: ["$price", 0] }] };
+const VALUE = { $multiply: [{ $ifNull: ["$stock", 0] }, COST] };
+const IN_USE = { $ne: ["$archived", true] };
+// What the report is about: every material in use, and a retired one
+// only while there is still some of it on the shelf.
+const ON_THE_BOOKS = { $or: [{ archived: { $ne: true } }, { stock: { $gt: 0 } }] };
+
 // Snapshot: current stock valuation + low-stock count. Not windowed.
 async function _stockSnapshot() {
   const [agg] = await RawMaterial.aggregate([
+    { $match: ON_THE_BOOKS },
     { $group: {
         _id: null,
-        materials: { $sum: 1 },
-        stockValue: { $sum: { $multiply: ["$stock", "$price"] } },
-        lowStock: { $sum: { $cond: [{ $and: [{ $gt: ["$minStock", 0] }, { $lte: ["$stock", "$minStock"] }] }, 1, 0] } },
+        materials: { $sum: { $cond: [IN_USE, 1, 0] } },
+        stockValue: { $sum: VALUE },
+        lowStock: { $sum: { $cond: [{ $and: [IN_USE, { $gt: ["$minStock", 0] }, { $lte: ["$stock", "$minStock"] }] }, 1, 0] } },
     } },
   ]);
   const r = agg || {};
@@ -75,7 +93,8 @@ async function _summary(from, to) {
 async function _rows(from, to, groupBy) {
   if (groupBy === "category") {
     const rows = await RawMaterial.aggregate([
-      { $group: { _id: "$category", items: { $sum: 1 }, stock: { $sum: "$stock" }, value: { $sum: { $multiply: ["$stock", "$price"] } } } },
+      { $match: ON_THE_BOOKS },
+      { $group: { _id: "$category", items: { $sum: 1 }, stock: { $sum: "$stock" }, value: { $sum: VALUE } } },
       { $project: { _id: 0, key: "$_id", label: { $ifNull: ["$_id", "—"] }, items: 1, stock: 1, value: 1 } },
       { $sort: { value: -1 } },
     ]);
@@ -95,25 +114,18 @@ async function _rows(from, to, groupBy) {
     return rows.map((r) => ({ ...r, orderedValue: round(r.orderedValue), pendingValue: round(r.pendingValue) }));
   }
 
-  // material (default) — stock valuation snapshot.
-  //
-  // Valued at the weighted average of what the stock cost, not at the
-  // latest purchase price. Priced at the newest quote, this figure
-  // jumped every time a supplier moved theirs — revaluing yarn bought
-  // months earlier — and it is the number the whole shelf is worth.
-  // `price` is the fallback for material that has not been received
-  // since averaging existed, which is what it was valued at anyway.
-  const COST = { $cond: [{ $gt: [{ $ifNull: ["$avgCost", 0] }, 0] }, "$avgCost", { $ifNull: ["$price", 0] }] };
+  // material (default) — stock valuation snapshot, at COST (above).
   const rows = await RawMaterial.aggregate([
+    { $match: ON_THE_BOOKS },
     { $project: {
-        _id: 0, key: "$_id", label: "$name", stock: 1, minStock: 1,
+        _id: 0, key: "$_id", label: "$name", stock: 1, minStock: 1, archived: 1,
         // Kept as `price` so every existing reader — the report page,
         // the PDF, the CSV — keeps working; it is now the cost the
         // value beside it was computed from, which is what a valuation
         // column should have shown all along.
         price: COST,
         latestPrice: { $ifNull: ["$price", 0] },
-        value: { $multiply: [{ $ifNull: ["$stock", 0] }, COST] },
+        value: VALUE,
     } },
     { $sort: { value: -1 } },
   ]);
@@ -121,7 +133,7 @@ async function _rows(from, to, groupBy) {
     key: r.key, label: r.label,
     stock: round(r.stock, 2), price: round(r.price, 2), value: round(r.value),
     latestPrice: round(r.latestPrice, 2),
-    low: r.minStock > 0 && r.stock <= r.minStock,
+    low: r.archived !== true && r.minStock > 0 && r.stock <= r.minStock,
   }));
 }
 

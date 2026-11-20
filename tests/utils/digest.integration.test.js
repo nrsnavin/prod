@@ -49,3 +49,23 @@ describe("digest.buildDigestData (integration smoke)", () => {
     expect(typeof data.dateLabel).toBe("string");
   });
 });
+
+// Found reading services/reports: the digest's "at/below reorder" count, like the
+// stock report's, still counted retired materials. One retired with a minimum set
+// sits at nothing for good, so it was in the morning message every day.
+describe("the digest's low-stock count", () => {
+  test("leaves out retired materials", async () => {
+    const db = mongoose.connection;
+    await db.collection("rawmaterials").insertMany([
+      { name: "In use, low", stock: 5, minStock: 20 },
+      { name: "In use, fine", stock: 50, minStock: 20 },
+      { name: "Retired, had a minimum", stock: 0, minStock: 25, archived: true },
+    ]);
+    try {
+      const data = await buildDigestData(new Date("2026-06-21T03:00:00Z"));
+      expect(data.commercial.lowStock).toBe(1);
+    } finally {
+      await db.collection("rawmaterials").deleteMany({});
+    }
+  });
+});
