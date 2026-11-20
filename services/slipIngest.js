@@ -56,7 +56,8 @@ const { promptVersion } = require('../utils/aiPrompts');
 const { enqueue } = require('../utils/outbox');
 const { sendWhatsApp } = require('../utils/whatsapp');
 const { submitProduction } = require('./shiftSubmit');
-const { createShiftPlan } = require('./shiftPlanCreate');
+const { createShiftPlan, planForDay, planDayKey } = require('./shiftPlanCreate');
+const factoryDay = require('../utils/factoryDay');
 const Machine = require('../models/Machine');
 const { levenshtein } = require('../utils/fuzzyMatch');
 const ledger = require('./aiLedger');
@@ -86,12 +87,15 @@ function parseDateShift(text, now = new Date()) {
   if (m) {
     const day = Number(m[1]);
     const month = Number(m[2]);
-    let year = m[3] ? Number(m[3]) : now.getFullYear();
+    // "This year" is the year in India: for the first hours of New
+    // Year's Day the server's own clock still says last year.
+    const today = factoryDay.calendarDay(now);
+    let year = m[3] ? Number(m[3]) : today.getUTCFullYear();
     if (year < 100) year += 2000;
-    const d = moment({ year, month: month - 1, day });
-    if (d.isValid() && d.date() === day) {
-      if (!m[3] && d.isAfter(moment(now).add(2, 'days'))) d.subtract(1, 'year');
-      dateKey = d.format('YYYY-MM-DD');
+    const key = (y) => `${String(y).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    if (factoryDay.isDayKey(key(year))) {
+      const far = !m[3] && factoryDay.daysBetween(today, factoryDay.calendarDay(key(year))) > 2;
+      dateKey = far && factoryDay.isDayKey(key(year - 1)) ? key(year - 1) : key(year);
     }
   }
   return { dateKey, shift };
@@ -313,18 +317,8 @@ async function downloadMedia(media) {
 
 // ── Working out the shift ────────────────────────────────────────
 
-/** The plan for a date and shift, matching how the printed sheet names dates. */
-async function planFor(dateKey, shift) {
-  if (!dateKey || !shift) return null;
-  const centre = moment(dateKey, 'YYYY-MM-DD');
-  const candidates = await ShiftPlan.find({
-    shift,
-    date: { $gte: centre.clone().subtract(36, 'hours').toDate(), $lte: centre.clone().add(36, 'hours').toDate() },
-  }).lean();
-  return candidates.find((p) => moment(p.date).format('YYYY-MM-DD') === dateKey)
-    || candidates.find((p) => new Date(p.date).toISOString().slice(0, 10) === dateKey)
-    || null;
-}
+/** The plan for a date and shift, the one way every reader finds it (services/shiftPlanCreate.js). */
+const planFor = (dateKey, shift) => planForDay(dateKey, shift);
 
 /** A sheet with codes but no readable plan number: the recent plan they belong to. */
 async function planFromCodes(codes) {
@@ -375,7 +369,7 @@ async function resolveShift(read, caption, override) {
   if (codes.length) {
     const plan = await planFromCodes(codes);
     if (plan) {
-      return { plan, dateKey: moment(plan.date).format('YYYY-MM-DD'), shift: plan.shift, from: 'codes' };
+      return { plan, dateKey: planDayKey(plan.date), shift: plan.shift, from: 'codes' };
     }
   }
   const cap = parseDateShift(caption);

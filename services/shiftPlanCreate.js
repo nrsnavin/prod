@@ -28,10 +28,41 @@ const JobOrder = require('../models/JobOrder');
 const ErrorHandler = require('../utils/ErrorHandler');
 const { assertCanWork } = require('../utils/employeeStatus');
 const { startingStatus } = require('./machineLoading');
+const factoryDay = require('../utils/factoryDay');
+
+const HOURS_36 = 36 * 3_600_000;
+
+/**
+ * The day a plan (or a shift entry) is for, as "YYYY-MM-DD": its day in
+ * India. Plans are stored at that day's UTC midnight; older ones were
+ * stored at midnight in India, the evening before in UTC. Both are that
+ * day in India — which is how every reader has to take it, whatever
+ * clock the server keeps (services/machineLoading.js shiftDateKey).
+ */
+const planDayKey = (date) => factoryDay.ymd(date);
+
+/**
+ * The plan for a day and a shift, however its date was stored; null
+ * when the shift has none. The one lookup: the floor tablet and the slip
+ * reader each had their own, reading the day off the server's clock.
+ * @param {string} dateKey "YYYY-MM-DD"
+ * @param {{ select?: string }} opts
+ */
+async function planForDay(dateKey, shift, { select = null } = {}) {
+  if (!factoryDay.isDayKey(dateKey) || !shift) return null;
+  const day = factoryDay.calendarDay(dateKey);
+  const q = ShiftPlan.find({ shift, date: { $gte: new Date(day.getTime() - HOURS_36), $lte: new Date(day.getTime() + HOURS_36) } }).sort({ date: 1 });
+  if (select) q.select(select);
+  const candidates = await q.lean();
+  return candidates.find((p) => planDayKey(p.date) === dateKey) || null;
+}
 
 /**
  * @param {object} input
- *   date       anything new Date() reads; the plan is for that UTC day
+ *   date       a day ("2026-10-21"), the phone's clock with no zone
+ *              ("2026-10-21T00:00:00.000") or a moment: the plan is for
+ *              that day in India (01:00 on the 21st there is still the
+ *              20th in UTC — and is a plan for the 21st)
  *   shiftType  'DAY' | 'NIGHT'
  *   description
  *   machines   [{ machine, operator }] — ids; rows missing either are skipped
@@ -54,9 +85,8 @@ async function createShiftPlan({ date, shiftType, description = '', machines = [
   );
   if (bad) throw new ErrorHandler('Every row needs a valid machine and operator.', 400);
 
-  const planDate = new Date(date);
-  if (Number.isNaN(planDate.getTime())) throw new ErrorHandler('date is not a valid date.', 400);
-  planDate.setUTCHours(0, 0, 0, 0);
+  const planDate = factoryDay.calendarDay(date);
+  if (!planDate) throw new ErrorHandler('date is not a valid date.', 400);
   // Nobody who has left by this date goes on it.
   await assertCanWork(rows.map((m) => m.operator), planDate);
 
@@ -184,4 +214,4 @@ async function addMachineToPlan(planId, { machine, operator }) {
   return detail;
 }
 
-module.exports = { createShiftPlan, addMachineToPlan };
+module.exports = { createShiftPlan, addMachineToPlan, planForDay, planDayKey };

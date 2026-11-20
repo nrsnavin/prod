@@ -36,7 +36,7 @@ const { assertCanWork, employedFrom } = require('../utils/employeeStatus');
 require('../models/JobOrder');
 require('../models/Elastic');
 const ErrorHandler = require('../utils/ErrorHandler');
-const { createShiftPlan, addMachineToPlan } = require('./shiftPlanCreate');
+const { createShiftPlan, addMachineToPlan, planForDay, planDayKey } = require('./shiftPlanCreate');
 const { submitProduction } = require('./shiftSubmit');
 const { isProductionLocked } = require('../utils/productionLock');
 const { currentShift } = require('./machineLoading');
@@ -154,17 +154,8 @@ async function openFloor({ dateKey, shift, pin, name, ip = '' }) {
 
 // ── The shift as it stands ────────────────────────────────────────
 
-/** The plan for a date and shift, however its date was stored. */
-async function findPlan(dateKey, shift) {
-  const centre = moment.utc(dateKey, 'YYYY-MM-DD');
-  const candidates = await ShiftPlan.find({
-    shift,
-    date: { $gte: centre.clone().subtract(36, 'hours').toDate(), $lte: centre.clone().add(36, 'hours').toDate() },
-  }).select('_id date shift status finalized description plan source floor').lean();
-  return candidates.find((p) => moment(p.date).format('YYYY-MM-DD') === dateKey)
-    || candidates.find((p) => new Date(p.date).toISOString().slice(0, 10) === dateKey)
-    || null;
-}
+/** The plan for a date and shift, however its date was stored (services/shiftPlanCreate.js). */
+const findPlan = (dateKey, shift) => planForDay(dateKey, shift, { select: '_id date shift status finalized description plan source floor' });
 
 const MACHINE_FIELDS = 'ID manufacturer NoOfHead NoOfHooks status loading orderRunning elastics';
 
@@ -566,7 +557,7 @@ async function previousReadingFor(detail) {
   const machine = detail?.machine?._id || detail?.machine;
   if (!plan?.date || !isShift(plan.shift) || !mongoose.isValidObjectId(String(machine || ''))) return null;
   // The plan's date as a key, the way findPlan matches it.
-  return previousTimerPhoto({ dateKey: moment(plan.date).format('YYYY-MM-DD'), shift: plan.shift }, machine);
+  return previousTimerPhoto({ dateKey: planDayKey(plan.date), shift: plan.shift }, machine);
 }
 
 /** Whether a kept photo belongs to the open shift or the one before it — the two the floor may see. */

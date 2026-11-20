@@ -61,7 +61,7 @@ const LOADING_SHIFT = "This machine was being loaded this shift — there is no 
 const { getPdfBranding } = require("../services/documentSettings.js");
 const { extractShiftRows } = require("../utils/shiftSheetOcr");
 const { submitProduction } = require("../services/shiftSubmit");
-const { createShiftPlan } = require("../services/shiftPlanCreate");
+const { createShiftPlan, planDayKey } = require("../services/shiftPlanCreate");
 const { VISION_MODEL } = require("../utils/anthropicClient");
 const { promptVersion } = require("../utils/aiPrompts");
 const ledger = require("../services/aiLedger");
@@ -412,20 +412,23 @@ router.get(
     if (!start || !less) {
       return next(new ErrorHandler("start and less date params are required", 400));
     }
-    const tooWide = rangeProblem(moment(start, "YYYY-MM-DD").toDate(), moment(less, "YYYY-MM-DD").toDate());
+    if (!factoryDay.isDayKey(start) || !factoryDay.isDayKey(less)) {
+      return next(new ErrorHandler("start and less must be YYYY-MM-DD dates", 400));
+    }
+    const tooWide = rangeProblem(factoryDay.calendarDay(start), factoryDay.calendarDay(less));
     if (tooWide) return next(new ErrorHandler(tooWide, 400));
 
+    // The days as India has them, from the first to the end of the last:
+    // a plan is for its day in India, however its date was stored
+    // (services/shiftPlanCreate.js planDayKey).
     const shifts = await ShiftPlan.find({
-      date: {
-        $gte: moment(start, "YYYY-MM-DD").toDate(),
-        $lte: moment(less,  "YYYY-MM-DD").toDate(),
-      },
-    }).lean();
+      date: { $gte: factoryDay.dayStart(start), $lte: factoryDay.dayEnd(less) },
+    }).sort({ date: 1 }).lean();
 
     const productionByDate = new Map();
 
     shifts.forEach((s) => {
-      const dateKey = moment(s.date).format("DD-MM-YYYY");
+      const dateKey = planDayKey(s.date).split("-").reverse().join("-");
       const existing = productionByDate.get(dateKey) || 0;
       productionByDate.set(dateKey, existing + (s.totalProduction || 0));
     });
@@ -1025,11 +1028,15 @@ router.get(
     const { date } = req.query;
     if (!date) return next(new ErrorHandler("date is required", 400));
 
-    const start = moment(date, "DD-MM-YYYY").startOf("day").toDate();
-    const end   = moment(date, "DD-MM-YYYY").endOf("day").toDate();
+    // That day in India, however each plan's date was stored
+    // (services/shiftPlanCreate.js planDayKey).
+    const dayKey = String(date).split("-").reverse().join("-");
+    if (!factoryDay.isDayKey(dayKey)) return next(new ErrorHandler("date must look like 21-10-2026", 400));
+    const start = factoryDay.dayStart(dayKey);
+    const end   = factoryDay.dayEnd(dayKey);
 
     const shift = await ShiftPlan.find({
-      date: { $gte: start, $lt: end },
+      date: { $gte: start, $lte: end },
     })
       .populate({
         path: "plan",
@@ -1389,7 +1396,8 @@ router.get(
   "/floor-sheet.pdf",
   isAdmin("admin", "production"),
   catchAsyncErrors(async (req, res, next) => {
-    const dateKey = String(req.query.date || moment().format("YYYY-MM-DD"));
+    // With no date asked for: today in India, not on the server's clock.
+    const dateKey = String(req.query.date || factoryDay.ymd());
     const shift = String(req.query.shift || "DAY").toUpperCase();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey) || !moment(dateKey, "YYYY-MM-DD", true).isValid()) {
       return next(new ErrorHandler("date must look like 2026-10-21", 400));
@@ -1468,12 +1476,15 @@ router.get(
       loading: d.status === "loading" || (d.machine?.status === "running" && !!d.machine?.loading),
     }));
 
-    const dateLabel = moment(sp.date).format("DD-MMM-YYYY");
+    // The plan's own day (services/shiftPlanCreate.js planDayKey): the
+    // number printed here is what a photo of the sheet is matched by.
+    const dayKey = planDayKey(sp.date);
+    const dateLabel = moment(dayKey, "YYYY-MM-DD").format("DD-MMM-YYYY");
     const branding = await getPdfBranding();
     const pdf = await renderPdf('shiftSheet', {
       dateLabel,
       shift: sp.shift,
-      planNo: `SP-${moment(sp.date).format("YYYYMMDD")}-${sp.shift === "NIGHT" ? "N" : "D"}`,
+      planNo: `SP-${dayKey.replace(/-/g, "")}-${sp.shift === "NIGHT" ? "N" : "D"}`,
       rows,
       branding,
     });
@@ -1481,7 +1492,7 @@ router.get(
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="production-sheet-${moment(sp.date).format("YYYY-MM-DD")}-${sp.shift}.pdf"`
+      `attachment; filename="production-sheet-${dayKey}-${sp.shift}.pdf"`
     );
     return res.send(pdf);
   })
