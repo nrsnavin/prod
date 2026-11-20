@@ -344,6 +344,95 @@ describe('the attribution end to end', () => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+//  3b. WHAT CAME AFTER A CHECK DID NOT CAUSE IT
+//
+//  Found reading the service line by line. Every shift ever run on the
+//  job, and every lot ever issued to it, was hung on every one of its
+//  checks. A weaver who took the loom over on Thursday was counted
+//  against the cloth that failed on Tuesday — in a report that names
+//  people. The cloth a check looked at was woven before the check.
+// ══════════════════════════════════════════════════════════════════
+describe('what came after a check', () => {
+  const DAY_MS = 86_400_000;
+  const daysAgo = (n) => new Date(Date.now() - n * DAY_MS);
+  const dayOf = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+
+  test('a shift that began after the check, and a lot issued after it, are not on it', async () => {
+    const ctx = await fixture();
+    const job = await makeJob(ctx.order, ctx.customer);
+    const loom = await Machine.create({ ID: 'LOOM-21', manufacturer: 'Comez', DateOfPurchase: new Date(), NoOfHead: 4, NoOfHooks: 12 });
+    const loom2 = await Machine.create({ ID: 'LOOM-22', manufacturer: 'Comez', DateOfPurchase: new Date(), NoOfHead: 4, NoOfHooks: 12 });
+    const first = await Employee.create({ name: 'Arun', phoneNumber: '9000000021', department: 'production' });
+    const later = await Employee.create({ name: 'Bala', phoneNumber: '9000000022', department: 'production' });
+    const shiftOn = async (n, shift, machine, employee) => {
+      const date = dayOf(daysAgo(n));
+      const plan = await ShiftPlan.create({ date, shift });
+      await ShiftDetail.create({ job: job._id, machine: machine._id, employee: employee._id, shift, date, status: 'closed', shiftPlan: plan._id });
+    };
+    await shiftOn(10, 'DAY', loom, first);    // Arun wove it first…
+    await shiftOn(2, 'NIGHT', loom2, later);  // …Bala took over a week later, on another loom.
+    const lot = (lotNo, issuedDate) => WarpingBatch.create({
+      job: job._id, elastics: [ctx.elastic._id], status: 'issued', batchNo: `WB-${seq++}`, warping: new mongoose.Types.ObjectId(), issuedDate,
+      allocations: [{ yarnLot: new mongoose.Types.ObjectId(), lotNo, quantity: 10, rawMaterial: new mongoose.Types.ObjectId() }],
+    });
+    await lot('D-EARLY', daysAgo(11));
+    await lot('D-LATE', daysAgo(3));
+    await lot('D-UNDATED', undefined);
+    const check = async (n, failed) => {
+      const c = await QcRecord.create({
+        job: job._id, elastic: ctx.elastic._id, results: [{ parameter: 'Width (mm)', expected: '20', measured: failed ? '17' : '20', pass: !failed }],
+        overallResult: failed ? 'fail' : 'pass', defectCode: failed ? 'weave-fault' : '', rejectedMeters: failed ? 40 : 0,
+      });
+      await QcRecord.collection.updateOne({ _id: c._id }, { $set: { createdAt: daysAgo(n) } });
+      return String(c._id);
+    };
+    const early = await check(6, true);   // failed while only Arun had touched it
+    const late = await check(1, false);   // passed after Bala's shift
+
+    const checks = await I.loadChecks({ since: daysAgo(30) });
+    const names = (c, field) => c[field].map((x) => x.label).sort();
+    const a = checks.find((c) => c.id === early);
+    const b = checks.find((c) => c.id === late);
+    expect(names(a, 'operators')).toEqual(['Arun']);
+    expect(names(a, 'machines')).toEqual(['LOOM-21']);
+    expect(names(a, 'shifts')).toEqual(['DAY']);
+    // A batch that never said when it was issued could have been in the cloth: it stays.
+    expect(names(a, 'lots')).toEqual(['D-EARLY', 'D-UNDATED']);
+    // By the later check, everything had touched the job.
+    expect(names(b, 'operators')).toEqual(['Arun', 'Bala']);
+    expect(names(b, 'machines')).toEqual(['LOOM-21', 'LOOM-22']);
+    expect(names(b, 'lots')).toEqual(['D-EARLY', 'D-LATE', 'D-UNDATED']);
+
+    // And so in the table: Bala has one check, a pass — not the failure from before his shift.
+    const out = await rootCause.analyse({ days: 30 });
+    expect(out.factors.operator.find((r) => r.label === 'Bala')).toMatchObject({ checks: 1, fails: 0 });
+    expect(out.factors.operator.find((r) => r.label === 'Arun')).toMatchObject({ checks: 2, fails: 1 });
+    expect(out.factors.lot.find((r) => r.label === 'D-LATE')).toMatchObject({ checks: 1, fails: 0 });
+  });
+
+  test('a night shift begun the evening of the check\'s own day counts only once it has begun', async () => {
+    const ctx = await fixture();
+    const job = await makeJob(ctx.order, ctx.customer);
+    const loom = await Machine.create({ ID: 'LOOM-31', manufacturer: 'Comez', DateOfPurchase: new Date(), NoOfHead: 4, NoOfHooks: 12 });
+    const night = await Employee.create({ name: 'Night Kumar', phoneNumber: '9000000031', department: 'production' });
+    // The night shift of 10 Nov 2026 begins at 20:00 that day in India (14:30 UTC).
+    const date = new Date('2026-11-10T00:00:00.000Z');
+    const plan = await ShiftPlan.create({ date, shift: 'NIGHT' });
+    await ShiftDetail.create({ job: job._id, machine: loom._id, employee: night._id, shift: 'NIGHT', date, status: 'closed', shiftPlan: plan._id });
+    const check = async (iso) => {
+      const c = await QcRecord.create({ job: job._id, elastic: ctx.elastic._id, results: [{ parameter: 'Width (mm)', expected: '20', measured: '20', pass: true }], overallResult: 'pass' });
+      await QcRecord.collection.updateOne({ _id: c._id }, { $set: { createdAt: new Date(iso) } });
+      return String(c._id);
+    };
+    const afternoon = await check('2026-11-10T09:30:00.000Z');  // 15:00 in India: before the shift
+    const midnight = await check('2026-11-10T18:45:00.000Z');   // 00:15 in India: during it
+    const checks = await I.loadChecks({ since: new Date('2026-11-01T00:00:00Z') });
+    expect(checks.find((c) => c.id === afternoon).operators).toEqual([]);
+    expect(checks.find((c) => c.id === midnight).operators.map((o) => o.label)).toEqual(['Night Kumar']);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 //  4. THE CONFOUNDING — the finding this service must not make alone
 // ══════════════════════════════════════════════════════════════════
 describe('confounded findings', () => {

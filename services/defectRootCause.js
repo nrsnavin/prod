@@ -33,6 +33,13 @@
 //     alongside the finding. It cannot be resolved from observational
 //     data, and pretending otherwise would be the most damaging thing
 //     this service could do to somebody's job.
+//
+//  And one thing that is simply not possible: what came AFTER a check
+//  did not cause it. The cloth a check looked at was woven before the
+//  check, so a shift that began later, and a lot issued later, are not
+//  hung on it. (Every shift and lot of the job used to be, on every one
+//  of its checks: a weaver who took the loom over on Thursday was
+//  counted against the cloth that failed on Tuesday.)
 // ══════════════════════════════════════════════════════════════════
 
 const QcRecord     = require('../models/QcRecord');
@@ -42,6 +49,17 @@ const ShiftDetail  = require('../models/ShiftDetail');
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 const { promptVersion, systemPrompt } = require('../utils/aiPrompts');
 const ledger = require('./aiLedger');
+const factoryDay = require('../utils/factoryDay');
+
+/** When a shift begins, factory time: day 08:00, night 20:00 (services/machineLoading.js). */
+const SHIFT_BEGINS = { DAY: 8, NIGHT: 20 };
+/** The moment a shift entry's shift began; null when its day is not known. */
+function beganAt(detail) {
+  const day = detail?.date ? factoryDay.dayStart(detail.date) : null;
+  return day ? day.getTime() + (SHIFT_BEGINS[detail.shift] ?? SHIFT_BEGINS.DAY) * 3_600_000 : null;
+}
+/** Not after the check — or its time is not known, and it may have been before. */
+const couldPrecede = (at, checkAt) => at == null || checkAt == null || at <= checkAt;
 
 /** Below this many checks, a factor value is not reported as a finding. */
 const MIN_SAMPLES = 8;
@@ -89,7 +107,7 @@ async function loadChecks({ since, elasticId } = {}) {
     // Neither put anything into the cloth, so neither can have caused a
     // defect in it.
     status: { $in: ['issued', 'completed'] },
-  }).select('job elastics allocations').lean();
+  }).select('job elastics allocations issuedDate').lean();
 
   const lotsByJob = new Map();
   for (const b of batches) {
@@ -99,6 +117,8 @@ async function loadChecks({ since, elasticId } = {}) {
       if (!a.yarnLot) continue;
       lotsByJob.get(key).push({
         id: String(a.yarnLot),
+        // When the yarn came off the rack, where the batch says.
+        at: b.issuedDate ? new Date(b.issuedDate).getTime() : null,
         label: a.lotNo || String(a.yarnLot).slice(-6),
         // Empty means the batch was job-wide — the operator did not say
         // which elastic it warped and the job had several. Recorded as
@@ -110,7 +130,7 @@ async function loadChecks({ since, elasticId } = {}) {
 
   // ── Machine, operator and shift, per job ──
   const details = await ShiftDetail.find({ job: { $in: jobIds } })
-    .select('job machine employee shift')
+    .select('job machine employee shift date')
     .populate('machine', 'ID')
     .populate('employee', 'name')
     .lean();
@@ -125,19 +145,22 @@ async function loadChecks({ since, elasticId } = {}) {
       operatorId:   d.employee ? String(d.employee._id) : null,
       operatorLabel: d.employee?.name || null,
       shift:        d.shift || null,
+      at:           beganAt(d),
     });
   }
 
   return checks.map((c) => {
     const jobKey = String(c.job);
     const elasticKey = String(c.elastic);
-    const allLots = lotsByJob.get(jobKey) || [];
+    const checkAt = c.createdAt ? new Date(c.createdAt).getTime() : null;
+    const allLots = (lotsByJob.get(jobKey) || []).filter((l) => couldPrecede(l.at, checkAt));
 
     // Prefer lots the batch attributed to THIS elastic. A job-wide
     // batch is included too — it genuinely may have gone into this
     // cloth, and dropping it would hide a real cause.
     const lots = allLots.filter((l) => l.elastics.length === 0 || l.elastics.includes(elasticKey));
-    const runs = runsByJob.get(jobKey) || [];
+    // The shifts that had begun by the time of the check.
+    const runs = (runsByJob.get(jobKey) || []).filter((r) => couldPrecede(r.at, checkAt));
 
     return {
       id: String(c._id),
