@@ -40,6 +40,7 @@ const { createShiftPlan, addMachineToPlan, planForDay, planDayKey } = require('.
 const { submitProduction } = require('./shiftSubmit');
 const { isProductionLocked } = require('../utils/productionLock');
 const { currentShift } = require('./machineLoading');
+const { headsInUse, headsOfShift } = require('../utils/machineHeads');
 const pm = require('./productionModel');
 
 const TOKEN_HOURS = 14;
@@ -218,6 +219,24 @@ async function sensorRuns(session, machineIds) {
   return out;
 }
 
+/**
+ * What an entry made, both ways. Production is entered A HEAD; verifying
+ * it stores the loom's total (a head × the heads it ran, api/shift.js
+ * /verify-production). The floor's screens print `production` as
+ * "m/head", so that is a head whether the entry is verified or not —
+ * and `total` is the loom's, for anything that adds looms up.
+ */
+function madeBy(m, detail) {
+  if (detail.status === 'closed') {
+    if (detail.productionMeters == null) return { production: null, total: null };
+    const total = Number(detail.productionMeters);
+    return { production: Math.round((total / headsOfShift(detail, m)) * 10) / 10, total };
+  }
+  if (detail.submittedProductionMeters == null) return { production: null, total: null };
+  const perHead = Number(detail.submittedProductionMeters);
+  return { production: perHead, total: Math.round(perHead * (headsInUse(m) || 1) * 100) / 100 };
+}
+
 function machineState(m, detail, plan, model = null, sensor = null) {
   const job = m.orderRunning && typeof m.orderRunning === 'object' ? m.orderRunning : null;
   const headMap = headMapOf(m);
@@ -260,7 +279,7 @@ function machineState(m, detail, plan, model = null, sensor = null) {
       operator: detail.employee ? { id: String(detail.employee._id ?? detail.employee), name: detail.employee.name ?? null } : null,
       operatorLocked: operatorLocked(plan, detail),
       submitted: detail.status === 'pending_verification' || detail.status === 'closed' ? {
-        production: detail.status === 'closed' ? (detail.productionMeters ?? null) : (detail.submittedProductionMeters ?? null),
+        ...madeBy(m, detail),
         timer: detail.status === 'closed' ? (detail.timer || null) : (detail.submittedTimer || null),
         feedback: detail.submittedFeedback || detail.feedback || '',
         at: detail.submittedAt || detail.verifiedAt || null,
@@ -301,7 +320,7 @@ async function shiftState({ dateKey, shift }) {
       .populate({ path: 'elastics.elastic', select: 'name pick' })
       .lean(),
     plan ? await ShiftDetail.find({ _id: { $in: plan.plan || [] } })
-      .select('machine employee status submittedProductionMeters submittedTimer submittedFeedback submittedAt submittedByName productionMeters timer feedback verifiedAt')
+      .select('machine employee status submittedProductionMeters submittedTimer submittedFeedback submittedAt submittedByName productionMeters headsRun timer feedback verifiedAt')
       .populate({ path: 'employee', select: 'name department' }).lean() : [],
     // The operators to pick from: whoever is still here on this shift's date.
     await Employee.find(employedFrom(dateKey)).select('name department').sort({ name: 1 }).lean(),
@@ -373,7 +392,7 @@ async function machineForShift({ dateKey, shift }, code) {
     .lean();
   const detail = plan
     ? await ShiftDetail.findOne({ shiftPlan: plan._id, machine: m._id })
-      .select('machine employee status submittedProductionMeters submittedTimer submittedFeedback submittedAt submittedByName productionMeters timer feedback verifiedAt')
+      .select('machine employee status submittedProductionMeters submittedTimer submittedFeedback submittedAt submittedByName productionMeters headsRun timer feedback verifiedAt')
       .populate({ path: 'employee', select: 'name department' }).lean()
     : null;
   const { model } = await pm.getModel();

@@ -515,7 +515,9 @@ async function expectFor({ machineId, elasticIds, minutes }) {
   const elastics = [...counts].map(([id, heads]) => ({
     id, name: byId.get(id)?.name ?? null, pick: byId.get(id)?.pick ?? null, heads,
   }));
-  const { pick, problem: pickProblem } = pickOfRunning(elastics);
+  // The pick a head at a time, as the model is trained (buildRows): three
+  // heads at pick 10 and one at 20 are not two elastics at 13.3.
+  const { pick, problem: pickProblem } = pickOfRunning(ids.map((id) => ({ pick: byId.get(id)?.pick ?? null })));
   // The heads that will run: one per elastic given (the head plan), or
   // the whole machine when no plan was given.
   const heads = ids.length || machine.NoOfHead;

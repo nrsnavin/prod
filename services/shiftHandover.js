@@ -42,8 +42,9 @@ async function figures({ dateKey, shift }) {
   let made = 0; let expected = 0; let expectedLooms = 0;
   const remarks = [];
   for (const m of running) {
-    const p = Number(m.detail?.submitted?.production);
-    if (Number.isFinite(p)) made += p;
+    // The loom's metres, not a head's: what is expected below is a loom's too.
+    const p = Number(m.detail?.submitted?.total);
+    if (m.detail?.submitted?.total != null && Number.isFinite(p)) made += p;
     if (m.rate?.metresPerHeadHour && m.headsRunning) { expected += m.rate.metresPerHeadHour * m.headsRunning * SHIFT_HOURS; expectedLooms += 1; }
     const fb = String(m.detail?.submitted?.feedback || '').trim();
     if (fb) remarks.push({ loom: m.ID, text: fb.slice(0, 120) });
