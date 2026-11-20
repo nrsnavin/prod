@@ -63,17 +63,32 @@ async function customerForPhone(phone) {
   return all.find((c) => collections.e164(c.phoneNumber) === want || (c.accountant?.mobile && collections.e164(c.accountant.mobile) === want)) || null;
 }
 
-/** A date written the way people write it in a chat, from `today`; null when there is none. */
-function dateIn(text, today = new Date()) {
+/**
+ * A date written the way people write it in a chat, from `today`; null when there is none.
+ *
+ * A day with no year or month is read FORWARD — "by the 15th", said on the
+ * 20th, is next month's: right for what somebody says they will do. With
+ * `past` it is read BACK, for what they say they have done: "sent on the
+ * 15th", said on the 20th, is five days ago, and "on Monday" the Monday
+ * just gone (services/poChaser.js: a supplier's "dispatched on 15/11" was
+ * read as the 15th of November next year).
+ */
+function dateIn(text, today = new Date(), { past = false } = {}) {
   const t = String(text || '').toLowerCase();
   const base = dayOf(today);
   const { y: thisYear, m: thisMonth } = cal.parts(base);
   const plus = (n) => new Date(base.getTime() + n * DAY);
-  if (/\bday after tomorrow\b/.test(t)) return plus(2);
-  if (/\btomorrow\b|\btmrw\b|\bnaalai\b|நாளை/.test(t)) return plus(1);
-  if (/\btoday\b|\btoday itself\b|இன்று/.test(t)) return base;
-  if (/\bnext week\b/.test(t)) return plus(7);
-  if (/\bmonth[- ]?end\b|\bend of (the )?month\b/.test(t)) return cal.at(thisYear, thisMonth + 1, 0);
+  if (past) {
+    if (/\bday before yesterday\b/.test(t)) return plus(-2);
+    if (/\byesterday\b|\bnetru\b|நேற்று/.test(t)) return plus(-1);
+    if (/\btoday\b|இன்று/.test(t)) return base;
+  } else {
+    if (/\bday after tomorrow\b/.test(t)) return plus(2);
+    if (/\btomorrow\b|\btmrw\b|\bnaalai\b|நாளை/.test(t)) return plus(1);
+    if (/\btoday\b|\btoday itself\b|இன்று/.test(t)) return base;
+    if (/\bnext week\b/.test(t)) return plus(7);
+    if (/\bmonth[- ]?end\b|\bend of (the )?month\b/.test(t)) return cal.at(thisYear, thisMonth + 1, 0);
+  }
   // A date written out, day first. One that does not exist ("31/11", "5/13")
   // is no date: it used to be rolled into the next month, or the next year.
   let m = t.match(/\b(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2,4}))?\b/);
@@ -81,7 +96,9 @@ function dateIn(text, today = new Date()) {
     const y = m[3] ? (m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3])) : thisYear;
     const d = realDay(y, Number(m[2]), Number(m[1]));
     if (!d) return null;
-    return !m[3] && d < base ? realDay(y + 1, Number(m[2]), Number(m[1])) : d;
+    if (m[3]) return d;
+    if (past) return d > base ? realDay(y - 1, Number(m[2]), Number(m[1])) : d;
+    return d < base ? realDay(y + 1, Number(m[2]), Number(m[1])) : d;
   }
   m = t.match(/\b(?:on|by|before)?\s*(\d{1,2})(?:st|nd|rd|th)\b/) || t.match(/\b(?:on|by|before)\s+(\d{1,2})\b(?![\d,.]|\s*(?:lakh|lac|k|thousand|%))/);
   if (m) {
@@ -89,11 +106,12 @@ function dateIn(text, today = new Date()) {
     if (n >= 1 && n <= 31) {
       // "By the 31st" in a month of thirty days is its last day.
       const d = cal.dayOfMonth(thisYear, thisMonth, n);
+      if (past) return d > base ? cal.dayOfMonth(thisYear, thisMonth - 1, n) : d;
       return d < base ? cal.dayOfMonth(thisYear, thisMonth + 1, n) : d;
     }
   }
   const wd = WEEKDAYS.findIndex((w) => new RegExp(`\\b${w}\\b`).test(t));
-  if (wd >= 0) return plus(((wd - base.getUTCDay() + 7) % 7) || 7);
+  if (wd >= 0) return past ? plus(-((base.getUTCDay() - wd + 7) % 7)) : plus(((wd - base.getUTCDay() + 7) % 7) || 7);
   return null;
 }
 

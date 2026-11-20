@@ -16,7 +16,8 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
-jest.mock('../../utils/anthropicClient', () => ({ anthropic: () => null, TEXT_MODEL: 'test-text', VISION_MODEL: 'test-vision', isPinned: () => true }));
+let mockClaude = null;   // no model: the keywords read the reply, unless a test gives one
+jest.mock('../../utils/anthropicClient', () => ({ anthropic: () => mockClaude, TEXT_MODEL: 'test-text', VISION_MODEL: 'test-vision', isPinned: () => true }));
 const mockSend = jest.fn().mockResolvedValue({ sent: true, provider: 'twilio', providerId: 'SM1' });
 jest.mock('../../utils/whatsapp', () => ({ sendWhatsApp: (...a) => mockSend(...a), isConfigured: () => true }));
 const mockNotify = jest.fn().mockResolvedValue({ sent: true });
@@ -129,5 +130,116 @@ describe('the settings', () => {
     expect(ok.body.settings).toMatchObject({ auto: true, hour: 9 });
     const bad = await request(app).put('/api/v2/supplier/po/chase/settings').set('Cookie', cookie()).send({ hour: 2 });
     expect(bad.status).toBe(400);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading services/poChaser.js line by line.
+//
+//  A reply's day decides whether the chaser waits. The day was read the
+//  way a PROMISE is read — looking forward — whatever the reply said:
+//
+//    • "Dispatched on 15/11", written on the 20th, was the 15th of
+//      November NEXT YEAR: the PO sat as "promised" and was not chased
+//      again for twelve months
+//    • "Sent on 15th" was a promise to dispatch on the 15th of next month
+//    • "not yet dispatched" read as dispatched
+//    • any date at all ("your PO dated 01/11…") was a promise, a year off
+//    • the model's day was checked for its shape only (the second copy of
+//      the rule in services/collectionReply.js, without its checks)
+// ══════════════════════════════════════════════════════════════════
+describe('the day in a supplier\'s reply', () => {
+  const FRIDAY = new Date('2026-11-20T06:00:00Z');
+  const read = (text, when = FRIDAY) => chaser.keywordRead(text, when);
+
+  it('is a day gone by when they say it has been sent', () => {
+    expect(read('Dispatched on 15/11, LR no 4471')).toMatchObject({ kind: 'dispatched', date: '2026-11-15' });
+    expect(read('Dispatched on 28/12', new Date('2027-01-02T06:00:00Z'))).toMatchObject({ kind: 'dispatched', date: '2026-12-28' });
+    expect(read('Sent on 15th itself sir')).toMatchObject({ kind: 'dispatched', date: '2026-11-15' });
+    expect(read('Material dispatched yesterday')).toMatchObject({ kind: 'dispatched', date: '2026-11-19' });
+    expect(read('Loaded on Monday')).toMatchObject({ kind: 'dispatched', date: '2026-11-16' });
+    expect(read('Dispatched today, will reach tomorrow')).toMatchObject({ kind: 'dispatched', date: '2026-11-20' });
+  });
+
+  it('is a promise when it is still to be sent', () => {
+    expect(read('Will be dispatched tomorrow')).toMatchObject({ kind: 'promise', date: '2026-11-21' });
+    expect(read('will dispatch by 25/11')).toMatchObject({ kind: 'promise', date: '2026-11-25' });
+    expect(read('Sorry sir, not yet dispatched. Will send on Monday')).toMatchObject({ kind: 'promise', date: '2026-11-23' });
+  });
+
+  it('is not a promise when it is only a date they mention', () => {
+    // Read forward, 01/11 is next November: nobody promises yarn a year out.
+    expect(read('Your PO dated 01/11 is not in our records')).toMatchObject({ kind: 'other', date: null });
+  });
+
+  it('leaves a PO that was "dispatched last week" to be chased, not waiting a year', async () => {
+    const ago = dayFromToday(-5);
+    const r = await chaser.handleReply({ from: '+919840022222', text: `PO 501 dispatched on ${ago.getUTCDate()}/${ago.getUTCMonth() + 1}`, supplier });
+    expect(r.read.kind).toBe('dispatched');
+    expect(r.promised).toBe(ago.toISOString().slice(0, 10));
+    const row = (await chaser.overdue()).find((x) => x.poNo === 501);
+    expect(row.state).toBe('overdue');
+    const [, payload] = mockNotify.mock.calls.at(-1);
+    expect(payload.body).toMatch(/says it is dispatched/);
+  });
+
+  describe('when the model reads it', () => {
+    const says = (obj) => { mockClaude = { messages: { create: async () => ({ content: [{ type: 'text', text: JSON.stringify(obj) }], usage: {} }) } }; };
+    afterEach(() => { mockClaude = null; });
+
+    it('takes its day only when it is a day, not gone for a promise, and not months away', async () => {
+      says({ kind: 'promise', date: '2026-11-31', summary: 'x' });            // no such day
+      expect((await chaser.readReply('ok sir will send by 25th', { today: FRIDAY })).date).toBe('2026-11-25');
+      says({ kind: 'promise', date: '2025-11-25', summary: 'x' });            // a model a year out
+      expect((await chaser.readReply('ok sir will send by 25th', { today: FRIDAY })).date).toBe('2026-11-25');
+      says({ kind: 'promise', date: '2027-11-25', summary: 'x' });            // a year ahead
+      expect((await chaser.readReply('ok will send', { today: FRIDAY })).date).toBeNull();
+      says({ kind: 'dispatched', date: '2026-11-18', summary: 'Sent on 18th' }); // sent: a day gone is right
+      expect(await chaser.readReply('sent 2 days back', { today: FRIDAY })).toMatchObject({ kind: 'dispatched', date: '2026-11-18', ai: true });
+      says({ kind: 'promise', date: '2026-12-02', summary: 'x' });
+      expect((await chaser.readReply('next to next week', { today: FRIDAY })).date).toBe('2026-12-02');
+    });
+  });
+});
+
+describe('the morning run', () => {
+  let other, a, b;
+  const tenThirty = () => new Date(require('../../utils/factoryDay').calendarDay().getTime() + (10.5 * 60 - 330) * 60_000);
+
+  beforeAll(async () => {
+    const Supplier = require('../../models/Supplier');
+    other = (await Supplier.collection.insertOne({ name: 'Kovai Rubber', phoneNumber: '9840033333' })).insertedId;
+    const base = { supplier: other, date: dayFromToday(-20), status: 'Open' };
+    [a, b] = await PO.insertMany([
+      { ...base, poNo: 606, expectedDate: dayFromToday(-8), items: [{ rawMaterial: mat._id, quantity: 10, receivedQuantity: 0, price: 300 }] },
+      { ...base, poNo: 607, expectedDate: dayFromToday(-7), items: [{ rawMaterial: mat._id, quantity: 10, receivedQuantity: 0, price: 300 }] },
+    ]);
+  });
+
+  it('goes on to the next PO when one fails', async () => {
+    mockSend.mockRejectedValueOnce(new Error('provider library crashed'));
+    const out = await chaser.sendDue();
+    expect(out.map((x) => x.poNo)).toEqual([606, 607]);
+    expect(out[0]).toMatchObject({ sent: false, error: expect.stringMatching(/crashed/) });
+    expect(out[1]).toMatchObject({ sent: true });
+    expect((await PO.findById(b._id).lean()).chase.count).toBe(1);
+    expect((await PO.findById(a._id).lean()).chase?.count || 0).toBe(0);
+  });
+
+  it('that failed before anything went is recorded as failed, and tried again at the next tick', async () => {
+    const ScheduledRun = require('../../models/ScheduledRun');
+    await request(app).put('/api/v2/supplier/po/chase/settings').set('Cookie', cookie()).send({ auto: true, hour: 10 });
+    const now = tenThirty();
+    const day = require('../../utils/factoryDay').ymd(now);
+    const spy = jest.spyOn(PO, 'find').mockImplementationOnce(() => { throw new Error('db down'); });
+    await expect(chaser.tick(now)).rejects.toThrow('db down');
+    spy.mockRestore();
+    expect(await ScheduledRun.findOne({ key: `poChase:${day}` }).lean()).toMatchObject({ ok: false, error: 'db down' });
+
+    const again = await chaser.tick(now);
+    expect(again.ran).toBe(true);
+    expect(again.sent.map((x) => x.poNo)).toEqual([606]);          // 607 went above; nothing goes twice
+    expect(await ScheduledRun.findOne({ key: `poChase:${day}` }).lean()).toMatchObject({ ok: true });
+    expect(await chaser.tick(now)).toMatchObject({ ran: false, why: 'already sent today' });
   });
 });

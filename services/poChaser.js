@@ -38,6 +38,11 @@ const KINDS = ['promise', 'dispatched', 'problem', 'other'];
 const DAY = 86_400_000;
 const AI_WAIT_MS = Number(process.env.PO_CHASE_AI_MS) || 6000;
 const EVERY_MS = 15 * 60_000;
+// A reply's day makes the chaser wait until it has passed. No supplier
+// promises yarn three months out: a day further off than this is a
+// misreading (a date with no year read forward into next year), and is
+// not taken as a day at all.
+const MAX_WAIT_DAYS = 90;
 
 const qty = (n) => Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 3 });
 const dmy = (d) => (d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' }) : '');
@@ -149,7 +154,10 @@ async function send(poId, { by = '', now = new Date() } = {}) {
 async function sendDue({ now = new Date(), by = 'Automatic' } = {}) {
   const rows = (await overdue({ now })).filter((r) => r.chaseDue);
   const out = [];
-  for (const r of rows) out.push({ poNo: r.poNo, ...(await send(r._id, { by, now })) });
+  // One PO that cannot be sent does not stop the rest of the morning's.
+  for (const r of rows) {
+    try { out.push({ poNo: r.poNo, ...(await send(r._id, { by, now })) }); } catch (err) { out.push({ poNo: r.poNo, sent: false, dryRun: false, error: err?.message || String(err) }); }
+  }
   return out;
 }
 
@@ -163,11 +171,23 @@ async function supplierForPhone(phone) {
   return all.find((s) => e164(s.phoneNumber) === want) || null;
 }
 
+// It has gone — unless the same words are about what is still to happen
+// ("will be dispatched tomorrow", "not yet dispatched").
+const GONE = /\b(dispatched|despatched|sent (today|yesterday|already|it|on)|shipped|loaded|on the way|in transit|lr (no|number)|lorry)\b|அனுப்பி/;
+const NOT_YET = /\b(will|shall|would|can|to)\s+(be\s+)?(dispatch|despatch|ship|load|sen[dt])|\bnot\s+(yet\s+)?(been\s+)?(dispatched|despatched|sent|shipped|loaded)|\byet to\b/;
+const tooFar = (day, today) => day.getTime() - today.getTime() > MAX_WAIT_DAYS * DAY;
+
 function keywordRead(text, today = new Date()) {
   const t = String(text || '').toLowerCase();
-  const d = dateIn(t, factoryDay.calendarDay(today)); // India's today, at its calendar midnight
+  const base = factoryDay.calendarDay(today); // India's today, at its calendar midnight
+  // What has been sent was sent on a day gone by; what will be is ahead.
+  // Every day used to be read ahead: "dispatched on 15/11", written on the
+  // 20th, was the 15th of November next year, and the PO waited for it.
+  const gone = GONE.test(t) && !NOT_YET.test(t);
+  let d = dateIn(t, base, { past: gone });
+  if (d && tooFar(d, base)) d = null;
   let kind = 'other';
-  if (/\b(dispatched|despatched|sent (today|already|it)|shipped|loaded|on the way|in transit|lr (no|number)|lorry)\b|அனுப்பி/.test(t)) kind = 'dispatched';
+  if (gone) kind = 'dispatched';
   else if (/\b(cannot|can't|cant|unable|not possible|no stock|out of stock|shortage|price (increase|revised|hike)|rate (increase|revised)|delay(ed)? due|power cut|strike)\b/.test(t) && !d) kind = 'problem';
   else if (d || /\b(will (send|dispatch|deliver|ship)|by (tomorrow|monday|tuesday|wednesday|thursday|friday|saturday)|next week)\b/.test(t)) kind = 'promise';
   const poNo = (t.match(/\bpo\s*(?:no\.?|number|#)?\s*[:#-]?\s*(\d{1,7})\b/) || [])[1];
@@ -198,9 +218,18 @@ async function readReply(text, { today = new Date(), refId = null } = {}) {
     const msg = await Promise.race([call, new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), AI_WAIT_MS))]);
     const raw = parseJson((msg.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''));
     if (!raw || !KINDS.includes(raw.kind)) throw new Error('model returned no kind');
+    // The model's day, by the rule for a customer's promise to pay
+    // (services/collectionReply.js), which this copy had none of: a day
+    // that exists ("2026-11-31" was told to the office as the 1st of
+    // December and kept as no promise at all); for a promise, not one that
+    // has gone; and not months away. Otherwise what the words themselves say.
+    const now = factoryDay.calendarDay(today);
+    let date = factoryDay.isDayKey(String(raw.date || '')) ? raw.date : base.date;
+    const ok = (day) => !!day && !(raw.kind === 'promise' && day < factoryDay.ymd(now)) && !tooFar(factoryDay.calendarDay(day), now);
+    if (!ok(date)) date = ok(base.date) ? base.date : null;
     const out = {
       kind: raw.kind,
-      date: /^\d{4}-\d{2}-\d{2}$/.test(String(raw.date || '')) ? raw.date : base.date,
+      date,
       poNo: Number.isInteger(Number(raw.poNo)) && Number(raw.poNo) > 0 ? Number(raw.poNo) : base.poNo,
       summary: String(raw.summary || '').slice(0, 100), ai: true,
     };
@@ -249,7 +278,7 @@ async function handleReply({ from, text, supplier, now = new Date() }) {
     _entity: { type: 'PurchaseOrder', id: po._id },
   }).catch(() => null);
   const cfg = await settings();
-  const ack = cfg.acknowledge && promised ? `Thank you — noted dispatch by ${dmy(promised)} for PO #${po.poNo}.` : '';
+  const ack = cfg.acknowledge && promised ? `Thank you — noted ${read.kind === 'dispatched' && promised <= factoryDay.calendarDay(now) ? 'as dispatched on' : 'dispatch by'} ${dmy(promised)} for PO #${po.poNo}.` : '';
   return { read, po: { _id: po._id, poNo: po.poNo }, promised: promised ? ymd(promised) : null, atRisk: !!risk, ack };
 }
 
@@ -261,9 +290,21 @@ async function tick(now = new Date()) {
   if (mins < cfg.hour * 60 || mins > cfg.hour * 60 + 180) return { ran: false, why: 'not now' };
   const ScheduledRun = require('../models/ScheduledRun');
   const day = factoryDay.ymd(now);
-  try { await ScheduledRun.create({ key: `poChase:${day}`, task: 'poChase', day }); } catch (err) { if (err?.code === 11000) return { ran: false, why: 'already sent today' }; throw err; }
-  const sent = await sendDue({ now });
-  await ScheduledRun.updateOne({ key: `poChase:${day}` }, { $set: { ok: true } });
+  const key = `poChase:${day}`;
+  try { await ScheduledRun.create({ key, task: 'poChase', day }); } catch (err) {
+    if (err?.code !== 11000) throw err;
+    // A morning that failed before its list could be made is tried again at
+    // the next tick (it was left claimed, and the day's chasers never went);
+    // one that ran is not. Nothing goes twice: a PO chased is not due.
+    const again = await ScheduledRun.findOneAndUpdate({ key, ok: false }, { $set: { ok: null, error: '' } });
+    if (!again) return { ran: false, why: 'already sent today' };
+  }
+  let sent;
+  try { sent = await sendDue({ now }); } catch (err) {
+    await ScheduledRun.updateOne({ key }, { $set: { ok: false, error: String(err?.message || err).slice(0, 500) } }).catch(() => null);
+    throw err;
+  }
+  await ScheduledRun.updateOne({ key }, { $set: { ok: true } });
   return { ran: true, sent };
 }
 
