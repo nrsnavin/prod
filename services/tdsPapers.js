@@ -27,7 +27,7 @@ const tds = require('./tds');
 const bizDates = require('../utils/bizDates');
 const aiLedger = require('./aiLedger');
 const { promptVersion } = require('../utils/aiPrompts');
-const { nameScore } = require('./partyMatch');
+const { oneByName } = require('./partyMatch');
 const { r2 } = require('../utils/money');
 
 const SURFACE = 'tds-paper-ocr';
@@ -109,10 +109,9 @@ async function customerFor(read) {
     if (c) return { ...c, matchedBy: 'tan' };
   }
   if (!read.deductorName) return null;
-  const all = await Customer.find({}).select('name tan').lean();
-  const scored = all.map((c) => ({ c, s: nameScore(read.deductorName, c.name) })).filter((x) => x.s >= 0.75).sort((a, b) => b.s - a.s);
-  if (!scored.length || (scored.length > 1 && scored[1].s >= scored[0].s - 0.1)) return null;
-  return { ...scored[0].c, matchedBy: 'name' };
+  // One rule for every paper that names a party (services/partyMatch.js).
+  const { party } = await oneByName(Customer, read.deductorName, { select: 'name tan' });
+  return party ? { ...party, matchedBy: 'name' } : null;
 }
 
 async function form16a({ pages } = {}) {

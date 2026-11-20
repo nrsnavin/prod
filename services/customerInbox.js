@@ -18,14 +18,19 @@
 //
 //  The sender is matched to a customer on file by e-mail (their own,
 //  purchase contact's, accountant's or merchandiser's). An order or
-//  complaint from an unknown sender is kept, not filed under a guess.
+//  complaint from an unknown sender is kept, not filed under a guess —
+//  and so is one from an address two customers share (a buying house's
+//  merchandiser), and a complaint whose job the reading only guessed
+//  (services/complaintIntake.js clearJob).
 //  Nothing is confirmed, posted or sent from here; everything waits for
 //  a person in Accounts → Inbox. The office is told (event customerMail).
 //
 //  Set CUSTOMER_IMAP_HOST, CUSTOMER_IMAP_USER, CUSTOMER_IMAP_PASS (and
 //  _PORT, _SECURE, CUSTOMER_MAILBOX, CUSTOMER_MAIL_EVERY_MIN,
 //  CUSTOMER_MAIL_MAX_PER_RUN). A mail is claimed before it is read, so
-//  two processes never read it twice.
+//  two processes never read it twice; a reading cut short (the server
+//  was restarted) is taken up again by the next check, once
+//  (services/mailClaim.js).
 // ══════════════════════════════════════════════════════════════════
 
 const crypto = require('crypto');
@@ -33,9 +38,12 @@ const InboxMail = require('../models/InboxMail');
 const Customer = require('../models/Customer');
 const { anthropic, TEXT_MODEL } = require('../utils/anthropicClient');
 const ledger = require('./aiLedger');
+const mailClaim = require('./mailClaim');
 const { promptVersion } = require('../utils/aiPrompts');
 
 const SURFACE = 'inbox-triage';
+/** What a claimed, unfinished mail looks like. */
+const READING = { status: 'reading' };
 const KINDS = ['purchase_order', 'complaint', 'payment_advice', 'enquiry', 'other'];
 const MAX_FILES = 4;
 const MAX_BYTES = 10 * 1024 * 1024;
@@ -70,21 +78,33 @@ function bodyOf(mail) {
   return (cut > 0 ? t.slice(0, cut) : t).replace(/\n{3,}/g, '\n\n').trim().slice(0, 6000);
 }
 
-/** The customer on file with this e-mail address, any of their contacts. */
-async function customerForEmail(email) {
+/** The customers on file with this e-mail address, any of their contacts (at most two are looked for). */
+async function customersForEmail(email) {
   const e = String(email || '').trim().toLowerCase();
-  if (!e) return null;
+  if (!e) return [];
   const rx = new RegExp(`(^|[,;\\s])${e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[,;\\s])`, 'i');
-  return Customer.findOne({ $or: [{ email: rx }, { 'purchase.email': rx }, { 'accountant.email': rx }, { 'merchandiser.email': rx }] }).select('name').lean();
+  return Customer.find({ $or: [{ email: rx }, { 'purchase.email': rx }, { 'accountant.email': rx }, { 'merchandiser.email': rx }] }).select('name').limit(2).lean();
+}
+/**
+ * The ONE customer this address belongs to. An address two customers
+ * share (a buying house's merchandiser looks after both) is nobody's:
+ * the first of them would be a guess.
+ */
+async function customerForEmail(email) {
+  const hits = await customersForEmail(email);
+  return hits.length === 1 ? hits[0] : null;
 }
 
 function keywordKind(text) {
   const t = String(text || '').toLowerCase();
-  if (/\b(payment advice|remittance|remitted|payment (details|made|released|done)|we have (paid|transferred)|utr|neft|rtgs|imps)\b/.test(t)) return 'payment_advice';
+  // A mail that SAYS it paid; the bare words NEFT / RTGS / UTR come
+  // further down, because a purchase order's payment terms carry them too.
+  if (/\b(payment advice|remittance|remitted|payment (details|made|released|done)|we have (paid|transferred))\b/.test(t)) return 'payment_advice';
   if (/\b(complaint|defect\w*|damaged?|rejected|rejection|shade (variation|difference)|short (supply|quantity|received)|quality (issue|problem)|not as per)\b/.test(t)) return 'complaint';
   // A PO named outright, then an ask for rates, then the softer "please supply".
   if (/\b(purchase order|p\.?o\.?\s*(no|number|#)|po\s*\d+|order (attached|enclosed))\b/.test(t)) return 'purchase_order';
   if (/\b(quotation|quote|enquiry|inquiry|rate for|price for|(best|your) (rate|rates|price|prices)|requirement|samples? (for|of))\b/.test(t)) return 'enquiry';
+  if (/\b(utr|neft|rtgs|imps)\b/.test(t)) return 'payment_advice';
   if (/\b(order for|please (supply|send)|kindly (supply|send))\b/.test(t)) return 'purchase_order';
   return 'other';
 }
@@ -121,23 +141,30 @@ async function classify({ subject, text, filenames }) {
   }
 }
 
-/** Hand the mail to its reader. Returns the fields to set on the InboxMail. */
-async function route(kind, { customer, text, files, from }) {
+/**
+ * Hand the mail to its reader. Returns the fields to set on the InboxMail.
+ * `shared`: the sender's address is on more than one customer.
+ */
+async function route(kind, { customer, text, files, from, shared = false }) {
   const pages = files.map((f) => ({ buffer: f.buffer, mimetype: f.type }));
+  const whose = shared ? 'The sender is a contact of more than one customer — open it and pick one' : 'Sender not matched to a customer — open it and pick one';
   if (kind === 'purchase_order') {
     const intake = require('./inboundPoIntake');
     let d = null;
-    try { d = files[0] ? await intake.draftFromDocument(files[0].buffer, files[0].type) : await intake.draftFromText(text, { customer }); } catch (err) { return { status: 'new', note: `The order could not be read: ${err.message}`.slice(0, 300) }; }
+    try { d = files[0] ? await intake.draftFromDocument(files[0].buffer, files[0].type) : await intake.draftFromText(text, { customer, matchedBy: 'email' }); } catch (err) { return { status: 'new', note: `The order could not be read: ${err.message}`.slice(0, 300) }; }
     const draft = d?.ok ? d.draft : null;
-    if (!customer) return { status: 'new', draft, note: 'Sender not matched to a customer — open it and pick one' };
+    if (!customer) return { status: 'new', draft, note: whose };
     const OrderRequest = require('../models/OrderRequest');
     const r = await OrderRequest.create({ customer: customer._id, customerName: customer.name, from, text: String(text || '(see the attached order)').slice(0, 3000), draft, aiSuggestion: d?.aiSuggestionId || '' });
     return { status: 'done', orderRequest: r._id, note: `Order request — ${draft?.lines?.length || 0} line(s) read; confirm it under Orders` };
   }
   if (kind === 'complaint') {
-    if (!customer) return { status: 'new', note: 'Sender not matched to a customer — open it and pick one' };
-    const r = await require('./complaintIntake').intake({ customer: customer._id, text, images: pages.filter((p) => /^image\//.test(p.mimetype)) });
-    const job = r.jobs?.[0];
+    if (!customer) return { status: 'new', note: whose };
+    const complaintIntake = require('./complaintIntake');
+    const r = await complaintIntake.intake({ customer: customer._id, text, images: pages.filter((p) => /^image\//.test(p.mimetype)) });
+    // The likeliest job is for the form a person fills; a complaint is
+    // opened without one only when the reading knows which job it is.
+    const job = complaintIntake.clearJob(r);
     if (!job) return { status: 'new', draft: r, aiSuggestion: r.aiSuggestion || '', note: 'Which job it is about is not clear — open it to finish the complaint' };
     const Complaint = require('../models/Complaints');
     const c = await Complaint.create({ customer: customer._id, job: job._id, elastic: r.elastic?._id || undefined, category: r.category || 'other', reason: r.reason || String(text).slice(0, 500), date: new Date(), status: 'Open' });
@@ -169,20 +196,19 @@ async function handle(raw) {
   const mail = await simpleParser(raw.source);
   const messageId = mail.messageId || raw.messageId || `sha-${crypto.createHash('sha256').update(raw.source).digest('hex').slice(0, 32)}`;
   const from = String(mail.from?.value?.[0]?.address || '').toLowerCase();
-  try { await InboxMail.create({ messageId, from, subject: String(mail.subject || '').slice(0, 300), receivedAt: mail.date || new Date() }); } catch (err) {
-    if (err?.code === 11000) return { status: 'known' };
-    throw err;
-  }
+  // Claimed first: read once, and a reading cut short is taken up again once.
+  if (!(await mailClaim.claim(InboxMail, { messageId }, { from, subject: String(mail.subject || '').slice(0, 300), receivedAt: mail.date || new Date() }, READING))) return { status: 'known' };
   const text = bodyOf(mail);
   const files = (mail.attachments || [])
     .map((a) => ({ a, type: typeOf(a) }))
     .filter(({ a, type }) => type && a.content && a.content.length <= MAX_BYTES && !(a.contentDisposition === 'inline' && /^image\//.test(type) && a.content.length < 30_000))
     .slice(0, MAX_FILES)
     .map(({ a, type }) => ({ buffer: a.content, type, filename: String(a.filename || 'attachment').slice(0, 120), size: a.content.length }));
-  const customer = await customerForEmail(from);
+  const senders = await customersForEmail(from);
+  const customer = senders.length === 1 ? senders[0] : null;
   const kind = await classify({ subject: mail.subject || '', text, filenames: files.map((f) => f.filename) });
   let out;
-  try { out = await route(kind.kind, { customer, text, files, from }); } catch (err) { out = { status: 'new', note: `Could not be handled: ${err.message}`.slice(0, 300) }; }
+  try { out = await route(kind.kind, { customer, text, files, from, shared: senders.length > 1 }); } catch (err) { out = { status: 'new', note: `Could not be handled: ${err.message}`.slice(0, 300) }; }
   await InboxMail.updateOne({ messageId }, { $set: {
     text, files: files.map((f) => ({ filename: f.filename, contentType: f.type, size: f.size })),
     customer: customer?._id || null, customerName: customer?.name || '', kind: kind.kind, summary: kind.summary,
@@ -227,7 +253,9 @@ async function run({ now = new Date() } = {}) {
   const out = { ran: true, mails: 0, errors: [] };
   try {
     const since = new Date(now.getTime() - c.days * 86_400_000);
-    const isKnown = async (id) => !!(await InboxMail.exists({ messageId: id }));
+    // A reading cut short twice is not begun a third time: a person is shown the mail as it came.
+    await mailClaim.giveUp(InboxMail, READING, { status: 'new', note: 'This mail could not be read (its reading was cut short twice) — open it in the mailbox' });
+    const isKnown = (id) => mailClaim.known(InboxMail, { messageId: id }, READING);
     for (const raw of (await fetcher(c, { since, isKnown })).slice(0, c.maxPerRun)) {
       try { const r = await handle(raw); if (r.status !== 'known') out.mails += 1; } catch (err) { out.errors.push(err.message); }
     }
@@ -247,4 +275,4 @@ function start() {
 function stop() { if (timer) clearInterval(timer); timer = null; }
 function status() { const c = config(); return { configured: configured(c), mailbox: configured(c) ? c.user : '', everyMin: c.everyMin }; }
 
-module.exports = { run, start, stop, handle, fileWhatsApp, route, status, classify, keywordKind, customerForEmail, bodyOf, setFetcher, config, configured, SURFACE };
+module.exports = { run, start, stop, handle, fileWhatsApp, route, status, classify, keywordKind, customerForEmail, customersForEmail, bodyOf, setFetcher, config, configured, SURFACE };

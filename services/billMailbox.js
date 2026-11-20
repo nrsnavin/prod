@@ -14,7 +14,9 @@
 //  only senders read (addresses or @domains); otherwise anyone's mail is
 //  read, so the reading is capped: BILLS_MAX_PER_RUN mails a run, four
 //  files a mail, 10 MB a file. A mail is claimed before it is read, so
-//  two processes never read it twice.
+//  two processes never read it twice; a reading cut short (the server
+//  was restarted) is taken up again by the next check, once, from the
+//  file it stopped at (services/mailClaim.js).
 // ══════════════════════════════════════════════════════════════════
 
 const crypto = require('crypto');
@@ -22,8 +24,11 @@ const InboxBill = require('../models/InboxBill');
 const { readBill, SUPPORTED } = require('../utils/billOcr');
 const { matchRead } = require('./billMatch');
 const aiLedger = require('./aiLedger');
+const mailClaim = require('./mailClaim');
 const { promptVersion } = require('../utils/aiPrompts');
 
+/** What a claimed, unfinished mail looks like (its own row, part 0). */
+const READING = { status: 'skipped', note: 'reading' };
 const MAX_FILES = 4;
 const MAX_BYTES = 10 * 1024 * 1024;
 
@@ -91,10 +96,7 @@ async function handle(raw, c = config()) {
   const base = { messageId, from, subject: String(mail.subject || '').slice(0, 300), receivedAt: mail.date || new Date() };
 
   // Claimed first (part 0 holds the mail): a second process sees the duplicate and leaves it.
-  try { await InboxBill.create({ ...base, part: 0, status: 'skipped', note: 'reading' }); } catch (err) {
-    if (err?.code === 11000) return { status: 'known', bills: 0 };
-    throw err;
-  }
+  if (!(await mailClaim.claim(InboxBill, { messageId, part: 0 }, base, READING))) return { status: 'known', bills: 0 };
   const settle = (status, note) => InboxBill.updateOne({ messageId, part: 0 }, { $set: { status, note } });
 
   if (!senderOk(from, c.senders)) { await settle('skipped', `${from || 'Unknown sender'} is not on the bills senders list`); return { status: 'skipped', bills: 0 }; }
@@ -106,14 +108,29 @@ async function handle(raw, c = config()) {
     .slice(0, MAX_FILES);
   if (!files.length) { await settle('skipped', 'No PDF or photo of a bill attached'); return { status: 'skipped', bills: 0 }; }
 
-  let made = 0;
+  let made = 0;      // bills this reading made
+  let before = 0;    // bills an earlier, cut-short reading of this mail had already kept
   for (let i = 0; i < files.length; i++) {
     const { a, type } = files[i];
+    // Kept by a reading that was cut short after this file: not read twice.
+    const kept = await InboxBill.findOne({ messageId, part: i + 1 }).select('status').lean();
+    if (kept) { if (kept.status !== 'failed' && kept.status !== 'skipped') before += 1; continue; }
     const doc = { ...base, part: i + 1, filename: String(a.filename || `bill-${i + 1}`).slice(0, 120), contentType: type, size: a.content?.length || 0 };
-    const out = await fileOne(doc, a.content, type);
+    let out;
+    try {
+      out = await fileOne(doc, a.content, type);
+    } catch (err) {
+      // One file that cannot be read or placed does not take the mail's
+      // other bills with it: it is kept, with the file, to enter by hand.
+      console.warn(`[bills-mailbox] ${doc.filename} of ${messageId} failed: ${err.message}`);
+      const data = a.content && a.content.length <= MAX_BYTES ? `data:${type};base64,${a.content.toString('base64')}` : undefined;
+      await InboxBill.create({ ...doc, data, status: 'failed', note: `Could not be read: ${err.message} — open the file and enter it by hand`.slice(0, 300) }).catch(() => null);
+      out = { status: 'failed' };
+    }
     if (out.status === 'new') made += 1;
   }
-  await settle('skipped', `${made} bill${made === 1 ? '' : 's'} read from ${files.length} file${files.length === 1 ? '' : 's'}`);
+  const all = made + before;
+  await settle('skipped', `${all} bill${all === 1 ? '' : 's'} read from ${files.length} file${files.length === 1 ? '' : 's'}`);
   return { status: 'read', bills: made };
 }
 
@@ -180,7 +197,7 @@ async function run({ now = new Date() } = {}) {
   const out = { ran: true, mails: 0, bills: 0, errors: [] };
   try {
     const since = new Date(now.getTime() - c.days * 86_400_000);
-    const isKnown = async (id) => !!(await InboxBill.exists({ messageId: id, part: 0 }));
+    const isKnown = (id) => mailClaim.known(InboxBill, { messageId: id, part: 0 }, READING);
     const mails = await fetcher(c, { since, isKnown });
     for (const raw of mails.slice(0, c.maxPerRun)) {
       try {

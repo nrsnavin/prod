@@ -14,7 +14,7 @@ const SupplierBill = require('../models/SupplierBill');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const MaterialInward = require('../models/MaterialInward');
 
-const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const { oneByName } = require('./partyMatch');
 
 async function matchRead(read) {
   let supplier = null;
@@ -24,12 +24,11 @@ async function matchRead(read) {
     if (supplier) matchedBy = 'gstin';
   }
   if (!supplier && read?.supplierName) {
-    const words = read.supplierName.split(/\s+/).filter((w) => w.length >= 3).slice(0, 3);
-    if (words.length) {
-      const re = new RegExp(words.map((w) => `(?=.*${escapeRegex(w)})`).join(''), 'i');
-      supplier = await Supplier.findOne({ name: re }).select('name gstin email').lean();
-      if (supplier) matchedBy = 'name';
-    }
+    // By name only when it can be one supplier — the rule every paper
+    // that names a party shares (services/partyMatch.js): "M/s." and
+    // "Pvt Ltd" set aside, and never the first of two it could be.
+    const { party } = await oneByName(Supplier, read.supplierName, { select: 'name gstin email' });
+    if (party) { supplier = party; matchedBy = 'name'; }
   }
   const already = read?.billNo && supplier
     ? await SupplierBill.findOne({ supplier: supplier._id, supplierBillNo: read.billNo, status: { $ne: 'cancelled' } }).select('billNo').lean()

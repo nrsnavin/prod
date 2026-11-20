@@ -33,6 +33,8 @@ const InboxBillSchema = new mongoose.Schema(
 
     status: { type: String, enum: ['new', 'entered', 'dismissed', 'failed', 'skipped'], default: 'new', index: true },
     note: { type: String, default: '' },
+    /** On the mail's own row (part 0): how many times its reading was begun (services/mailClaim.js). */
+    readings: { type: Number, default: 1 },
 
     /** What was read (utils/billOcr.js readBill), as the scan returns it. */
     read: { type: mongoose.Schema.Types.Mixed, default: null },

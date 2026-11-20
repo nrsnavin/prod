@@ -24,7 +24,7 @@ const RawMaterial = require('../models/RawMaterial');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const aiLedger = require('./aiLedger');
 const { promptVersion } = require('../utils/aiPrompts');
-const { nameScore } = require('./partyMatch');
+const { oneByName } = require('./partyMatch');
 const { rank } = require('../utils/fuzzyMatch');
 const { r2 } = require('../utils/money');
 const bizDates = require('../utils/bizDates');
@@ -43,10 +43,9 @@ async function findSupplier(read, picked) {
     if (s) return { ...s, matchedBy: 'gstin' };
   }
   if (!read.supplierName) return null;
-  const all = await Supplier.find({}).select('name gstin').lean();
-  const scored = all.map((s) => ({ s, k: nameScore(read.supplierName, s.name) })).filter((x) => x.k >= 0.75).sort((a, b) => b.k - a.k);
-  if (!scored.length || (scored.length > 1 && scored[1].k >= scored[0].k - 0.1)) return null;
-  return { ...scored[0].s, matchedBy: 'name' };
+  // One rule for every paper that names a party (services/partyMatch.js).
+  const { party } = await oneByName(Supplier, read.supplierName);
+  return party ? { ...party, matchedBy: 'name' } : null;
 }
 
 /** The live rate for each material from a supplier. → Map(materialId → rate doc) */

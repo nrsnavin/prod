@@ -244,11 +244,12 @@ async function settleDraft(aiSuggestionId, opts) {
 }
 
 /**
- * An order typed into a WhatsApp message, drafted like a document. The
- * sender is a customer on file (by their number), so the customer is
- * theirs whatever the text says.
+ * An order typed into a WhatsApp message (or a mail), drafted like a
+ * document. The sender is a customer on file — by their number, or
+ * `matchedBy: 'email'` for a mail — so the customer is theirs whatever
+ * the text says.
  */
-async function draftFromText(text, { customer } = {}) {
+async function draftFromText(text, { customer, matchedBy = 'phone' } = {}) {
   const startedAt = Date.now();
   let extracted;
   try {
@@ -259,7 +260,7 @@ async function draftFromText(text, { customer } = {}) {
   }
   const out = await fromExtracted(extracted, startedAt, { surface: 'whatsapp-order' });
   if (out?.ok && customer) {
-    out.draft.customer = { customerId: String(customer._id), customerName: customer.name, candidates: [{ id: String(customer._id), name: customer.name, score: 1 }], confident: true, matchedBy: 'phone' };
+    out.draft.customer = { customerId: String(customer._id), customerName: customer.name, candidates: [{ id: String(customer._id), name: customer.name, score: 1 }], confident: true, matchedBy };
     out.summary.customerMatched = true;
   }
   return out;

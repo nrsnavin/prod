@@ -225,4 +225,25 @@ async function draftReply(complaintId, { company = 'Balu Elastics', trace = null
   }
 }
 
-module.exports = { intake, draftReply, keywordCategory, templateReply, candidates, INTAKE_PROMPT, REPLY_PROMPT };
+/**
+ * The job a reading is sure enough of to file a complaint against with
+ * no person looking (a mail, services/customerInbox.js) — or null.
+ *
+ * intake() always lists "the likeliest" jobs for the form a person
+ * fills. That is not the same as knowing: with no model (or when the
+ * model fails) the list is simply the customer's newest jobs. So:
+ *   · read by the model: the one job it named, or the first when it
+ *     said it was sure (0.8 and over);
+ *   · read by keywords: only the one job carrying the elastic the
+ *     customer named.
+ */
+function clearJob(r) {
+  const jobs = Array.isArray(r?.jobs) ? r.jobs : [];
+  if (!jobs.length) return null;
+  if (r.aiGenerated) return jobs.length === 1 || Number(r.confidence) >= 0.8 ? jobs[0] : null;
+  if (!r.elastic?._id) return null;
+  const carrying = jobs.filter((j) => (j.elastics || []).some((e) => String(e._id) === String(r.elastic._id)));
+  return carrying.length === 1 ? carrying[0] : null;
+}
+
+module.exports = { intake, draftReply, clearJob, keywordCategory, templateReply, candidates, INTAKE_PROMPT, REPLY_PROMPT };

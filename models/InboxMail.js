@@ -20,6 +20,8 @@ const InboxMailSchema = new mongoose.Schema({
   summary:  { type: String, default: '' },
   status:   { type: String, enum: ['reading', 'new', 'done', 'dismissed', 'skipped'], default: 'reading', index: true },
   note:     { type: String, default: '' },
+  /** How many times its reading was begun: a reading cut short is taken up again once (services/mailClaim.js). */
+  readings: { type: Number, default: 1 },
   // What it became.
   orderRequest: { type: mongoose.Types.ObjectId, ref: 'OrderRequest', default: null },
   complaint:    { type: mongoose.Types.ObjectId, ref: 'Complaint', default: null },

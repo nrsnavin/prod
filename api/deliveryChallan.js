@@ -1589,8 +1589,8 @@ router.post(
     let transporter = null;
     if (read.transporterGstin) transporter = await Supplier.findOne({ gstin: read.transporterGstin }).select("name gstin gstRegistration").lean();
     if (!transporter && read.transporterName) {
-      const words = read.transporterName.split(/\s+/).filter((w) => w.length >= 3).slice(0, 2);
-      if (words.length) transporter = await Supplier.findOne({ name: new RegExp(words.map((w) => `(?=.*${escapeRegex(w)})`).join(""), "i") }).select("name gstin gstRegistration").lean();
+      // By name only when it can be one transporter (services/partyMatch.js), never the first of several.
+      transporter = (await require("../services/partyMatch").oneByName(Supplier, read.transporterName, { select: "name gstin gstRegistration" })).party;
     }
     // Does it look like this challan's? Said plainly, not refused.
     const checks = [];

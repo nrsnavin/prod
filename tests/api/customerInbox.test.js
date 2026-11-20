@@ -78,7 +78,7 @@ describe('a purchase order by mail', () => {
 
 describe('a complaint by mail', () => {
   it('opens a complaint when the job it is about is clear', async () => {
-    mockIntake.mockResolvedValue({ category: 'shade', reason: 'Shade differs from the last lot', jobs: [{ _id: job, jobOrderNo: 812, why: 'Delivered last week' }], elastic: null, aiSuggestion: 'ai2' });
+    mockIntake.mockResolvedValue({ category: 'shade', reason: 'Shade differs from the last lot', jobs: [{ _id: job, jobOrderNo: 812, why: 'Delivered last week' }], elastic: null, aiGenerated: true, confidence: 0.8, aiSuggestion: 'ai2' });
     const r = await inbox.handle(mail({ subject: 'Complaint - shade variation', body: 'The shade of the last supply is different, rejected by our customer.' }));
     expect(r.kind).toBe('complaint');
     const c = await require('../../models/Complaints').findOne({ customer: customer._id }).lean();
@@ -126,5 +126,133 @@ describe('the inbox', () => {
     const one = list.body.rows.find((r) => r.subject === 'Hello');
     const res = await request(app).post(`/api/v2/accounts/customer-mail/${one._id}/dismiss`).set('Cookie', cookie());
     expect(res.body.mail.status).toBe('dismissed');
+  });
+});
+
+describe('nothing is filed under a guess', () => {
+  const Complaint = () => require('../../models/Complaints');
+  const complaintsNow = () => Complaint().countDocuments({});
+  const jobRow = (no, over = {}) => ({ _id: String(new mongoose.Types.ObjectId()), jobOrderNo: no, date: new Date('2026-10-12'), status: 'completed', elastics: [], why: 'job of 12 Oct 2026, completed', ...over });
+
+  it('a complaint read without the model lists the newest jobs, not the one it is about: kept for a person', async () => {
+    const before = await complaintsNow();
+    // What services/complaintIntake.js answers with no model (or when the model fails): keywords and dates.
+    mockIntake.mockResolvedValue({ category: 'shade', reason: 'Shade differs', jobs: [jobRow(901), jobRow(900), jobRow(899)], elastic: null, confidence: 0.3, aiGenerated: false, aiSuggestion: null });
+    const r = await inbox.handle(mail({ subject: 'Complaint: shade', body: 'Shade variation in the last supply, rejected.' }));
+    expect(r).toMatchObject({ kind: 'complaint', status: 'new' });
+    expect(await complaintsNow()).toBe(before);
+    const m = await InboxMail.findOne({ subject: 'Complaint: shade' }).lean();
+    expect(m.note).toMatch(/not clear/);
+    expect(m.complaint).toBeNull();
+    expect(m.draft.jobs).toHaveLength(3);
+  });
+
+  it('…unless they named an elastic only one of those jobs carries', async () => {
+    const before = await complaintsNow();
+    const e = { _id: String(new mongoose.Types.ObjectId()), name: '25mm Black Knitted' };
+    const only = jobRow(905, { elastics: [e], why: 'carries 25mm Black Knitted' });
+    mockIntake.mockResolvedValue({ category: 'shade', reason: 'Shade differs on 25mm black', jobs: [only, jobRow(904), jobRow(903)], elastic: e, confidence: 0.3, aiGenerated: false, aiSuggestion: null });
+    const r = await inbox.handle(mail({ subject: 'Complaint: 25mm black shade', body: 'Shade variation in 25mm Black Knitted, rejected.' }));
+    expect(r).toMatchObject({ kind: 'complaint', status: 'done' });
+    expect(await complaintsNow()).toBe(before + 1);
+    expect(String((await Complaint().findOne({}).sort({ _id: -1 }).lean()).job)).toBe(only._id);
+    // Two of them carry it: which one is not clear.
+    mockIntake.mockResolvedValue({ category: 'shade', reason: 'x', jobs: [only, jobRow(906, { elastics: [e] }), jobRow(903)], elastic: e, confidence: 0.3, aiGenerated: false, aiSuggestion: null });
+    expect(await inbox.handle(mail({ subject: 'Complaint: 25mm black again', body: 'Shade variation in 25mm Black Knitted, rejected.' }))).toMatchObject({ status: 'new' });
+    expect(await complaintsNow()).toBe(before + 1);
+  });
+
+  it('the model naming several jobs, unsure, is for a person; one job, or sure of the first, is filed', async () => {
+    const before = await complaintsNow();
+    const two = [jobRow(910, { why: 'delivered last week' }), jobRow(909, { why: 'also 25mm' })];
+    mockIntake.mockResolvedValue({ category: 'width', reason: 'Width short', jobs: two, elastic: null, confidence: 0.5, aiGenerated: true, aiSuggestion: 'ai5' });
+    expect(await inbox.handle(mail({ subject: 'Complaint: width A', body: 'Width is short, quality issue.' }))).toMatchObject({ status: 'new' });
+    expect(await complaintsNow()).toBe(before);
+    mockIntake.mockResolvedValue({ category: 'width', reason: 'Width short', jobs: two, elastic: null, confidence: 0.9, aiGenerated: true, aiSuggestion: 'ai6' });
+    expect(await inbox.handle(mail({ subject: 'Complaint: width B', body: 'Width is short, quality issue.' }))).toMatchObject({ status: 'done' });
+    mockIntake.mockResolvedValue({ category: 'width', reason: 'Width short', jobs: [two[1]], elastic: null, confidence: 0.4, aiGenerated: true, aiSuggestion: 'ai7' });
+    expect(await inbox.handle(mail({ subject: 'Complaint: width C', body: 'Width is short, quality issue.' }))).toMatchObject({ status: 'done' });
+    expect(await complaintsNow()).toBe(before + 2);
+  });
+
+  it('a sender who is a contact of two customers is not taken for the first of them', async () => {
+    // A buying house's merchandiser looks after two of our customers.
+    const Customer = require('../../models/Customer');
+    await Customer.collection.insertMany([
+      { name: 'Alpha Exports', merchandiser: { name: 'Meena', email: 'meena@buyinghouse.in' } },
+      { name: 'Beta Garments', merchandiser: { name: 'Meena', email: 'Meena@BuyingHouse.in' } },
+    ]);
+    expect(await inbox.customerForEmail('meena@buyinghouse.in')).toBeNull();
+    mockPoDoc.mockResolvedValue({ ok: true, draft: { lines: [{ elastic: 'x' }] }, aiSuggestionId: 'ai8' });
+    const OrderRequest = require('../../models/OrderRequest');
+    const before = await OrderRequest.countDocuments();
+    const r = await inbox.handle(mail({ from: 'meena@buyinghouse.in', subject: 'Purchase Order 88', body: 'Please find our PO attached.', attach: 'PO-88.pdf' }));
+    expect(r).toMatchObject({ kind: 'purchase_order', status: 'new' });
+    expect(await OrderRequest.countDocuments()).toBe(before);
+    const m = await InboxMail.findOne({ subject: 'Purchase Order 88' }).lean();
+    expect(m.customer).toBeNull();
+    expect(m.note).toMatch(/more than one customer/i);
+    // One customer's own address is still theirs.
+    expect((await inbox.customerForEmail('PURCHASE@tirupurknits.in')).name).toBe('Tirupur Knits');
+  });
+});
+
+describe('sorting by keywords, when the model is off or slow', () => {
+  it('a purchase order whose terms mention NEFT is an order, not a payment advice', () => {
+    expect(inbox.keywordKind('Purchase Order 4512 attached. Payment by NEFT within 30 days of delivery.')).toBe('purchase_order');
+    expect(inbox.keywordKind('PO No: 7781 — kindly supply. Our bank: RTGS only.')).toBe('purchase_order');
+    // What a payment advice says is still one.
+    expect(inbox.keywordKind('We have paid Rs 84,000 by NEFT against your PO 4512 invoice')).toBe('payment_advice');
+    expect(inbox.keywordKind('Payment advice for purchase order 4512')).toBe('payment_advice');
+    expect(inbox.keywordKind('UTR HDFC000123 dated 28 Oct for INV 701')).toBe('payment_advice');
+    expect(inbox.keywordKind('Short supply against PO 4512, rolls damaged')).toBe('complaint');
+  });
+});
+
+describe('a mail whose reading was cut short', () => {
+  const env = { CUSTOMER_IMAP_HOST: 'imap.test', CUSTOMER_IMAP_USER: 'orders@balu.in', CUSTOMER_IMAP_PASS: 'x' };
+  let box = [];
+  beforeAll(() => { Object.assign(process.env, env); inbox.setFetcher(async (_c, { isKnown }) => { const out = []; for (const m of box) if (!(await isKnown(m.messageId))) out.push(m); return out; }); });
+  afterAll(() => { for (const k of Object.keys(env)) delete process.env[k]; inbox.setFetcher(null); });
+  const hourAgo = (messageId) => InboxMail.collection.updateOne({ messageId }, { $set: { updatedAt: new Date(Date.now() - 3_600_000) } });
+
+  it('is read again by the next check — not while another server may still be on it', async () => {
+    const m = mail({ subject: 'Purchase Order 4600', body: 'Please find our PO attached.', attach: 'PO-4600.pdf' });
+    box = [m];
+    mockPoDoc.mockResolvedValue({ ok: true, draft: { lines: [{ elastic: 'x' }] }, aiSuggestionId: 'ai9' });
+    // Another server claimed it a moment ago and is reading it.
+    await InboxMail.create({ messageId: m.messageId, from: 'purchase@tirupurknits.in', subject: 'Purchase Order 4600' });
+    expect(await inbox.run()).toMatchObject({ ran: true, mails: 0 });
+    expect((await InboxMail.findOne({ messageId: m.messageId }).lean()).status).toBe('reading');
+    // …it was restarted and never finished: nobody would ever see this order.
+    await hourAgo(m.messageId);
+    expect(await inbox.run()).toMatchObject({ ran: true, mails: 1 });
+    const read = await InboxMail.findOne({ messageId: m.messageId }).lean();
+    expect(read).toMatchObject({ status: 'done', kind: 'purchase_order', customerName: 'Tirupur Knits' });
+    expect(read.orderRequest).toBeTruthy();
+    expect(await InboxMail.countDocuments({ messageId: m.messageId })).toBe(1);
+    // Read: not read a third time.
+    expect(await inbox.run()).toMatchObject({ mails: 0 });
+  });
+
+  it('cut short a second time, it is not tried again: a person is shown it', async () => {
+    const m = mail({ subject: 'Purchase Order 4601', body: 'Please find our PO attached.', attach: 'PO-4601.pdf' });
+    box = [m];
+    await InboxMail.create({ messageId: m.messageId, from: 'purchase@tirupurknits.in', subject: 'Purchase Order 4601' });
+    await hourAgo(m.messageId);
+    // The second reading never comes back either (the reader hangs; the server is restarted).
+    mockPoDoc.mockImplementation(() => new Promise(() => {}));
+    const hung = inbox.handle(m); hung.catch(() => {});
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await InboxMail.findOne({ messageId: m.messageId }).lean())).toMatchObject({ status: 'reading', readings: 2 });
+    await hourAgo(m.messageId);
+    mockPoDoc.mockReset();
+    expect(await inbox.run()).toMatchObject({ mails: 0 });
+    expect(mockPoDoc).not.toHaveBeenCalled();
+    const shown = await InboxMail.findOne({ messageId: m.messageId }).lean();
+    expect(shown.status).toBe('new');
+    expect(shown.note).toMatch(/could not be read/i);
+    const list = await request(app).get('/api/v2/accounts/customer-mail').set('Cookie', cookie());
+    expect(list.body.rows.some((r) => r.subject === 'Purchase Order 4601')).toBe(true);
   });
 });

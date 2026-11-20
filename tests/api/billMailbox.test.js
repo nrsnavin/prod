@@ -151,3 +151,74 @@ describe('the bills mailbox', () => {
     expect((await request(app).get('/api/v2/accounts/bill-inbox')).status).toBe(401);
   });
 });
+
+describe('a mail whose reading was cut short', () => {
+  const two = async (id) => mail({ id, attachments: [
+    { filename: 'SY-118.pdf', content: PDF, contentType: 'application/pdf' },
+    { filename: 'SY-119.pdf', content: PDF, contentType: 'application/pdf' },
+  ] });
+  const hourAgo = (messageId) => M.InboxBill.collection.updateOne({ messageId, part: 0 }, { $set: { updatedAt: new Date(Date.now() - 3_600_000) } });
+
+  it('is read again by the next check, from the file it stopped at', async () => {
+    await M.Supplier.create({ name: 'Sri Yarn Traders', gstin: '33AAAPS0001F1Z5', address: 'Erode', email: 'accounts@sriyarn.in' });
+    const m = await two('cut1');
+    inbox = [m];
+    // A server claimed the mail, kept its first bill, and was restarted before the second.
+    await M.InboxBill.create({ messageId: m.messageId, part: 0, from: 'accounts@sriyarn.in', subject: 'Invoice SY/118', status: 'skipped', note: 'reading' });
+    await M.InboxBill.create({ messageId: m.messageId, part: 1, from: 'accounts@sriyarn.in', filename: 'SY-118.pdf', contentType: 'application/pdf', status: 'new', supplierName: 'Sri Yarn Traders', grand: 19530 });
+    mockReadBill.mockResolvedValue(reading({ billNo: 'SY/119' }));
+    // A moment ago: it may still be reading.
+    expect(await box.run()).toMatchObject({ ran: true, mails: 0 });
+    expect(mockReadBill).not.toHaveBeenCalled();
+    // An hour ago: nobody is.
+    await hourAgo(m.messageId);
+    expect(await box.run()).toMatchObject({ ran: true, mails: 1, bills: 1 });
+    expect(mockReadBill).toHaveBeenCalledTimes(1);
+    const rows = await M.InboxBill.find({ messageId: m.messageId }).sort({ part: 1 }).lean();
+    expect(rows.map((r) => [r.part, r.status])).toEqual([[0, 'skipped'], [1, 'new'], [2, 'new']]);
+    expect(rows[0].note).toMatch(/2 bills read from 2 files/);
+    expect(rows[2].read.billNo).toBe('SY/119');
+    // Read: not a third time.
+    expect(await box.run()).toMatchObject({ mails: 0 });
+    expect(mockReadBill).toHaveBeenCalledTimes(1);
+  });
+
+  it('one file that cannot be placed is kept as failed, with the file, and the rest are still read', async () => {
+    await M.Supplier.create({ name: 'Sri Yarn Traders', gstin: '33AAAPS0001F1Z5', address: 'Erode', email: 'accounts@sriyarn.in' });
+    inbox = [await two('oops')];
+    mockReadBill.mockResolvedValue(reading());
+    // The books cannot be asked about the first file's supplier (the database blinks).
+    const spy = jest.spyOn(M.Supplier, 'findOne').mockImplementationOnce(() => { throw new Error('database unreachable'); });
+    const r = await box.run();
+    spy.mockRestore();
+    expect(r).toMatchObject({ ran: true, mails: 1, bills: 1, errors: [] });
+    const rows = await M.InboxBill.find({ messageId: '<oops@sriyarn.in>' }).select('+data').sort({ part: 1 }).lean();
+    expect(rows.map((x) => [x.part, x.status])).toEqual([[0, 'skipped'], [1, 'failed'], [2, 'new']]);
+    expect(rows[1].note).toMatch(/database unreachable/);
+    expect(rows[1].data).toMatch(/^data:application\/pdf;base64,/);
+    expect(rows[0].note).toMatch(/1 bill read from 2 files/);
+    // It is on the list of ones that failed, to open and enter by hand.
+    const failed = (await get('/accounts/bill-inbox?status=failed')).body;
+    expect(JSON.stringify(failed)).toMatch(/SY-118\.pdf/);
+  });
+});
+
+describe('the supplier a bill names', () => {
+  const billMatch = () => require('../../services/billMatch');
+  it('is found by name through "M/s." and "Pvt Ltd", and never one of two it could be', async () => {
+    const abc = await M.Supplier.create({ name: 'ABC Traders', address: 'Erode' });
+    const sly = await M.Supplier.create({ name: 'Sri Lakshmi Yarns', address: 'Tiruppur' });
+    await M.Supplier.create({ name: 'Sri Lakshmi Yarns Coimbatore', address: 'Coimbatore' });
+    const who = async (supplierName) => (await billMatch().matchRead({ supplierName })).supplier;
+    expect(await who('M/s. ABC Traders')).toMatchObject({ _id: abc._id, matchedBy: 'name' });
+    expect(await who('ABC TRADERS PVT. LTD.')).toMatchObject({ _id: abc._id, matchedBy: 'name' });
+    // Named word for word, it is that one of the two.
+    expect(await who('Sri Lakshmi Yarns Private Limited')).toMatchObject({ _id: sly._id, matchedBy: 'name' });
+    // Named loosely, it could be either: a person picks.
+    expect(await who('Lakshmi Yarns')).toBeNull();
+    expect(await who('Nobody Mills')).toBeNull();
+    // The GSTIN settles it, whatever the name says.
+    const g = await M.Supplier.create({ name: 'Zed Chemicals', gstin: '33AAAPZ0009F1Z5', address: 'Karur' });
+    expect((await billMatch().matchRead({ supplierName: 'Sri Lakshmi Yarns', supplierGstin: '33AAAPZ0009F1Z5' })).supplier).toMatchObject({ _id: g._id, matchedBy: 'gstin' });
+  });
+});
