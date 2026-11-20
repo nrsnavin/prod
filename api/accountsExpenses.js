@@ -247,6 +247,13 @@ router.post("/expenses/:id/approve", isAdmin("admin", "accounts"), catchAsyncErr
   if (String(e.submittedBy || "") === String(req.user?._id || "") && req.user?.role !== "admin") {
     return next(new ErrorHandler("An expense is approved by someone other than the person who entered it", 403));
   }
+  // Approval is what puts the expense in the books, on the expense's own
+  // day. That day was checked against the closed period when the expense
+  // was entered — and an expense can wait. Approved after its month was
+  // closed, it went into that month (its cost, its input credit, the
+  // supplier's ledger) through the one door that did not ask. Rejecting
+  // it posts nothing, and is not held.
+  try { await assertOpen(e.date, req); } catch (err) { return next(err); }
   const approval = { required: true, by: req.user?._id, byName: req.user?.name || "", at: new Date(), note: String(req.body?.note || "").trim().slice(0, 200) };
   const mark = fp(ACTION_CODES.EXPENSE_APPROVED, e, req, { expenseNo: e.expenseNo, grand: e.totals.grand });
   let voucher = null;
