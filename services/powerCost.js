@@ -17,13 +17,22 @@
 const PowerBill = require('../models/PowerBill');
 const ShiftDetail = require('../models/ShiftDetail');
 const bizDates = require('../utils/bizDates');
+const { isDayKey } = require('../utils/factoryDay');
 const aiLedger = require('./aiLedger');
 const { promptVersion } = require('../utils/aiPrompts');
 const { r2 } = require('../utils/money');
 
 const SURFACE = 'power-bill-ocr';
 const rupees = (n) => `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
-const day = (iso) => (iso ? new Date(`${iso}T00:00:00Z`) : null);
+// A day on the bill, or none. A day that does not exist is said, by name:
+// made with new Date() it was kept as another day (30 February as 2 March),
+// and text that is no date failed as a server error.
+const day = (iso, what) => {
+  if (iso === null || iso === undefined || iso === '') return null;
+  const s = String(iso).slice(0, 10);
+  if (!isDayKey(s)) throw Object.assign(new Error(`The ${what} is not a date (YYYY-MM-DD)`), { status: 400 });
+  return new Date(`${s}T00:00:00Z`);
+};
 
 /** The month a bill is for: its period's end, else the month before its date. */
 function monthOf(read) {
@@ -81,7 +90,7 @@ async function save(b, { by = null } = {}) {
   if (!(total > 0)) throw Object.assign(new Error('The bill\'s total is needed'), { status: 400 });
   const data = {
     month, consumerNo: String(b.consumerNo || '').trim().slice(0, 40), billNo: String(b.billNo || '').trim().slice(0, 40),
-    billDate: day(b.billDate), periodFrom: day(b.periodFrom), periodTo: day(b.periodTo), dueDate: day(b.dueDate),
+    billDate: day(b.billDate, 'bill date'), periodFrom: day(b.periodFrom, 'start of the period'), periodTo: day(b.periodTo, 'end of the period'), dueDate: day(b.dueDate, 'due date'),
     units: r2(units), total: r2(total), demandKva: num(b.demandKva), energyCharges: num(b.energyCharges), demandCharges: num(b.demandCharges), otherCharges: num(b.otherCharges), tax: num(b.tax),
     note: String(b.note || '').trim().slice(0, 200), aiSuggestion: String(b.aiSuggestion || ''), createdBy: by,
   };

@@ -7,6 +7,13 @@
 //  `statutoryNotice`. Each is claimed on the notice before it is sent
 //  (`reminded`), so two server processes never both send it. A notice
 //  replied or closed is never reminded.
+//
+//  A claim whose message did not go — the provider failed, or every
+//  recipient did — is given back, and the next hour tries again. It used
+//  to stay claimed: one bad hour at WhatsApp and the "reply due today"
+//  for a tax notice was never sent at all. Switched off, muted, or with
+//  nobody to send to, it stays claimed: that is a setting, not a failure,
+//  and is not retried every hour.
 // ══════════════════════════════════════════════════════════════════
 
 const StatutoryNotice = require('../models/StatutoryNotice');
@@ -54,7 +61,12 @@ async function run({ now = new Date() } = {}) {
     const claimed = await StatutoryNotice.updateOne({ _id: n._id, status: 'open', reminded: { $ne: key } }, { $push: { reminded: key } });
     if (!claimed.modifiedCount) continue;
     const body = message(n, key);
-    await notify('statutoryNotice', { body, _entity: { type: 'StatutoryNotice', id: n._id } }).catch(() => null);
+    const r = await notify('statutoryNotice', { body, _entity: { type: 'StatutoryNotice', id: n._id } }).catch((err) => ({ error: err?.message || 'failed' }));
+    const failed = !!r?.error || (Array.isArray(r?.results) && r.results.length > 0 && !(r.sent > 0)) || r?.skipped === 'quiet hours';
+    if (failed) {
+      await StatutoryNotice.updateOne({ _id: n._id }, { $pull: { reminded: key } });
+      continue;
+    }
     sent.push({ id: String(n._id), key, body });
   }
   return { sent };

@@ -287,3 +287,41 @@ describe('expected heads', () => {
     expect(out.method).toMatch(/rounded DOWN/i);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading services/attendanceForecast.js line by line.
+// ══════════════════════════════════════════════════════════════════
+describe('who the plan can count on', () => {
+  test('somebody who has left, or moved off the floor, is not an expected head', async () => {
+    const here = await makeEmployee();
+    const left = await makeEmployee();
+    const moved = await makeEmployee();
+    for (const e of [here, left, moved]) await mark(e, { dow: 1, count: 10, status: 'present' });
+    // One left last month; one is in the office now.
+    await Employee.updateOne({ _id: left._id }, { $set: { status: 'offboarded', offboarding: { lastWorkingDay: new Date(Date.UTC(2026, 6, 20)) } } });
+    await Employee.updateOne({ _id: moved._id }, { $set: { department: 'admin' } });
+
+    const f = await run();
+    const monday = f.slots.find((s) => s.day === 'Mon' && s.shift === 'DAY');
+    // All three turned up every Monday — and only one of them will again. The
+    // forecast used to count everyone with a row in the register, so the plan
+    // was staffed with people who were gone, for as long as the window ran.
+    expect(f.roster).toBe(1);
+    expect(monday.peopleRostered).toBe(1);
+    expect(monday.planningHeads).toBeLessThanOrEqual(1);
+    expect(monday.expectedHeads).toBeGreaterThan(0.9);
+    expect(monday.expectedHeads).toBeLessThanOrEqual(1);
+  });
+
+  test('a day kept at midnight in India is that weekday, not the one before', async () => {
+    const e = await makeEmployee();
+    // Mondays: four kept at the day's UTC midnight, four the older way, at
+    // 00:00 IST — which is 18:30 on Sunday by the server's clock.
+    const mondays = [3, 10].flatMap((d) => [new Date(Date.UTC(2026, 7, d)), new Date(Date.UTC(2026, 6, d + 3))]);   // 3, 10 Aug; 6, 13 Jul
+    const older = [20, 27].flatMap((d) => [new Date(Date.UTC(2026, 6, d) - 5.5 * 3600_000), new Date(Date.UTC(2026, 5, d + 2) - 5.5 * 3600_000)]);   // 20, 27 Jul; 22, 29 Jun
+    for (const d of [...mondays, ...older]) expect(new Date(d.getTime() + 5.5 * 3600_000).getUTCDay()).toBe(1);
+    await Attendance.insertMany([...mondays, ...older].map((date) => ({ employee: e._id, date, shift: 'DAY', status: 'present' })));
+    const cells = [...(await I.buildTable({ now: NOW })).values()];
+    expect(cells.map((c) => `${I.DAY_NAMES[c.dow]}:${c.obs}`)).toEqual(['Mon:8']);
+  });
+});

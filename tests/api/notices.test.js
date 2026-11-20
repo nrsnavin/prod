@@ -94,4 +94,35 @@ describe('a government notice', () => {
     await request(app).patch(`/api/v2/accounts/notices/${n._id}`).set('Cookie', cookie()).send({ replyBy: day(3) });
     expect((await M.Notice.findById(n._id).lean()).reminded).toEqual([]);
   });
+
+  // A reminder is claimed on the notice before it is sent, so two processes never
+  // both send it. But claimed and not sent — WhatsApp down that hour — it was never
+  // tried again: a reply deadline could pass with the one message about it lost.
+  it('a reminder that could not be sent is tried again the next hour', async () => {
+    const { run } = require('../../services/noticeReminders');
+    const notifyMod = require('../../utils/notify');
+    await M.Notice.deleteMany({});
+    const n = await M.Notice.create({ authority: 'gst', form: 'DRC-01', reference: 'R-10', replyBy: new Date(`${day(1)}T12:00:00+05:30`) });
+    const spy = jest.spyOn(notifyMod, 'notify');
+    try {
+      // The provider fails outright, then every recipient fails.
+      spy.mockResolvedValueOnce({ error: 'provider down' });
+      expect((await run()).sent).toEqual([]);
+      expect((await M.Notice.findById(n._id).lean()).reminded).toEqual([]);
+      spy.mockResolvedValueOnce({ sent: 0, results: [{ to: '+919800000000', sent: false, error: 'timeout' }] });
+      expect((await run()).sent).toEqual([]);
+      expect((await M.Notice.findById(n._id).lean()).reminded).toEqual([]);
+      // It goes: claimed for good, and not sent twice.
+      spy.mockResolvedValueOnce({ sent: 1, results: [{ to: '+919800000000', sent: true }] });
+      expect((await run()).sent.map((s) => s.key)).toEqual(['1']);
+      expect((await M.Notice.findById(n._id).lean()).reminded).toEqual(['1']);
+      expect((await run()).sent).toEqual([]);
+      expect(spy).toHaveBeenCalledTimes(3);
+      // Switched off, or nobody to send to, is a decision, not a failure: not retried every hour.
+      await M.Notice.updateOne({ _id: n._id }, { $set: { reminded: [] } });
+      spy.mockResolvedValueOnce({ skipped: 'no recipients' });
+      await run();
+      expect((await M.Notice.findById(n._id).lean()).reminded).toEqual(['1']);
+    } finally { spy.mockRestore(); }
+  });
 });

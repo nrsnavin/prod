@@ -250,6 +250,22 @@ describe('power cost per metre', () => {
     expect(after[0]).toMatchObject({ month: now, partial: true, change: null });
   });
 
+  // The bill's dates were made with new Date() from whatever was sent: 30 February
+  // was kept as 2 March, and text that is no date at all failed as a server error.
+  it('a date on the bill that is not a day is refused, by name', async () => {
+    const bill = { month: '2026-02', consumerNo: 'D-1', units: 100, total: 1000 };
+    const bad = await post('/accounts/power-bills', { ...bill, billDate: '2026-02-30' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.message).toMatch(/bill date/i);
+    expect((await post('/accounts/power-bills', { ...bill, dueDate: 'soon' })).status).toBe(400);
+    expect((await post('/accounts/power-bills', { ...bill, periodTo: '2026-04-31' })).status).toBe(400);
+    expect(await M.PowerBill.countDocuments({ consumerNo: 'D-1' })).toBe(0);
+    // A real day, and no day at all, are both fine.
+    const ok = await post('/accounts/power-bills', { ...bill, billDate: '2026-03-05', periodFrom: '2026-02-01', periodTo: '2026-02-28', dueDate: '' });
+    expect(ok.status).toBe(201);
+    expect(new Date(ok.body.bill.billDate).toISOString()).toBe('2026-03-05T00:00:00.000Z');
+  });
+
   it('parts that do not make the total, and a rate a unit no Tamil Nadu bill has, are said', async () => {
     replies.power = { problem: null, consumerNo: 'X', periodTo: '2026-09-30', units: 2000, energyCharges: 10000, demandCharges: 0, otherCharges: 0, tax: 0, total: 90000 };
     const r = (await upload('/accounts/power-bills/read')).body;

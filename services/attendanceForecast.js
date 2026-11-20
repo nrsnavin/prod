@@ -35,6 +35,7 @@
 
 const Attendance = require('../models/Attendence.js');
 const Employee   = require('../models/Employee');
+const factoryDay = require('../utils/factoryDay');
 const { stillHere } = require('../utils/employeeStatus');
 
 /** Statuses that mean a person was at work in some useful capacity. */
@@ -97,10 +98,13 @@ async function buildTable({ days = DEFAULT_WINDOW_DAYS, now = new Date() } = {})
     if (value === null) continue;
 
     const d = new Date(r.date);
-    // Local weekday, not UTC. The factory's Monday is the one that
-    // matters, and toISOString would move it for half the year on a
-    // server east of Greenwich.
-    const dow = d.getDay();
+    // The factory's weekday: the day the row is for, read the same way
+    // whether it was kept at that day's UTC midnight or, the older way,
+    // at 00:00 in India (18:30 the evening before by the server's clock —
+    // which the server's own getDay() called the day before).
+    const day = factoryDay.calendarDay(r.date);
+    if (!day) continue;
+    const dow = day.getUTCDay();
     const ageDays = Math.max(0, (now - d) / 86_400_000);
     const w = decay(ageDays);
 
@@ -164,6 +168,11 @@ async function forecast({ days = DEFAULT_WINDOW_DAYS, now = new Date() } = {}) {
     .select('name')
     .lean();
   const roster = employees.length;
+  // The heads a plan can count on are the people on the floor's roster
+  // today. Everyone with a row in the register used to be counted: somebody
+  // who left last month, or moved to the office, stayed an "expected head"
+  // on every slot they had ever worked for as long as the window ran.
+  const onRoster = new Set(employees.map((e) => String(e._id)));
 
   // Plant-wide weighted attendance, the prior every thin cell leans on.
   let totalW = 0, totalWP = 0, totalObs = 0;
@@ -185,7 +194,7 @@ async function forecast({ days = DEFAULT_WINDOW_DAYS, now = new Date() } = {}) {
   const slots = [];
   for (const shift of ['DAY', 'NIGHT']) {
     for (let dow = 0; dow < 7; dow++) {
-      const forSlot = [...cells.values()].filter((c) => c.dow === dow && c.shift === shift);
+      const forSlot = [...cells.values()].filter((c) => c.dow === dow && c.shift === shift && onRoster.has(c.employee));
       if (forSlot.length === 0) continue;
 
       let expected = 0;
@@ -201,8 +210,8 @@ async function forecast({ days = DEFAULT_WINDOW_DAYS, now = new Date() } = {}) {
         dayOfWeek: dow,
         day: DAY_NAMES[dow],
         shift,
-        // People who have EVER worked this slot, and how many of them
-        // are expected to be there.
+        // People on the roster today who have worked this slot, and how
+        // many of them are expected to be there.
         peopleRostered: people,
         expectedHeads: Math.round(expected * 10) / 10,
         expectedAttendancePct: people > 0 ? Math.round((expected / people) * 1000) / 10 : null,
