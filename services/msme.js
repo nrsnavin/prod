@@ -20,6 +20,18 @@
 //  yearEnd()   s.43B(h): bills of the year unpaid at 31 March past
 //              their day, so disallowed, and what was paid late
 //  formOne()   the half-year return's rows
+//
+//  A BILL HERE IS ANY SUM PAYABLE TO THEM: a supplier's bill, and an
+//  expense booked against a supplier (job work, a repair, transport).
+//  dues() always listed both; the year-end statement and Form I read
+//  bills alone, so the same document was due on one page and absent
+//  from the other two.
+//
+//  PAID IS WHATEVER SETTLED IT: a payment voucher, and an advance
+//  brought over from Tally set against it (the supplier has had that
+//  money since before the books began here). The year end asked the
+//  vouchers alone, and listed a bill settled from an opening advance —
+//  paid, nothing outstanding — as disallowed.
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require('../utils/factoryDay');
@@ -28,6 +40,7 @@ const Supplier = require('../models/Supplier');
 const SupplierBill = require('../models/SupplierBill');
 const Expense = require('../models/Expense');
 const Payment = require('../models/Payment');
+const OpeningBalance = require('../models/OpeningBalance');
 
 const DAY = 86_400_000;
 const { r2 } = require('../utils/money');
@@ -86,17 +99,44 @@ async function dues({ asOf = new Date() } = {}) {
   };
 }
 
-/** When each bill of these suppliers was settled, from the vouchers against it. */
+/**
+ * When each document of these suppliers was settled: by the vouchers
+ * against it, and by an opening advance set against it (paid before the
+ * books began here, so on the advance's own date).
+ */
 async function settlementDates(docIds) {
-  const pays = await Payment.find({ status: 'posted', 'allocations.doc': { $in: docIds } }).select('date allocations').lean();
   const byDoc = new Map();
-  for (const p of pays) for (const a of p.allocations || []) {
-    if (!docIds.some((id) => String(id) === String(a.doc))) continue;
-    const list = byDoc.get(String(a.doc)) || [];
-    list.push({ date: p.date, amount: r2((a.amount || 0)) });
-    byDoc.set(String(a.doc), list);
-  }
+  if (!docIds.length) return byDoc;
+  const wanted = new Set(docIds.map(String));
+  const add = (doc, date, amount) => {
+    if (!wanted.has(String(doc)) || !(amount > 0)) return;
+    const list = byDoc.get(String(doc)) || [];
+    list.push({ date, amount: r2(amount) });
+    byDoc.set(String(doc), list);
+  };
+  const [pays, advances] = await Promise.all([
+    Payment.find({ status: 'posted', 'allocations.doc': { $in: docIds } }).select('date allocations').lean(),
+    OpeningBalance.find({ status: 'posted', kind: 'advance', partyType: 'supplier', 'applications.doc': { $in: docIds } }).select('date applications').lean(),
+  ]);
+  for (const p of pays) for (const a of p.allocations || []) add(a.doc, p.date, a.amount || 0);
+  for (const o of advances) for (const a of o.applications || []) add(a.doc, o.date, a.amount || 0);
   return byDoc;
+}
+
+/**
+ * Every sum payable to the micro and small suppliers that matches the
+ * filters, as one list: bills and the expenses booked against them.
+ * `owed` is what the document is for, less what was debited back.
+ */
+async function documents(ids, { bills: billFilter, expenses: expenseFilter }) {
+  const [bills, expenses] = await Promise.all([
+    SupplierBill.find({ supplier: { $in: ids }, status: { $ne: 'cancelled' }, ...billFilter }).select('billNo supplierBillNo supplier billDate totals debitedAmount').lean(),
+    Expense.find({ supplier: { $in: ids }, status: { $in: ['approved', 'paid'] }, ...expenseFilter }).select('expenseNo refNo supplier date totals').lean(),
+  ]);
+  return [
+    ...bills.map((b) => ({ docType: 'SupplierBill', _id: b._id, docNo: b.billNo, refNo: b.supplierBillNo || '', supplier: b.supplier, date: b.billDate, owed: r2((b.totals?.grand || 0) - (b.debitedAmount || 0)) })),
+    ...expenses.map((e) => ({ docType: 'Expense', _id: e._id, docNo: e.expenseNo, refNo: e.refNo || '', supplier: e.supplier, date: e.date, owed: r2(e.totals?.grand || 0) })),
+  ];
 }
 
 /**
@@ -110,16 +150,15 @@ async function yearEnd(fy) {
   const suppliers = await msmeSuppliers();
   if (!suppliers.size) return { fy, rows: [], totals: { allowed: 0, late: 0, disallowed: 0, interest: 0 } };
   const ids = [...suppliers.keys()];
-  const bills = await SupplierBill.find({ supplier: { $in: ids }, status: { $ne: 'cancelled' }, billDate: { $gte: from, $lte: to } }).select('billNo supplierBillNo supplier supplierName billDate totals paidAmount tdsAmount debitedAmount').lean();
-  const settled = await settlementDates(bills.map((b) => b._id));
+  const inYear = { $gte: from, $lte: to };
+  const docs = await documents(ids, { bills: { billDate: inYear }, expenses: { date: inYear } });
+  const settled = await settlementDates(docs.map((d) => d._id));
   const rows = [];
-  for (const b of bills) {
+  for (const b of docs) {
     const s = suppliers.get(String(b.supplier));
     const days = statutoryDays(s);
-    const due = new Date(dayStart(b.billDate).getTime() + days * DAY);
-    const grand = r2(b.totals?.grand || 0);
-    const debited = r2(b.debitedAmount || 0);
-    const owed = r2(grand - debited);
+    const due = new Date(dayStart(b.date).getTime() + days * DAY);
+    const owed = b.owed;
     const pays = (settled.get(String(b._id)) || []).sort((a, c) => a.date - c.date);
     const byDue = r2(pays.filter((p) => p.date <= new Date(due.getTime() + DAY - 1)).reduce((t, p) => t + p.amount, 0));
     const byYearEnd = r2(pays.filter((p) => p.date <= to).reduce((t, p) => t + p.amount, 0));
@@ -127,8 +166,8 @@ async function yearEnd(fy) {
     const disallowed = r2(Math.max(0, owed - byYearEnd));
     const lastPaid = pays.length ? pays[pays.length - 1].date : null;
     rows.push({
-      id: b._id, docNo: b.billNo, refNo: b.supplierBillNo, party: b.supplier, partyName: s.name, category: s.msme.category,
-      date: b.billDate, dueDate: due, amount: owed, paidByDue: byDue, paidLate: late, disallowed, lastPaid,
+      docType: b.docType, id: b._id, docNo: b.docNo, refNo: b.refNo, party: b.supplier, partyName: s.name, category: s.msme.category,
+      date: b.date, dueDate: due, amount: owed, paidByDue: byDue, paidLate: late, disallowed, lastPaid,
       status: disallowed > 0.005 ? 'disallowed' : late > 0.005 ? 'late' : 'allowed',
     });
   }
@@ -157,15 +196,16 @@ async function formOne(asOfInput) {
   const suppliers = await msmeSuppliers();
   if (!suppliers.size) return { asOf: end, rows: [], total: 0 };
   const ids = [...suppliers.keys()];
-  const bills = await SupplierBill.find({ supplier: { $in: ids }, status: { $ne: 'cancelled' }, billDate: { $lte: new Date(end.getTime() - 45 * DAY) } }).select('billNo supplierBillNo supplier billDate totals debitedAmount').lean();
-  const settled = await settlementDates(bills.map((b) => b._id));
+  const over45 = { $lte: new Date(end.getTime() - 45 * DAY) };
+  const docs = await documents(ids, { bills: { billDate: over45 }, expenses: { date: over45 } });
+  const settled = await settlementDates(docs.map((d) => d._id));
   const rows = [];
-  for (const b of bills) {
+  for (const b of docs) {
     const paidByEnd = r2((settled.get(String(b._id)) || []).filter((p) => p.date <= endOfDay).reduce((t, p) => t + p.amount, 0));
-    const left = r2((b.totals?.grand || 0) - (b.debitedAmount || 0) - paidByEnd);
+    const left = r2(b.owed - paidByEnd);
     if (left <= 0.005) continue;
     const s = suppliers.get(String(b.supplier));
-    rows.push({ party: b.supplier, partyName: s.name, udyam: s.msme.udyam || '', category: s.msme.category, docNo: b.billNo, refNo: b.supplierBillNo, date: b.billDate, amount: left, daysOutstanding: Math.floor((end - dayStart(b.billDate)) / DAY), reason: 'Payment pending' });
+    rows.push({ docType: b.docType, party: b.supplier, partyName: s.name, udyam: s.msme.udyam || '', category: s.msme.category, docNo: b.docNo, refNo: b.refNo, date: b.date, amount: left, daysOutstanding: Math.floor((end - dayStart(b.date)) / DAY), reason: 'Payment pending' });
   }
   rows.sort((a, b) => a.partyName.localeCompare(b.partyName) || a.date - b.date);
   return { asOf: end, rows, total: r2(rows.reduce((t, r) => t + r.amount, 0)) };

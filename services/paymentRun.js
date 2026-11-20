@@ -47,6 +47,7 @@ const credits = require('./credits');
 const bankBalances = require('./bankBalances');
 const { taxOn } = require('./allocation');
 const cal = require('../utils/bizDates');
+const { indiaDay } = require('../utils/indiaLabel');
 const { r2 } = require('../utils/money');
 
 const DAY = 86_400_000;
@@ -72,7 +73,9 @@ function holdsFor(s, shared) {
   if (s.isActive === false) out.push({ code: 'INACTIVE', severity: 'danger', message: `${s.name} is marked inactive` });
   if (!s.bank?.accountNo || !s.bank?.ifsc) out.push({ code: 'NO_BANK', severity: 'danger', message: 'No bank account on file: pay them by cheque from the payment form, or add their account' });
   if (s.bank?.changedAt && Date.now() - new Date(s.bank.changedAt).getTime() < BANK_CHANGE_DAYS * DAY) {
-    out.push({ code: 'BANK_CHANGED', severity: 'confirm', message: `Their bank account changed on ${dm(s.bank.changedAt)}${s.bank.changedByName ? ` (by ${s.bank.changedByName})` : ''}, from ${last4(s.bank.previousAccountNo)} to ${last4(s.bank.accountNo)}: call them on the number on file before paying` });
+    // A moment, not a books day: written as the day it was in India
+    // (a change made at 2 a.m. was dated the day before).
+    out.push({ code: 'BANK_CHANGED', severity: 'confirm', message: `Their bank account changed on ${indiaDay(s.bank.changedAt, { day: 'numeric', month: 'short' })}${s.bank.changedByName ? ` (by ${s.bank.changedByName})` : ''}, from ${last4(s.bank.previousAccountNo)} to ${last4(s.bank.accountNo)}: call them on the number on file before paying` });
   }
   const twin = s.bank?.accountNo ? shared.get(s.bank.accountNo) : null;
   if (twin) {

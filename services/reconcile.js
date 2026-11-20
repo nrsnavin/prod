@@ -22,6 +22,7 @@ const Contra = require('../models/Contra');
 const BankAccount = require('../models/BankAccount');
 const BankStatement = require('../models/BankStatement');
 const bankBalances = require('./bankBalances');
+const bankLines = require('./bankLines');
 
 const { r2 } = require('../utils/money');
 const endOf = (d) => factoryDay.calendarDayEnd(d) || new Date(NaN);
@@ -95,14 +96,22 @@ async function statementAsOf(account, asOf, bankBalance) {
     ...contrasOut.map((c) => ({ voucherType: 'Contra', _id: c._id, number: c.contraNo, date: c.date, party: `To ${c.toName}`, reference: c.reference || '', direction: 'out', amount: c.amount })),
   ].sort((a, b) => new Date(a.date) - new Date(b.date));
 
-  // Statement lines nobody has placed, once each (a line uploaded twice counts once).
+  // Statement lines nobody has placed, once each: a line that came in on
+  // two statements counts once. Two lines that look the same — the bank
+  // charging 5.90 twice on one day — are two: the first of their key and
+  // the second, as they are everywhere else (services/bankLines.js). They
+  // were counted here by the key alone, so only one of the two was taken
+  // off, and once one was posted the other vanished from the list: the
+  // reconciliation was 5.90 out with nothing on the page to explain it.
   const seen = new Map();
   for (const st of statements) {
+    const nth = bankLines.occurrenceMap(st);
     for (const l of st.lines) {
       if (new Date(l.date) > at) continue;
-      const prev = seen.get(l.key);
+      const id = `${l.key}#${nth.get(l.index) || 1}`;
+      const prev = seen.get(id);
       const done = ['recorded', 'posted', 'ignored'].includes(l.status);
-      if (!prev || (done && !prev.done)) seen.set(l.key, { done, line: { statement: st._id, index: l.index, date: l.date, narration: l.narration, ref: l.ref, amount: l.amount, direction: l.direction } });
+      if (!prev || (done && !prev.done)) seen.set(id, { done, line: { statement: st._id, index: l.index, date: l.date, narration: l.narration, ref: l.ref, amount: l.amount, direction: l.direction } });
     }
   }
   const unmatched = [...seen.values()].filter((x) => !x.done).map((x) => x.line).sort((a, b) => new Date(a.date) - new Date(b.date));

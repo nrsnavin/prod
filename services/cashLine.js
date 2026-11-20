@@ -25,6 +25,7 @@
 // ══════════════════════════════════════════════════════════════════
 const ExpenseCategory = require('../models/ExpenseCategory');
 const bizDates = require('../utils/bizDates');
+const factoryDay = require('../utils/factoryDay');
 const { anthropic } = require('../utils/anthropicClient');
 const aiLedger = require('./aiLedger');
 const { promptVersion } = require('../utils/aiPrompts');
@@ -153,7 +154,8 @@ async function read(text, { by } = {}) {
       source = 'model';
       if (r.amount == null && typeof o.amount === 'number' && o.amount > 0 && o.amount <= MAX_AMOUNT) r.amount = Math.round(o.amount * 100) / 100;
       if (o.day === 'yesterday') r.date = new Date(today.getTime() - bizDates.DAY);
-      else if (/^\d{4}-\d{2}-\d{2}$/.test(String(o.day || ''))) { const d = new Date(`${o.day}T00:00:00Z`); if (d <= today) r.date = d; }
+      // A day that exists, and not ahead of today: "31 April" used to be taken as the 1st of May.
+      else if (factoryDay.isDayKey(String(o.day || ''))) { const d = factoryDay.calendarDay(o.day); if (d <= today) r.date = d; }
       if (o.description) r.description = String(o.description).slice(0, 200);
       if (!r.payee && o.payee) r.payee = String(o.payee).slice(0, 120);
       if (!head && o.head) {

@@ -20,7 +20,7 @@ const partyLedger = require('./partyLedger');
 const outstanding = require('./outstanding');
 const { getDocumentSettings } = require('./documentSettings');
 const { allocate } = require('./docNumbers');
-const { isId, r2, fp, DAY } = require('./accountsHelpers');
+const { isId, r2, fp, DAY, businessDay } = require('./accountsHelpers');
 const { ACTION_CODES } = require('../utils/fingerprint');
 
 const dmy = (d) => { const t = new Date(d); const p = (n) => String(n).padStart(2, '0'); return `${p(t.getUTCDate())}-${p(t.getUTCMonth() + 1)}-${t.getUTCFullYear()}`; };
@@ -104,7 +104,8 @@ async function letter(id) {
     settings.addressLines?.filter(Boolean).join(', ') || '',
     settings.gstin ? `GSTIN ${settings.gstin}` : '',
     '',
-    `Date: ${dmy(new Date())}`,
+    // The day it is in India: the server's own date is still yesterday's until 05:30 there.
+    `Date: ${dmy(businessDay(new Date()))}`,
     `Ref: ${c.confirmationNo}`,
     '',
     `To,`,
@@ -152,9 +153,13 @@ async function send(id, { channel, to }, req) {
     to = address;
   } else if (channel === 'whatsapp') {
     const { sendWhatsApp, isConfigured } = require('../utils/whatsapp');
-    const { e164 } = require('./collections');
+    const { e164, knownPhone } = require('./collections');
     const phone = e164(to);
     if (!phone) throw new ErrorHandler('Give the phone number to send to', 400);
+    // The company's WhatsApp line speaks to the parties on file, as a
+    // payment reminder does (api/accountsCollections.js): a letter with a
+    // party's GSTIN and balance on it went to whatever number was typed.
+    if (!(await knownPhone(phone))) throw new ErrorHandler('That number is not on any customer or supplier on file — add it to the party first', 400);
     if (!isConfigured()) throw new ErrorHandler('WhatsApp is not set up on this server. Print the letter, or send it by email.', 409);
     const r = await sendWhatsApp(phone, text);
     if (!r.sent) throw new ErrorHandler(`WhatsApp did not send: ${r.error || 'not configured'}`, 502);

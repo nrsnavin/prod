@@ -165,7 +165,12 @@ async function save(lotId, b = {}, { by = null, byName = '' } = {}) {
   const tests = normalise(b.tests);
   if (!tests.length) throw fail('Put in at least one test with its value');
   const result = b.result === 'pass' || b.result === 'fail' ? b.result : '';
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || '')) ? new Date(`${b.date}T00:00:00Z`) : null;
+  // The certificate's own date, when it gives one: a day that exists
+  // ("31 November" used to be kept as the 1st of December).
+  const factoryDay = require('../utils/factoryDay');
+  const sentDate = b.date === undefined || b.date === null || b.date === '' ? null : String(b.date);
+  if (sentDate && !factoryDay.isDayKey(sentDate)) throw fail('The certificate\'s date is not a date');
+  const date = sentDate ? factoryDay.calendarDay(sentDate) : null;
   const flags = flagsFor(tests, result, await history(lot.rawMaterial?._id || lot.rawMaterial, lot._id), lot.rawMaterial?.name);
   const certificate = {
     certNo: String(b.certNo || '').trim().slice(0, 40), date, issuer: String(b.issuer || '').trim().slice(0, 120), product: String(b.product || '').trim().slice(0, 120),

@@ -2,10 +2,23 @@
 // ══════════════════════════════════════════════════════════════════
 //  GST FOR A PERIOD, AS ENTERED HERE
 //
-//  Output tax from sales less credit notes, plus reverse charge on what
-//  unregistered suppliers did not charge; input credit from purchases
-//  less debit notes, plus expenses with credit. By rate, and the net.
+//  Output tax from sales less credit notes, plus debit notes raised on
+//  customers, plus reverse charge on what unregistered suppliers did not
+//  charge; input credit from purchases less debit notes raised on
+//  suppliers, plus expenses with credit. By rate, and the net.
 //  The GST report and the cash forecast read the same figures.
+//
+//  A DEBIT NOTE IS ONE OF TWO THINGS. Raised on a supplier (goods sent
+//  back, a price cut) it lowers our input credit. Raised on a customer
+//  (interest on a late payment, a price increase) it is more output tax.
+//  Every debit note used to be taken as the first kind: the customer's
+//  came off input credit and never reached output tax. The net payable
+//  was the same either way, which hid it; but the output tax of the
+//  month was less than GSTR-1 says (table 9B has those notes) and the
+//  credit less than the purchase register's.
+//
+//  A financial credit note (issued past the time limit, no GST) is not
+//  a GST document: GSTR-1 leaves it out, and so does this.
 // ══════════════════════════════════════════════════════════════════
 
 const Invoice = require('../models/Invoice');
@@ -31,20 +44,27 @@ const sum = (rows) => rows.reduce((t, g) => ({ taxable: r2(t.taxable + g.taxable
 
 async function summary({ from, to }) {
   const range = { $gte: from, $lte: to };
-  const [invoices, creditNotes, bills, debitNotes, expenses, rcmBills] = await Promise.all([
+  const [invoices, creditNotes, customerDebitNotes, bills, debitNotes, expenses, rcmBills] = await Promise.all([
     Invoice.find({ status: 'issued', invoiceDate: range }).select('lines').lean(),
-    AccountNote.find({ kind: 'credit', status: 'issued', date: range }).select('lines').lean(),
+    AccountNote.find({ kind: 'credit', status: 'issued', financial: { $ne: true }, date: range }).select('lines').lean(),
+    // Raised on a customer: more output tax.
+    AccountNote.find({ kind: 'debit', partyType: 'customer', status: 'issued', date: range }).select('lines').lean(),
     SupplierBill.find({ status: { $ne: 'cancelled' }, 'itc.eligible': true, billDate: range }).select('lines').lean(),
-    AccountNote.find({ kind: 'debit', status: 'issued', date: range }).select('lines').lean(),
+    // Raised on a supplier: less input credit.
+    AccountNote.find({ kind: 'debit', partyType: 'supplier', status: 'issued', date: range }).select('lines').lean(),
     Expense.find({ status: { $in: ['approved', 'paid'] }, 'itc.eligible': true, date: range }).select('lines').lean(),
     // Reverse charge: tax we owe on what the supplier did not charge.
     SupplierBill.find({ status: { $ne: 'cancelled' }, reverseCharge: true, billDate: range }).select('lines').lean(),
   ]);
-  const output = { sales: byRate(invoices), creditNotes: byRate(creditNotes), reverseCharge: byRate(rcmBills) };
+  const output = { sales: byRate(invoices), creditNotes: byRate(creditNotes), debitNotes: byRate(customerDebitNotes), reverseCharge: byRate(rcmBills) };
   const input = { purchases: byRate(bills), debitNotes: byRate(debitNotes), expenses: byRate(expenses) };
-  const outputTotal = sum(output.sales); const cnTotal = sum(output.creditNotes); const rcmTotal = sum(output.reverseCharge);
+  const outputTotal = sum(output.sales); const cnTotal = sum(output.creditNotes); const cdnTotal = sum(output.debitNotes); const rcmTotal = sum(output.reverseCharge);
   const inputTotal = sum(input.purchases); const dnTotal = sum(input.debitNotes); const expTotal = sum(input.expenses);
-  const netOutput = { cgst: r2(outputTotal.cgst - cnTotal.cgst + rcmTotal.cgst), sgst: r2(outputTotal.sgst - cnTotal.sgst + rcmTotal.sgst), igst: r2(outputTotal.igst - cnTotal.igst + rcmTotal.igst) };
+  const netOutput = {
+    cgst: r2(outputTotal.cgst - cnTotal.cgst + cdnTotal.cgst + rcmTotal.cgst),
+    sgst: r2(outputTotal.sgst - cnTotal.sgst + cdnTotal.sgst + rcmTotal.sgst),
+    igst: r2(outputTotal.igst - cnTotal.igst + cdnTotal.igst + rcmTotal.igst),
+  };
   // Rule 37: credit reversed on bills unpaid 180 days, and re-claimed once paid.
   const rule37 = await require('./itcReversal').inPeriod(from, to);
   const netInput = {
@@ -55,10 +75,10 @@ async function summary({ from, to }) {
   return {
     from, to, output, input,
     totals: {
-      output: outputTotal, creditNotes: cnTotal, reverseCharge: rcmTotal, purchases: inputTotal, debitNotes: dnTotal, expenses: expTotal, rule37, netOutput, netInput,
+      output: outputTotal, creditNotes: cnTotal, customerDebitNotes: cdnTotal, reverseCharge: rcmTotal, purchases: inputTotal, debitNotes: dnTotal, expenses: expTotal, rule37, netOutput, netInput,
       payable: { cgst: r2(netOutput.cgst - netInput.cgst), sgst: r2(netOutput.sgst - netInput.sgst), igst: r2(netOutput.igst - netInput.igst) },
     },
-    counts: { invoices: invoices.length, creditNotes: creditNotes.length, bills: bills.length, debitNotes: debitNotes.length, expenses: expenses.length, reverseCharge: rcmBills.length },
+    counts: { invoices: invoices.length, creditNotes: creditNotes.length, customerDebitNotes: customerDebitNotes.length, bills: bills.length, debitNotes: debitNotes.length, expenses: expenses.length, reverseCharge: rcmBills.length },
   };
 }
 

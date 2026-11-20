@@ -81,6 +81,29 @@ describe('reading a lot\'s test certificate', () => {
     expect((list.lots || list.data || []).find((l) => l.lotNo === 'L-4471').certificate.certNo).toBe('TC/2611/044');
   });
 
+  // The certificate's date was checked for its shape only: "31 November"
+  // was kept as the 1st of December, and "month 13" was a server error.
+  it('a certificate dated a day that does not exist is refused, not kept for another day', async () => {
+    // A lot of its own, of a property the other tests do not search by.
+    const mine = await M.YarnLot.create({ rawMaterial: spandex._id, lotNo: 'L-DATES', supplier: supplier._id, receivedQty: 10 });
+    const tests = [{ label: 'Moisture regain', value: 1.2, unit: '%' }];
+    try {
+      for (const date of ['2026-11-31', '2026-02-30', '2026-13-01']) {
+        const res = await put(`/yarn-lots/${mine._id}/certificate`, { certNo: 'TC/1', date, tests });
+        expect([date, res.status]).toEqual([date, 400]);
+        expect(res.body.message).toMatch(/date/i);
+      }
+      expect((await M.YarnLot.findById(mine._id).lean()).certificate?.certNo || '').toBe('');
+      // No date at all is allowed, as before; a real one is kept.
+      expect((await put(`/yarn-lots/${mine._id}/certificate`, { certNo: 'TC/2', tests })).status).toBe(200);
+      const kept = await put(`/yarn-lots/${mine._id}/certificate`, { certNo: 'TC/3', date: '2026-11-30', tests });
+      expect(kept.status).toBe(200);
+      expect(new Date((await M.YarnLot.findById(mine._id).lean()).certificate.date).toISOString()).toBe('2026-11-30T00:00:00.000Z');
+    } finally {
+      await M.YarnLot.deleteOne({ _id: mine._id });
+    }
+  });
+
   it('far off the lots before is said; a fail is said', async () => {
     for (const [no, ten] of [['L-4401', 4.5], ['L-4402', 4.7], ['L-4403', 4.6]]) {
       const l = await M.YarnLot.create({ rawMaterial: nylon._id, lotNo: no, receivedQty: 100 });

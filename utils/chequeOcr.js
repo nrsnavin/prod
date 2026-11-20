@@ -37,7 +37,8 @@ function normalise(raw, meta = {}) {
   if (!raw) return { problem: 'unreadable', ...meta };
   if (raw.problem === 'not_a_cheque' || raw.problem === 'unreadable') return { problem: raw.problem, ...meta };
   const chequeNo = String(raw.chequeNo || '').replace(/\D/g, '');
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(raw.date || '')) && !Number.isNaN(new Date(`${raw.date}T00:00:00Z`).getTime()) ? raw.date : '';
+  // A day that exists: "31 April" used to be kept, and drafted as a cheque post-dated to 1 May.
+  const date = require('./factoryDay').isDayKey(String(raw.date || '')) ? raw.date : '';
   const amount = num(raw.amount);
   const ifsc = String(raw.ifsc || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const accountNo = String(raw.accountNo || '').replace(/\D/g, '');

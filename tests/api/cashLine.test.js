@@ -101,6 +101,22 @@ describe('a line read into a draft', () => {
     expect(sent.thinking).toBeUndefined();
   });
 
+  // The model's day was asked only whether JavaScript could make a date
+  // of it: "31 April" became the 1st of May on the expense.
+  it('a day the model gives that is not a day is not taken: the expense stays on today', async () => {
+    mockClient = { messages: { create: mockCreate } };
+    const today = bizDates.today().toISOString().slice(0, 10);
+    const y = bizDates.parts(bizDates.today()).y - 1;
+    for (const day of [`${y}-04-31`, `${y}-02-30`, `${y}-13-01`]) {
+      mockCreate.mockResolvedValue({ stop_reason: 'end_turn', usage: { input_tokens: 80, output_tokens: 30 }, content: [{ type: 'text', text: JSON.stringify({ amount: 300, day, description: 'Tea for the night shift', payee: '', head: 'Staff welfare' }) }] });
+      const res = await line('munnooru roobaai night shift ku');
+      expect([day, res.body.draft.date]).toEqual([day, today]);
+    }
+    // A real day in the past is taken (unchanged).
+    mockCreate.mockResolvedValue({ stop_reason: 'end_turn', usage: { input_tokens: 80, output_tokens: 30 }, content: [{ type: 'text', text: JSON.stringify({ amount: 300, day: `${y}-04-30`, description: 'Tea for the night shift', payee: '', head: 'Staff welfare' }) }] });
+    expect((await line('munnooru roobaai night shift ku')).body.draft.date).toBe(`${y}-04-30`);
+  });
+
   it('a head the model makes up is not taken; a refusal or no AI key leaves the rules\' draft and says what is missing', async () => {
     mockClient = { messages: { create: mockCreate } };
     mockCreate.mockResolvedValueOnce({ stop_reason: 'end_turn', usage: {}, content: [{ type: 'text', text: JSON.stringify({ amount: null, day: null, description: 'Something', payee: '', head: 'Entertainment' }) }] });

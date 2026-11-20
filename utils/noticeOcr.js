@@ -51,7 +51,8 @@ const REPLY_NEEDS = {
 /** Days to reply fixed by law, where the notice does not print a date. */
 const LAW_DAYS = { 'ASMT-10': 30, 'DRC-01': 30 };
 
-const asDate = (v) => { const d = str(v, 10); return /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(Date.parse(d)) ? d : ''; };
+// A day that exists: a notice "issued 31/11" used to have its reply date counted from 1 December.
+const asDate = (v) => { const d = str(v, 10); return require('./factoryDay').isDayKey(d) ? d : ''; };
 const formKey = (form) => {
   const f = String(form || '').toUpperCase().replace(/\s+/g, '').replace(/^FORM(GST)?/, '').replace(/^GST/, '');
   return Object.keys(REPLY_NEEDS).find((k) => f === k.replace(/\s+/g, '') || f.startsWith(`${k}`)) || '';

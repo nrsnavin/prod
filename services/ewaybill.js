@@ -25,14 +25,19 @@ const ddmmyyyy = (d) => { const x = new Date(d); return `${String(x.getDate()).p
 const valueOf = (doc) => Number(doc.totals?.grand ?? doc.totalAmount ?? 0) || 0;
 const needed = (doc) => valueOf(doc) > LIMIT;
 
-function readDetails(b = {}) {
+/**
+ * @param pasted  the e-way bill exists already (its number came from the
+ *                portal): the vehicle may be blank, for the transporter
+ *                to add under Part B, with or without their ID here.
+ */
+function readDetails(b = {}, { pasted = false } = {}) {
   const vehicleNo = String(b.vehicleNo || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const mode = ['road', 'rail', 'air', 'ship'].includes(b.mode) ? b.mode : 'road';
   const distanceKm = Math.max(0, Math.round(Number(b.distanceKm) || 0));
   const transporterId = String(b.transporterId || '').toUpperCase().trim().slice(0, 15);
   const transporterName = String(b.transporterName || '').trim().slice(0, 100);
   const transDocNo = String(b.transDocNo || '').trim().slice(0, 15);
-  if (mode === 'road' && !vehicleNo && !transporterId) throw new ErrorHandler('Give the vehicle number, or the transporter\'s GSTIN / ID when they will add Part B', 400);
+  if (!pasted && mode === 'road' && !vehicleNo && !transporterId) throw new ErrorHandler('Give the vehicle number, or the transporter\'s GSTIN / ID when they will add Part B', 400);
   if (vehicleNo && !/^[A-Z]{2}\d{1,2}[A-Z]{0,3}\d{4}$/.test(vehicleNo)) throw new ErrorHandler(`Vehicle number ${vehicleNo} is not in the RTO form (e.g. TN39BX1234)`, 400);
   return { vehicleNo, mode, distanceKm, transporterId, transporterName, transDocNo };
 }
@@ -74,11 +79,12 @@ function paste(doc, body) {
   if (doc.ewaybill?.status === 'generated') throw new ErrorHandler(`Already recorded — e-way bill ${doc.ewaybill.number}`, 409);
   const number = String(body?.number || '').replace(/\D/g, '');
   if (number.length !== 12) throw new ErrorHandler('The e-way bill number is 12 digits, as on the portal', 400);
-  const d = readDetails({ ...body, vehicleNo: body?.vehicleNo || 'TRANSPORTER', transporterId: body?.transporterId || (body?.vehicleNo ? '' : 'PASTED') });
-  if (d.vehicleNo === 'TRANSPORTER') d.vehicleNo = '';
-  if (d.transporterId === 'PASTED') d.transporterId = '';
-  const validUpto = body?.validUpto ? new Date(body.validUpto) : undefined;
-  if (validUpto && Number.isNaN(validUpto.getTime())) throw new ErrorHandler('validUpto is not a date', 400);
+  // A stand-in vehicle ("TRANSPORTER") used to be put in to get past the
+  // rule that asks for one, and the next rule — the RTO form — refused the
+  // stand-in: a number pasted with the vehicle left blank never went in.
+  const d = readDetails(body || {}, { pasted: true });
+  const { momentFrom } = require('../utils/requestDate');
+  const validUpto = momentFrom(body?.validUpto, 'validUpto', undefined);
   stamp(doc, { number, validUpto, generatedAt: new Date(), provider: 'manual' }, d);
   return d;
 }

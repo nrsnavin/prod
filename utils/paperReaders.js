@@ -19,7 +19,9 @@
 
 const { readJson, num, str } = require('./docRead');
 
-const isoDate = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !Number.isNaN(new Date(`${v}T00:00:00Z`).getTime()) ? String(v) : '');
+// A day that exists (utils/factoryDay.js): "2026-04-31" used to pass, and became the 1st of May.
+const { isDayKey } = require('./factoryDay');
+const isoDate = (v) => (isDayKey(String(v || '')) ? String(v) : '');
 const money = (v) => { const n = num(v); return n != null && n >= 0 && n < 1e11 ? Math.round(n * 100) / 100 : null; };
 const upper = (v, max) => str(v, max).toUpperCase().replace(/\s+/g, '');
 const meta = (r) => ({ model: r.model, usage: r.usage, latencyMs: r.latencyMs });
@@ -232,6 +234,6 @@ async function readTestCertificate(pages) {
 }
 
 module.exports = {
-  readDebitNote, readTdsChallan, readForm16a, read26as, readPriceList, readPowerBill, readTestCertificate,
+  readDebitNote, readTdsChallan, readForm16a, read26as, readPriceList, readPowerBill, readTestCertificate, isoDate,
   PROMPTS: { DEBIT_NOTE_PROMPT, CHALLAN_PROMPT, FORM16A_PROMPT, AS26_PROMPT, PRICE_LIST_PROMPT, POWER_BILL_PROMPT, TEST_CERT_PROMPT },
 };

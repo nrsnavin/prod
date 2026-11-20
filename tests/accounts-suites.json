@@ -70,5 +70,10 @@
   "tests/api/whatsappPapers.test.js",
   "tests/api/bankLearned.test.js",
   "tests/api/accountsPapersRead.test.js",
-  "tests/api/accountsPaymentRun.test.js"
+  "tests/api/accountsPaymentRun.test.js",
+  "tests/api/bankReconcileTwins.test.js",
+  "tests/api/gstSummaryNotes.test.js",
+  "tests/api/msmeSettled.test.js",
+  "tests/api/confirmationsRecipient.test.js",
+  "tests/api/collectionsReminderNumber.test.js"
 ]

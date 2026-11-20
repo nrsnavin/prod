@@ -58,6 +58,14 @@ function leadsWithRealDay(text) {
   return !m || isRealDay(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
 }
 
+/**
+ * Whether a value is a day written as "YYYY-MM-DD", and one that exists.
+ * For a date read off a paper or sent in a form: four readers each asked
+ * only whether JavaScript could make a date of it, and it makes the 1st
+ * of May of "2026-04-31".
+ */
+const isDayKey = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && leadsWithRealDay(v);
+
 /** The India calendar day of a value as [y, m (0-11), d]; null if unreadable. */
 function partsOf(v) {
   if (v == null || v === '') return null;
@@ -167,4 +175,4 @@ function daysBetween(from, to) {
   return a && b ? Math.round((b.getTime() - a.getTime()) / DAY) : null;
 }
 
-module.exports = { DAY, IST, calendarDay, calendarDayEnd, dayStart, dayEnd, shiftDay, moment, ymd, daysBetween, leadsWithRealDay };
+module.exports = { DAY, IST, calendarDay, calendarDayEnd, dayStart, dayEnd, shiftDay, moment, ymd, daysBetween, leadsWithRealDay, isDayKey };
