@@ -150,6 +150,10 @@ describe('lots searched and compared by their certificates', () => {
     const elong = (await get(`/yarn-lots/certificates/search?key=elongation&min=30`)).body.lots;
     expect(elong).toEqual([expect.objectContaining({ lotNo: 'L-4471', value: 33, max: 32, outOfSpec: true, balance: 400 })]);
     expect((await get('/yarn-lots/certificates/search')).status).toBe(400);
+    // The property sent twice (a form that repeats the field) is still that property, not a crash.
+    const twice = await get(`/yarn-lots/certificates/search?key=tenacity&key=tenacity&min=4.6&material=${nylon._id}`);
+    expect(twice.status).toBe(200);
+    expect(twice.body.lots.map((l) => l.lotNo)).toEqual(lots.map((l) => l.lotNo));
   });
 
   it('the certified lots of a yarn side by side, a row a property, with the average', async () => {

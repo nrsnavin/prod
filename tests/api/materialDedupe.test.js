@@ -102,3 +102,82 @@ describe('duplicate materials', () => {
     expect((await post('/merge', { into: String(a._id), from: [String(b._id)] })).status).toBe(409);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading services/materialDedupe.js line by line.
+// ══════════════════════════════════════════════════════════════════
+describe('what makes two names the same yarn', () => {
+  const dd = () => require('../../services/materialDedupe');
+
+  it('raw white is not white, and a polyester-cotton blend is not polyester', () => {
+    const key = (name) => dd().yarnKey(name, 'warp');
+    // "white" was looked for before "raw white", so the second never matched:
+    // undyed yarn and bleached white were offered as one material to merge.
+    expect(key('40s PC Raw White')).not.toBe(key('40s PC White'));
+    expect(key('40s PC RW')).toBe(key('40s PC Raw White'));
+    expect(dd().standardName('pc 40s raw white')).toBe('40s PC Raw White');
+    expect(dd().standardName('PC 40/1 wht')).toBe('40s PC White');
+    // A blend written out in full is the blend.
+    expect(key('40s Polyester Cotton Black')).toBe(key('40s PC Black'));
+    expect(key('40s P/C Black')).toBe(key('40s PC Black'));
+    expect(key('40s Poly-Cotton BLK')).toBe(key('40s PC Black'));
+    expect(key('40s Polyester Black')).not.toBe(key('40s PC Black'));
+    expect(key('40s Cotton Black')).not.toBe(key('40s PC Black'));
+  });
+});
+
+describe('merging two materials that each hold the same lot number', () => {
+  it('is refused, naming the lot, with nothing moved', async () => {
+    const mk = (name) => M.RawMaterial.create({ name, category: 'warp', unit: 'kg', stock: 10, avgCost: 100, price: 100 });
+    const keep = await mk('60s PC Navy');
+    const other = await mk('60/1 PC NAVY');
+    const YarnLot = require('../../models/YarnLot');
+    await YarnLot.init();   // the one-lot-number-a-material index is in place
+    const lots = mongoose.connection.collection('yarnlots');
+    await lots.insertOne({ rawMaterial: keep._id, lotNo: 'L-77', receivedQty: 6 });
+    await lots.insertOne({ rawMaterial: other._id, lotNo: 'L-77', receivedQty: 4 });
+    await lots.insertOne({ rawMaterial: other._id, lotNo: 'L-78', receivedQty: 3 });
+
+    const res = await post('/merge', { into: String(keep._id), from: [String(other._id)] });
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/L-77/);
+    expect(res.body.message).not.toMatch(/L-78/);
+    expect(res.body.message).not.toMatch(/E11000|duplicate key/i);
+    // Nothing moved: the other is still itself, with its lots and its stock.
+    const after = await M.RawMaterial.findById(other._id).lean();
+    expect(after).toMatchObject({ archived: false, stock: 10, name: '60/1 PC NAVY' });
+    expect(await lots.countDocuments({ rawMaterial: other._id })).toBe(2);
+    expect((await M.RawMaterial.findById(keep._id).lean()).stock).toBe(10);
+  });
+});
+
+describe('merging two materials one supplier has quoted for', () => {
+  it('leaves one live rate for that supplier — the later quotation', async () => {
+    const SupplierRate = require('../../models/SupplierRate');
+    const mk = (name) => M.RawMaterial.create({ name, category: 'weft', unit: 'kg', stock: 0, avgCost: 0, price: 0 });
+    const keep = await mk('20s Cotton Grey');
+    const other = await mk('20/1 CTN GRY');
+    const sup = new mongoose.Types.ObjectId();
+    const elsewhere = new mongoose.Types.ObjectId();
+    const rate = (rawMaterial, supplier, value, quotedOn) => SupplierRate.create({ supplier, rawMaterial, rate: value, quotedOn: new Date(quotedOn) });
+    const older = await rate(keep._id, sup, 100, '2026-10-01T00:00:00Z');
+    const newer = await rate(other._id, sup, 112, '2026-11-01T00:00:00Z');
+    const theirs = await rate(other._id, elsewhere, 90, '2026-09-01T00:00:00Z');
+
+    const res = await post('/merge', { into: String(keep._id), from: [String(other._id)] });
+    expect(res.status).toBe(200);
+
+    // "One rate per supplier and material is live at a time" (models/SupplierRate.js):
+    // two live ones left the price check on a purchase order to whichever came back last.
+    const live = await SupplierRate.find({ supplier: sup, rawMaterial: keep._id, live: true }).lean();
+    expect(live.map((r) => r.rate)).toEqual([112]);
+    const was = await SupplierRate.findById(older._id).lean();
+    expect(was).toMatchObject({ live: false, rate: 100 });
+    expect(String(was.replacedBy)).toBe(String(newer._id));
+    // Another supplier's only rate is simply carried over.
+    expect(await SupplierRate.findById(theirs._id).lean()).toMatchObject({ live: true, rate: 90 });
+    expect(String((await SupplierRate.findById(theirs._id).lean()).rawMaterial)).toBe(String(keep._id));
+    const rates = await require('../../services/priceLists').liveRates(String(sup), [String(keep._id)]);
+    expect(rates.get(String(keep._id)).rate).toBe(112);
+  });
+});

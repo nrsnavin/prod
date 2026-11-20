@@ -185,12 +185,14 @@ async function save(lotId, b = {}, { by = null, byName = '' } = {}) {
 }
 
 /** Lots whose certificate has `key` within [min, max]. */
-async function search({ material, key, min = null, max = null } = {}) {
+async function search({ material, key: asked, min = null, max = null } = {}) {
+  // One property: a form that sends the field twice still means that one.
+  const key = String((Array.isArray(asked) ? asked[0] : asked) || '').trim();
   if (!key) throw Object.assign(new Error('Say which property to search by'), { status: 400 });
   const range = {};
   if (num(min) !== null) range.$gte = num(min);
   if (num(max) !== null) range.$lte = num(max);
-  const q = { 'certificate.tests': { $elemMatch: { key: String(key), ...(Object.keys(range).length ? { value: range } : {}) } } };
+  const q = { 'certificate.tests': { $elemMatch: { key, ...(Object.keys(range).length ? { value: range } : {}) } } };
   if (isId(material)) q.rawMaterial = material;
   const lots = await YarnLot.find(q).select('lotNo shade status receivedQty consumedQty rawMaterial supplier certificate receivedDate')
     .populate('rawMaterial', 'name').populate('supplier', 'name').sort({ receivedDate: -1 }).limit(200).lean();

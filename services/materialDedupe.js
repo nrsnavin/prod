@@ -27,8 +27,10 @@ const RawMaterial = require('../models/RawMaterial');
 const ErrorHandler = require('../utils/ErrorHandler');
 const { rank } = require('../utils/fuzzyMatch');
 
+// A blend is looked for before either fibre in it: "polyester cotton" and
+// "P/C" are the blend, not polyester.
 const FIBRES = [
-  [/\b(p\s*c|poly\s*cotton|polycot|pc)\b/, 'PC'],
+  [/\b(p\s*\/?\s*c|poly(ester)?\s*\/?\s*cotton|cotton\s*\/?\s*poly(ester)?|polycot)\b/, 'PC'],
   [/\b(poly(ester)?|pet|psf|pfy)\b/, 'Polyester'],
   [/\b(cotton|ctn|cot)\b/, 'Cotton'],
   [/\b(nylon|nyl|ny)\b/, 'Nylon'],
@@ -37,7 +39,9 @@ const FIBRES = [
   [/\b(viscose|rayon)\b/, 'Viscose'],
 ];
 const SHADES = [
-  [/\b(black|blk|bk)\b/, 'Black'], [/\b(white|wht|wh)\b/, 'White'], [/\b(raw\s*white|rw)\b/, 'Raw White'],
+  // Raw white before white: undyed yarn is not bleached white, and the
+  // first shade found is the one taken.
+  [/\b(black|blk|bk)\b/, 'Black'], [/\b(raw\s*(white|wht|wh)|rw)\b/, 'Raw White'], [/\b(white|wht|wh)\b/, 'White'],
   [/\b(navy)\b/, 'Navy'], [/\b(grey|gray|gry)\b/, 'Grey'], [/\b(red)\b/, 'Red'], [/\b(blue)\b/, 'Blue'],
   [/\b(beige)\b/, 'Beige'], [/\b(skin)\b/, 'Skin'], [/\b(dyed)\b/, 'Dyed'],
 ];
@@ -93,7 +97,7 @@ function refPaths(schema, prefix = '', arrays = []) {
   return out;
 }
 
-const MODEL_FILES = ['Elastic', 'Order', 'PurchaseOrder', 'MaterialInward', 'YarnLot', 'WarpingBatch', 'WarpingPlan', 'StockCount', 'SupplierBill', 'Expense', 'Invoice', 'AccountNote'];
+const MODEL_FILES = ['Elastic', 'Order', 'PurchaseOrder', 'MaterialInward', 'YarnLot', 'WarpingBatch', 'WarpingPlan', 'StockCount', 'SupplierBill', 'SupplierRate', 'Expense', 'Invoice', 'AccountNote'];
 function referringModels() {
   for (const f of MODEL_FILES) { try { require(`../models/${f}`); } catch { /* optional */ } }
   try { require('../models/MaterialOut.cjs'); } catch { /* optional */ }
@@ -191,12 +195,44 @@ async function merge({ into, from, name, by }) {
       const units = new Set([keep, ...others].map((m) => (m.unit || 'kg').toLowerCase()));
       if (units.size > 1) throw new ErrorHandler(`They are kept in different units (${[...units].join(', ')}) — merging would add kilograms to cones. Fix the unit first.`, 400);
 
+      // A lot number is one lot within a material (models/YarnLot.js). Two
+      // of these holding the same number cannot both move to the one kept:
+      // said here, by number, rather than as a duplicate-key error halfway.
+      const models = referringModels();
+      const YarnLot = mongoose.models.YarnLot;
+      if (YarnLot) {
+        const lots = await YarnLot.find({ rawMaterial: { $in: [keepId, ...fromIds] } }).select('rawMaterial lotNo').session(session).lean();
+        const holders = new Map();
+        for (const l of lots) holders.set(l.lotNo, (holders.get(l.lotNo) || new Set()).add(String(l.rawMaterial)));
+        const clash = [...holders].filter(([, who]) => who.size > 1).map(([lotNo]) => lotNo).sort();
+        if (clash.length) {
+          throw new ErrorHandler(`Lot ${clash.slice(0, 5).join(', ')}${clash.length > 5 ? ` and ${clash.length - 5} more` : ''} is on more than one of these materials — two lots cannot share a number within one material. Rename one of them first.`, 409);
+        }
+      }
+
       const moved = {};
-      for (const { model, paths } of referringModels()) {
+      for (const { model, paths } of models) {
         for (const p of paths) {
           const { filter, update, options } = moveOp(p, fromIds, keepId);
           const r = await model.updateMany(filter, update, { ...options, session, strict: false, timestamps: false });
           if (r.modifiedCount) moved[`${model.modelName}.${p.path}`] = r.modifiedCount;
+        }
+      }
+
+      // One rate per supplier and material is live at a time
+      // (models/SupplierRate.js). A supplier who quoted for two of these now
+      // has two for the one kept: the later quotation stays live.
+      const SupplierRate = mongoose.models.SupplierRate;
+      if (SupplierRate) {
+        const when = (r) => new Date(r.quotedOn || r.createdAt || 0).getTime();
+        const live = await SupplierRate.find({ rawMaterial: keepId, live: true }).select('supplier quotedOn createdAt').session(session).lean();
+        const bySupplier = new Map();
+        for (const r of live) bySupplier.set(String(r.supplier), [...(bySupplier.get(String(r.supplier)) || []), r]);
+        for (const rates of bySupplier.values()) {
+          if (rates.length < 2) continue;
+          rates.sort((x, y) => when(y) - when(x) || new Date(y.createdAt || 0) - new Date(x.createdAt || 0));
+          const r = await SupplierRate.updateMany({ _id: { $in: rates.slice(1).map((x) => x._id) } }, { $set: { live: false, replacedBy: rates[0]._id } }, { session, timestamps: false });
+          if (r.modifiedCount) moved['SupplierRate.replaced'] = (moved['SupplierRate.replaced'] || 0) + r.modifiedCount;
         }
       }
 
