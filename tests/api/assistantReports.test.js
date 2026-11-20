@@ -60,6 +60,19 @@ describe('the report tool', () => {
     expect(svc.toolFor(acct).description).toMatch(/sales.*taxable/);
   });
 
+  // The model was shown field keys alone. `pending` on orders is the metres no
+  // job has been raised for; asked "what is pending for Sunrise?", it summed that
+  // — and a customer whose orders were all planned was told nothing was pending.
+  it('says what a field is where its name does not', () => {
+    const d = svc.toolFor(prod).description;
+    expect(d).toMatch(/toDeliver# \(Still to deliver\)/);
+    expect(d).toMatch(/pending# \(Not yet planned\)/);
+    expect(d).toMatch(/orders \(dated\) — .*still to deliver/i);
+    // A name that already says it is left as it is.
+    expect(d).toMatch(/customer, /);
+    expect(d).not.toMatch(/customer \(Customer\)/);
+  });
+
   it('runs the query with the asker\'s role', async () => {
     const r = await svc.run({ sql: 'SELECT category, SUM(stock) FROM stock GROUP BY category' }, prod);
     expect(r.error).toBeUndefined();

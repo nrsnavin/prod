@@ -213,18 +213,28 @@ const DATASETS = {
     },
   },
 
+  // `toDeliver` is what the customer is still owed: ordered less packed,
+  // line by line, on an order still open — the order book's and the
+  // delivery-risk list's figure (services/deliveryRisk.js). `pending` is
+  // the order's pendingElastic: what no job has been raised for yet. It
+  // was headed "Pending" and read as the backlog, so an order planned
+  // onto jobs in full, with nothing made, showed nothing pending. It
+  // keeps its key (saved queries name it) and is headed for what it is.
   orders: {
     label: 'Orders (ordered lines)', access: OPS, dated: true,
-    description: 'What each order asked for, and what is still pending on it. Deleted orders are left out.',
-    fields: { date: F.date('Date'), month: F.text('Month'), orderNo: F.text('Order'), po: F.text('Customer PO'), customer: F.text('Customer'), customerGroup: F.text('Customer group'), elastic: F.text('Elastic'), status: F.text('Status'), supplyDate: F.date('Supply by'), ordered: F.qty('Ordered'), pending: F.qty('Pending'), rate: F.num('Rate', 'avg'), value: F.money('Value') },
+    description: 'What each order asked for, what is still to deliver on it (ordered less packed) and what has not been planned onto a job yet. Deleted orders are left out; a completed or cancelled order has nothing still to deliver.',
+    fields: { date: F.date('Date'), month: F.text('Month'), orderNo: F.text('Order'), po: F.text('Customer PO'), customer: F.text('Customer'), customerGroup: F.text('Customer group'), elastic: F.text('Elastic'), status: F.text('Status'), supplyDate: F.date('Supply by'), ordered: F.qty('Ordered'), toDeliver: F.qty('Still to deliver'), pending: F.qty('Not yet planned'), rate: F.num('Rate', 'avg'), value: F.money('Value') },
     async rows({ from, to }) {
-      const orders = await model('Order').find({ status: { $ne: 'Deleted' }, date: { $gte: from, $lt: to } }).select('orderNo po date supplyDate customer status elasticOrdered pendingElastic').lean();
+      const { OPEN_STATUSES } = require('../deliveryRisk');
+      const orders = await model('Order').find({ status: { $ne: 'Deleted' }, date: { $gte: from, $lt: to } }).select('orderNo po date supplyDate customer status elasticOrdered pendingElastic packedElastic').lean();
       const [customers, els] = await Promise.all([lookup('Customer', orders.map((o) => o.customer), 'name group'), lookup('Elastic', orders.flatMap((o) => (o.elasticOrdered || []).map((l) => l.elastic)), 'name')]);
       const out = [];
       for (const o of orders) {
-        const pending = new Map((o.pendingElastic || []).map((p) => [String(p.elastic), p.quantity || 0]));
+        const open = OPEN_STATUSES.includes(o.status);
+        const sumBy = (list) => { const m = new Map(); for (const p of list || []) m.set(String(p.elastic), (m.get(String(p.elastic)) || 0) + (Number(p.quantity) || 0)); return m; };
+        const pending = sumBy(o.pendingElastic); const packed = sumBy(o.packedElastic);
         const c = customers.get(String(o.customer));
-        for (const l of o.elasticOrdered || []) out.push({ date: day(o.date), month: month(o.date), orderNo: o.orderNo != null ? String(o.orderNo) : '', po: o.po || '', customer: c?.name || '', customerGroup: c?.group || 'No group', elastic: els.get(String(l.elastic))?.name || '', status: o.status, supplyDate: day(o.supplyDate), ordered: r3(l.quantity), pending: r3(['Completed', 'Cancelled'].includes(o.status) ? 0 : pending.get(String(l.elastic)) ?? 0), rate: r2(l.rate), value: r2((l.quantity || 0) * (l.rate || 0)) });
+        for (const l of o.elasticOrdered || []) out.push({ date: day(o.date), month: month(o.date), orderNo: o.orderNo != null ? String(o.orderNo) : '', po: o.po || '', customer: c?.name || '', customerGroup: c?.group || 'No group', elastic: els.get(String(l.elastic))?.name || '', status: o.status, supplyDate: day(o.supplyDate), ordered: r3(l.quantity), toDeliver: r3(open ? Math.max(0, (Number(l.quantity) || 0) - (packed.get(String(l.elastic)) || 0)) : 0), pending: r3(open ? pending.get(String(l.elastic)) ?? 0 : 0), rate: r2(l.rate), value: r2((l.quantity || 0) * (l.rate || 0)) });
       }
       return out;
     },

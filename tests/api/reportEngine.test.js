@@ -123,6 +123,40 @@ describe('purchases and production', () => {
     expect(rowsOf(d)).toEqual([{ downtimeKind: 'yarn break', sum_downtimeMinutes: 25, count_downtimeKind: 1 }]);
   }, 30_000);
 
+  // The order book was put right (it said "0 m pending" for a book planned onto jobs
+  // in full with nothing made); this dataset, behind the Reports page, the SQL box and
+  // Ask Jarvis, still called the un-planned metres "pending" — and "Pending orders by
+  // customer: what is still to supply" left out every order that had been planned.
+  it('pending orders are what is still to deliver, not what is still to plan', async () => {
+    const [cust, a, b] = [new mongoose.Types.ObjectId(), new mongoose.Types.ObjectId(), new mongoose.Types.ObjectId()];
+    await db().collection('customers').insertOne({ _id: cust, name: 'Planned Mills', group: '' });
+    await db().collection('elastics').insertMany([{ _id: a, name: '30mm Navy' }, { _id: b, name: '35mm Grey' }]);
+    const order = (orderNo, status, extra) => ({ orderNo, status, customer: cust, date: at('2026-10-12T10:00:00'), supplyDate: at('2026-11-30T00:00:00'), ...extra });
+    await db().collection('orders').insertMany([
+      // Planned onto jobs in full (nothing left to plan), 300 m of one line packed.
+      order(9101, 'InProgress', { elasticOrdered: [{ elastic: a, quantity: 1000, rate: 4 }, { elastic: b, quantity: 500, rate: 5 }], pendingElastic: [{ elastic: a, quantity: 0 }, { elastic: b, quantity: 0 }], packedElastic: [{ elastic: a, quantity: 300 }] }),
+      // Not planned at all.
+      order(9102, 'Approved', { elasticOrdered: [{ elastic: a, quantity: 200, rate: 4 }], pendingElastic: [{ elastic: a, quantity: 200 }], packedElastic: [] }),
+      // Closed: nothing is owed on it, whatever its old figures say.
+      order(9103, 'Cancelled', { elasticOrdered: [{ elastic: b, quantity: 800, rate: 5 }], pendingElastic: [{ elastic: b, quantity: 800 }], packedElastic: [] }),
+    ]);
+    const mine = (res, key = 'customer') => rowsOf(res).find((r) => r[key] === 'Planned Mills');
+    const byCustomer = await run({ report: 'pending-by-customer', ...PERIOD });
+    expect(byCustomer.status).toBe(200);
+    expect(mine(byCustomer)).toMatchObject({ sum_ordered: 1700, sum_toDeliver: 1400, sum_pending: 200 });
+    const labels = Object.fromEntries(byCustomer.body.result.columns.map((c) => [c.key, c.label]));
+    expect(labels.sum_toDeliver).toMatch(/still to deliver/i);
+    expect(labels.sum_pending).toMatch(/not yet planned/i);
+
+    const byElastic = rowsOf(await run({ report: 'pending-by-elastic', ...PERIOD }));
+    expect(byElastic.find((r) => r.elastic === '30mm Navy')).toMatchObject({ sum_toDeliver: 900, sum_pending: 200 });
+    expect(byElastic.find((r) => r.elastic === '35mm Grey')).toMatchObject({ sum_toDeliver: 500, sum_pending: 0 });
+
+    // And in the SQL box, by either name.
+    const sql = await run({ sql: "SELECT order_no, SUM(still_to_deliver) AS owed, SUM(not_yet_planned) AS unplanned FROM orders WHERE customer = 'Planned Mills' GROUP BY order_no ORDER BY order_no", ...PERIOD });
+    expect(rowsOf(sql)).toEqual([{ orderNo: '9101', owed: 1200, unplanned: 0 }, { orderNo: '9102', owed: 200, unplanned: 200 }, { orderNo: '9103', owed: 0, unplanned: 0 }]);
+  });
+
   it('every ready-made report runs, on this data and on an empty period', async () => {
     const { REPORTS } = require('../../services/reportEngine/catalog');
     for (const r of REPORTS) {

@@ -20,6 +20,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const ErrorHandler = require('../../utils/ErrorHandler');
+const { isDayKey } = require('../../utils/factoryDay');
 const { DATASETS } = require('./datasets');
 
 const AGGS = ['sum', 'count', 'countd', 'avg', 'min', 'max'];
@@ -62,6 +63,12 @@ function asComparable(f, v) {
 function test(row, c, f) {
   const x = row[c.field];
   const lower = (s) => String(s ?? '').toLowerCase();
+  // A blank is not less than anything. Compared as it stood, '' sorted
+  // before every date and null counted as 0: an order with no supply date
+  // was "to supply before 1 December", a row with no figure was "under 5".
+  // Ask for blanks by name (IS NULL); every other comparison leaves them out.
+  const blank = x == null || x === '';
+  if (blank && ['<', '<=', '>', '>=', 'between'].includes(c.op)) return false;
   switch (c.op) {
     case '=': return f.type === 'text' ? lower(x) === lower(c.value) : x === c.value;
     case '!=': return f.type === 'text' ? lower(x) !== lower(c.value) : x !== c.value;
@@ -86,7 +93,8 @@ function windowOf(where, from, to) {
   let a = from; let b = to;
   for (const c of where) {
     if (c.field !== 'date') continue;
-    const at = (s) => new Date(`${s}T00:00:00+05:30`);
+    // A day that exists, written YYYY-MM-DD: '2026-02-30' is not 2 March.
+    const at = (s) => (isDayKey(String(s)) ? new Date(`${s}T00:00:00+05:30`) : new Date(NaN));
     if (c.op === '>=' || c.op === '=') a = at(c.value);
     if (c.op === '>') a = new Date(at(c.value).getTime() + DAY);
     if (c.op === '<=' || c.op === '=') b = new Date(at(c.value).getTime() + DAY);
@@ -127,7 +135,13 @@ function normalise(query, role) {
       if (!s.agg && !groupBy.includes(s.field)) throw bad(`${ds.fields[s.field].label} must be grouped by, or totalled (SUM, COUNT…)`);
     }
   }
-  const limit = query.limit == null ? null : Math.max(1, Math.min(Number(query.limit) || 0, 100_000));
+  // A number, 1 or more. LIMIT 'abc' used to be read as one row.
+  let limit = null;
+  if (query.limit != null && query.limit !== '') {
+    const n = Number(query.limit);
+    if (!Number.isFinite(n) || n < 1) throw bad('LIMIT needs a number, 1 or more');
+    limit = Math.min(Math.floor(n), 100_000);
+  }
   return { key, ds, select, where, groupBy, orderBy: Array.isArray(query.orderBy) ? query.orderBy : [], limit, hasAgg };
 }
 

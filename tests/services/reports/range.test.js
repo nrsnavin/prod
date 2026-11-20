@@ -81,3 +81,46 @@ describe("previousWindow", () => {
     expect(prev.from).toEqual(new Date(cur.from.getTime() - 7 * DAY_MS));
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+//  Found reading services/reportEngine line by line.
+//
+//  The report engine (the Reports page, the SQL box, Ask Jarvis) keeps a
+//  second date-range resolver, and its "this week" asked the weekday of
+//  00:00 IST as a UTC moment — which is the evening before. So the week
+//  began on Tuesday: on a Monday it showed last Tuesday to today, and
+//  every other day it left Monday out. Both resolvers also filed a date
+//  that does not exist under another day (30 February as 2 March).
+// ══════════════════════════════════════════════════════════════════
+describe("the report engine's own range", () => {
+  const { resolve } = require("../../../services/reportEngine/range.js");
+  const on = (when) => resolve({ preset: "week" }, new Date(when));
+
+  test("this week begins on Monday, on every day of it", () => {
+    // 13 July 2026 is a Monday.
+    expect(on("2026-07-13T10:00:00+05:30")).toMatchObject({ fromDay: "2026-07-13", toDay: "2026-07-13" });
+    expect(on("2026-07-14T10:00:00+05:30")).toMatchObject({ fromDay: "2026-07-13", toDay: "2026-07-14" });
+    expect(on("2026-07-15T14:30:00+05:30")).toMatchObject({ fromDay: "2026-07-13", toDay: "2026-07-15" });
+    expect(on("2026-07-19T23:30:00+05:30")).toMatchObject({ fromDay: "2026-07-13", toDay: "2026-07-19" });
+    // Just after midnight in India the server's own day is still Sunday.
+    expect(on("2026-07-20T00:30:00+05:30")).toMatchObject({ fromDay: "2026-07-20", toDay: "2026-07-20" });
+    // And it agrees with the other resolver, to the moment.
+    expect(on("2026-07-15T14:30:00+05:30").from).toEqual(resolveRange({ preset: "week" }, NOW).from);
+  });
+
+  test("a date that does not exist is refused, not moved", () => {
+    expect(() => resolve({ from: "2026-02-30", to: "2026-03-05" })).toThrow(/YYYY-MM-DD/);
+    expect(() => resolve({ from: "2026-04-01", to: "2026-04-31" })).toThrow(/YYYY-MM-DD/);
+    expect(() => resolve({ from: "2026-13-01" })).toThrow(/YYYY-MM-DD/);
+    expect(resolve({ from: "2028-02-29", to: "2028-02-29" })).toMatchObject({ fromDay: "2028-02-29" });   // a leap day is a day
+  });
+});
+
+describe("resolveRange with a date that does not exist", () => {
+  test("is refused, not filed under another day", () => {
+    expect(() => resolveRange({ from: "2026-02-30", to: "2026-03-05" }, NOW)).toThrow(/Invalid from\/to date/);
+    expect(() => resolveRange({ from: "2026-04-01", to: "2026-04-31" }, NOW)).toThrow(/Invalid from\/to date/);
+    expect(() => resolveRange({ from: "2026-13-01" }, NOW)).toThrow(/Invalid from\/to date/);
+    expect(resolveRange({ from: "2028-02-29", to: "2028-02-29" }, NOW).from).toEqual(at("2028-02-29"));
+  });
+});

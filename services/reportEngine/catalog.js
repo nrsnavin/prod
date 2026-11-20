@@ -56,8 +56,10 @@ const REPORTS = [
   { id: 'dispatch-by-customer', group: 'Dispatch and orders', title: 'Dispatch by customer', description: 'Challans out, per customer.', query: by('dispatch', ['customer'], [n('dcNumber'), s('quantity'), s('amount')]) },
   { id: 'dispatch-by-elastic', group: 'Dispatch and orders', title: 'Dispatch by elastic', description: 'Metres sent, per elastic.', query: by('dispatch', ['elastic'], [s('quantity'), s('amount')]) },
   { id: 'dispatch-register', group: 'Dispatch and orders', title: 'Dispatch register', description: 'Challan by challan.', query: by('dispatch', ['dcNumber', 'date', 'customer', 'status'], [s('quantity'), s('amount')], { orderBy: [{ key: 'date', dir: 'desc' }] }) },
-  { id: 'pending-by-customer', group: 'Dispatch and orders', title: 'Pending orders by customer', description: 'What is still to supply, per customer.', query: by('orders', ['customer'], [s('ordered'), s('pending')], { where: [{ field: 'pending', op: '>', value: 0 }] }) },
-  { id: 'pending-by-elastic', group: 'Dispatch and orders', title: 'Pending orders by elastic', description: 'What is still to weave, per elastic.', query: by('orders', ['elastic'], [s('pending')], { where: [{ field: 'pending', op: '>', value: 0 }] }) },
+  // What is owed, not what is un-planned: filtered on `pending` (metres no job
+  // has been raised for), these left out every order already planned onto jobs.
+  { id: 'pending-by-customer', group: 'Dispatch and orders', title: 'Pending orders by customer', description: 'What is still to deliver, per customer — and how much of it is not planned onto a job yet.', query: by('orders', ['customer'], [s('ordered'), s('toDeliver'), s('pending')], { where: [{ field: 'toDeliver', op: '>', value: 0 }], orderBy: [{ key: 'sum_toDeliver', dir: 'desc' }] }) },
+  { id: 'pending-by-elastic', group: 'Dispatch and orders', title: 'Pending orders by elastic', description: 'What is still to deliver, per elastic — and how much of it is not planned onto a job yet.', query: by('orders', ['elastic'], [s('toDeliver'), s('pending')], { where: [{ field: 'toDeliver', op: '>', value: 0 }], orderBy: [{ key: 'sum_toDeliver', dir: 'desc' }] }) },
   { id: 'orders-by-customer-group', group: 'Dispatch and orders', title: 'Orders by customer group', description: 'Order intake by your customer groups.', query: by('orders', ['customerGroup'], [n('orderNo'), s('ordered'), s('value')]) },
 
   // ── Stock ────────────────────────────────────────────────────────

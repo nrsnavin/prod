@@ -14,6 +14,8 @@
 //  fractional-second gap.
 // ═════════════════════════════════════════════════════════════════
 
+const { isDayKey } = require("../../utils/factoryDay");
+
 const DAY_MS = 86_400_000;
 const IST_MS = 330 * 60_000;
 
@@ -54,7 +56,11 @@ function weekStart(now) {
 /** "2026-07-01" as that day in India; anything else as the India day it falls on. */
 function dayOf(v) {
   const s = String(v);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) { const [y, m, d] = s.split("-").map(Number); return istMidnight(y, m - 1, d); }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    // 30 February is not 2 March: a day that does not exist is not a date.
+    if (!isDayKey(s)) return new Date(NaN);
+    const [y, m, d] = s.split("-").map(Number); return istMidnight(y, m - 1, d);
+  }
   return startOfDay(new Date(v));
 }
 

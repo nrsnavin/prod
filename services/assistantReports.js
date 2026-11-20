@@ -33,7 +33,13 @@ function toolFor(user) {
   if (!mayReport(user)) return null;
   const sets = engine.datasets.describe(roleOf(user));
   if (!sets.length) return null;
-  const catalogue = sets.map((d) => `${d.id}${d.dated ? ' (dated)' : ' (as of today)'}: ${d.fields.map((f) => `${f.key}${f.type === 'money' ? '₹' : f.type === 'number' ? '#' : ''}`).join(', ')}`).join('\n');
+  // Each dataset with what it holds, and each field with its heading where
+  // the key alone does not say it: `pending` on orders is "Not yet planned",
+  // not the backlog — which is `toDeliver`. Shown keys only, the model read
+  // "pending" the way anyone would.
+  const plain = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const field = (f) => `${f.key}${f.type === 'money' ? '₹' : f.type === 'number' ? '#' : ''}${plain(f.label) === plain(f.key) ? '' : ` (${f.label})`}`;
+  const catalogue = sets.map((d) => `${d.id}${d.dated ? ' (dated)' : ' (as of today)'} — ${d.description} Fields: ${d.fields.map(field).join(', ')}`).join('\n');
   return {
     name: 'run_report',
     description:
