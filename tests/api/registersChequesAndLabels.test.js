@@ -213,6 +213,28 @@ describe('a financial year is April to March, and says so', () => {
     expect((await post('/accounts/fixed-assets', { ...body, name: 'New compressor', openingWdv: { fy: '', companiesAct: '' } })).status).toBe(201);
   });
 
+  it('an opening written-down value is for an asset from an earlier year, and for a year that has begun', async () => {
+    const count = () => mongoose.connection.collection('fixedassets').countDocuments({});
+    // Put to use this year, with an opening value "for" the same year: the
+    // register takes an opening value only for a LATER year, so this one
+    // was kept on the asset and never used — depreciated from full cost.
+    const sameYear = await post('/accounts/fixed-assets', { name: 'Loom 9', block: 'plant', purchaseDate: '2026-06-01', putToUse: '2026-06-10', cost: 500000, openingWdv: { fy: '2026-27', companiesAct: 300000 } });
+    expect(sameYear.status).toBe(400);
+    expect(sameYear.body.message).toMatch(/put to use in 2026-27/);
+    const yearBefore = await post('/accounts/fixed-assets', { name: 'Loom 9', block: 'plant', purchaseDate: '2026-06-01', putToUse: '2026-06-10', cost: 500000, openingWdv: { fy: '2025-26', companiesAct: 300000 } });
+    expect(yearBefore.status).toBe(400);
+    // A year still to come: the asset would be in no register until it came.
+    const future = await post('/accounts/fixed-assets', { name: 'Old loom', block: 'plant', purchaseDate: '2021-06-01', putToUse: '2021-06-10', cost: 500000, openingWdv: { fy: '2099-00', companiesAct: 300000 } });
+    expect(future.status).toBe(400);
+    expect(future.body.message).toMatch(/2099-00 has not begun/);
+    expect(await count()).toBe(0);
+    // The year after it was put to use is the first an opening value can be for.
+    const ok = await post('/accounts/fixed-assets', { name: 'Old loom', block: 'plant', purchaseDate: '2021-06-01', putToUse: '2021-06-10', cost: 500000, openingWdv: { fy: '2022-23', companiesAct: 400000 } });
+    expect(ok.status).toBe(201);
+    const reg = (await get('/accounts/fixed-assets?fy=2022-23')).body;
+    expect(reg.rows.find((r) => r.name === 'Old loom').year.companiesAct.opening).toBe(400000);
+  });
+
   it('a budget cannot be saved under one', async () => {
     const head = await M.ExpenseCategory.create({ name: 'Power', ledger: 'Power & Fuel' });
     const rows = [{ category: String(head._id), annual: 120000 }];

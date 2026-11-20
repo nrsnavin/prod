@@ -223,6 +223,14 @@ async function create(b, req) {
   const openingValue = opening.companiesAct !== undefined && opening.companiesAct !== null && opening.companiesAct !== '';
   if ((openingYear || openingValue) && !cal.isFy(openingYear)) throw new ErrorHandler('openingWdv.fy must be a financial year like 2026-27', 400);
   if (openingYear) {
+    // …and a year the schedule will use. It starts an asset from its opening
+    // value only in a year AFTER the one it was put to use (schedule(), above):
+    // an opening value for the same year, or an earlier one, was kept on the
+    // asset and never read — depreciated from full cost all the same. And one
+    // for a year still to come kept the asset out of every register until then.
+    const useFy = fyOf(putToUse);
+    if (fyStartYear(openingYear) <= fyStartYear(useFy)) throw new ErrorHandler(`This asset was put to use in ${useFy}: an opening written-down value is for an asset put to use in an earlier year. Leave it blank, or correct the date it was put to use`, 400);
+    if (fyStartYear(openingYear) > fyStartYear(fyOf(cal.today()))) throw new ErrorHandler(`openingWdv.fy ${openingYear} has not begun`, 400);
     const ca = Number(b.openingWdv.companiesAct); const it = Number(b.openingWdv.incomeTax);
     if (!(ca >= 0) || ca > cost) throw new ErrorHandler('openingWdv.companiesAct must be between 0 and the cost', 400);
     data.openingWdv = { fy: openingYear, companiesAct: r2(ca), incomeTax: Number.isFinite(it) && it >= 0 ? r2(it) : r2(ca) };

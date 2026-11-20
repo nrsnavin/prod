@@ -190,9 +190,13 @@ async function computeEmployeeBonus(emp, cfg, win) {
   // Approved leave earns nothing (services/payrollService.js: approved
   // leave of every type is unpaid), so it adds nothing to an estimate of
   // what was earned.
+  // …and a shift is one shift. The roster has a row for every LOOM, and a
+  // weaver minds several: counted row by row, four looms in a shift were
+  // four shifts' pay, and the bonus on it four times too large.
+  const oneEach = new Map(shifts.map((s) => [`${dayKey(s.date)}|${s.shift}`, s]));
   const attendedShifts = marks.length > 0
     ? marks.filter((m) => ['present', 'late', 'half_day'].includes(m.status))
-    : shifts;                       // legacy windows with no register at all
+    : [...oneEach.values()];        // legacy windows with no register at all
   const hoursWorked = attendedShifts.reduce(
     (sum, s) => sum + shiftHours(s.shift), 0
   );

@@ -30,6 +30,14 @@
 //                    Shifts still `open` are not charged — nobody has
 //                    worked them yet — and are counted in `warnings`.
 //
+//                    ONE WAGE, HOWEVER MANY LOOMS. A weaver minds several
+//                    looms and the plan has a row for each, but is paid
+//                    for the shift once. Each row carries its share: the
+//                    shift's wage ÷ the looms that weaver worked in it,
+//                    across the whole floor. (Every row used to carry the
+//                    whole wage — a weaver on four looms cost the orders
+//                    four shifts' pay for the one they drew.)
+//
 //    Job-work        For outsourced jobs, the vendor's rate × the
 //                    meters that actually came back (not what was
 //                    sent — the shortfall is not billable work).
@@ -60,6 +68,9 @@ const DeliveryChallan  = require('../models/DeliveryChallan');
 const { LEFT: CHALLAN_LEFT } = require('../domain/challanStatus');
 const CostSettings     = require('../models/CostSettings');
 const { shiftHours }   = require('../utils/shiftHours');
+const factoryDay       = require('../utils/factoryDay');
+
+const DAY_MS = 86_400_000;
 const costCentres      = require('./costCentres');
 
 // `Math.round((Number(n) || 0) * 100) / 100` laundered a broken number
@@ -188,6 +199,30 @@ async function orderPnl(orderId) {
         .lean()
     : [];
 
+  // How many looms each of these weavers worked in each of these shifts —
+  // on any job, this order's or another's, or none. By the day in India,
+  // so a row dated at India's midnight and one at UTC's are the same day.
+  const worked = shifts.filter((s) => !UNWORKED_SHIFT_STATUSES.has(s.status) && s.employee?._id);
+  const shiftKey = (employee, date, shift) => `${employee}|${factoryDay.ymd(date)}|${shift}`;
+  const loomsMinded = new Map();
+  if (worked.length > 0) {
+    const times = worked.map((s) => new Date(s.date).getTime());
+    const rows = await ShiftDetail.aggregate([
+      { $match: {
+        employee: { $in: [...new Set(worked.map((s) => String(s.employee._id)))].map((id) => new mongoose.Types.ObjectId(id)) },
+        date:     { $gte: new Date(Math.min(...times) - DAY_MS), $lte: new Date(Math.max(...times) + DAY_MS) },
+        status:   { $nin: [...UNWORKED_SHIFT_STATUSES] },
+      } },
+      { $group: {
+        _id: { employee: '$employee', day: { $dateToString: { format: '%Y-%m-%d', date: '$date', timezone: '+05:30' } }, shift: '$shift' },
+        looms: { $sum: 1 },
+      } },
+    ]);
+    for (const r of rows) loomsMinded.set(`${r._id.employee}|${r._id.day}|${r._id.shift}`, r.looms);
+  }
+  /** This row's part of its weaver's wage for the shift. */
+  const shareOf = (s) => (s.employee?._id ? 1 / (loomsMinded.get(shiftKey(s.employee._id, s.date, s.shift)) || 1) : 1);
+
   const labourByJob = new Map();   // jobId → { cost, shifts, hours, unworked, unrated }
   for (const s of shifts) {
     const key = String(s.job);
@@ -200,7 +235,7 @@ async function orderPnl(orderId) {
       continue;
     }
 
-    const hours = shiftHours(s.shift);
+    const hours = shiftHours(s.shift) * shareOf(s);
     const rate  = num(s.employee?.hourlyRate);
     if (rate <= 0) acc.unrated += 1;
 

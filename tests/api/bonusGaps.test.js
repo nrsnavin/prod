@@ -95,6 +95,24 @@ describe('attendance is taken from the register, not the roster', () => {
   });
 });
 
+describe('an estimate, when there is no payroll and no register to go by', () => {
+  // The roster has a row for every loom, and a weaver minds several. The
+  // estimate counted the rows: four looms in one shift were four shifts'
+  // pay, and the bonus worked out on it four times too large.
+  test('counts a shift once, however many looms the weaver minded', async () => {
+    const emp = await makeEmp('Four looms');          // ₹100 an hour
+    await ShiftDetail.collection.insertMany([3, 3, 3, 3, 4].map((d) => ({ employee: emp._id, date: day(d), shift: 'DAY' })));
+    await ShiftDetail.collection.insertOne({ employee: emp._id, date: day(4), shift: 'NIGHT' });   // a second shift that day is a second shift
+    await makeCfg();
+
+    const row = (await request(app).get(`/api/v2/bonus/preview?year=${curYear}`).set('Cookie', cookie())).body.rows[0];
+    expect(row.basedOn).toBe('estimated');
+    expect(row.attendanceDays).toBe(2);
+    expect(row.hoursWorked).toBe(36);                 // three shifts of twelve hours, not six rows
+    expect(row.annualEarnings).toBe(3600);
+  });
+});
+
 describe('eligibility + statutory floor', () => {
   test('below the minimum days worked, no bonus is due', async () => {
     const emp = await makeEmp();

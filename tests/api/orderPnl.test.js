@@ -230,9 +230,69 @@ describe('labour, from the shifts on the job', () => {
     const theirs = await makeOrder({ lines: [{ elastic: e._id, quantity: 100, rate: 10 }] });
     const emp = await makeEmployee('Shared Op', 100);
     await makeShift(await makeJob(mine), emp);
-    await makeShift(await makeJob(theirs), emp);
+    // Their loom is another shift of the same day: its wage is theirs alone.
+    await makeShift(await makeJob(theirs), emp, { shift: 'NIGHT' });
 
     expect((await orderPnl(mine._id)).costs.labour).toBe(1200);
+    expect((await orderPnl(theirs._id)).costs.labour).toBe(1200);
+  });
+
+  // A weaver minds several looms, and the plan has a row for each loom.
+  // The wage is one wage. It was charged whole to every row: a weaver on
+  // three looms cost the orders three shifts' pay for the one they drew.
+  test('a weaver minding three looms in a shift is one wage, shared by the looms', async () => {
+    const e = await makeElastic('E-Looms');
+    const mine = await makeOrder({ lines: [{ elastic: e._id, quantity: 100, rate: 10 }] });
+    const theirs = await makeOrder({ lines: [{ elastic: e._id, quantity: 100, rate: 10 }] });
+    const emp = await makeEmployee('Loom minder', 50);          // 12h × 50 = ₹600 a shift
+    const a = await makeJob(mine);
+    const b = await makeJob(mine);
+    const c = await makeJob(theirs);
+    await makeShift(a, emp); await makeShift(b, emp); await makeShift(c, emp);   // one day, one shift, three looms
+
+    const pnl = await orderPnl(mine._id);
+    expect(pnl.costs.labour).toBe(400);
+    expect(pnl.jobs.map((j) => j.labour)).toEqual([
+      expect.objectContaining({ amount: 200, shifts: 1, hours: 4 }),
+      expect.objectContaining({ amount: 200, shifts: 1, hours: 4 }),
+    ]);
+    const other = await orderPnl(theirs._id);
+    expect(other.costs.labour).toBe(200);
+    // Between them, the one shift's pay — not three.
+    expect(pnl.costs.labour + other.costs.labour).toBe(600);
+  });
+
+  test('a loom that was only rostered takes no share: the looms worked carry the wage', async () => {
+    const e = await makeElastic('E-Rostered');
+    const order = await makeOrder({ lines: [{ elastic: e._id, quantity: 100, rate: 10 }] });
+    const emp = await makeEmployee('Two looms', 50);
+    const a = await makeJob(order);
+    const b = await makeJob(order);
+    await makeShift(a, emp);
+    await makeShift(b, emp, { status: 'open' });
+
+    const pnl = await orderPnl(order._id);
+    expect(pnl.costs.labour).toBe(600);
+    expect(pnl.jobs.map((j) => j.labour.amount)).toEqual([600, 0]);
+  });
+
+  test('a loom minded with no job on it takes its share, and no order pays for it', async () => {
+    const e = await makeElastic('E-IdleLoom');
+    const order = await makeOrder({ lines: [{ elastic: e._id, quantity: 100, rate: 10 }] });
+    const emp = await makeEmployee('Idle loom', 50);
+    await makeShift(await makeJob(order), emp);
+    await M.ShiftDetail.create({ date: new Date('2026-03-03'), shift: 'DAY', job: null, employee: emp._id, shiftPlan: oid(), machine: oid(), status: 'closed', productionMeters: 0 });
+
+    expect((await orderPnl(order._id)).costs.labour).toBe(300);
+  });
+
+  test('two weavers on two looms are two wages', async () => {
+    const e = await makeElastic('E-Two');
+    const order = await makeOrder({ lines: [{ elastic: e._id, quantity: 100, rate: 10 }] });
+    await makeShift(await makeJob(order), await makeEmployee('First', 50));
+    await makeShift(await makeJob(order), await makeEmployee('Second', 40));
+
+    expect((await orderPnl(order._id)).costs.labour).toBe(600 + 480);
   });
 });
 
