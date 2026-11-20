@@ -240,13 +240,19 @@ function _fallbackEntryTimeEta(order, plantMetersPerMachineDay, now, freeMachine
 // caching keeps the read side off the transactional path. TTL 0 under
 // jest so tests stay isolated.
 // ═════════════════════════════════════════════════════════════════
+// A shift's day is its day in India. A shift kept at 00:00 IST (18:30 UTC
+// the evening before) and one kept at UTC midnight are the same loom-day;
+// keyed by the UTC date they were two, and every rate per loom-day came
+// out low for it.
+const SHIFT_DAY_TZ = "Asia/Kolkata";
+
 const _loadPlantMetersPerMachineDay = memoizeAsync(async function (now) {
   const since = new Date(now.getTime() - C.RATE_LOOKBACK_DAYS * 86_400_000);
   const plantShiftAgg = await ShiftDetail.aggregate([
     { $match: { status: "closed", date: { $gte: since } } },
     { $group: {
         _id: { machine: "$machine", date: {
-          $dateToString: { format: "%Y-%m-%d", date: "$date" } } },
+          $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: SHIFT_DAY_TZ } } },
         meters: { $sum: "$productionMeters" },
       } },
     { $group: {
@@ -305,7 +311,7 @@ async function buildEntryTimeAggregates(elasticOrdered, now) {
       { $match: { status: "closed", date: { $gte: since } } },
       { $group: {
           _id: { machine: "$machine", date: {
-            $dateToString: { format: "%Y-%m-%d", date: "$date" } } },
+            $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: SHIFT_DAY_TZ } } },
           meters: { $sum: "$productionMeters" },
         } },
       { $group: {
@@ -317,6 +323,12 @@ async function buildEntryTimeAggregates(elasticOrdered, now) {
 
     // Per-elastic meters/machine active-day — same shape, filtered
     // to shifts whose head map includes the elastic.
+    //
+    // Each elastic ONCE a shift, however many heads ran it.
+    // productionMeters is the whole loom's metres; unwound head by head
+    // it was added once for every head, so a four-head loom on one
+    // elastic was taken to make four times what it made — and the date
+    // promised on a new order was worked out at that pace.
     elasticIds.length > 0
       ? ShiftDetail.aggregate([
           { $match: {
@@ -324,11 +336,11 @@ async function buildEntryTimeAggregates(elasticOrdered, now) {
               date: { $gte: since },
               "elastics.elastic": { $in: elasticIds },
             } },
-          { $unwind: "$elastics" },
-          { $match: { "elastics.elastic": { $in: elasticIds } } },
+          { $addFields: { _onLoom: { $setIntersection: [{ $ifNull: ["$elastics.elastic", []] }, elasticIds] } } },
+          { $unwind: "$_onLoom" },
           { $group: {
-              _id: { elastic: "$elastics.elastic", machine: "$machine", date: {
-                $dateToString: { format: "%Y-%m-%d", date: "$date" } } },
+              _id: { elastic: "$_onLoom", machine: "$machine", date: {
+                $dateToString: { format: "%Y-%m-%d", date: "$date", timezone: SHIFT_DAY_TZ } } },
               meters: { $sum: "$productionMeters" },
             } },
           { $group: {

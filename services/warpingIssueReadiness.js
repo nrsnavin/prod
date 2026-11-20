@@ -45,7 +45,12 @@ async function checkWarpingIssued(warpingId, session) {
     .lean();
   if (session) batchQ.session(session);
 
-  const [plan, batches] = await Promise.all([planQ, batchQ]);
+  // One after the other: a transaction's session runs one operation at a
+  // time, and this is called from inside one (api/warping.js). Two reads
+  // at once on it are not supported by the driver — the same care
+  // services/weavingReadiness.js takes.
+  const plan = await planQ;
+  const batches = await batchQ;
 
   // How many sections the programme committed to a lot. Snapshot or
   // reference — either means a decision was made and yarn identified.
