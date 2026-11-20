@@ -25,6 +25,14 @@ const BankAccount  = require("../models/BankAccount");
 const outstanding  = require("../services/outstanding");
 const partyLedger  = require("../services/partyLedger");
 const { escapeRegex } = require("../utils/escapeRegex");
+const risk         = require("../services/deliveryRisk");
+const factoryDay   = require("../utils/factoryDay");
+const cal          = require("../utils/bizDates");
+const { r2 }       = require("../utils/money");
+
+// A date as the model is to read it: the day, with its year. Rows used to
+// carry String(date).slice(0, 10) — "Sat Oct 03", in the server's zone.
+const day = (d) => factoryDay.ymd(d);
 
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const { isAuthenticated } = require("../middleware/auth");
@@ -35,25 +43,28 @@ const assistantReports = require("../services/assistantReports");
 
 // ── Tool implementations (read-only Mongo queries) ─────────────────
 const TOOLS = {
+  // The list the delivery-risk card shows (services/deliveryRisk.js), not
+  // a second reading of it. This one used to report `pendingElastic` —
+  // what no job has been raised for — as the metres pending, so an order
+  // planned in full with nothing made had none; and it called an order
+  // late by the clock, so one due today was "overdue" from 05:30.
   async get_orders_at_risk({ horizonDays = 7 } = {}) {
-    const cutoff = new Date(Date.now() + Number(horizonDays) * 86_400_000);
-    const orders = await Order.find({ status: { $in: ["Approved", "InProgress"] } })
-      .populate("customer", "name")
-      .select("orderNo customer supplyDate status pendingElastic")
-      .sort({ supplyDate: 1 })
-      .lean();
+    const horizon = risk.readHorizon(horizonDays);
     const now = new Date();
-    return orders
-      .filter((o) => o.supplyDate && new Date(o.supplyDate) <= cutoff)
-      .slice(0, 20)
-      .map((o) => ({
-        orderNo: o.orderNo,
-        customer: o.customer?.name || "—",
-        status: o.status,
-        supplyDate: o.supplyDate ? new Date(o.supplyDate).toISOString().slice(0, 10) : null,
-        overdue: o.supplyDate ? new Date(o.supplyDate) < now : false,
-        pendingMeters: (o.pendingElastic || []).reduce((s, p) => s + (p.quantity || 0), 0),
-      }));
+    const orders = await Order.find({ status: { $in: risk.OPEN_STATUSES }, supplyDate: { $lt: risk.fetchBefore(now, horizon) } })
+      .populate("customer", "name")
+      .select("orderNo customer status supplyDate elasticOrdered packedElastic pendingElastic")
+      .lean();
+    return risk.deliveryRisk(orders, { now, horizonDays: horizon }).slice(0, 20).map((o) => ({
+      orderNo: o.orderNo,
+      customer: o.customerName,
+      status: o.status,
+      supplyDate: day(o.supplyDate),
+      daysToSupply: o.daysToSupply,
+      overdue: o.daysToSupply < 0,
+      pendingMeters: o.pendingUnits,
+      notPlannedMeters: o.notPlanned,
+    }));
   },
 
   async get_wastage_summary({ days = 30 } = {}) {
@@ -74,7 +85,8 @@ const TOOLS = {
   },
 
   async get_materials_to_reorder() {
-    const docs = await RawMaterial.find({ $expr: { $lte: ["$stock", "$minStock"] }, minStock: { $gt: 0 } })
+    // Materials still in use: a retired one is not something to buy.
+    const docs = await RawMaterial.find({ archived: { $ne: true }, $expr: { $lte: ["$stock", "$minStock"] }, minStock: { $gt: 0 } })
       .populate("supplier", "name")
       .select("name stock minStock price supplier")
       .sort({ stock: 1 })
@@ -93,23 +105,31 @@ const TOOLS = {
       .populate("customer", "name")
       .lean();
     if (!o) return { error: `No order #${orderNo}` };
+    // "pending" is what the customer is still owed (ordered less packed);
+    // what no job has been raised for yet is beside it, under its own name.
+    // Nothing is owed on an order that is closed: cancelled or completed, it
+    // keeps its old figures on the record (as the order book has it).
+    const open = risk.OPEN_STATUSES.includes(o.status);
     return {
       orderNo: o.orderNo, status: o.status, customer: o.customer?.name || "—",
-      supplyDate: o.supplyDate ? new Date(o.supplyDate).toISOString().slice(0, 10) : null,
+      supplyDate: day(o.supplyDate),
       ordered: (o.elasticOrdered || []).reduce((s, e) => s + (e.quantity || 0), 0),
-      pending: (o.pendingElastic || []).reduce((s, p) => s + (p.quantity || 0), 0),
+      pending: open ? risk.stillOwed(o) : 0,
+      notPlanned: open ? risk.notPlanned(o) : 0,
     };
   },
 
   async find_material({ query = "" }) {
-    const rx = new RegExp(query.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const rx = new RegExp(escapeRegex(String(query ?? "").trim()), "i");
     const docs = await RawMaterial.find({ name: rx })
       .populate("supplier", "name")
-      .select("name stock minStock price supplier category")
+      .select("name stock minStock price supplier category archived")
+      .sort({ archived: 1, name: 1 })
       .limit(8).lean();
     return docs.map((m) => ({
       name: m.name, category: m.category, stock: m.stock, minStock: m.minStock,
       low: m.stock <= m.minStock, price: m.price, supplier: m.supplier?.name || "—",
+      retired: m.archived === true,
     }));
   },
 
@@ -120,7 +140,7 @@ const TOOLS = {
     const pick = customer ? groups.filter((g) => new RegExp(escapeRegex(String(customer)), "i").test(g.partyName)) : groups;
     return {
       totals: outstanding.totals(customer ? pick.flatMap((g) => g.docs) : rows),
-      byCustomer: pick.slice(0, 15).map((g) => ({ customer: g.partyName, outstanding: g.total, overdue: g.overdue, oldestDays: g.oldestDays, invoices: g.docs.slice(0, 8).map((d) => ({ no: d.docNo, date: String(d.date).slice(0, 10), outstanding: d.outstanding, overdueDays: d.overdueDays })) })),
+      byCustomer: pick.slice(0, 15).map((g) => ({ customer: g.partyName, outstanding: g.total, overdue: g.overdue, oldestDays: g.oldestDays, invoices: g.docs.slice(0, 8).map((d) => ({ no: d.docNo, date: day(d.date), outstanding: d.outstanding, overdueDays: d.overdueDays })) })),
     };
   },
   async get_payables({ supplier } = {}) {
@@ -129,7 +149,7 @@ const TOOLS = {
     const pick = supplier ? groups.filter((g) => new RegExp(escapeRegex(String(supplier)), "i").test(g.partyName)) : groups;
     return {
       totals: outstanding.totals(supplier ? pick.flatMap((g) => g.docs) : rows),
-      bySupplier: pick.slice(0, 15).map((g) => ({ supplier: g.partyName, outstanding: g.total, overdue: g.overdue, oldestDays: g.oldestDays, bills: g.docs.slice(0, 8).map((d) => ({ no: d.docNo, theirNo: d.refNo || "", date: String(d.date).slice(0, 10), outstanding: d.outstanding, overdueDays: d.overdueDays })) })),
+      bySupplier: pick.slice(0, 15).map((g) => ({ supplier: g.partyName, outstanding: g.total, overdue: g.overdue, oldestDays: g.oldestDays, bills: g.docs.slice(0, 8).map((d) => ({ no: d.docNo, theirNo: d.refNo || "", date: day(d.date), outstanding: d.outstanding, overdueDays: d.overdueDays })) })),
     };
   },
   async get_party_statement({ name, partyType = "customer", days = 90 } = {}) {
@@ -138,7 +158,7 @@ const TOOLS = {
     if (!party) return { error: `No ${partyType} matching "${name}"` };
     const from = new Date(Date.now() - Number(days) * 86_400_000);
     const st = await partyLedger.statement(partyType, party._id, { from });
-    return { party: party.name, partyType, opening: st.opening, closing: st.closing, rows: st.rows.slice(-40).map((r) => ({ date: String(r.date).slice(0, 10), doc: r.docNo, narration: r.narration, debit: r.debit, credit: r.credit, balance: r.balance })) };
+    return { party: party.name, partyType, opening: st.opening, closing: st.closing, rows: st.rows.slice(-40).map((r) => ({ date: day(r.date), doc: r.docNo, narration: r.narration, debit: r.debit, credit: r.credit, balance: r.balance })) };
   },
   async get_expense_summary({ days = 30 } = {}) {
     const since = new Date(Date.now() - Number(days) * 86_400_000);
@@ -148,7 +168,7 @@ const TOOLS = {
       { $sort: { amount: -1 } },
     ]);
     const pending = await Expense.countDocuments({ status: "pending" });
-    return { days: Number(days), total: rows.reduce((s, r) => s + r.amount, 0), byHead: rows.map((r) => ({ head: r._id, amount: r.amount, count: r.count })), waitingApproval: pending };
+    return { days: Number(days), total: r2(rows.reduce((s, r) => s + r.amount, 0)), byHead: rows.map((r) => ({ head: r._id, amount: r2(r.amount), count: r.count })), waitingApproval: pending };
   },
   async get_cash_forecast({ weeks = 6 } = {}) {
     const f = await require("../services/accountsInsights").forecast({ weeks: Math.min(13, Math.max(2, Number(weeks) || 6)) });
@@ -159,13 +179,16 @@ const TOOLS = {
     };
   },
   async get_close_checklist({ month } = {}) {
-    const d = new Date(); const prev = new Date(d.getFullYear(), d.getMonth() - 1, 1);
-    const m = /^\d{4}-\d{2}$/.test(String(month || "")) ? month : `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, "0")}`;
-    const c = await require("../services/accountsInsights").closeChecklist(m);
+    // A month that is one; otherwise last month by the books' calendar,
+    // which the checklist works out itself. It was worked out here in the
+    // server's zone: until 05:30 on the 1st, the month before last.
+    const c = await require("../services/accountsInsights").closeChecklist(cal.isMonthKey(month) ? month : undefined);
     return { month: c.month, done: c.done, total: c.total, items: c.items.map((i) => ({ item: i.label, done: i.ok, detail: i.detail, amount: i.amount })) };
   },
   async get_cash_position() {
-    const accounts = await BankAccount.find({ active: true }).lean();
+    // Not closed — as everywhere else an account is asked for. `active: true`
+    // left out the accounts kept from before that flag was on them.
+    const accounts = await BankAccount.find({ active: { $ne: false } }).lean();
     const rows = await require("../services/bankBalances").withBalances(accounts);
     return rows.map((a) => ({ account: a.name, kind: a.kind, balance: a.balance }));
   },
@@ -179,15 +202,15 @@ const TOOLS = {
 };
 
 const TOOL_SCHEMAS = [
-  { name: "get_orders_at_risk", description: "List Approved/InProgress orders whose supply date falls within horizonDays (default 7), with pending meters and whether overdue.",
+  { name: "get_orders_at_risk", description: "Open orders promised within horizonDays (default 7) or already past their date, that the customer is still owed goods on: pendingMeters is what is still to deliver (ordered less packed), notPlannedMeters how much of that no job has been raised for, daysToSupply the days left (negative once late).",
     input_schema: { type: "object", properties: { horizonDays: { type: "number" } } } },
   { name: "get_wastage_summary", description: "Wastage totals and top reasons over the last N days (default 30).",
     input_schema: { type: "object", properties: { days: { type: "number" } } } },
   { name: "get_materials_to_reorder", description: "Raw materials at or below their minimum stock, with a suggested reorder quantity and supplier.",
     input_schema: { type: "object", properties: {} } },
-  { name: "find_order", description: "Look up a single order by its number.",
+  { name: "find_order", description: "Look up a single order by its number: ordered, pending (still to deliver: ordered less packed) and notPlanned (no job raised for it yet).",
     input_schema: { type: "object", properties: { orderNo: { type: "number" } }, required: ["orderNo"] } },
-  { name: "find_material", description: "Search raw materials by name; returns stock, min, low-stock flag and supplier.",
+  { name: "find_material", description: "Search raw materials by name; returns stock, min, low-stock flag, supplier, and whether the material is retired (no longer used).",
     input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
   { name: "get_machine_status", description: "Count of machines by status (free/running/maintenance) and each machine's current status.",
     input_schema: { type: "object", properties: {} } },
@@ -232,15 +255,41 @@ const TOOL_FEATURES = {
   run_report:               ['/reports'],
 };
 
-// Same allow rule as requireFeature, and it has to stay the same or
-// Jarvis becomes the way around it: an account with NO list at all
-// (owner / legacy) defers to the role gate and keeps every tool, while an
-// explicitly EMPTY list is a deliberate "nothing" and gets none.
+// …and the ROLE gate the same data sits behind over HTTP (app.js: each
+// module's `gate(...)`; admin passes every one). The feature rule below
+// leaves an account with no list "to the role gate" — and this route has
+// none, being open to every login. So a production login from before the
+// lists, refused /accounts by its role, was told the bank balances and
+// any customer's statement for the asking. Keep these beside the mounts:
+//   /order → accounts · /wastage, /machine → production ·
+//   /materials, /reports → production, accounts · /accounts → accounts
+const TOOL_ROLES = {
+  get_orders_at_risk:       ['accounts'],
+  find_order:               ['accounts'],
+  get_wastage_summary:      ['production'],
+  get_materials_to_reorder: ['production', 'accounts'],
+  find_material:            ['production', 'accounts'],
+  get_machine_status:       ['production'],
+  get_receivables:          ['accounts'],
+  get_payables:             ['accounts'],
+  get_party_statement:      ['accounts'],
+  get_expense_summary:      ['accounts'],
+  get_cash_position:        ['accounts'],
+  get_cash_forecast:        ['accounts'],
+  get_close_checklist:      ['accounts'],
+  run_report:               ['production', 'accounts'],
+};
+
+// Both gates, as over HTTP. The role first. Then the same allow rule as
+// requireFeature, and it has to stay the same or Jarvis becomes the way
+// around it: an account with NO list at all (owner / legacy) is left to
+// its role, while an explicitly EMPTY list is a deliberate "nothing".
 function allowedToolNames(user) {
-  const all = Object.keys(TOOL_FEATURES);
-  if (!Array.isArray(user?.features)) return all;
+  const role = user?.role;
+  const byRole = Object.keys(TOOL_FEATURES).filter((t) => role === 'admin' || (TOOL_ROLES[t] || []).includes(role));
+  if (!Array.isArray(user?.features)) return byRole;
   const explicit = user.features;
-  return all.filter((t) => TOOL_FEATURES[t].some((k) => explicit.includes(k)));
+  return byRole.filter((t) => TOOL_FEATURES[t].some((k) => explicit.includes(k)));
 }
 
 const SYSTEM =
@@ -360,4 +409,5 @@ module.exports = router;
 // Exposed for the tool-scoping tests — the gate is the security boundary
 // here, so it is tested directly rather than only through a live model call.
 module.exports.TOOL_FEATURES = TOOL_FEATURES;
+module.exports.TOOL_ROLES = TOOL_ROLES;
 module.exports.allowedToolNames = allowedToolNames;

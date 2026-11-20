@@ -104,7 +104,9 @@ describe('asking Jarvis', () => {
   });
 
   it('is not offered when the account\'s features leave Reports out', async () => {
-    const narrow = await User.create({ name: 'Narrow', email: 'jr5@t.co', password: 'pass1234', role: 'production', department: 'production', features: ['/orders'] });
+    // A finance login: orders are behind the accounts role over the API, and
+    // Jarvis keeps to that gate as well as to the list (api/assistant.js TOOL_ROLES).
+    const narrow = await User.create({ name: 'Narrow', email: 'jr5@t.co', password: 'pass1234', role: 'accounts', department: 'finance', features: ['/orders'] });
     mockCreate.mockResolvedValueOnce({ stop_reason: 'end_turn', usage: {}, content: [{ type: 'text', text: 'ok' }] });
     await chat(narrow, 'stock by category');
     const offered = (mockCreate.mock.calls[0][0].tools || []).map((t) => t.name);
