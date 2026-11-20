@@ -56,6 +56,10 @@ const ACTION_CODES = Object.freeze({
   // (the looms, or the vendor record), and it was written with no line
   // on the trail at all.
   JOB_PRODUCTION_MODE_CHANGED: 'JOB_PRODUCTION_MODE_CHANGED',
+  // A job's actual finishing / checking / packing / overhead cost entered
+  // over the rate card, or handed back to it (api/pnl.js). It moves the
+  // order's margin, and kept only the last hand on it.
+  JOB_COST_RECORDED:        'JOB_COST_RECORDED',
   // Sub-stage / per-action events recorded on the parent JobOrder
   WARPING_STARTED:          'WARPING_STARTED',
   WARPING_COMPLETED:        'WARPING_COMPLETED',
@@ -194,6 +198,7 @@ const ACTION_LABELS = Object.freeze({
   JOB_MACHINE_CHANGED:      'Machine Changed',
   JOB_ELASTIC_CHANGED:      'Elastic Changed Mid-run',
   JOB_PRODUCTION_MODE_CHANGED: 'Production Mode Changed',
+  JOB_COST_RECORDED:        'Actual Cost Recorded',
   WARPING_STARTED:          'Warping Started',
   WARPING_COMPLETED:        'Warping Completed',
   WARPING_CANCELLED:        'Warping Cancelled',

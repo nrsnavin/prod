@@ -50,6 +50,11 @@ const RATE_CARD_FIELDS = [
 
 const OVERRIDE_FIELDS = ['finishing', 'checking', 'packing', 'overhead'];
 
+// How many changes of the rate card are kept, and how many the screen is given.
+const CHANGES_KEPT = 50;
+const CHANGES_SHOWN = 10;
+const changeView = (c) => ({ at: c.at, byName: c.byName || '', from: c.from || {}, to: c.to || {} });
+
 // Orders that never became work carry no cost worth reporting, and
 // listing them buries the ones that do.
 const LIST_EXCLUDED_STATUSES = ['Deleted'];
@@ -59,6 +64,8 @@ router.get(
   '/settings',
   catchAsyncErrors(async (_req, res) => {
     const doc = await CostSettings.findOne({ key: 'cost' }).lean();
+    // Newest first.
+    const changes = (doc?.changes || []).slice(-CHANGES_SHOWN).reverse().map(changeView);
     res.status(200).json({
       success: true,
       settings: {
@@ -69,6 +76,10 @@ router.get(
         notes:                 doc?.notes ?? '',
         configured:            Boolean(doc),
         updatedAt:             doc?.updatedAt ?? null,
+        // Who last moved a figure, and from what (null: nobody yet, or a
+        // card from before this was kept).
+        lastChange:            changes[0] ?? null,
+        changes,
       },
     });
   })
@@ -95,13 +106,30 @@ router.put(
       return next(new ErrorHandler('No rate card fields supplied', 400));
     }
 
+    // What each figure was, so the change can say: this card re-costs
+    // every order there is, and kept no word of who moved it or from what.
+    const before = await CostSettings.findOne({ key: 'cost' }).lean();
+    const from = {}; const to = {};
+    for (const field of RATE_CARD_FIELDS) {
+      if (update[field] === undefined) continue;
+      const was = before?.[field] ?? 0;
+      if (was !== update[field]) { from[field] = was; to[field] = update[field]; }
+    }
+    const change = Object.keys(to).length
+      ? { at: new Date(), by: req.user?._id || null, byName: req.user?.name || '', from, to }
+      : null;
+
     const settings = await CostSettings.findOneAndUpdate(
       { key: 'cost' },
-      { $set: update, $setOnInsert: { key: 'cost' } },
+      {
+        $set: update, $setOnInsert: { key: 'cost' },
+        ...(change ? { $push: { changes: { $each: [change], $slice: -CHANGES_KEPT } } } : {}),
+      },
       { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
     ).lean();
 
-    res.status(200).json({ success: true, settings });
+    const { changes, ...card } = settings;
+    res.status(200).json({ success: true, settings: { ...card, lastChange: changes?.length ? changeView(changes[changes.length - 1]) : null } });
   })
 );
 
@@ -213,9 +241,32 @@ router.put(
       return next(new ErrorHandler('No cost override fields supplied', 400));
     }
 
-    job.costOverrides = { ...(job.costOverrides || {}), ...next$ };
-    job.costOverrides.recordedBy = req.user?._id || null;
-    job.costOverrides.recordedAt = new Date();
+    // What moved, for the job's trail. An override decides an order's
+    // margin, and only the last hand on it was kept: the figure it
+    // replaced was gone. A save that changes nothing is not a change.
+    const was = job.costOverrides?.toObject ? job.costOverrides.toObject() : { ...(job.costOverrides || {}) };
+    const previousValues = {}; const newValues = {};
+    for (const [field, value] of Object.entries(next$)) {
+      const old = was[field] ?? (field === 'notes' ? '' : null);
+      if (old !== value) { previousValues[field] = old; newValues[field] = value; }
+    }
+    const changed = Object.keys(newValues);
+
+    job.costOverrides = { ...was, ...next$ };
+    if (changed.length) {
+      job.costOverrides.recordedBy = req.user?._id || null;
+      job.costOverrides.recordedAt = new Date();
+      job.fingerprints.push(buildFingerprint(ACTION_CODES.JOB_COST_RECORDED, {
+        entityId: job._id,
+        actor: actorFromRequest(req),
+        meta: {
+          changedFields: changed.map((f) => `costOverrides.${f}`),
+          previousValues,
+          newValues,
+          auditReason: 'Actual conversion cost recorded for order P&L',
+        },
+      }));
+    }
     await job.save();
 
     res.status(200).json({

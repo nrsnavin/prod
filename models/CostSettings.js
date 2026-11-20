@@ -37,6 +37,23 @@ const CostSettingsSchema = new mongoose.Schema(
     overheadRatePerMeter: { type: Number, default: 0, min: 0 },
 
     notes: { type: String, default: '' },
+
+    // ── Who moved the card ───────────────────────────────────
+    // These four figures cost every metre ever made: change one and
+    // the margin on every order, past ones too, changes with it. The
+    // card kept the time of its last save and nothing else. Each change
+    // of a figure is kept here — who, when, from what to what — the
+    // last fifty of them (api/pnl.js).
+    changes: {
+      type: [new mongoose.Schema({
+        at:     { type: Date, required: true },
+        by:     { type: mongoose.Types.ObjectId, ref: 'User', default: null },
+        byName: { type: String, default: '' },
+        from:   { type: mongoose.Schema.Types.Mixed, default: {} },
+        to:     { type: mongoose.Schema.Types.Mixed, default: {} },
+      }, { _id: false })],
+      default: [],
+    },
   },
   { timestamps: true }
 );
