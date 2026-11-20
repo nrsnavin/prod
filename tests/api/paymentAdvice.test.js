@@ -126,6 +126,52 @@ describe('a payment advice', () => {
     expect(p.notes.join(' | ')).toMatch(/₹1000\.00 of other deductions/);
   });
 
+  it('does not take their credit or debit note for an invoice, nor settle an invoice by nothing or less', async () => {
+    const s = await scene();
+    const seq = s.inv702.sequence;
+    reply({
+      problem: null, payerName: s.customer.name, payerGstin: s.customer.gstin, amount: 52000, date: '2026-10-28', reference: '',
+      lines: [
+        { invoiceNo: s.inv701.invoiceNumber, invoiceAmount: 52500, paid: 52500 },
+        { invoiceNo: `DN-${seq}`, paid: -1000 },   // their debit note, numbered like our invoice
+        { invoiceNo: `CN ${seq}`, paid: 500 },     // a credit note, printed without a sign
+        { invoiceNo: String(seq), paid: 0 },       // our invoice, listed with nothing against it
+      ],
+    });
+    const p = (await post('/accounts/advice/read', { text: 'x' })).body.placed;
+    expect(p.allocations.map((a) => [a.docNo, a.amount])).toEqual([[s.inv701.invoiceNumber, 52500]]);
+    expect(p.unmatched.map((u) => u.invoiceNo)).toEqual([`DN-${seq}`, `CN ${seq}`, String(seq)]);
+    expect(p.unmatched[0].why).toMatch(/debit or credit note/i);
+    expect(p.unmatched[1].why).toMatch(/debit or credit note/i);
+    expect(p.unmatched[2].why).toMatch(/nothing paid/i);
+    expect(p.notes.join(' | ')).not.toMatch(/taken as/);
+    // An invoice whose own number begins that way is still found, in full.
+    const dr = await M.Invoice.create({
+      invoiceNumber: 'DN/2026-27/0001', financialYear: '2026-27', sequence: 1, invoiceDate: new Date('2026-09-20'), dueDate: new Date('2026-10-20'),
+      order: new mongoose.Types.ObjectId(), customer: s.customer._id, buyer: { name: s.customer.name }, supplyType: 'intra', lines: [], totals: { taxable: 1000, grand: 1050 }, status: 'issued',
+    });
+    await require('../../services/partyLedger').post({ partyType: 'customer', party: s.customer._id, date: dr.invoiceDate, docType: 'Invoice', doc: dr._id, docNo: dr.invoiceNumber, debit: 1050 });
+    reply({ problem: null, payerName: s.customer.name, payerGstin: s.customer.gstin, amount: 1050, lines: [{ invoiceNo: 'DN/2026-27/0001', paid: 1050 }] });
+    const q = (await post('/accounts/advice/read', { text: 'x' })).body.placed;
+    expect(q.allocations.map((a) => [a.docNo, a.amount])).toEqual([['DN/2026-27/0001', 1050]]);
+  });
+
+  it('does not pick one of two customers the payer\'s name could be', async () => {
+    const s = await scene();
+    await M.Customer.create({ name: `${s.customer.name} Tirupur`, contactName: 'T', phoneNumber: '9311111111' });
+    const advice = (payerName) => ({ problem: null, payerName, payerGstin: '', amount: 52500, lines: [{ invoiceNo: s.inv701.invoiceNumber, paid: 52500 }] });
+    reply(advice('Sunrise Garments'));
+    const p = (await post('/accounts/advice/read', { text: 'x' })).body.placed;
+    expect(p.customer).toBeNull();
+    expect(p.allocations).toEqual([]);
+    expect(p.notes[0]).toMatch(/more than one customer/i);
+    // Named in full, it is that one.
+    reply(advice(`M/s ${s.customer.name.toUpperCase()} PVT LTD`));
+    const q = (await post('/accounts/advice/read', { text: 'x' })).body.placed;
+    expect(q.customer).toMatchObject({ name: s.customer.name, matchedBy: 'name' });
+    expect(q.allocations.map((a) => a.docNo)).toEqual([s.inv701.invoiceNumber]);
+  });
+
   it('says when the payer is not on file, and when it is not an advice', async () => {
     reply({ problem: null, payerName: 'Nobody Knits', amount: 500, lines: [{ invoiceNo: '1', paid: 500 }] });
     const p = (await post('/accounts/advice/read', { text: 'x' })).body.placed;

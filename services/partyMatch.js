@@ -61,4 +61,32 @@ async function similar(Model, { name = '', gstin = '', phone = '', excludeId = n
   return [...out.values()].slice(0, 3);
 }
 
-module.exports = { similar, keyWords, nameScore };
+/**
+ * Who a name on a paper could be, best first: every party on file whose
+ * name is the same once suffixes and punctuation are set aside (75% of
+ * the shorter name's words).
+ */
+async function nameMatches(Model, name, { select = 'name gstin' } = {}) {
+  if (!keyWords(name).length) return [];
+  const all = await Model.find({}).select(select).lean();
+  return all.map((doc) => ({ doc, score: nameScore(name, doc.name) })).filter((x) => x.score >= 0.75).sort((a, b) => b.score - a.score);
+}
+
+/**
+ * The ONE party a name on a paper means, for a reader that would
+ * otherwise have to guess (a payment advice, a customer's debit note):
+ * the best match when no other comes close — or, of several that do,
+ * the one whose name it is word for word. → { party, candidates }:
+ * party null with candidates > 1 means "more than one it could be".
+ */
+async function oneByName(Model, name, opts) {
+  const scored = await nameMatches(Model, name, opts);
+  if (!scored.length) return { party: null, candidates: 0 };
+  const close = scored.filter((x) => x.score >= scored[0].score - 0.1);
+  if (close.length === 1) return { party: scored[0].doc, candidates: 1 };
+  const words = keyWords(name).join(' ');
+  const exact = close.filter((x) => keyWords(x.doc.name).join(' ') === words);
+  return { party: exact.length === 1 ? exact[0].doc : null, candidates: close.length };
+}
+
+module.exports = { similar, keyWords, nameScore, nameMatches, oneByName };

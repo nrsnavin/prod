@@ -24,7 +24,7 @@ const Customer = require('../models/Customer');
 const Invoice = require('../models/Invoice');
 const AccountNote = require('../models/AccountNote');
 const creditNoteLimit = require('./creditNoteLimit');
-const { nameScore } = require('./partyMatch');
+const { oneByName } = require('./partyMatch');
 const aiLedger = require('./aiLedger');
 const { promptVersion } = require('../utils/aiPrompts');
 const { r2 } = require('../utils/money');
@@ -44,10 +44,9 @@ async function findCustomer(read, picked) {
     if (c) return { ...c, matchedBy: 'gstin' };
   }
   if (!read.customerName) return null;
-  const all = await Customer.find({}).select('name gstin').lean();
-  const scored = all.map((c) => ({ c, s: nameScore(read.customerName, c.name) })).filter((x) => x.s >= 0.75).sort((a, b) => b.s - a.s);
-  if (!scored.length || (scored.length > 1 && scored[1].s >= scored[0].s - 0.1)) return null;
-  return { ...scored[0].c, matchedBy: 'name' };
+  // One rule for every paper that names a customer (services/partyMatch.js).
+  const { party } = await oneByName(Customer, read.customerName);
+  return party ? { ...party, matchedBy: 'name' } : null;
 }
 
 /** The customer's invoice a number names: the whole number, else the one number it ends in. */

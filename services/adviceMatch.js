@@ -12,17 +12,22 @@
 //
 //  An invoice number matches exactly, or — written short, "701" or
 //  "INV-701" — by its last number when that is one open invoice of this
-//  customer and no other. Anything unsure is listed, not guessed.
+//  customer and no other. Anything unsure is listed, not guessed: a
+//  payer whose name two customers share, a line that is their own debit
+//  or credit note ("DN-701" is not our invoice 701), an invoice listed
+//  with nothing paid against it.
 // ══════════════════════════════════════════════════════════════════
 
 const Customer = require('../models/Customer');
 const BankStatement = require('../models/BankStatement');
 const outstanding = require('./outstanding');
+const { oneByName } = require('./partyMatch');
 
 const { r2 } = require('../utils/money');
-const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const squash = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 const lastNumber = (s) => { const m = String(s || '').match(/(\d+)\D*$/); return m ? Number(m[1]) : null; };
+// A number that says what it is: a debit or credit note, not an invoice.
+const NOTE_NO = /^\s*(?:dn|cn|dr|cr|d\/n|c\/n|debit|credit)(?![a-z])/i;
 
 async function findCustomer(read, customerId) {
   if (customerId) {
@@ -33,13 +38,11 @@ async function findCustomer(read, customerId) {
     const c = await Customer.findOne({ gstin: read.payerGstin }).select('name gstin').lean();
     if (c) return { ...c, matchedBy: 'gstin' };
   }
-  const words = String(read.payerName || '').split(/\s+/).filter((w) => w.length >= 3 && !/^(pvt|ltd|private|limited|the|and)$/i.test(w)).slice(0, 3);
-  if (words.length) {
-    const re = new RegExp(words.map((w) => `(?=.*${escapeRegex(w)})`).join(''), 'i');
-    const c = await Customer.findOne({ name: re }).select('name gstin').lean();
-    if (c) return { ...c, matchedBy: 'name' };
-  }
-  return null;
+  // By name only when it can be one customer: the same rule as every
+  // other paper that names one (services/partyMatch.js).
+  const { party, candidates } = await oneByName(Customer, read.payerName);
+  if (party) return { ...party, matchedBy: 'name' };
+  return candidates > 1 ? { ambiguous: candidates } : null;
 }
 
 /** The open invoice an advice's number names, or why none. */
@@ -48,6 +51,9 @@ function invoiceFor(no, open, taken) {
   if (exact.length === 1) return { doc: exact[0] };
   const n = lastNumber(no);
   if (n == null) return { why: 'no invoice number' };
+  // Written short it is found by its last number — but "DN-701" is their
+  // debit note, not our invoice 701.
+  if (NOTE_NO.test(no)) return { why: 'a debit or credit note, not an invoice — settle it with a credit note' };
   const byNumber = open.filter((d) => d.docType === 'Invoice' && lastNumber(d.docNo) === n && !taken.has(String(d.id)));
   if (byNumber.length === 1) return { doc: byNumber[0], short: true };
   if (byNumber.length > 1) return { why: `more than one open invoice ends in ${n}` };
@@ -81,7 +87,8 @@ async function statementLineFor(read) {
  * @param opts  { customer?: id } — the customer, when the person chose one
  */
 async function placeAdvice(read, { customer: customerId = null } = {}) {
-  const customer = await findCustomer(read, customerId);
+  const who = await findCustomer(read, customerId);
+  const customer = who?.ambiguous ? null : who;
   const out = {
     customer: customer ? { _id: customer._id, name: customer.name, gstin: customer.gstin || '', matchedBy: customer.matchedBy } : null,
     amount: read.amount, date: read.date, reference: read.reference,
@@ -89,7 +96,9 @@ async function placeAdvice(read, { customer: customerId = null } = {}) {
     statementLine: await statementLineFor(read),
   };
   if (!customer) {
-    out.notes.push(`${read.payerName || 'The payer'} is not a customer on file — choose the customer`);
+    out.notes.push(who?.ambiguous
+      ? `More than one customer on file could be ${read.payerName} — choose the customer`
+      : `${read.payerName || 'The payer'} is not a customer on file — choose the customer`);
     return out;
   }
   const open = (await outstanding.receivables({ customer: customer._id })).filter((d) => d.docType === 'Invoice' || d.docType === 'OpeningBalance');
@@ -99,13 +108,16 @@ async function placeAdvice(read, { customer: customerId = null } = {}) {
     const found = invoiceFor(line.invoiceNo, open, taken);
     if (!found.doc) { out.unmatched.push({ invoiceNo: line.invoiceNo, why: found.why, paid: line.paid }); continue; }
     const d = found.doc;
-    taken.add(String(d.id));
     // TDS and a discount settle the invoice with the money; another
     // deduction (a debit note, short supply) leaves it short until a
     // credit note says why.
     const off = r2((line.tds || 0) + (line.discount || 0));
     const settles = line.paid != null ? r2(line.paid + off) : line.invoiceAmount != null ? r2(line.invoiceAmount - (line.other || 0)) : d.outstanding;
     const gross = r2(Math.min(settles, d.outstanding));
+    // A receipt settles an invoice by money or it does not name it: a
+    // line with nothing (or less than nothing) against it is listed.
+    if (!(gross > 0)) { out.unmatched.push({ invoiceNo: line.invoiceNo, why: settles < 0 ? 'a deduction, not a payment — settle it with a credit note' : 'nothing paid against it', paid: line.paid }); continue; }
+    taken.add(String(d.id));
     if (settles > d.outstanding + 0.5) out.notes.push(`${d.docNo}: the advice settles ₹${settles.toFixed(2)}, but only ₹${d.outstanding.toFixed(2)} is outstanding`);
     if (found.short) out.notes.push(`"${line.invoiceNo}" taken as ${d.docNo}`);
     out.allocations.push({ docType: d.docType, doc: d.id, docNo: d.docNo, amount: gross, outstanding: d.outstanding, paid: line.paid, tds: line.tds || 0, discount: line.discount || 0, other: line.other || 0 });
