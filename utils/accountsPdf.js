@@ -236,7 +236,9 @@ async function buildStatementPdf({ statement, party = {}, partyType = 'customer'
   y = room(ctx, y, 60);
   const owes = s.closing > 0;
   const who = partyType === 'customer' ? (owes ? 'Due from you' : 'Held for you') : (owes ? 'Due to you' : 'Paid ahead to you');
-  text(`${who}: ${RS} ${money(Math.abs(s.closing))}`, L, y, { bold: true, size: 11 });
+  // A settled account is neither: it used to read "Held for you: 0.00".
+  const settled = Math.abs(Number(s.closing) || 0) < 0.005;
+  text(settled ? 'Nothing is due either way: the account is settled.' : `${who}: ${RS} ${money(Math.abs(s.closing))}`, L, y, { bold: true, size: 11 });
   y += 16;
   if (open && open.overdue > 0) { text(`Of which past due: ${RS} ${money(open.overdue)}`, L, y, { size: 9 }); y += 13; }
   y += 8;

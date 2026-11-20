@@ -198,8 +198,8 @@ const PROMPTS = Object.freeze({
   },
 
   'whatsapp-order': {
-    version: 'v1.0',
-    notes: 'An order typed into a WhatsApp message, read with the inbound PO schema and matched to elastics like a document; the customer is the sender. Drafted into an order request for the office to open as an order. Lives in utils/inboundPoOcr.js (extractPurchaseOrderText) and services/inboundPoIntake.js (draftFromText).',
+    version: 'v1.1',
+    notes: 'v1.1: the message is read with today given as the day in India and its weekday ("Saturday, 2026-11-21"), not the UTC date alone, so "by Friday" is worked out from the right day. An order typed into a WhatsApp message, read with the inbound PO schema and matched to elastics like a document; the customer is the sender. Drafted into an order request for the office to open as an order. Lives in utils/inboundPoOcr.js (extractPurchaseOrderText) and services/inboundPoIntake.js (draftFromText).',
     system: null,
   },
 

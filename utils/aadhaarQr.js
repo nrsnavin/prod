@@ -54,6 +54,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const https = require('https');
+const { isDayKey } = require('./factoryDay');
 
 const SIGNATURE_BYTES = 256;
 const HASH_BYTES = 32;
@@ -230,7 +231,9 @@ function dobOf(s) {
   else if ((r = /^(\d{4})$/.exec(t))) [y, m, d] = [r[1], '01', '01'];
   else return null;
   const year = Number(y);
-  if (year < 1900 || year > new Date().getFullYear() || Number(m) < 1 || Number(m) > 12 || Number(d) < 1 || Number(d) > 31) return null;
+  // A day that exists (31 February passed a 1-to-31 check, and is filed
+  // as 3 March further on), in a year somebody alive was born in.
+  if (year < 1900 || year > new Date().getFullYear() || !isDayKey(`${y}-${m}-${d}`)) return null;
   return `${y}-${m}-${d}`;
 }
 

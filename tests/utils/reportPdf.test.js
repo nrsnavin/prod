@@ -117,3 +117,38 @@ describe("reportPublisher", () => {
     }
   });
 });
+
+// ── What the paper says ───────────────────────────────────────────
+// The built-in font has no rupee sign and no arrows: "penalty ₹1,500"
+// printed as "penalty  ¹1,500" and a 32% drop as "!“32%". The figures
+// were right and the sheet read as nonsense.
+describe("the daily report PDFs print what they mean", () => {
+  const { pdfText } = require("../helpers/pdfText");
+
+  it("the morning digest spells the rupee and the drop, and a service due today reads today", async () => {
+    const text = await pdfText(await buildMorningDigestPdf({
+      ...baseDigest,
+      maintenance: [{ ID: "M1", overdue: true, daysUntil: -2 }, { ID: "M2", overdue: false, daysUntil: 0 }, { ID: "M3", overdue: false, daysUntil: 4 }],
+    }));
+    expect(text).toContain("penalty Rs. 1,500");
+    expect(text).toContain("M3 · ElasticA: down 32%");
+    expect(text).toContain("M1: OVERDUE");
+    expect(text).toContain("M2: today");
+    expect(text).toContain("M3: in 4d");
+    expect(text).not.toMatch(/¹|!“/);
+  });
+
+  it("the evening report spells the rupee", async () => {
+    const text = await pdfText(await buildEveningReportPdf(baseEvening));
+    expect(text).toContain("8,500 m · Rs. 1,25,000");
+    expect(text).not.toMatch(/¹/);
+  });
+
+  it("a name with a line break in it stays on its line", async () => {
+    const text = await pdfText(await buildEveningReportPdf({
+      ...baseEvening,
+      deliveries: { ...baseEvening.deliveries, items: [{ dcNumber: "DC-9", orderNo: 7, customerName: "Acme\nTextiles", totalQuantity: 10 }] },
+    }));
+    expect(text).toContain("DC-9 · Order #7 · Acme Textiles: 10 m");
+  });
+});

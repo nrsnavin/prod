@@ -101,6 +101,17 @@ function configRisks(env = process.env) {
     ...databaseRisks(env),
   ];
 
+  // The switch is one exact word. Most tools spell it "production", and
+  // spelt that way this server runs with its development allowances on
+  // and says nothing: so it says so.
+  const mode = String(env.NODE_ENV ?? '').trim();
+  if (env.NODE_ENV !== 'PRODUCTION' && /^prod/i.test(mode)) {
+    out.push({
+      key: 'NODE_ENV', level: 'risk',
+      message: `NODE_ENV is "${mode.slice(0, 20)}", which this server does not read as production: only the exact word PRODUCTION is (deploy/jarvis.service sets it). Until it is, the WhatsApp webhook does not insist on Twilio's signature, the customer portal's cookie is not marked Secure, outbound links to private addresses are allowed, and web pages on localhost may call the API.`,
+    });
+  }
+
   const cron = String(env.CRON_SECRET || '');
   if (cron && cron.length < MIN_SHARED_SECRET_LENGTH) {
     out.push({

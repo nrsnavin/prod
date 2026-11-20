@@ -99,6 +99,7 @@ function useScripts(doc) {
 const latinRun = (s) => String(s)
   .replace(/₹\s?/g, 'Rs. ')
   .replace(/[–—]/g, '-')
+  .replace(/[\t\r\n\v\f]+/g, ' ')
   .replace(/[^\x20-\xFF]/g, '')
   .replace(/\s{2,}/g, ' ');
 

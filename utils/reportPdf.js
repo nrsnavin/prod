@@ -42,8 +42,26 @@ function _drawSection(doc, title) {
   doc.fillColor(COLOR_DARK).font(BODY_FONT).fontSize(11);
 }
 
+// The built-in font has no rupee sign and no arrows: "₹1,500" printed
+// as " ¹1,500" and "↓32%" as "!“32%". They are spelt out; a line break
+// inside a name is the space it stands for. The bullet, the middle dot,
+// the long dash and the ellipsis the font does have, and they stay.
+function _printable(text) {
+  return String(text ?? "")
+    .replace(/₹\s?/g, "Rs. ")
+    .replace(/↓\s?/g, "down ")
+    .replace(/↑\s?/g, "up ")
+    .replace(/[\t\r\n\v\f]+/g, " ");
+}
+
 function _line(doc, text) {
-  doc.fillColor(COLOR_DARK).font(BODY_FONT).fontSize(11).text(text);
+  doc.fillColor(COLOR_DARK).font(BODY_FONT).fontSize(11).text(_printable(text));
+}
+
+/** "OVERDUE", "today" or "in 4d" — as the message that goes with this sheet says it. */
+function _serviceDue(m) {
+  if (m.overdue) return "OVERDUE";
+  return Number(m.daysUntil) === 0 ? "today" : `in ${m.daysUntil}d`;
 }
 
 function _num(n) {
@@ -130,7 +148,7 @@ async function buildMorningDigestPdf(d) {
   _drawSection(doc, "Maintenance due");
   if ((d.maintenance || []).length > 0) {
     for (const m of d.maintenance.slice(0, 10)) {
-      _line(doc, `• ${m.ID}: ${m.overdue ? "OVERDUE" : `in ${m.daysUntil}d`}`);
+      _line(doc, `• ${m.ID}: ${_serviceDue(m)}`);
     }
   } else {
     _line(doc, "Nothing due.");
