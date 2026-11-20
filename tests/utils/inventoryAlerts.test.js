@@ -55,6 +55,25 @@ async function makeMaterial(over = {}) {
 // criticalStockout
 // ─────────────────────────────────────────────────────────────────
 describe("maybeFireCriticalStockout", () => {
+  // Found reading utils/inventoryAlerts.js line by line. "Pending orders
+  // needing it" asked for orders that are "Pending" or "In Production" —
+  // statuses no order has ever had (they are Open and InProgress). Only
+  // the approved ones were counted: the alert under-stated who was waiting.
+  test("counts the open orders that need it — whatever stage they are at", async () => {
+    const m = await makeMaterial({ stock: 5, minStock: 10 });
+    const soon = new Date(Date.now() + 3 * 86_400_000);
+    const needs = (orderNo, status, supplyDate = soon) => ({ orderNo, status, supplyDate, rawMaterialRequired: [{ rawMaterial: m._id, quantity: 5 }] });
+    await Order.collection.insertMany([
+      needs(1, "Open"), needs(2, "Approved"), needs(3, "InProgress"),
+      needs(4, "Completed"), needs(5, "Cancelled"), needs(6, "Deleted"),
+      needs(7, "Approved", new Date(Date.now() + 30 * 86_400_000)),   // not within the week
+      { orderNo: 8, status: "Approved", supplyDate: soon, rawMaterialRequired: [] },
+    ]);
+    await alerts.maybeFireCriticalStockout({ material: m, oldStock: 20, newStock: 5 });
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(notifyMock.mock.calls[0][1]).toMatchObject({ pendingOrders: 3 });
+  });
+
   test("fires when stock crosses from healthy to at-or-below minStock", async () => {
     const m = await makeMaterial({ stock: 5, minStock: 10 });
     await alerts.maybeFireCriticalStockout({ material: m, oldStock: 20, newStock: 5 });

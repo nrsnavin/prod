@@ -12,6 +12,7 @@ const Order           = require("../models/Order.js");
 const { notify }      = require("./notify.js");
 
 const PO_OPEN_STATUSES = ["Open", "Partial"];
+const { OPEN_STATUSES } = require("../services/deliveryRisk.js");
 
 // ── criticalStockout ──────────────────────────────────────────────
 // Fire when stock crosses from healthy to at-or-below minStock, but
@@ -42,7 +43,10 @@ async function maybeFireCriticalStockout({ material, oldStock, newStock, reason 
     try {
       const horizon = new Date(Date.now() + 7 * 86_400_000);
       pendingOrders = await Order.countDocuments({
-        status: { $in: ["Pending", "Approved", "In Production"] },
+        // The orders still open (services/deliveryRisk.js). This asked for
+        // "Pending" and "In Production" — statuses no order has — so only
+        // the approved ones were counted.
+        status: { $in: OPEN_STATUSES },
         supplyDate: { $lte: horizon },
         "rawMaterialRequired.rawMaterial": material._id,
       });

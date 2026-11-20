@@ -50,6 +50,39 @@ async function twilioSend(to, body, mediaUrl) {
   return { sid: res.data?.sid, status: res.data?.status };
 }
 
+// ── A long message goes in parts ─────────────────────────────────
+// Twilio refuses a body over 1,600 characters (error 21617): nothing is
+// cut, nothing is split, the whole message is rejected. The morning
+// digest on a busy day runs to about 1,800, the month-close checklist
+// further — so the day there was most to say, nothing was said. A body
+// over the limit is sent as several messages, broken between lines.
+//
+// Kept under the limit with room to spare: the provider counts emoji and
+// other characters outside the basic set as more than one.
+const MAX_BODY = 1500;
+
+/** `body` as the pieces to send: each within MAX_BODY, broken at a line where there is one. */
+function partsOf(body) {
+  const text = String(body);
+  if (text.length <= MAX_BODY) return [text];
+  const parts = [];
+  let part = "";
+  const flush = () => { if (part.trim()) parts.push(part); part = ""; };
+  for (const line of text.split("\n")) {
+    // One line longer than a whole message: cut it where it must be.
+    if (line.length > MAX_BODY) {
+      flush();
+      for (let i = 0; i < line.length; i += MAX_BODY) parts.push(line.slice(i, i + MAX_BODY));
+      continue;
+    }
+    if (part && part.length + 1 + line.length > MAX_BODY) flush();
+    part = part ? `${part}\n${line}` : line;
+  }
+  flush();
+  // A blank line that fell at a break is not worth starting a message with.
+  return parts.map((p) => p.replace(/^\n+|\n+$/g, "")).filter(Boolean);
+}
+
 // ── Public API ────────────────────────────────────────────────────
 
 function isConfigured() {
@@ -83,26 +116,42 @@ async function sendWhatsApp(to, body, opts = {}) {
     return { sent: false, dryRun: true, preview: { to, body, mediaUrl } };
   }
 
+  if (PROVIDER !== "twilio") return { sent: false, error: `unknown provider: ${PROVIDER}` };
+
+  // Surface Twilio's structured error message when present.
+  const reasonOf = (err) => err?.response?.data?.message || err?.message || "send failed";
+  const parts = partsOf(body);
+  let first;
   try {
-    let providerResult;
-    switch (PROVIDER) {
-      case "twilio":
-        providerResult = await twilioSend(to, body, mediaUrl);
-        break;
-      default:
-        return { sent: false, error: `unknown provider: ${PROVIDER}` };
-    }
-    return { sent: true, provider: PROVIDER, providerId: providerResult.sid, status: providerResult.status };
+    // A picture goes with the first part.
+    first = await twilioSend(to, parts[0], mediaUrl);
   } catch (err) {
-    // Surface Twilio's structured error message when present.
-    const msg = err?.response?.data?.message || err?.message || "send failed";
+    const msg = reasonOf(err);
     console.warn(`[whatsapp] send to ${to} failed: ${msg}`);
     return { sent: false, error: msg };
   }
+  const out = { sent: true, provider: PROVIDER, providerId: first.sid, status: first.status };
+  if (parts.length === 1) return out;
+
+  // The rest, in order. The message has gone once its first part has: a
+  // later part failing is said, and is not a reason to send it all again.
+  out.parts = parts.length;
+  for (let i = 1; i < parts.length; i += 1) {
+    try {
+      await twilioSend(to, parts[i]);
+    } catch (err) {
+      const msg = `part ${i + 1} of ${parts.length} was not sent: ${reasonOf(err)}`;
+      console.warn(`[whatsapp] send to ${to}: ${msg}`);
+      return { ...out, partial: true, error: msg };
+    }
+  }
+  return out;
 }
 
 module.exports = {
   sendWhatsApp,
   isConfigured,
+  partsOf,
+  MAX_BODY,
   PROVIDER,
 };

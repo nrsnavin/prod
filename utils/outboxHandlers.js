@@ -8,12 +8,32 @@ const factoryDay = require("./factoryDay");
 // Requires are lazy (inside functions) to keep this module import-cheap
 // and cycle-free — utils/outbox.js requires this file at module load.
 
+// ── An alert that reached nobody is one to try again ─────────────
+// The dispatcher retries a handler that THROWS. notify() never throws: it
+// says what happened, and the handlers did not listen — WhatsApp down for
+// a minute, and a high-wastage or late-despatch alert was marked "sent"
+// having reached no one. That is what the queue is for.
+//
+// Tried again: an error before anything went, or every recipient refused
+// by the provider. Not tried again: it reached at least one person (a
+// retry would send them a second copy); it was muted, throttled or had no
+// recipients; or no provider is set up (a dry run) — nothing would change.
+async function deliver(event, payload) {
+  const { notify } = require("./notify.js");
+  const r = await notify(event, payload || {});
+  const results = Array.isArray(r?.results) ? r.results : [];
+  const reachedNobody = results.length > 0 && !results.some((x) => x?.sent || x?.dryRun);
+  if (r?.error || reachedNobody) {
+    throw new Error(`${event} not delivered: ${r?.error || results.find((x) => x?.error)?.error || "provider refused it"}`);
+  }
+  return r;
+}
+
 const HANDLERS = {
   // Generic passthrough: enqueue(session, "notify", { event, payload }).
   async notify({ event, payload }) {
-    const { notify } = require("./notify.js");
     if (!event) throw new Error("notify handler needs payload.event");
-    await notify(event, payload || {});
+    await deliver(event, payload);
   },
 
   // High-wastage alert: fires only when today's wastage on this elastic/
@@ -42,7 +62,6 @@ const HANDLERS = {
     const JobOrder    = require("../models/JobOrder.js");
     const ShiftDetail = require("../models/ShiftDetail.js");
     const Wastage     = require("../models/Wastage.js");
-    const { notify }  = require("./notify.js");
 
     const job = await JobOrder.findById(jobId).select("machine jobOrderNo").lean();
     if (!job?.machine) return;
@@ -68,7 +87,7 @@ const HANDLERS = {
       .lean();
     if (!wastage) return; // deleted before delivery — nothing to report
 
-    await notify("wastageHighEvent", {
+    await deliver("wastageHighEvent", {
       jobNo:           job.jobOrderNo,
       elasticName:     wastage.elastic?.name,
       quantity,
@@ -87,7 +106,6 @@ const HANDLERS = {
     const Order           = require("../models/Order.js");
     const Customer        = require("../models/Customer.js");
     const DeliveryChallan = require("../models/DeliveryChallan.js");
-    const { notify }      = require("./notify.js");
 
     if (!orderId) return;
     const [orderDoc, dc] = await Promise.all([
@@ -108,7 +126,7 @@ const HANDLERS = {
       custName = c?.name || custName;
     }
 
-    await notify("dcDelayedDelivery", {
+    await deliver("dcDelayedDelivery", {
       dcNumber:     dc.dcNumber,
       orderNo:      orderDoc.orderNo,
       customerName: custName,
@@ -150,4 +168,4 @@ function getHandler(kind) {
   return HANDLERS[kind] || null;
 }
 
-module.exports = { getHandler, HANDLERS };
+module.exports = { getHandler, HANDLERS, deliver };
