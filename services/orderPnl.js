@@ -385,6 +385,18 @@ async function orderPnl(orderId) {
   // of GST claimed. Yarn from stock is the material line above, not
   // this one, so nothing is counted twice.
   const booked = await costCentres.forOrder(order._id);
+  // Job-work is costed above at the vendor's rate × the metres that came
+  // back. If the vendor's bill has also been booked to this order, the
+  // same money is in both lines; which one is right is for a person to
+  // say, so it is said rather than guessed.
+  const serviceBills = booked.rows.filter((r) => r.docType === 'SupplierBill' && r.what === 'Service bill');
+  if (jobWorkCost > 0.005 && serviceBills.length > 0) {
+    warnings.push(
+      `Outsourced job-work is costed at the vendor's rate (₹${Math.round(jobWorkCost).toLocaleString('en-IN')}), and ` +
+      `${serviceBills.length} service bill(s) are also booked to this order (${serviceBills.slice(0, 3).map((r) => r.docNo).join(', ')}` +
+      `${serviceBills.length > 3 ? '…' : ''}): if one of them is the vendor's bill, the job-work may be counted twice.`
+    );
+  }
 
   const costs = {
     material:  materialCost,

@@ -465,6 +465,33 @@ describe('outsourced jobs', () => {
     expect(pnl.costs.overhead).toBe(2820);
   });
 
+  // The job-work line is the vendor's rate × what came back. The vendor's
+  // BILL, booked to the order as its cost centre, is the same money under
+  // "bought for this order". With both, the order pays the vendor twice on
+  // paper — and nothing said so.
+  test("says so when the vendor's bill is also booked to the order: the job-work may be there twice", async () => {
+    const e = await makeElastic('E-Twice');
+    const order = await makeOrder({ lines: [{ elastic: e._id, quantity: 1000, rate: 30 }] });
+    await makeJob(order, {
+      productionMode: 'outsource', outsourceVendor: 'Sunrise Weaving',
+      outsourcing: { qtySentMeters: 1000, qtyReceivedMeters: 940, ratePerMeter: 12 },
+    });
+    const bill = (over) => mongoose.connection.collection('supplierbills').insertOne({
+      billNo: `PB/2026-27/00${++seq}`, supplierBillNo: `SW/${seq}`, billDate: new Date('2026-03-20'), supplierName: 'Sunrise Weaving', status: 'open',
+      totals: { taxable: 11280, tax: 564, grand: 11844 }, itc: { eligible: true },
+      costCentre: { kind: 'order', order: order._id, orderNo: order.orderNo, name: 'Order' }, ...over,
+    });
+    // A purchase booked to the order (dye, trims) is not job-work: nothing to say.
+    await bill({ kind: 'material' });
+    expect((await orderPnl(order._id)).warnings.join(' ')).not.toMatch(/twice/i);
+
+    await bill({ kind: 'service' });
+    const pnl = await orderPnl(order._id);
+    expect(pnl.costs.jobWork).toBe(11280);
+    expect(pnl.costs.booked).toBe(22560);
+    expect(pnl.warnings.join(' ')).toMatch(/job-work .* may be counted twice/i);
+  });
+
   test('a vendor with no agreed rate is named rather than costed at zero', async () => {
     const e = await makeElastic('E-NoVendorRate');
     const order = await makeOrder({ lines: [{ elastic: e._id, quantity: 100, rate: 30 }] });
