@@ -95,6 +95,13 @@ function fromAddress() {
   return process.env.SMTP_FROM || process.env.SMTP_USER;
 }
 
+// A person's name goes into the HTML of a mail as it was typed on the
+// Users screen. Markup in it ("<a href=…>") became markup in a mail that
+// carries the company's name and a sign-in link.
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+/** The first name to greet, safe to put in HTML. */
+const greetingName = (name) => esc(name ? String(name).trim().split(/\s+/)[0] : "") || "there";
+
 // Low-level send. Resolves { skipped:true } when SMTP is unconfigured
 // so callers can stay indifferent to deployment state.
 async function sendMail({ to, subject, text, html }) {
@@ -129,7 +136,8 @@ async function sendMail({ to, subject, text, html }) {
 //  Password-reset email
 // ─────────────────────────────────────────────────────────────
 async function sendPasswordResetEmail({ to, name, resetUrl, ttlMinutes }) {
-  const who = name ? name.split(" ")[0] : "there";
+  const who = name ? String(name).trim().split(/\s+/)[0] || "there" : "there";
+  const whoHtml = greetingName(name);
   const subject = "Reset your Balu Elastics ERP password";
   const text = [
     `Hi ${who},`,
@@ -148,12 +156,12 @@ async function sendPasswordResetEmail({ to, name, resetUrl, ttlMinutes }) {
   <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:480px;margin:0 auto;color:#0f172a">
     <h2 style="font-size:18px;margin:0 0 12px">Reset your password</h2>
     <p style="font-size:14px;line-height:1.6;margin:0 0 16px">
-      Hi ${who}, we received a request to reset the password for your
+      Hi ${whoHtml}, we received a request to reset the password for your
       <strong>Balu Elastics ERP</strong> account. Click the button below to
       choose a new password. This link expires in <strong>${ttlMinutes} minutes</strong>.
     </p>
     <p style="margin:0 0 20px">
-      <a href="${resetUrl}"
+      <a href="${esc(resetUrl)}"
          style="display:inline-block;background:#1e3a5f;color:#fff;text-decoration:none;
                 padding:11px 20px;border-radius:8px;font-size:14px;font-weight:600">
         Reset password
@@ -161,7 +169,7 @@ async function sendPasswordResetEmail({ to, name, resetUrl, ttlMinutes }) {
     </p>
     <p style="font-size:12px;line-height:1.6;color:#64748b;margin:0 0 8px">
       Or paste this link into your browser:<br>
-      <span style="word-break:break-all;color:#1e3a5f">${resetUrl}</span>
+      <span style="word-break:break-all;color:#1e3a5f">${esc(resetUrl)}</span>
     </p>
     <p style="font-size:12px;line-height:1.6;color:#64748b;margin:16px 0 0">
       If you didn't request this, ignore this email — your password stays unchanged.
@@ -175,7 +183,8 @@ async function sendPasswordResetEmail({ to, name, resetUrl, ttlMinutes }) {
 //  Login OTP email
 // ─────────────────────────────────────────────────────────────
 async function sendLoginOtpEmail({ to, name, code, ttlMinutes }) {
-  const who = name ? name.split(" ")[0] : "there";
+  const who = name ? String(name).trim().split(/\s+/)[0] || "there" : "there";
+  const whoHtml = greetingName(name);
   const subject = `${code} is your Balu Elastics ERP sign-in code`;
   const text = [
     `Hi ${who},`,
@@ -193,13 +202,13 @@ async function sendLoginOtpEmail({ to, name, code, ttlMinutes }) {
   <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:480px;margin:0 auto;color:#0f172a">
     <h2 style="font-size:18px;margin:0 0 12px">Your sign-in code</h2>
     <p style="font-size:14px;line-height:1.6;margin:0 0 16px">
-      Hi ${who}, use this code to sign in to <strong>Balu Elastics ERP</strong>.
+      Hi ${whoHtml}, use this code to sign in to <strong>Balu Elastics ERP</strong>.
       It expires in <strong>${ttlMinutes} minutes</strong>.
     </p>
     <p style="margin:0 0 20px">
       <span style="display:inline-block;background:#f1f5f9;border:1px solid #e2e8f0;
                    border-radius:10px;padding:14px 28px;font-size:28px;font-weight:800;
-                   letter-spacing:8px;color:#1e3a5f">${code}</span>
+                   letter-spacing:8px;color:#1e3a5f">${esc(code)}</span>
     </p>
     <p style="font-size:12px;line-height:1.6;color:#64748b;margin:0">
       If you didn't try to sign in, ignore this email — nobody can access your

@@ -53,7 +53,10 @@ const REFERENCES = {
     { label: 'material issue',   model: 'MaterialOutward', path: 'rawMaterial' },
     { label: 'dye lot',          model: 'YarnLot',       path: 'rawMaterial' },
     { label: 'warping programme', model: 'WarpingPlan',  path: 'beams.sections.warpYarn' },
-    { label: 'warping batch',    model: 'WarpingBatch',  path: 'rawMaterial' },
+    // Under each allocation, not on the batch (it was looked for on the
+    // batch, where it is not — so a yarn drawn into a batch read "not used").
+    { label: 'warping batch',    model: 'WarpingBatch',  path: 'allocations.rawMaterial' },
+    { label: 'supplier rate',    model: 'SupplierRate',  path: 'rawMaterial' },
     { label: 'stock count',      model: 'StockCount',    path: 'lines.rawMaterial' },
   ],
 
@@ -64,7 +67,7 @@ const REFERENCES = {
     { label: 'packing entry',    model: 'Packing',        path: 'elastic' },
     { label: 'wastage entry',    model: 'Wastage',        path: 'elastic' },
     { label: 'QC record',        model: 'QcRecord',       path: 'elastic' },
-    { label: 'shift entry',      model: 'ShiftDetail',    path: 'elastic' },
+    { label: 'shift entry',      model: 'ShiftDetail',    path: 'elastics.elastic' },
     { label: 'elastic group',    model: 'ElasticGroup',   path: 'items.elastic' },
     { label: 'machine head map', model: 'Machine',        path: 'elastics.elastic' },
     { label: 'warping programme', model: 'WarpingPlan',   path: 'beams.elastic' },
@@ -75,7 +78,7 @@ const REFERENCES = {
     { label: 'order',            model: 'Order',          path: 'customer' },
     { label: 'job',              model: 'JobOrder',       path: 'customer' },
     { label: 'sample request',   model: 'SampleRequest',  path: 'customer' },
-    { label: 'complaint',        model: 'Complaints',     path: 'customer' },
+    { label: 'complaint',        model: 'Complaint',      path: 'customer' },
     { label: 'elastic group',    model: 'ElasticGroup',   path: 'customer' },
     { label: 'portal login',     model: 'CustomerUser',   path: 'customer' },
   ],
@@ -84,7 +87,12 @@ const REFERENCES = {
 /** "3 orders", "1 job" — the count and its label, pluralised. */
 function phrase(label, count) {
   if (count === 1) return `1 ${label}`;
-  // "elastic recipe" → "elastic recipes"; "QC record" → "QC records".
+  // "elastic recipe" → "elastic recipes"; "QC record" → "QC records" —
+  // and "packing entry" → "packing entries", "warping batch" → "warping
+  // batches", which an added "s" made "entrys" and "batchs" in the
+  // sentence that tells someone why a delete was refused.
+  if (/[^aeiou]y$/i.test(label)) return `${count} ${label.slice(0, -1)}ies`;
+  if (/(ch|sh|s|x)$/i.test(label)) return `${count} ${label}es`;
   return `${count} ${label}s`;
 }
 
@@ -143,4 +151,4 @@ async function countUsage(kind, id) {
   };
 }
 
-module.exports = { countUsage, REFERENCES };
+module.exports = { countUsage, REFERENCES, phrase };
