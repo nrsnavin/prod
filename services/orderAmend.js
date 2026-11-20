@@ -37,6 +37,7 @@ const { applyMovement } = require('../utils/elasticStock');
 const { appendStockMovement } = require('../utils/stockLedger');
 const { costOf } = require('../utils/materialValuation');
 const { computeMaterialRequirement } = require('../utils/materialRequirement');
+const { shortfallMessage } = require('./orderService');
 
 const MIN_REASON = 8;
 const AMENDABLE = ['Approved', 'InProgress'];
@@ -92,24 +93,30 @@ async function addElasticToOrder(session, {
     if (!material) throw new ErrorHandler(`Raw material ${rm.name || rm.rawMaterial} not found`, 404);
     materials.set(String(rm.rawMaterial), material);
     const wanted = r3(rm.requiredWeight);
-    const have = Number(material.stock) || 0;
+    // To the gram on both sides: a shelf holding 0.7999999999999999 is not
+    // short of 0.8, and nobody should have to force an approval over it.
+    const have = r3(material.stock);
     if (have < wanted) {
       const short = {
         materialId: String(material._id), rawMaterial: material._id, materialName: material.name, name: material.name,
-        available: r3(have), required: wanted, short: r3(wanted - have),
+        available: have, required: wanted, short: r3(wanted - have),
       };
-      if (!force) {
-        const err = new ErrorHandler(
-          `Insufficient stock for ${material.name} (have ${r3(have)}, need ${wanted}). Force it with a reason to draw what there is.`,
-          400
-        );
-        err.code = 'INSUFFICIENT_STOCK';
-        err.shortfall = short;
-        err.details = { shortfalls: [short], requirement };
-        throw err;
-      }
       shortfalls.push(short);
     }
+  }
+  // Refused only once every yarn has been looked at: forcing draws down
+  // each one that is short, so the person about to force it is shown each
+  // one — not the first the loop happened to reach. (The same rule, in the
+  // same words, as approving the order: services/orderService.js.)
+  if (!force && shortfalls.length > 0) {
+    const err = new ErrorHandler(
+      `${shortfallMessage(shortfalls)}. Force it with a reason to draw what there is.`,
+      400
+    );
+    err.code = 'INSUFFICIENT_STOCK';
+    err.shortfall = shortfalls[0];
+    err.details = { shortfalls, requirement };
+    throw err;
   }
   const forced = force === true && shortfalls.length > 0;
   const forceWhy = String(forceReason || '').trim();

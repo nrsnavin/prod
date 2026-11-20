@@ -24,7 +24,11 @@ const day = (d) => (d ? new Date(d).toLocaleDateString('en-CA', { timeZone: IST 
 const month = (d) => day(d).slice(0, 7);
 const { r2 } = require('../../utils/money');
 const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
-const model = (name) => mongoose.models[name] || require(`../../models/${name}`);
+// Through the request's database (db/tenants.js). Taken from mongoose's
+// own registry these were the live models, so a report run from the
+// sandbox showed production's rows.
+const { modelFor } = require('../../db/tenants');
+const model = (name) => modelFor(name) || require(`../../models/${name}`);
 const ids = (list) => [...new Set(list.filter(Boolean).map(String))].filter((x) => mongoose.isValidObjectId(x));
 
 /** Map of id → document (selected fields) for the ids given. */

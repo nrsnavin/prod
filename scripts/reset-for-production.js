@@ -1,160 +1,41 @@
 'use strict';
-// ══════════════════════════════════════════════════════════════
-//  PRODUCTION RESET — wipe test/trial data, keep the masters.
+// ════════════════════════════════════════════════════════════
+//  RETIRED — this script no longer erases anything.
 //
-//  Usage (from the repo root on the server):
+//  It cleared a hand-written list of collections, written before the
+//  system had invoices, books of account, yarn lots, warping batches,
+//  sample requests or stock counts. Run today it would have:
 //
-//    node scripts/reset-for-production.js                # DRY RUN — shows what would be deleted
-//    node scripts/reset-for-production.js --yes          # actually delete
-//    node scripts/reset-for-production.js --yes --reset-stock
-//                                                        # also zero Elastic + RawMaterial stock
+//    • emptied orders, jobs and challans and left every INVOICE that
+//      names them, with the payments, bills and ledger behind it;
+//    • restarted document numbering at 1 underneath those invoices, so
+//      the next invoice asked for a number that already exists;
+//    • done it on whatever database the connection string names, with
+//      no backup asked for and no name to confirm.
 //
-//  ⚠️  BACK UP FIRST. There is no undo:
-//    mongodump --uri "$MONGO_URL" --out ~/backup-$(date +%F)
+//  A list of what to CLEAR goes stale every time a collection is added,
+//  and says nothing when it does. The two scripts that replaced this one
+//  read the database and erase whatever they were not told to KEEP:
 //
-//  KEPT (master data — untouched documents):
-//    Users (logins), Employees*, Customers, Suppliers, Machines*,
-//    Elastics* (+ Costing), Elastic Groups, Raw Materials*,
-//    Payroll settings, Bonus config, Notification settings.
-//    * = counters/links derived from wiped transactions are reset:
-//      Employee.shifts[], Machine.shifts[]/orderRunning/status,
-//      Elastic.quantityProduced/reservedStock (+stock with --reset-stock),
-//      RawMaterial.stock (only with --reset-stock).
+//    node scripts/reset-to-masters.js
+//        keeps raw materials, elastics, suppliers, customers and elastic
+//        groups (and logins, settings, the migration record); insists on
+//        a backup and on the database's name.
 //
-//  CLEARED (transactional data):
-//    Orders, Job Orders, Delivery Challans, Warping (+plans), Covering,
-//    Packing, Shift Plans + Shift Details, Attendance, Payroll runs,
-//    Advances, Yearly bonus, Bonus records, Wastage, Material inward/out,
-//    Stock movements, Purchase Orders, Leaves, Machine issues,
-//    Announcements, Complaints, Feedback, QC records, Production docs,
-//    Production plans, Notifications, Outbox, Idempotency keys,
-//    learned ETA rates, and document-number Counters (numbering restarts
-//    at 1 for a clean production ledger).
-// ══════════════════════════════════════════════════════════════
+//    node scripts/reset-transactional-data.js
+//        also keeps employees and machines; insists on the database's
+//        name.
+//
+//  Both print the whole plan and change nothing until told to.
+// ════════════════════════════════════════════════════════════
 
-const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '../config/.env') });
-const mongoose = require('mongoose');
-
-const EXECUTE     = process.argv.includes('--yes');
-const RESET_STOCK = process.argv.includes('--reset-stock');
-
-// Transactional collections to clear completely (model file → label).
-const CLEAR = [
-  ['Order',           '../models/Order'],
-  ['JobOrder',        '../models/JobOrder'],
-  ['DeliveryChallan', '../models/DeliveryChallan'],
-  ['Warping',         '../models/Warping'],
-  ['WarpingPlan',     '../models/WarpingPlan'],
-  ['Covering',        '../models/Covering'],
-  ['Packing',         '../models/Packing'],
-  ['ShiftPlan',       '../models/ShiftPlan'],
-  ['ShiftDetail',     '../models/ShiftDetail'],
-  ['Attendance',      '../models/Attendence'],
-  ['Payroll',         '../models/Payroll'],
-  ['AdvanceRequest',  '../models/Advance'],
-  ['YearlyBonus',     '../models/YearlyBonus'],
-  ['BonusRecord',     '../models/BonusRecord'],
-  ['Wastage',         '../models/Wastage'],
-  ['MaterialInward',  '../models/MaterialInward'],
-  ['MaterialOut',     '../models/MaterialOut.cjs'],
-  ['StockMovement',   '../models/StockMovement'],
-  ['PurchaseOrder',   '../models/PurchaseOrder'],
-  ['LeaveRequest',    '../models/LeaveRequest'],
-  ['MachineIssue',    '../models/MachineIssue'],
-  ['Announcement',    '../models/Announcement'],
-  ['Complaints',      '../models/Complaints'],
-  ['EmployeeFeedback','../models/EmployeeFeedback'],
-  ['QcRecord',        '../models/QcRecord'],
-  ['Production',      '../models/Production'],
-  ['ProductionPlan',  '../models/ProductionPlan'],
-  ['Notification',    '../models/Notification'],
-  ['Outbox',          '../models/Outbox'],
-  ['IdempotencyKey',  '../models/IdempotencyKey'],
-  ['EtaRatePosterior','../models/EtaRatePosterior'],
-  ['Counter',         '../models/Counter'], // doc numbering restarts at 1
-];
-
-async function main() {
-  if (!process.env.MONGO_URL) {
-    console.error('MONGO_URL is not set (config/.env). Aborting.');
-    process.exit(1);
-  }
-  // A maintenance script has no business (re)building indexes or creating
-  // collections — requiring ~35 models would otherwise fire a storm of
-  // index builds on connect.
-  mongoose.set('autoIndex', false);
-  mongoose.set('autoCreate', false);
-  await mongoose.connect(process.env.MONGO_URL, {});
-  const dbName = mongoose.connection.name;
-  console.log(`Connected to database: ${dbName}`);
-  console.log(EXECUTE ? '\n⚠️  EXECUTE MODE — data WILL be deleted.\n'
-                      : '\n🔍 DRY RUN — nothing will be deleted. Re-run with --yes to execute.\n');
-
-  // Masters whose derived counters get reset (loaded for both modes).
-  const Employee    = require('../models/Employee');
-  const Machine     = require('../models/Machine');
-  const Elastic     = require('../models/Elastic');
-  const RawMaterial = require('../models/RawMaterial');
-  const User        = require('../models/User');
-
-  let totalDocs = 0;
-  const plan = [];
-  for (const [label, file] of CLEAR) {
-    let Model;
-    try {
-      Model = require(file);
-      if (Model && typeof Model.countDocuments !== 'function' && Model.default) {
-        Model = Model.default; // ES-module style export (e.g. Complaints)
-      }
-      if (typeof Model.countDocuments !== 'function') throw new Error('module does not export a mongoose model');
-    }
-    catch (e) { console.warn(`  (skipping ${label} — model not loadable: ${e.message})`); continue; }
-    const count = await Model.countDocuments({});
-    totalDocs += count;
-    plan.push({ label, Model, count });
-  }
-
-  console.log('WILL CLEAR:');
-  for (const p of plan) console.log(`  ${p.label.padEnd(18)} ${p.count} docs`);
-  console.log(`  ${'TOTAL'.padEnd(18)} ${totalDocs} docs\n`);
-
-  const [users, emps, machines, elastics, materials] = await Promise.all([
-    User.countDocuments({}), Employee.countDocuments({}), Machine.countDocuments({}),
-    Elastic.countDocuments({}), RawMaterial.countDocuments({}),
-  ]);
-  console.log('WILL KEEP (documents untouched):');
-  console.log(`  Users ${users} · Employees ${emps} · Machines ${machines} · Elastics ${elastics} · RawMaterials ${materials}`);
-  console.log('  + Customers, Suppliers, Elastic groups, Costings, Payroll/Bonus/Notification settings\n');
-  console.log('WILL RESET on kept docs:');
-  console.log('  Employee.shifts[] · Machine.shifts[]/orderRunning/status · Elastic.quantityProduced/reservedStock');
-  console.log(RESET_STOCK
-    ? '  --reset-stock: Elastic.stock and RawMaterial.stock will be ZEROED\n'
-    : '  (Elastic.stock / RawMaterial.stock kept AS-IS — pass --reset-stock to zero them)\n');
-
-  if (!EXECUTE) {
-    console.log('Dry run complete. Nothing was changed.');
-    await mongoose.disconnect();
-    return;
-  }
-
-  console.log('Deleting…');
-  for (const p of plan) {
-    const r = await p.Model.deleteMany({});
-    console.log(`  cleared ${p.label} (${r.deletedCount})`);
-  }
-
-  console.log('Resetting derived fields on masters…');
-  await Employee.updateMany({}, { $set: { shifts: [] } });
-  await Machine.updateMany({}, { $set: { shifts: [], orderRunning: null, status: 'free' } });
-  const elasticReset = { quantityProduced: 0, reservedStock: 0 };
-  if (RESET_STOCK) elasticReset.stock = 0;
-  await Elastic.updateMany({}, { $set: elasticReset });
-  if (RESET_STOCK) await RawMaterial.updateMany({}, { $set: { stock: 0 } });
-
-  console.log('\n✅ Reset complete. Masters kept; transactions cleared; numbering restarts at 1.');
-  console.log('Restart the API so any in-memory state is fresh:  sudo systemctl restart jarvis');
-  await mongoose.disconnect();
-}
-
-main().catch((err) => { console.error('FAILED:', err); process.exit(1); });
+console.error(
+  '\nscripts/reset-for-production.js is retired and erased nothing.\n\n' +
+  'Its list of what to clear predates invoices and the books: it would have left\n' +
+  'every invoice in place and restarted their numbering at 1.\n\n' +
+  'Use one of these instead — each prints its plan first and changes nothing\n' +
+  'until you confirm the database by name:\n\n' +
+  '    node scripts/reset-to-masters.js            # keep the five master lists\n' +
+  '    node scripts/reset-transactional-data.js    # also keep employees and machines\n'
+);
+process.exit(1);

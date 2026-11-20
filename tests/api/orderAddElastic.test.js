@@ -119,6 +119,29 @@ describe('adding an elastic to an approved order', () => {
     expect(order.amendments[0].shortfalls[0]).toMatchObject({ name: 'Poly 300D', short: 0.3 });
   });
 
+  it('short of two yarns, names both before anybody forces it', async () => {
+    // The refusal stopped at the first yarn short. Forcing then drew down
+    // both — the second one unseen by the person who typed the reason.
+    const s = await seed({ weftStock: 0.2 });
+    const cover = await M.RawMaterial.create({ name: 'Spandex 40D', category: 'covering', price: 900, stock: 0.1 });
+    await M.Elastic.updateOne({ _id: s.b._id }, { $set: { spandexCovering: { id: cover._id, weight: 0.4 } } });
+
+    const refused = await add(s);
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe('INSUFFICIENT_STOCK');
+    const names = refused.body.details.shortfalls.map((x) => x.materialName).sort();
+    expect(names).toEqual(['Poly 300D', 'Spandex 40D']);
+    expect(refused.body.message).toMatch(/2 materials/);
+    expect(refused.body.message).toContain('Poly 300D');
+    expect(refused.body.message).toContain('Spandex 40D');
+    expect(refused.body.message).toMatch(/Force it with a reason/);
+    // The first is still where older screens look.
+    expect(names).toContain(refused.body.shortfall.materialName);
+    // Nothing drawn.
+    expect((await M.RawMaterial.findById(cover._id).lean()).stock).toBe(0.1);
+    expect((await M.RawMaterial.findById(s.weft._id).lean()).stock).toBe(0.2);
+  });
+
   it('needs a reason, an elastic not already on the order, and an approved order', async () => {
     const s = await seed();
     expect((await add(s, { auditReason: 'oops' })).body.message).toMatch(/needs a reason/);

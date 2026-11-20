@@ -77,6 +77,8 @@ const KEEP_OPERATIONAL = new Map([
   ['users',                'login accounts — dropping these locks everyone out'],
   ['customerusers',        'customer portal logins, belonging to kept customers'],
   ['costings',             'per-elastic costing, referenced by the kept elastics'],
+  ['materialgroups',       'the groups the kept raw materials are filed under'],
+  ['costsettings',         'configuration, not data'],
   ['elasticgroups',        'groupings of the kept elastics'],
   ['employeepayconfigs',   'pay setup for the kept employees'],
   ['payrollsettings',      'configuration, not data'],
@@ -84,6 +86,17 @@ const KEEP_OPERATIONAL = new Map([
   ['notificationsettings', 'configuration, not data'],
   ['pdftemplates',         'document layouts you designed'],
   ['bonusconfigs',         'configuration, not data'],
+]);
+
+/**
+ * Kept whatever is asked, --drop-users included. `changelog` is
+ * migrate-mongo's record of which migrations have run: empty it and the
+ * next `migrate-mongo up` replays every one of them against this
+ * database — among them the ones that rewrite who may open what. It was
+ * emptied here with everything else until it was named.
+ */
+const KEEP_ALWAYS = new Map([
+  ['changelog', 'which migrations have run — emptying it replays them all'],
 ]);
 
 /** Cleared unless --keep-counters: numbering restarts from 1. */
@@ -108,6 +121,7 @@ const OPTS = {
 const out = (...a) => { if (!OPTS.json) console.log(...a); };
 
 function keepReason(name) {
+  if (KEEP_ALWAYS.has(name)) return KEEP_ALWAYS.get(name);
   if (KEEP_MASTER.has(name)) return 'master data';
   if (!OPTS.dropUsers && KEEP_OPERATIONAL.has(name)) return KEEP_OPERATIONAL.get(name);
   if (OPTS.keepCounters && COUNTER_COLLECTIONS.has(name)) return 'document numbering (--keep-counters)';

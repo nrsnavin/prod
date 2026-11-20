@@ -42,7 +42,11 @@ async function main() {
 
   const User = require('../models/User');
   const normalized = email.trim().toLowerCase();
-  const existing = await User.findOne({ email: normalized }).select('+password');
+  // Whatever case it was saved in (as scripts/add-user.js does): looked
+  // up exactly, "Owner@…" was not found and a second account was made
+  // beside it.
+  const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const existing = await User.findOne({ email: { $regex: `^${escaped}$`, $options: 'i' } }).select('+password');
 
   if (existing && !UPDATE) {
     console.error(`A user with ${normalized} already exists (role: ${existing.role}).`);

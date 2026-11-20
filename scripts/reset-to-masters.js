@@ -62,6 +62,7 @@
 //    • settings and branding: document settings, PDF templates,
 //      notification / payroll / bonus / cost settings
 //    • costings — the cost sheets belong to the elastics they price
+//    • material groups — what the kept raw materials are filed under
 //  Any of these can be erased anyway with --wipe <collection>.
 // ══════════════════════════════════════════════════════════════════
 
@@ -79,8 +80,14 @@ const MASTERS = [
   'elasticgroups',
 ];
 
-/** Cost sheets are part of the elastic they price, not transactions. */
-const ATTACHED = ['costings'];
+/**
+ * Part of a master that stays, not transactions: cost sheets belong to
+ * the elastic they price, and material groups are what the raw materials
+ * are filed under. (The groups were erased here until they were named:
+ * every kept material then pointed at a group that was gone, and the
+ * recipe pickers fell back to a category nobody types.)
+ */
+const ATTACHED = ['costings', 'materialgroups'];
 
 /** Infrastructure. Erasing any of these breaks the system itself. */
 const SYSTEM = [

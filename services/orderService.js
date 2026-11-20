@@ -25,6 +25,34 @@ const { costOf } = require('../utils/materialValuation');
 const YarnLot = require('../models/YarnLot');
 const { validateEarmarks, allocatedByLot } = require('./lotAllocation');
 
+// Yarn is weighed to the gram. Every figure compared, drawn or left on the
+// shelf here goes through this, so that 999.6 − 0.8 is 998.8 and a shelf
+// holding 0.7999999999999999 is not "short" of 0.8.
+const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
+
+// What a refusal for want of stock says. One material reads as it always
+// has. Several are counted and each is named — the person reading this is
+// about to decide whether to force the approval, and forcing draws down
+// every one of them, not the first.
+const NAMED_IN_MESSAGE = 6;
+function shortfallMessage(shortfalls) {
+  const one = (s) => `${s.materialName} (have ${s.available}, need ${s.required})`;
+  if (shortfalls.length === 1) return `Insufficient stock for ${one(shortfalls[0])}`;
+  const named = shortfalls.slice(0, NAMED_IN_MESSAGE).map(one).join('; ');
+  const more = shortfalls.length - NAMED_IN_MESSAGE;
+  return `Insufficient stock for ${shortfalls.length} materials: ${named}${more > 0 ? `; and ${more} more` : ''}`;
+}
+
+// The refusal itself: `shortfall` is the first, where every screen has
+// always looked; `details.shortfalls` is all of them.
+function insufficientStock(shortfalls, suffix = '') {
+  const err = new ErrorHandler(`${shortfallMessage(shortfalls)}${suffix}`, 400);
+  err.code = 'INSUFFICIENT_STOCK';
+  err.shortfall = shortfalls[0];
+  err.details = { shortfalls };
+  return err;
+}
+
 /**
  * Write the dye-lot earmarks for an order, replacing whatever it held.
  *
@@ -134,35 +162,29 @@ async function approveOrderTxn(session, {
   }
 
   // ── Pre-flight stock check ──────────────────────────────────────
+  //
+  // EVERY material is looked at before anything is refused. This used to
+  // stop at the first one short and name only that: the admin was shown
+  // one yarn, typed a reason, forced it — and the forced approval then
+  // drew down every short material, the other two unseen. The trail
+  // recorded all of them; the person deciding had been told about one.
   const shortfalls = [];
   for (const rm of order.rawMaterialRequired) {
     const material = await RawMaterial.findById(rm.rawMaterial).session(session);
     if (!material) throw new ErrorHandler('Raw material not found', 404);
-    if (material.stock < rm.requiredWeight) {
-      if (!force) {
-        const err = new ErrorHandler(
-          `Insufficient stock for ${material.name} (have ${material.stock}, need ${rm.requiredWeight})`,
-          400
-        );
-        err.code = 'INSUFFICIENT_STOCK';
-        err.shortfall = {
-          materialId:   rm.rawMaterial.toString(),
-          materialName: material.name,
-          available:    material.stock,
-          required:     rm.requiredWeight,
-          short:        rm.requiredWeight - material.stock,
-        };
-        throw err;
-      }
+    const have = r3(material.stock);
+    const wanted = r3(rm.requiredWeight);
+    if (have < wanted) {
       shortfalls.push({
         materialId:   rm.rawMaterial.toString(),
         materialName: material.name,
-        available:    material.stock,
-        required:     rm.requiredWeight,
-        short:        rm.requiredWeight - material.stock,
+        available:    have,
+        required:     wanted,
+        short:        r3(wanted - have),
       });
     }
   }
+  if (!force && shortfalls.length > 0) throw insufficientStock(shortfalls);
   // Reason only demanded when force actually overrides something.
   if (force && shortfalls.length > 0) {
     const reason = String(forceReason || '').trim();
@@ -195,15 +217,19 @@ async function approveOrderTxn(session, {
     // precisely the case somebody comes back to this ledger to
     // understand, so the gap is recorded on the row rather than left
     // to be inferred from the balance.
-    const wanted  = Math.max(0, Number(rm.requiredWeight) || 0);
-    const applied = Math.max(0, Math.min(wanted, _oldStock));
-    material.stock = Math.max(0, _oldStock - wanted);
+    //
+    // To the gram, and the shelf SET to the figure worked out here: an
+    // in-place 999.6 − 0.8 leaves 998.8000000000001 behind, and the next
+    // order is then refused for a hair nobody can weigh.
+    const wanted  = r3(Math.max(0, Number(rm.requiredWeight) || 0));
+    const applied = r3(Math.max(0, Math.min(wanted, _oldStock)));
+    material.stock = r3(Math.max(0, _oldStock - wanted));
     stockoutSnapshots.push({
       materialId: material._id,
       oldStock:   _oldStock,
       newStock:   Number(material.stock),
     });
-    material.totalConsumption = (material.totalConsumption || 0) + applied;
+    material.totalConsumption = r3((material.totalConsumption || 0) + applied);
     await material.save({ session });
     await appendStockMovement(material._id, {
       // Negative: this debits stock. Stored positive for years, which
@@ -234,7 +260,7 @@ async function approveOrderTxn(session, {
       // moment a supplier raised theirs — on yarn bought months before.
       unitPrice:   costOf(material),
       remarks:     applied < wanted
-        ? `Order #${order.orderNo ?? ''} approval (forced — requested ${wanted}, short ${wanted - applied})`
+        ? `Order #${order.orderNo ?? ''} approval (forced — requested ${wanted}, short ${r3(wanted - applied)})`
         : `Order #${order.orderNo ?? ''} approval`,
     }], { session });
 
@@ -342,4 +368,4 @@ async function approveOrderTxn(session, {
   };
 }
 
-module.exports = { approveOrderTxn, applyLotAssignments };
+module.exports = { approveOrderTxn, applyLotAssignments, shortfallMessage };

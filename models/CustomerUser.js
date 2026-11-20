@@ -23,14 +23,12 @@ const CustomerUserSchema = new mongoose.Schema(
     },
     name: {
       type:     String,
+      // ("min" and "max" stood here: rules for numbers, ignored on text.)
       required: [true, "Please enter the contact's name"],
-      min:      2,
-      max:      100,
     },
     email: {
       type:     String,
       required: [true, "Please enter an email"],
-      max:      100,
       unique:   true,
       lowercase: true,
       trim:     true,

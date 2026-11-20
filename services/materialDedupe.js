@@ -23,6 +23,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const mongoose = require('mongoose');
+const { modelFor, modelNames } = require('../db/tenants');
 const RawMaterial = require('../models/RawMaterial');
 const ErrorHandler = require('../utils/ErrorHandler');
 const { rank } = require('../utils/fuzzyMatch');
@@ -101,8 +102,11 @@ const MODEL_FILES = ['Elastic', 'Order', 'PurchaseOrder', 'MaterialInward', 'Yar
 function referringModels() {
   for (const f of MODEL_FILES) { try { require(`../models/${f}`); } catch { /* optional */ } }
   try { require('../models/MaterialOut.cjs'); } catch { /* optional */ }
-  return mongoose.modelNames().filter((n) => n !== 'RawMaterial').map((n) => {
-    const model = mongoose.model(n);
+  // By name, through the request's database (db/tenants.js): fetched
+  // from mongoose itself these were the LIVE models, and a merge made in
+  // the sandbox moved production's records.
+  return modelNames().filter((n) => n !== 'RawMaterial').map((n) => {
+    const model = modelFor(n);
     return { model, paths: refPaths(model.schema) };
   }).filter((m) => m.paths.length);
 }
@@ -199,7 +203,7 @@ async function merge({ into, from, name, by }) {
       // of these holding the same number cannot both move to the one kept:
       // said here, by number, rather than as a duplicate-key error halfway.
       const models = referringModels();
-      const YarnLot = mongoose.models.YarnLot;
+      const YarnLot = modelFor('YarnLot');
       if (YarnLot) {
         const lots = await YarnLot.find({ rawMaterial: { $in: [keepId, ...fromIds] } }).select('rawMaterial lotNo').session(session).lean();
         const holders = new Map();
@@ -222,7 +226,7 @@ async function merge({ into, from, name, by }) {
       // One rate per supplier and material is live at a time
       // (models/SupplierRate.js). A supplier who quoted for two of these now
       // has two for the one kept: the later quotation stays live.
-      const SupplierRate = mongoose.models.SupplierRate;
+      const SupplierRate = modelFor('SupplierRate');
       if (SupplierRate) {
         const when = (r) => new Date(r.quotedOn || r.createdAt || 0).getTime();
         const live = await SupplierRate.find({ rawMaterial: keepId, live: true }).select('supplier quotedOn createdAt').session(session).lean();

@@ -142,10 +142,15 @@ const RawMaterialSchema = new mongoose.Schema(
     // meaning same-day, and the two must not read alike.
     leadTimeDays: { type: Number, default: null, min: 0 },
 
+    // No default. One supplier's id used to be written in here, so a
+    // material saved without one (the demo seed, an import) was filed
+    // under that supplier — on its buying list where the record exists,
+    // pointing at nobody where it does not. The form asks for a supplier
+    // (api/rawMaterialMaster.js); "none" is what the buying lists already
+    // read as "no supplier set".
     supplier: {
       type: mongoose.Types.ObjectId,
       ref: "Supplier",
-      default:"697e40c4e79c50e10e17ab61"
     },
 
     // min: 0 — schema-level floor so a stray negative from a missed

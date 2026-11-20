@@ -10,8 +10,9 @@
 //   • Per-elastic insert uses { ordered: false }, so we tolerate
 //     duplicate-key errors from rows that were inserted by a
 //     previous (possibly crashed) run.
-//   • Drift / quantityProduced are recomputed from the embedded
-//     source data every run, so they're always correct on retry.
+//   • quantityProduced is set only for an elastic whose rows this run
+//     moved; an elastic already moved is left as the ledger has it.
+//     Drift is reported every run.
 //
 //  Run from the repo root once MONGO_URI (or DB_URL) is set:
 //    node scripts/migrate-stock-movements.js
@@ -86,18 +87,22 @@ async function main() {
     } catch (err) {
       // BulkWriteError: some rows duplicate-keyed (already migrated
       // by a previous run). Mongo still inserts the rest.
+      // The driver keeps each row's code under `err` (it was read off the
+      // row itself, found nothing, called every duplicate "not a
+      // duplicate" and aborted — so a second run never got past the
+      // first elastic).
+      const codeOf = (w) => w.code ?? w.err?.code;
       const writeErrors = (err && err.writeErrors) || [];
-      duplicateCount = writeErrors.filter((w) => w.code === 11000).length;
-      const nonDup = writeErrors.filter((w) => w.code !== 11000);
-      if (nonDup.length > 0) {
+      duplicateCount = writeErrors.filter((w) => codeOf(w) === 11000).length;
+      const nonDup = writeErrors.filter((w) => codeOf(w) !== 11000);
+      if (nonDup.length > 0 || writeErrors.length === 0) {
         console.error(
           `  [${e.name}] aborting — non-duplicate write errors:`,
-          nonDup.map((w) => w.errmsg)
+          nonDup.map((w) => w.errmsg ?? w.err?.errmsg)
         );
         throw err;
       }
-      // BulkWriteError reports insertedCount on err.result.nInserted
-      insertedCount = (err.result && err.result.nInserted) || 0;
+      insertedCount = (err.result && (err.result.insertedCount ?? err.result.nInserted)) || 0;
     }
 
     if (insertedCount > 0) {
@@ -119,16 +124,21 @@ async function main() {
       );
     }
 
-    // Always recompute quantityProduced and drift from the embedded
-    // source (idempotent — same result every run).
-    const produced = rows
-      .filter((r) => r.type === "PACKING_INWARD")
-      .reduce((s, r) => s + (Number(r.quantity) || 0), 0);
+    // quantityProduced is set from the embedded rows ONLY for an elastic
+    // this run actually moved. The embedded rows stopped being written
+    // the day the ledger took over, so on any later run they are an old
+    // photograph: "recomputing" from them put every elastic's produced
+    // figure back to what it was on the day of the move.
+    if (insertedCount > 0) {
+      const produced = rows
+        .filter((r) => r.type === "PACKING_INWARD")
+        .reduce((s, r) => s + (Number(r.quantity) || 0), 0);
 
-    await Elastic.updateOne(
-      { _id: e._id },
-      { $set: { quantityProduced: Math.max(0, produced) } }
-    );
+      await Elastic.updateOne(
+        { _id: e._id },
+        { $set: { quantityProduced: Math.max(0, produced) } }
+      );
+    }
 
     const ledgerSum = rows.reduce((s, r) => s + (Number(r.quantity) || 0), 0);
     const drift     = (Number(e.stock) || 0) - ledgerSum;

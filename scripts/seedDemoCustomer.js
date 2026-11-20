@@ -93,33 +93,19 @@ const daysAhead = (n) => new Date(today.getTime() + n * 86_400_000);
 //  database it is about to touch and refuses one that looks live
 //  unless you say the name back to it.
 // ─────────────────────────────────────────────────────────────────
-const LIVE_HINTS = [/prod/i, /live/i, /mongodb\+srv:/i, /atlas/i];
-
-function dbNameOf(uri) {
-  // Everything after the last "/" and before any "?" — good enough for
-  // both mongodb:// and mongodb+srv:// forms.
-  const withoutQuery = String(uri).split("?")[0];
-  return withoutQuery.slice(withoutQuery.lastIndexOf("/") + 1) || "(default)";
-}
+// The check itself is shared with the other demo seed (scripts/lib/demoTarget.js).
+const demoTarget = require("./lib/demoTarget.js");
+const { dbNameOf } = demoTarget;
 
 function assertSafeTarget(uri) {
-  const name = dbNameOf(uri);
-  const looksLive = LIVE_HINTS.some((re) => re.test(uri));
-  const confirmed = process.env.DEMO_SEED_CONFIRM === name;
-
-  log("target database:", name);
-  if (!looksLive || confirmed) return name;
-
-  log("");
-  log("REFUSING TO RUN.");
-  log(`  "${uri.replace(/\/\/[^@]*@/, "//<credentials>@")}" looks like a live database.`);
-  log("  This script DELETES demo-prefixed machines, elastics, materials,");
-  log("  employees, users, shifts and orders before it reseeds them.");
-  log("");
-  log(`  If that is really what you want, re-run with:`);
-  log(`      DEMO_SEED_CONFIRM=${name} node scripts/seedDemoCustomer.js`);
-  log("");
-  throw new Error(`refusing to seed demo data into "${name}"`);
+  return demoTarget.assertSafeTarget(uri, {
+    log,
+    what: [
+      "This script DELETES demo-prefixed machines, elastics, materials,",
+      "employees, users, shifts and orders before it reseeds them.",
+    ],
+    command: "node scripts/seedDemoCustomer.js",
+  });
 }
 
 async function main() {

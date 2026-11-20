@@ -26,7 +26,7 @@
 //  someone on the floor would say it, not as a collection name.
 // ══════════════════════════════════════════════════════════════════
 
-const mongoose = require('mongoose');
+const { modelFor } = require('../db/tenants');
 
 /**
  * Every place a master id can appear, as {label, model, path}.
@@ -116,10 +116,11 @@ async function countUsage(kind, id) {
   const idsByLabel = new Map();
 
   for (const ref of refs) {
-    let Model;
-    try {
-      Model = mongoose.model(ref.model);
-    } catch {
+    // Through the request's database (db/tenants.js): asked of mongoose
+    // itself this was the live model, so "is it used?" from the sandbox
+    // was answered about production.
+    const Model = modelFor(ref.model);
+    if (!Model) {
       // The model is not registered in this process. Skipping is the
       // right call — but silently deciding "unused" because a model
       // failed to load would authorise a delete on the strength of a

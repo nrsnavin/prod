@@ -105,7 +105,7 @@ async function lotsForJob(jobId, { elasticId = null } = {}) {
     (p.beams || []).flatMap((b) => (b.sections || []).map((s) => idOf(s.yarnLot)))
   ).filter(Boolean))];
   const lotDocs = planLotIds.length
-    ? await mongoose.model('YarnLot').find({ _id: { $in: planLotIds } })
+    ? await require('../models/YarnLot').find({ _id: { $in: planLotIds } })
         .select('lotNo shade').lean()
     : [];
   const lotById = new Map(lotDocs.map((l) => [String(l._id), l]));

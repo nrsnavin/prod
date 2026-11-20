@@ -4,16 +4,15 @@ const crypto = require("crypto");
 
 const userSchema = new mongoose.Schema(
   {
+    // ("min" and "max" stood on the name and the email: rules for
+    // numbers, ignored on text. The routes check what is typed.)
     name: {
       type: String,
-      min: 2,
-      max: 100,
       required: [true, "Please enter your name!"],
     },
     email: {
       type: String,
       required: [true, "Please enter your email!"],
-      max: 50,
       unique: true,
     },
     password: {

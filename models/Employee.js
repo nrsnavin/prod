@@ -11,11 +11,10 @@ const OFFBOARD_REASONS = ["resigned", "terminated", "absconded", "retired", "con
 
 const EmployeeSchema = new mongoose.Schema(
   {
+    // ("min" and "max" stood here: rules for numbers, ignored on text.)
     name: {
       type: String,
       required: true,
-      min: 2,
-      max: 100,
     },
     phoneNumber: {
       type: String,

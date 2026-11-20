@@ -61,16 +61,17 @@ const PackingSchema = new mongoose.Schema(
       type: String,
     },
 
+    // Who checked and who packed. The route asks for both; neither has
+    // a default — one employee's id used to be written in here, so a
+    // packing saved any other way was filed under that one person.
     checkedBy: {
       type: mongoose.Types.ObjectId,
       ref: "Employee",
-      default: "697755809a83e2490a7f3855",
     },
 
     packedBy: {
       type: mongoose.Types.ObjectId,
       ref: "Employee",
-      default: "697755809a83e2490a7f3855",
     },
   },
   { timestamps: true }

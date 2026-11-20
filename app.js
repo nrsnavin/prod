@@ -945,9 +945,21 @@ app.post("/api/v2/notify/cron/run-close-checklist", async (req, res) => {
     const checklist = await insights.closeChecklist(month);
     const text = insights.checklistText(checklist, (await getDocumentSettings()).companyName || "Balu Elastics");
     const settings = await NotificationSettings.load();
-    const sent = [];
-    if (settings.enabled) for (const to of settings.recipients || []) sent.push(await sendWhatsApp(to, text));
-    return res.json({ success: true, month, preview: text, sent: sent.length });
+    // `sent` is how many went. It was how many were TRIED: a send the
+    // provider refused, or one made on a server with no WhatsApp set up,
+    // was counted with the rest, and the scheduler's log read "sent: 2"
+    // on a morning nobody received anything.
+    let sent = 0; let tried = 0;
+    const notSent = [];
+    if (settings.enabled) {
+      for (const to of settings.recipients || []) {
+        tried += 1;
+        const r = await sendWhatsApp(to, text);
+        if (r?.sent) sent += 1;
+        else notSent.push({ to, reason: r?.error || (r?.dryRun ? "WhatsApp is not set up on this server" : "not sent") });
+      }
+    }
+    return res.json({ success: true, month, preview: text, sent, tried, notSent });
   } catch (err) {
     return require("./utils/routeError").sendError(req, res, err);
   }

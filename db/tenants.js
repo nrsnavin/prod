@@ -276,6 +276,42 @@ function tenantAware(model) {
   });
 }
 
+// ── A model by name ──────────────────────────────────────────────
+const byName = new Map();
+
+/**
+ * The model called `name`, for whichever request is asking.
+ *
+ * `mongoose.model('YarnLot')` and `mongoose.models.YarnLot` hand back
+ * the model as it was first registered: bound to the primary database,
+ * whoever is asking. Code that fetched its models that way worked on
+ * LIVE records from inside a sandbox session — merging two materials in
+ * the sandbox re-pointed production's dye lots, purchase orders and
+ * recipes (a sandbox is a copy, so the ids match), and a sandbox user's
+ * reports were production's rows.
+ *
+ * This is the same routed model a `require('../models/YarnLot')` gives.
+ * Use it wherever a model is reached by a name held in a variable; when
+ * the name is known, require the file.
+ *
+ * @returns the model, or undefined when none of that name is registered
+ */
+function modelFor(name) {
+  const base = mongoose.models[name];
+  if (!base) return undefined;
+  let routed = byName.get(name);
+  // Re-made if the registration behind the name has changed (tests
+  // re-register models between cases).
+  if (!routed || routed.__baseModel !== base) {
+    routed = tenantAware(base);
+    byName.set(name, routed);
+  }
+  return routed;
+}
+
+/** Every registered model's name — the list `modelFor` can answer for. */
+const modelNames = () => Object.keys(mongoose.models);
+
 // ── Installation ─────────────────────────────────────────────────
 let installed = false;
 
@@ -314,6 +350,8 @@ module.exports = {
   sandboxIsPrimary,
   currentDb,
   connectionFor,
+  modelFor,
+  modelNames,
   runInDb,
   runOnPrimary,
   PINNED_TO_PRIMARY,

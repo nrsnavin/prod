@@ -37,7 +37,22 @@ function uploadProblem(err) {
   return ["The upload could not be read. Try again.", 400];
 }
 
-module.exports = (err, req, res, next) => {
+const GENERIC = "Something went wrong on the server, and it has been logged.";
+const newRef = () => crypto.randomBytes(4).toString("hex").toUpperCase();
+const withRef = (said, ref) => `${said} Try again — if it keeps happening, give the administrator this reference: ${ref}.`;
+
+function respond(err, req, res, next) {
+  // Something thrown that is not an error at all (a bare string).
+  if (!err || typeof err !== "object") err = new Error(String(err));
+
+  // The answer has already started (a download that failed part-way):
+  // there is nothing left to say on it. Logged, and handed to Express,
+  // which closes the connection.
+  if (res.headersSent) {
+    reportError(err, req);
+    return next(err);
+  }
+
   err.statusCode = err.statusCode || 500;
   err.message = err.message || "Internal server Error";
 
@@ -51,11 +66,6 @@ module.exports = (err, req, res, next) => {
     err.code = code;
   }
 
-  // Report genuine server faults (5xx) to the error sink BEFORE the
-  // status-remapping below rewrites some of them down to 4xx. A stale
-  // read that a route surfaced as a 500 is a real fault worth seeing;
-  // a VersionError that becomes a 409 is expected traffic and is not
-  // reported. Reporting is fail-open and never touches the response.
   // A document that failed its schema (a required field left out, a value
   // out of range) is the caller's mistake, not a crash: said plainly, 400.
   if (err.name === "ValidationError" && err.errors && err.statusCode === 500) {
@@ -67,10 +77,9 @@ module.exports = (err, req, res, next) => {
     err = new ErrorHandler(message, 400);
   }
 
-  // Kept before any of the branches below swap `err` for a plainer one.
+  // Kept before any of the branches below swap `err` for a plainer one:
+  // it is what gets logged, and what says whether the fault is ours.
   const fault = err;
-  const ref = err.statusCode >= 500 ? crypto.randomBytes(4).toString("hex").toUpperCase() : null;
-  if (ref) reportError(err, req, ref);
 
   // Mongoose optimistic-lock failure (doc.increment() + save raced a
   // concurrent write). Same meaning as an expectedVersion mismatch:
@@ -110,9 +119,16 @@ module.exports = (err, req, res, next) => {
     );
   }
 
-  // Duplicate key error
+  // Duplicate key error. One save names the field on the error itself;
+  // a save of several rows at once names it on the first row refused, or
+  // nowhere — and reading the keys of nothing threw from in here.
   if (err.code === 11000) {
-    const message = `Duplicate key ${Object.keys(err.keyValue)} Entered`;
+    const first = err.writeErrors?.[0];
+    const dup = err.keyValue || first?.err?.keyValue || first?.keyValue;
+    const fields = dup && typeof dup === "object" ? Object.keys(dup) : [];
+    const message = fields.length
+      ? `Duplicate key ${fields} Entered`
+      : "That is already on record, so it was not saved again.";
     err = new ErrorHandler(message, 400);
   }
 
@@ -127,6 +143,15 @@ module.exports = (err, req, res, next) => {
     err = new ErrorHandler("Your session has expired. Please login again.", 401);
   }
 
+  // Only now is it known what this is, so only now is it reported. This
+  // used to run first, when everything without a status was still a 500:
+  // every stale form (409), id that is not one (400), entry that already
+  // exists (400) and ended session (401) was written to the error log
+  // with a stack, and the real faults were somewhere among them.
+  // Reporting is fail-open and never touches the response.
+  const ref = err.statusCode >= 500 ? newRef() : null;
+  if (ref) reportError(fault, req, ref);
+
   // Still a 500 after all of that, and not something a route said on
   // purpose: our fault. The reference, not the text.
   // (`publicMessage`: a route that catches its own errors names what it
@@ -134,12 +159,12 @@ module.exports = (err, req, res, next) => {
   if (err.statusCode >= 500 && err === fault && (isInternalFault(fault) || fault.publicMessage)) {
     const said = fault.publicMessage
       ? `${String(fault.publicMessage).replace(/[.!\s]+$/, "")}.`
-      : "Something went wrong on the server, and it has been logged.";
+      : GENERIC;
     return res.status(500).json({
       success: false,
       code: "SERVER_ERROR",
       ref,
-      message: `${said} Try again — if it keeps happening, give the administrator this reference: ${ref}.`,
+      message: withRef(said, ref),
     });
   }
 
@@ -153,9 +178,31 @@ module.exports = (err, req, res, next) => {
   if (typeof routeCode === "string") payload.code = routeCode;
   if (routeShortfall) payload.shortfall = routeShortfall;
   if (typeof routeCode === "string" && routeDetails) payload.details = routeDetails;
-  if (ref && err.statusCode >= 500) payload.ref = ref;
+  if (ref) payload.ref = ref;
 
-  res.status(err.statusCode).json(payload);
+  return res.status(err.statusCode).json(payload);
+}
+
+// ── The handler must not be the thing that fails ───────────────────
+// Whatever is thrown in here goes to Express's own last-resort page,
+// which prints the stack and the server's file paths unless NODE_ENV is
+// exactly "production" — and this server runs as "PRODUCTION". So a
+// failure of the handler is answered here too: the one sentence, a
+// reference, and both errors on the log under it.
+module.exports = (err, req, res, next) => {
+  try {
+    return respond(err, req, res, next);
+  } catch (inner) {
+    const ref = newRef();
+    reportError(inner, req, ref);
+    reportError(err, req, ref);
+    if (res.headersSent) return next(inner);
+    try {
+      return res.status(500).json({ success: false, code: "SERVER_ERROR", ref, message: withRef(GENERIC, ref) });
+    } catch (_) {
+      return next(inner);
+    }
+  }
 };
 
 module.exports.isInternalFault = isInternalFault;
