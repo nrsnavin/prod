@@ -5,8 +5,11 @@
  * algorithm.
  */
 
+const factoryDay = require('./factoryDay');
+
+const DAY_MS = 86_400_000;
 const SHIFTS_PER_DAY = 2;                 // DAY + NIGHT (both 12h per the user)
-const WEEKLY_OFF     = [0];               // Sunday = 0 in JS Date.getDay()
+const WEEKLY_OFF     = [0];               // Sunday = 0, as Date.getUTCDay() numbers the week
 const HOLIDAYS       = [];                // YYYY-MM-DD strings — empty for v1, wired for later
 
 // Fixed lead-time buffers (working days) for the non-weaving stages.
@@ -39,37 +42,56 @@ const RATE_LOOKBACK_DAYS = 30;
 const WHATIF_MAX_MACHINES = 6;
 
 // ── working-day arithmetic ────────────────────────────────────────
+//
+// On the calendar in India, a day at a time. These took whatever Date
+// they were handed and stepped it with the server's own clock, time of
+// day and all. Two things followed. An estimate came out as "24 November,
+// 14:10" and was compared with a promise of "24 November" (midnight): an
+// order expected on the day it was promised was fourteen hours late, and
+// shown as late by a working day. And between midnight and 05:30 in
+// India the server is still on yesterday, so the first hours of a Sunday
+// were a working Saturday, and of a Monday a Sunday off.
+//
+// A day here is the calendar day in India, kept at UTC midnight like
+// every other calendar date (utils/factoryDay.js).
+const dayOf = (d) => factoryDay.calendarDay(d);
+/** No week is all rest days; a setting that says so must not hang the server. */
+const MAX_SPAN_DAYS = 3660;
+
 function isWorkingDay(d, weeklyOff = WEEKLY_OFF, holidays = HOLIDAYS) {
-  if (weeklyOff.includes(d.getDay())) return false;
-  const iso = d.toISOString().slice(0, 10);
-  if (holidays.includes(iso)) return false;
-  return true;
+  const day = dayOf(d);
+  if (!day) return false;
+  if (weeklyOff.includes(day.getUTCDay())) return false;
+  return !holidays.includes(day.toISOString().slice(0, 10));
 }
 
 /**
- * Advance `from` by `workingDays` working days (skipping weekly off +
- * holidays). Returns a fresh Date — does not mutate `from`.
+ * The day `workingDays` working days after the day `from` falls on
+ * (skipping the weekly off and holidays). A fresh Date — `from` is not
+ * changed — at that day's UTC midnight.
  */
 function addWorkingDays(from, workingDays, weeklyOff = WEEKLY_OFF, holidays = HOLIDAYS) {
-  const d = new Date(from);
+  let d = dayOf(from);
+  if (!d) return new Date(NaN);
   let remaining = Math.ceil(workingDays);
-  while (remaining > 0) {
-    d.setDate(d.getDate() + 1);
+  for (let i = 0; remaining > 0 && i < MAX_SPAN_DAYS; i++) {
+    d = new Date(d.getTime() + DAY_MS);
     if (isWorkingDay(d, weeklyOff, holidays)) remaining -= 1;
   }
   return d;
 }
 
 /**
- * Count working days strictly between two dates (excludes `from`,
- * includes any working `to`). Used for back-tests.
+ * The working days after the day `from` falls on, up to and including
+ * the day `to` falls on: none when they are the same day, or `to` is
+ * the earlier.
  */
 function workingDaysBetween(from, to, weeklyOff = WEEKLY_OFF, holidays = HOLIDAYS) {
-  if (!from || !to || to <= from) return 0;
-  const d = new Date(from);
+  const a = from ? dayOf(from) : null;
+  const b = to ? dayOf(to) : null;
+  if (!a || !b || b <= a) return 0;
   let n = 0;
-  while (d < to) {
-    d.setDate(d.getDate() + 1);
+  for (let d = new Date(a.getTime() + DAY_MS), i = 0; d <= b && i < MAX_SPAN_DAYS; d = new Date(d.getTime() + DAY_MS), i++) {
     if (isWorkingDay(d, weeklyOff, holidays)) n += 1;
   }
   return n;

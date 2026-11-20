@@ -17,13 +17,9 @@ const SupplierBill = require('../models/SupplierBill');
 const Supplier = require('../models/Supplier');
 const { getDocumentSettings } = require('./documentSettings');
 const { stateName, stateCodeFromGstin, amountInWords } = require('./gst');
+const cal = require('../utils/bizDates');
 
-const ddmmyyyy = (d) => {
-  if (!d) return '—';
-  const t = new Date(d);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${p(t.getDate())}/${p(t.getMonth() + 1)}/${t.getFullYear()}`;
-};
+const ddmmyyyy = (d) => cal.dmy(d, '/') || '—';   // the day in India, not the server's
 
 async function asInvoice(note) {
   const settings = await getDocumentSettings();

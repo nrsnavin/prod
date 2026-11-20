@@ -6,11 +6,22 @@
 // router because the quote numbers itself the same way, and two copies
 // of this would eventually disagree about April — which is exactly the
 // month where being wrong renumbers a whole year of documents.
+//
+// The year turns at midnight IN INDIA. This read the server's own
+// clock, which is kept on UTC: a challan raised in the first five and a
+// half hours of 1 April — the night shift's despatch — took the next
+// number of last year's series.
+
+const cal = require('./bizDates');
+
+/** The year the financial year of `at` begins in, by the calendar in India. */
+function startYear(at) {
+  const p = cal.parts(at) || cal.parts();
+  return p.m >= 4 ? p.y : p.y - 1;
+}
 
 function currentFinancialYear(at = new Date()) {
-  const month   = at.getMonth();          // 0 = January, 3 = April
-  const year    = at.getFullYear();
-  const fyStart = month >= 3 ? year : year - 1;
+  const fyStart = startYear(at);
   return `${String(fyStart).slice(-2)}/${String(fyStart + 1).slice(-2)}`;
 }
 
@@ -20,9 +31,7 @@ function currentFinancialYear(at = new Date()) {
  * with slashes inside INV/.../0001 is one slash too many.
  */
 function financialYearLong(at = new Date()) {
-  const month   = at.getMonth();
-  const year    = at.getFullYear();
-  const fyStart = month >= 3 ? year : year - 1;
+  const fyStart = startYear(at);
   return `${fyStart}-${String(fyStart + 1).slice(-2)}`;
 }
 

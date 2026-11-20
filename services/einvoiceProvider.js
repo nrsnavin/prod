@@ -34,6 +34,7 @@
 const DocumentSettings = require('../models/DocumentSettings');
 const ErrorHandler = require('../utils/ErrorHandler');
 const { outboundUrlProblem } = require('../utils/outboundUrl');
+const factoryDay = require('../utils/factoryDay');
 
 const failure = (message, code, status = 409) => {
   const err = new ErrorHandler(message, status);
@@ -49,16 +50,21 @@ const pick = (obj, ...keys) => {
   return undefined;
 };
 
-/** Parse "dd/mm/yyyy HH:MM:SS" (the portal's AckDt) or anything Date can. */
+/**
+ * When the portal acknowledged it. "dd/mm/yyyy HH:MM:SS" (the portal's
+ * AckDt) and "2026-11-13 10:30:00" (ClearTax) are the portal's own clock,
+ * which is India's; anything else is whatever Date can read. The first
+ * was read on the server's clock instead — five and a half hours late on
+ * a server kept on UTC — and a date that does not exist was rolled into
+ * the next month. Now (the moment we were told) when it cannot be read.
+ */
 function readAckDate(v) {
   if (!v) return new Date();
-  const m = /^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}):(\d{2}))?/.exec(String(v));
-  if (m) return new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0));
-  // "2026-11-13 10:30:00" (ClearTax): the portal's clock, India time.
-  const iso = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})$/.exec(String(v));
-  if (iso) return new Date(`${iso[1]}T${iso[2]}+05:30`);
-  const d = new Date(v);
-  return Number.isNaN(d.getTime()) ? new Date() : d;
+  const s = String(v).trim();
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}):(\d{2}))?/.exec(s);
+  const iso = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})$/.exec(s);
+  const wall = m ? `${m[3]}-${m[2]}-${m[1]}T${m[4] || '00'}:${m[5] || '00'}:${m[6] || '00'}` : iso ? `${iso[1]}T${iso[2]}` : null;
+  return factoryDay.moment(wall || s) || new Date();
 }
 
 /** The portal's reply, whatever casing the proxy used. */

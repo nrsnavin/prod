@@ -14,16 +14,13 @@
 
 const { isGstin, round2 } = require('./gst');
 const exportSupply = require('./exportSupply');
+const cal = require('../utils/bizDates');
 
 // GST unit quantity codes for the units the challans use.
 const UQC = { m: 'MTR', mtr: 'MTR', meter: 'MTR', metre: 'MTR', pcs: 'PCS', pc: 'PCS', kg: 'KGS', kgs: 'KGS', nos: 'NOS', set: 'SET', roll: 'ROL' };
 const uqc = (unit) => UQC[String(unit || '').trim().toLowerCase()] || 'OTH';
 
-const ddmmyyyy = (d) => {
-  const t = new Date(d);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${p(t.getDate())}/${p(t.getMonth() + 1)}/${t.getFullYear()}`;
-};
+const ddmmyyyy = (d) => cal.dmy(d, '/');   // the day in India, not the server's
 
 const num = (n) => round2(n);
 

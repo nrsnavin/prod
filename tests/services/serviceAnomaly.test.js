@@ -24,7 +24,7 @@ process.env.NODE_ENV = 'test';
 const {
   median, mad, robustScore, issueKey, severityFrom,
   repeatServices, technicianCost, issueAcrossMachines,
-  duplicateBills, costMismatch, monthsBetween,
+  duplicateBills, costMismatch, monthsBetween, monthKey,
   MAD_THRESHOLD,
 } = require('../../services/serviceAnomaly');
 
@@ -311,6 +311,26 @@ describe('a bill filed twice', () => {
     ];
     expect(duplicateBills(logs)[0].innocent).toMatch(/uploaded twice|several machines/i);
   });
+
+  it('does not say "the same vendor" of bills that name none', () => {
+    // A number alone — "101" — is on many vendors' bill books. With no
+    // vendor written on either, two of them are a likeness, not a match:
+    // it used to be reported, at the top of the list, as "the same bill
+    // number from the same vendor".
+    const logs = [
+      log({ machineId: 'm1', machineID: 'LOOM-01', bills: [bill({ vendor: '', billNo: '101' })] }),
+      log({ machineId: 'm2', machineID: 'LOOM-02', bills: [bill({ vendor: '  ', billNo: '101', billDate: new Date('2026-05-09') })] }),
+    ];
+    const found = duplicateBills(logs).find((f) => f.kind === 'duplicate-bill-no');
+    expect(found.detail).not.toMatch(/same vendor/i);
+    expect(found.detail).toMatch(/no vendor is written on/i);
+    expect(found.severity).toBeLessThan(0.8);
+    expect(found.innocent).toMatch(/different vendors/i);
+    // Named, it is what it was.
+    const named = duplicateBills([log({ machineId: 'm1', bills: [bill()] }), log({ machineId: 'm2', bills: [bill()] })]).find((f) => f.kind === 'duplicate-bill-no');
+    expect(named.detail).toMatch(/from Comez Spares/);
+    expect(named.severity).toBeGreaterThan(0.8);
+  });
 });
 
 describe('the logged cost against the bills', () => {
@@ -358,5 +378,18 @@ describe('the months a chart is drawn over', () => {
   it('gives a single month for a window inside one', () => {
     expect(monthsBetween(new Date('2026-03-02'), new Date('2026-03-28')))
       .toEqual(['2026-03']);
+  });
+
+  it('a month begins at midnight in India, for the window and for a service alike', () => {
+    // 01:30 on 1 September and 00:30 on 1 November there: still August and
+    // October on a server kept on UTC, which is where these were read.
+    const from = new Date('2026-08-31T20:00:00Z');
+    const to = new Date('2026-10-31T19:00:00Z');
+    expect(monthsBetween(from, to)).toEqual(['2026-09', '2026-10', '2026-11']);
+    expect(monthKey(from)).toBe('2026-09');
+    expect(monthKey(to)).toBe('2026-11');
+    // A calendar date is in its own month.
+    expect(monthKey(new Date('2026-09-01T00:00:00Z'))).toBe('2026-09');
+    expect(monthKey(new Date('2026-08-31T00:00:00Z'))).toBe('2026-08');
   });
 });

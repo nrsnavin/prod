@@ -17,6 +17,7 @@ const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
 const { amountInWords } = require('../services/gst');
+const cal = require('./bizDates');
 
 const INK = '#111111';
 const MUTED = '#555555';
@@ -28,12 +29,9 @@ const FONTS = {
 };
 const hasFonts = () => { try { return fs.existsSync(FONTS.regular) && fs.existsSync(FONTS.bold); } catch { return false; } };
 
-const dmy = (d) => {
-  if (!d) return '—';
-  const t = new Date(d);
-  const p = (n) => String(n).padStart(2, '0');
-  return `${p(t.getDate())}/${p(t.getMonth() + 1)}/${t.getFullYear()}`;
-};
+// The day it is in India (utils/bizDates.js): a ledger printed "to today"
+// between midnight and 05:30 used to say yesterday.
+const dmy = (d) => cal.dmy(d, '/') || '—';
 const money = (n) => (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 /** A page with our letterhead and a title; returns the drawing helpers. */

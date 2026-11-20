@@ -48,6 +48,8 @@ const fs = require('fs');
 const PDFDocument = require('pdfkit');
 const QRCode = require('qrcode');
 const { stateName } = require('../services/gst');
+const cal = require('./bizDates');
+const factoryDay = require('./factoryDay');
 
 // ── A light spreadsheet ──────────────────────────────────────────
 const INK = '#1E2A36';
@@ -88,19 +90,18 @@ const qty = (n) => (Number(n) || 0).toLocaleString('en-IN', { minimumFractionDig
 const pct = (n) => `${Number(n) || 0}%`;
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const r3 = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
-const ddmmyyyy = (d) => {
-  if (!d) return '—';
-  const t = new Date(d);
-  if (Number.isNaN(t.getTime())) return '—';
-  const p = (x) => String(x).padStart(2, '0');
-  return `${p(t.getDate())}/${p(t.getMonth() + 1)}/${t.getFullYear()}`;
-};
+// A date on the invoice is the day it is in India: a calendar date as
+// itself, and a moment — the Ack Date, when the portal acknowledged the
+// IRN — as the day and the time there. These read the server's own
+// clock, which is kept on UTC: an acknowledgement at 01:45 on the 14th
+// was printed "13/11/2026 20:15".
+const ddmmyyyy = (d) => cal.dmy(d, '/') || '—';
 const when = (d) => {
-  if (!d) return '—';
-  const t = new Date(d);
-  if (Number.isNaN(t.getTime())) return '—';
+  const t = d ? new Date(d) : null;
+  if (!t || Number.isNaN(t.getTime())) return '—';
+  const clock = new Date(t.getTime() + factoryDay.IST);
   const p = (x) => String(x).padStart(2, '0');
-  return `${ddmmyyyy(t)} ${p(t.getHours())}:${p(t.getMinutes())}`;
+  return `${ddmmyyyy(t)} ${p(clock.getUTCHours())}:${p(clock.getUTCMinutes())}`;
 };
 const titleCase = (s) => String(s || '').toLowerCase().replace(/(^|\s)\S/g, (c) => c.toUpperCase());
 

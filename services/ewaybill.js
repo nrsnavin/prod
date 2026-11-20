@@ -19,7 +19,7 @@ const { getProvider } = require('./einvoiceProvider');
 
 const LIMIT = 50000;
 const MODE = { road: '1', rail: '2', air: '3', ship: '4' };
-const ddmmyyyy = (d) => { const x = new Date(d); return `${String(x.getDate()).padStart(2, '0')}/${String(x.getMonth() + 1).padStart(2, '0')}/${x.getFullYear()}`; };
+const ddmmyyyy = (d) => require('../utils/bizDates').dmy(d, '/');   // the day in India, not the server's
 
 /** Value of the goods on the document, as the rule counts it (with tax). */
 const valueOf = (doc) => Number(doc.totals?.grand ?? doc.totalAmount ?? 0) || 0;

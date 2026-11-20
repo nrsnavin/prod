@@ -60,6 +60,7 @@
 
 const Machine = require('../models/Machine');
 const { indiaDay } = require('../utils/indiaLabel');
+const cal = require('../utils/bizDates');
 const MachineServiceBill = require('../models/MachineServiceBill');
 const ServiceAnomalyFeedback = require('../models/ServiceAnomalyFeedback');
 
@@ -447,18 +448,27 @@ function duplicateBills(logs) {
 
   for (const [key, rows] of byNumber) {
     if (rows.length < 2) continue;
+    // The key is vendor and number. With no vendor written on the bills
+    // it is the number alone, and "101" is on many vendors' bill books:
+    // a likeness to look at, not the near-fact a named vendor's repeated
+    // number is. It used to be reported as "from the same vendor" all the
+    // same, at the top of the list.
+    const vendor = String(rows[0].bill.vendor || '').trim();
+    const machineCount = new Set(rows.map((r) => r.log.machineID)).size;
+    const total = `₹${Math.round(rows.reduce((s, r) => s + (Number(r.bill.amount) || 0), 0)).toLocaleString('en-IN')} in total.`;
     findings.push({
       kind:    'duplicate-bill-no',
       subject: key,
-      severity: 0.9,
+      severity: vendor ? 0.9 : 0.5,
       title:   `Bill ${rows[0].bill.billNo} is filed ${rows.length} times`,
-      detail:
-        `The same bill number from ${rows[0].bill.vendor || 'the same vendor'} ` +
-        `appears against ${new Set(rows.map((r) => r.log.machineID)).size} machine(s), ` +
-        `₹${Math.round(rows.reduce((s, r) => s + (Number(r.bill.amount) || 0), 0)).toLocaleString('en-IN')} in total.`,
-      innocent:
-        'Usually the same document uploaded twice, or one invoice that ' +
-        'genuinely covered several machines and was filed against each.',
+      detail: vendor
+        ? `The same bill number from ${vendor} appears against ${machineCount} machine(s), ${total}`
+        : `The same bill number appears against ${machineCount} machine(s), ${total} No vendor is written on these bills, so they may not be one vendor's.`,
+      innocent: vendor
+        ? 'Usually the same document uploaded twice, or one invoice that ' +
+          'genuinely covered several machines and was filed against each.'
+        : 'Bills from different vendors can carry the same number. Write the ' +
+          'vendor on each: if it is one vendor, it is usually the same document uploaded twice.',
       evidence: rows.map((r) => ({
         logId: r.log.logId, machineID: r.log.machineID,
         billNo: r.bill.billNo, vendor: r.bill.vendor,
@@ -576,8 +586,13 @@ async function analyse(windowDays = 365) {
 //  WHAT IS BEING SPENT
 // ══════════════════════════════════════════════════════════════════
 
-/** "2026-08" — the bucket a date falls in. */
-const monthKey = (d) => new Date(d).toISOString().slice(0, 7);
+/**
+ * "2026-08" — the month a date falls in, in India. A service log with no
+ * date given is stamped the moment it was written, and the window's two
+ * ends are moments: read as UTC, the first five and a half hours of a
+ * month were the month before.
+ */
+const monthKey = (d) => cal.monthKey(d);
 
 /**
  * Every month in the window, INCLUDING the ones with no spending.
@@ -587,14 +602,10 @@ const monthKey = (d) => new Date(d).toISOString().slice(0, 7);
  * quiet months are the shape of the data, not missing data.
  */
 function monthsBetween(from, to) {
-  const out = [];
-  const cursor = new Date(from.getFullYear(), from.getMonth(), 1);
-  const end = new Date(to.getFullYear(), to.getMonth(), 1);
-  while (cursor <= end) {
-    out.push(cursor.toISOString().slice(0, 7));
-    cursor.setMonth(cursor.getMonth() + 1);
-  }
-  return out;
+  // The same calendar as monthKey, or a log falls between the buckets.
+  // (This built its months on the server's local calendar and named them
+  // in UTC: one month out, every month, on a server kept on India time.)
+  return cal.monthsBetween(from, to);
 }
 
 /**

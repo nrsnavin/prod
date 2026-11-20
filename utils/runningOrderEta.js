@@ -25,6 +25,7 @@
 // jobs share it (post-weaving stages are not per-job).
 
 const C = require('./etaConfig.js');
+const factoryDay = require('./factoryDay');
 
 const FINISH_BUFFER_WORKING_DAYS = C.STAGE_BUFFER_DAYS.finish;
 
@@ -161,12 +162,14 @@ function estimateRunningOrderEta({
   // Risk vs promised supplyDate.
   let risk = null;
   if (supplyDate) {
+    // Day against day: expected on the day it was promised is on time.
     const promised = new Date(supplyDate);
     const lateDays = C.workingDaysBetween(promised, expectedDate, wOff, hol);
+    const late = factoryDay.daysBetween(promised, expectedDate) > 0;
     risk = {
       supplyDate:      promised,
-      late:            expectedDate > promised,
-      lateWorkingDays: expectedDate > promised ? lateDays : 0,
+      late,
+      lateWorkingDays: late ? lateDays : 0,
     };
   }
 

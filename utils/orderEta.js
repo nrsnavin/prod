@@ -27,6 +27,7 @@
  */
 
 const C = require('./etaConfig.js');
+const factoryDay = require('./factoryDay');
 
 // ── Rate engine ───────────────────────────────────────────────────
 //
@@ -81,7 +82,7 @@ function effectiveRate({ aggregates, elasticId }) {
 // ── ETA for a single (M machines dedicated) scenario ──────────────
 function estimateForMachines({ totalMeters, machines, effRate, today, weeklyOff, holidays }) {
   if (!Number.isFinite(totalMeters) || totalMeters <= 0) {
-    return { workingDays: 0, machineDays: 0, expectedDate: new Date(today) };
+    return { workingDays: 0, machineDays: 0, expectedDate: C.addWorkingDays(today, 0, weeklyOff, holidays) };
   }
   const M = Math.max(1, Math.floor(machines));
   const machineDays = totalMeters / effRate;
@@ -191,15 +192,17 @@ function estimateOrderEta({ lines, machines, supplyDate, today, aggregates, week
     weeklyOff: wOff, holidays: hol,
   });
 
-  // Risk vs admin-entered promise.
+  // Risk vs admin-entered promise. Day against day (utils/etaConfig.js):
+  // an order expected on the day it was promised is on time.
   let risk = null;
   if (supplyDate) {
     const promised = new Date(supplyDate);
     const lateDays = C.workingDaysBetween(promised, core.expectedDate, wOff, hol);
+    const late = factoryDay.daysBetween(promised, core.expectedDate) > 0;
     risk = {
       supplyDate: promised,
-      late: core.expectedDate > promised,
-      lateWorkingDays: core.expectedDate > promised ? lateDays : 0,
+      late,
+      lateWorkingDays: late ? lateDays : 0,
     };
   }
 

@@ -39,6 +39,7 @@ const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
 const { stateName } = require('../services/gst');
+const cal = require('./bizDates');
 
 // ── The invoice's light spreadsheet ──────────────────────────────
 const INK = '#1E2A36';
@@ -73,13 +74,10 @@ const FACES = [
 
 // A challan counts what went: 5,000 m, 12.5 kg, not 5,000.00.
 const qty = (n) => (Number(n) || 0).toLocaleString('en-IN', { maximumFractionDigits: 3 });
-const ddmmyyyy = (d) => {
-  if (!d) return '—';
-  const t = new Date(d);
-  if (Number.isNaN(t.getTime())) return '—';
-  const p = (x) => String(x).padStart(2, '0');
-  return `${p(t.getDate())}/${p(t.getMonth() + 1)}/${t.getFullYear()}`;
-};
+// The day it is in India (utils/bizDates.js). A challan raised with no
+// dispatch date is dated the moment it was keyed, and that was read off
+// the server's clock: one raised at 01:45 was a challan of the day before.
+const ddmmyyyy = (d) => cal.dmy(d, '/') || '—';
 
 function chooseLayout({ dc, branding = {}, settings = {} } = {}) {
   const args = { dc: dc || {}, branding, settings };
