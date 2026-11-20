@@ -89,3 +89,28 @@ describe('the challan fills its sheet', () => {
     }
   });
 });
+
+// ── What a cancelled invoice asks for ────────────────────────────
+// Found reading utils/invoicePdf.js line by line: a cancelled invoice,
+// stamped CANCELLED across the page, still carried a live "Scan to pay"
+// code for its full amount.
+describe('the scan-to-pay code', () => {
+  const { buildInvoicePdf } = require('../../utils/invoicePdf');
+  const { pdfText } = require('../helpers/pdfText');
+  const textOf = async (inv) => pdfText(await buildInvoicePdf({ invoice: inv, branding, settings }));
+
+  it('is on an invoice that is owed', async () => {
+    expect(await textOf(invoice(2))).toContain('Scan to pay');
+  });
+
+  it('is not on a cancelled invoice, nor on one for nothing', async () => {
+    const cancelled = await textOf({ ...invoice(2), status: 'cancelled', cancel: { reason: 'Raised twice' } });
+    expect(cancelled).toContain('CANCELLED');
+    expect(cancelled).not.toContain('Scan to pay');
+    // The bank's details stay: a cancelled invoice is still a record.
+    expect(cancelled).toContain('SBIN0001234');
+    const nothing = invoice(2);
+    nothing.totals = { ...nothing.totals, grand: 0 };
+    expect(await textOf(nothing)).not.toContain('Scan to pay');
+  });
+});

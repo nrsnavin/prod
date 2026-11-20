@@ -140,6 +140,43 @@ function pdfRuns(buffer) {
   return out;
 }
 
+/**
+ * Every drawn line of text with WHERE it was drawn: [{ x, y, text }], in
+ * draw order. pdfkit places each line with `1 0 0 1 x y Tm` before it
+ * shows it; y here is as the page is read, growing DOWN the sheet.
+ *
+ * For the failure the text alone cannot show: two lines printed on top
+ * of each other. A value too wide for its line wraps (pdfkit wraps to a
+ * given width whatever `lineBreak` says), and the wrapped half lands on
+ * the line that was already going there.
+ */
+function pdfLines(buffer) {
+  const pdf = buffer.toString('latin1');
+  const fonts = fontMaps(pdf);
+  const out = [];
+  const re = /stream\r?\n([\s\S]*?)endstream/g;
+  let m;
+  while ((m = re.exec(pdf)) !== null) {
+    let body;
+    try { body = zlib.inflateSync(Buffer.from(m[1], 'latin1')).toString('latin1'); } catch { continue; }
+    if (!/\bT[Jj]\b/.test(body)) continue;
+    let cmap = null;
+    let at = null;
+    for (const t of body.matchAll(/1 0 0 1 (-?[\d.]+) (-?[\d.]+) Tm|\/(F\d+)\s+[\d.]+\s+Tf|\[([^\]]*)\]\s*TJ|<([0-9A-Fa-f]+)>\s*Tj/g)) {
+      if (t[1] !== undefined) { at = { x: Number(t[1]), y: -Number(t[2]) }; continue; }
+      if (t[3]) { cmap = fonts.get(t[3]) ?? null; continue; }
+      let line = '';
+      if (t[4] !== undefined) {
+        for (const h of t[4].matchAll(/<([0-9A-Fa-f]+)>/g)) line += decodeHex(h[1], cmap);
+      } else {
+        line = decodeHex(t[5], cmap);
+      }
+      if (line.trim() && at) out.push({ x: at.x, y: at.y, text: line });
+    }
+  }
+  return out;
+}
+
 /** The same runs, joined — for assertions that only need presence. */
 function pdfText(buffer) {
   return pdfRuns(buffer).join('\n');
@@ -167,4 +204,4 @@ function pdfPageCount(buffer) {
   return (s.match(/\/Type\s*\/Page[^s]/g) || []).length;
 }
 
-module.exports = { pdfText, pdfRuns, hasRow, pdfPageCount };
+module.exports = { pdfText, pdfRuns, pdfLines, hasRow, pdfPageCount };

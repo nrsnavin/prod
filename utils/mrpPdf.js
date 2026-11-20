@@ -16,7 +16,7 @@ const PDFDocument = require("pdfkit");
 const { indiaDateTime } = require("./indiaLabel");
 const {
   INK, MUTED, RULE, HEADER_BG, ALERT_BG, ALERT_INK,
-  boxLabel, boxValue, box, titleBox, signatureStrip,
+  boxLabel, boxValue, box, titleBox, signatureStrip, fitText,
 } = require("./sapForm");
 
 // Aliases so the drawing code below reads the same as the other forms.
@@ -94,7 +94,7 @@ async function buildMrpPdf(data) {
   // and both answers were previously somewhere else entirely.
   box(doc, left, 134, width, 40);
   boxLabel(doc, "Customer", left + 6, 140, 260);
-  boxValue(doc, data.customerName || "—", left + 6, 150, 260, { bold: true, fontSize: 10 });
+  boxValue(doc, data.customerName || "—", left + 6, 150, 260, { bold: true, fontSize: 10, lineBreak: false });
   boxLabel(doc, "Customer PO", left + 290, 140, 110);
   boxValue(doc, data.customerPo || "—", left + 290, 150, 110, { fontSize: 9 });
   boxLabel(doc, "Supply date", left + 410, 140, 110);
@@ -267,12 +267,14 @@ async function buildMrpPdf(data) {
         onOrder:        Number(m.onOrder) > 0 ? _kg(m.onOrder) : "—",
         shortfall:      short ? _kg(m.shortfall) : "—",
       };
+      // One line a cell, measured and cut: a long material or supplier
+      // name used to wrap onto the row beneath (or onto its own lot line).
       cols.forEach((c, i) => {
         const cw = c.w * width;
         doc.fillColor(c.key === "shortfall" && short ? ALERT_INK : INK)
           .font(short ? "Helvetica-Bold" : "Helvetica")
-          .fontSize(9)
-          .text(String(cells[c.key]), colX[i] + pad, y + 6, { width: cw - pad * 2, align: c.align });
+          .fontSize(9);
+        doc.text(fitText(doc, cells[c.key], cw - pad * 2), colX[i] + pad, y + 6, { width: cw - pad * 2, align: c.align, lineBreak: false });
       });
 
       const lots = lotLine(m);

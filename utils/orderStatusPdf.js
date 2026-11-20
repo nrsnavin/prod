@@ -22,7 +22,7 @@ const PDFDocument = require('pdfkit');
 const { indiaDateTime } = require('./indiaLabel');
 const {
   INK, MUTED, RULE, HEADER_BG, ALERT_BG, ALERT_INK,
-  boxLabel, boxValue, box, titleBox, signatureStrip,
+  boxLabel, boxValue, box, titleBox, signatureStrip, fitText,
 } = require('./sapForm');
 
 const _num = (n) => {
@@ -78,12 +78,14 @@ async function buildOrderStatusPdf(data) {
   // ── Customer pane ───────────────────────────────────────────────
   box(doc, left, 134, width, 44);
   boxLabel(doc, 'Customer', left + 6, 140, 300);
-  boxValue(doc, data.customerName || '—', left + 6, 150, width - 200, { bold: true, fontSize: 10 });
+  // One line each, cut to the pane: a long name wrapped onto the address
+  // line under it, and a long address out of the foot of the box.
+  boxValue(doc, data.customerName || '—', left + 6, 150, width - 200, { bold: true, fontSize: 10, lineBreak: false });
   const sub = [data.customerGstin && `GSTIN ${data.customerGstin}`, data.customerAddress]
     .filter(Boolean).join('   ·   ');
   if (sub) {
-    doc.font('Helvetica').fontSize(7.5).fillColor(MUTED)
-      .text(sub, left + 6, 164, { width: width - 200, lineBreak: false });
+    doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
+    doc.text(fitText(doc, sub, width - 200), left + 6, 164, { width: width - 200, lineBreak: false });
   }
   boxLabel(doc, 'Customer PO', right - 180, 140, 174);
   boxValue(doc, data.customerPo || '—', right - 180, 150, 174, { bold: true });
@@ -153,12 +155,15 @@ async function buildOrderStatusPdf(data) {
         y = header(segTop);
       }
       if (opts.wash) doc.rect(left, y, width, rowH).fill(opts.wash);
+      // One line a cell, measured and cut (utils/sapForm.js fitText): a
+      // long elastic name used to wrap onto the row beneath.
       cols.forEach((c, i) => {
+        const cw = c.w * width - pad * 2;
         doc.fillColor(opts.ink || INK)
           .font(opts.bold ? 'Helvetica-Bold' : 'Helvetica')
-          .fontSize(8)
-          .text(String(cells[c.key] ?? '—'), colX[i] + pad, y + 5,
-            { width: c.w * width - pad * 2, align: c.align || 'left', lineBreak: false });
+          .fontSize(8);
+        doc.text(fitText(doc, cells[c.key] ?? '—', cw), colX[i] + pad, y + 5,
+          { width: cw, align: c.align || 'left', lineBreak: false });
       });
       doc.strokeColor(RULE).lineWidth(0.5)
         .moveTo(left, y + rowH).lineTo(right, y + rowH).stroke();

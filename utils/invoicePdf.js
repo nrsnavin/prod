@@ -117,8 +117,10 @@ async function chooseLayout({ invoice, branding = {}, settings = {} } = {}) {
       ? await QRCode.toBuffer(String(inv.einvoice.signedQr), { margin: 0, width: 480, errorCorrectionLevel: 'M' })
       : null,
     // A credit note, or a note we send a supplier, asks for no payment; a
-    // buyer abroad cannot pay by UPI.
-    upi: bank.upiId && !inv.hideUpi && inv.supplyType !== 'export'
+    // buyer abroad cannot pay by UPI. Nor does a cancelled invoice ask for
+    // any (it carried a live code for its full amount under the CANCELLED
+    // stamp), nor one whose total is nothing.
+    upi: bank.upiId && !inv.hideUpi && inv.supplyType !== 'export' && inv.status !== 'cancelled' && Number(t.grand) > 0
       ? await QRCode.toBuffer(
           `upi://pay?pa=${encodeURIComponent(bank.upiId)}&pn=${encodeURIComponent(company.slice(0, 40))}` +
           `&am=${(Number(t.grand) || 0).toFixed(2)}&cu=INR&tn=${encodeURIComponent(String(inv.invoiceNumber || 'Invoice').slice(0, 40))}`,
@@ -319,7 +321,7 @@ function render({ inv, branding, settings, qrs, D }) {
     ['Total Boxes', Number(inv.totalBoxes) > 0 ? String(inv.totalBoxes) : '—'],
     ...(zero && exp?.lut?.number ? [['LUT No.', exp.lut.number]] : []),
     ...(inv.supplyType === 'export' ? [
-      ['Currency', exp?.currency && exp.currency !== 'INR' ? `${exp.currency} @ ₹${exp.exchangeRate} · ${exp.currency} ${(exportSupply.fxValue(exp, inv.totals?.grand) ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'INR'],
+      ['Currency', exp?.currency && exp.currency !== 'INR' ? `${exp.currency} @ ${RS}${exp.exchangeRate} · ${exp.currency} ${(exportSupply.fxValue(exp, inv.totals?.grand) ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : 'INR'],
       ['Port / Ship. bill', [exp?.portCode, exp?.shippingBill?.number ? `${exp.shippingBill.number}${exp.shippingBill.date ? ` dt ${ddmmyyyy(exp.shippingBill.date)}` : ''}` : ''].filter(Boolean).join(' · ') || '—'],
     ] : []),
   ];

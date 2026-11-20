@@ -93,7 +93,7 @@ function _bufferFromDoc(doc) {
 const COST_ELEMENTS = [
   { key: 'material',  label: 'Yarn issued',         basis: 'Issued quantity x price captured at issue' },
   { key: 'booked',    label: 'Bought for this order', basis: 'Bills and expenses booked to the order, net of GST claimed' },
-  { key: 'labour',    label: 'Wages',               basis: 'Scheduled shift hours x operator hourly rate' },
+  { key: 'labour',    label: 'Wages',               basis: 'Scheduled shift hours x hourly rate, shared across looms' },
   { key: 'jobWork',   label: 'Outsourced job-work', basis: 'Vendor rate x meters returned' },
   { key: 'finishing', label: 'Finishing',           basis: 'Rate card per meter, or the job\'s own figure' },
   { key: 'checking',  label: 'Checking',            basis: 'Rate card per meter, or the job\'s own figure' },
@@ -151,7 +151,7 @@ async function buildOrderPnlPdf(data) {
   box(doc, left, 134, width, 34);
   boxLabel(doc, 'Customer', left + 6, 140, 300);
   boxValue(doc, order.customerName || '—', left + 6, 150, width - 200,
-    { bold: true, fontSize: 10 });
+    { bold: true, fontSize: 10, lineBreak: false });
   boxLabel(doc, 'Customer PO', right - 180, 140, 174);
   boxValue(doc, order.po || '—', right - 180, 150, 174, { bold: true });
   doc.y = 176;
@@ -199,13 +199,19 @@ async function buildOrderPnlPdf(data) {
     verdict = `Profit of INR ${_money(totals.profit)} at ${totals.marginPct}% margin `
       + `on ${_num(totals.producedMeters)} m produced.`;
   }
+  // The box is as tall as the sentence. A text given a width WRAPS when
+  // it is wider, whatever `lineBreak` says: the "not priced" verdict is
+  // longer than a line, and its second half sat across the foot of a box
+  // drawn for one.
   const vY = doc.y;
-  if (flagged) doc.rect(left, vY, width, 20).fill(ALERT_BG);
-  box(doc, left, vY, width, 20);
+  doc.font(flagged ? 'Helvetica-Bold' : 'Helvetica').fontSize(9);
+  const vH = Math.max(20, doc.heightOfString(verdict, { width: width - 12 }) + 10);
+  if (flagged) doc.rect(left, vY, width, vH).fill(ALERT_BG);
+  box(doc, left, vY, width, vH);
   doc.fillColor(flagged ? ALERT_INK : INK)
     .font(flagged ? 'Helvetica-Bold' : 'Helvetica').fontSize(9)
-    .text(verdict, left + 6, vY + 6, { width: width - 12, lineBreak: false });
-  doc.y = vY + 28;
+    .text(verdict, left + 6, vY + 6, { width: width - 12 });
+  doc.y = vY + vH + 8;
 
   // ── Shared table machinery ──────────────────────────────────────
   // One implementation for every section, so the grids line up and each
@@ -294,10 +300,14 @@ async function buildOrderPnlPdf(data) {
     close(segTop, y);
     doc.y = y + (note ? 3 : 12);
 
+    // A note longer than a line takes the lines it needs: placed as one,
+    // its second line was printed on the next section's heading.
     if (note) {
-      doc.font('Helvetica').fontSize(7.5).fillColor(MUTED)
-        .text(note, left, doc.y, { width, lineBreak: false });
-      doc.y += 14;
+      doc.font('Helvetica').fontSize(7.5).fillColor(MUTED);
+      const noteY = doc.y;
+      const noteH = doc.heightOfString(note, { width });
+      doc.text(note, left, noteY, { width });
+      doc.y = noteY + Math.max(14, noteH + 5.5);
     }
   }
 
@@ -483,6 +493,7 @@ async function buildOrderPnlPdf(data) {
   doc.font('Helvetica').fontSize(7.5).fillColor(MUTED)
     .text('Wages are charged at the operator\'s hourly rate for the full scheduled shift, '
       + 'whether or not the loom ran — the factory pays for the shift either way. '
+      + 'A weaver minding several looms is paid for the shift once: each loom carries its share of that wage. '
       + 'Yarn is valued at the price captured when it was issued, not today\'s price.',
       left, doc.y, { width });
   doc.y += 2;
@@ -491,7 +502,17 @@ async function buildOrderPnlPdf(data) {
   // The most important section on the page. Everything the figures rest
   // on that was never recorded, named. Without this the statement reads
   // as authoritative while four of its seven cost lines may be zero.
-  if (doc.y + 40 + warnings.length * 12 > bottomLimit - 90) doc.addPage();
+  // Each qualification takes the lines it needs. They were stepped a line
+  // apart whatever their length, so a long one was printed over the next
+  // — in the one section that has to be read.
+  doc.font('Helvetica-Bold').fontSize(8);
+  const wGap = 12 - doc.heightOfString('X', { width: width - 12 }); // one line still steps 12
+  const wLines = warnings.map((w) => {
+    const text = `•  ${_t(w)}`;
+    return { text, h: doc.heightOfString(text, { width: width - 12 }) + wGap };
+  });
+  const wTotal = wLines.reduce((a, l) => a + l.h, 0);
+  if (doc.y + 40 + wTotal > bottomLimit - 90) doc.addPage();
   const wY = doc.y + 4;
   doc.fillColor(INK).font('Helvetica-Bold').fontSize(7)
     .text('QUALIFICATIONS', left, wY, { lineBreak: false });
@@ -504,14 +525,15 @@ async function buildOrderPnlPdf(data) {
         left + 6, listTop + 7, { width: width - 12, lineBreak: false });
     doc.y = listTop + 28;
   } else {
-    const h = 16 + warnings.length * 12;
+    const h = 16 + wTotal;
     doc.rect(left, listTop, width, h).fill(ALERT_BG);
     box(doc, left, listTop, width, h);
     doc.fillColor(ALERT_INK).font('Helvetica-Bold').fontSize(8);
-    warnings.forEach((w, i) => {
-      doc.text(`•  ${_t(w)}`, left + 6, listTop + 8 + i * 12,
-        { width: width - 12, lineBreak: false });
-    });
+    let wy = listTop + 8;
+    for (const l of wLines) {
+      doc.text(l.text, left + 6, wy, { width: width - 12 });
+      wy += l.h;
+    }
     doc.y = listTop + h + 8;
   }
 

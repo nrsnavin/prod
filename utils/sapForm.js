@@ -19,20 +19,46 @@ const HEADER_BG = '#E4E4E4';
 const ALERT_BG = '#FBECEC';
 const ALERT_INK = '#A02020';
 
+/**
+ * `text` cut to fit `width` at the document's CURRENT font and size, the
+ * cut marked with "…".
+ *
+ * `lineBreak: false` does not hold a text to one line: given a width,
+ * pdfkit wraps whatever is wider than it. In a row of fixed height the
+ * wrapped half lands on the row beneath, so a cell that must stay one
+ * line is measured and cut here first.
+ */
+function fitText(doc, text, width) {
+  const t = String(text ?? '');
+  if (doc.widthOfString(t) <= width) return t;
+  let lo = 0;
+  let hi = t.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (doc.widthOfString(`${t.slice(0, mid).trimEnd()}…`) <= width) lo = mid; else hi = mid - 1;
+  }
+  return `${t.slice(0, lo).trimEnd()}…`;
+}
+
 /** Small-caps field label sitting above its value inside a ruled box. */
 function boxLabel(doc, text, x, y, w) {
   doc.font('Helvetica-Bold').fontSize(6.5).fillColor(MUTED)
     .text(String(text).toUpperCase(), x, y, { width: w, lineBreak: false });
 }
 
-/** The value under a boxLabel. */
+/**
+ * The value under a boxLabel. `lineBreak: false` holds it to one line,
+ * cut to the box's width (fitText): a value asked to stay on one line
+ * used to wrap all the same, out of the foot of its box.
+ */
 function boxValue(doc, text, x, y, w, opts = {}) {
+  const shown = text === undefined || text === null || text === '' ? '—' : String(text);
   doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica')
     .fontSize(opts.fontSize || 9)
-    .fillColor(opts.color || INK)
-    .text(text === undefined || text === null || text === '' ? '—' : String(text), x, y, {
-      width: w, align: opts.align || 'left', lineBreak: opts.lineBreak !== false,
-    });
+    .fillColor(opts.color || INK);
+  doc.text(opts.lineBreak === false ? fitText(doc, shown, w) : shown, x, y, {
+    width: w, align: opts.align || 'left', lineBreak: opts.lineBreak !== false,
+  });
 }
 
 /** A label/value pair inside a ruled box, returning the y below it. */
@@ -78,5 +104,5 @@ function signatureStrip(doc, x, y, w, labels, h = 52) {
 
 module.exports = {
   INK, MUTED, RULE, HEADER_BG, ALERT_BG, ALERT_INK,
-  boxLabel, boxValue, field, box, titleBox, signatureStrip,
+  boxLabel, boxValue, field, box, titleBox, signatureStrip, fitText,
 };

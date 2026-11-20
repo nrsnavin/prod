@@ -14,7 +14,7 @@
 // ══════════════════════════════════════════════════════════════════
 
 const { buildOrderPnlPdf } = require('../../utils/orderPnlPdf');
-const { pdfText, pdfPageCount } = require('../helpers/pdfText');
+const { pdfText, pdfPageCount, pdfLines } = require('../helpers/pdfText');
 
 const job = (over = {}) => ({
   id: 'j1', jobOrderNo: 42, jobNo: 'J-42', status: 'weaving',
@@ -408,5 +408,67 @@ describe('the sheet holds together', () => {
     });
     expect(buf.length).toBeGreaterThan(500);
     expect(pdfText(buf)).toMatch(/ORDER P&L/);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  NO LINE PRINTED ON TOP OF ANOTHER
+//
+//  Found reading utils/orderPnlPdf.js line by line. A text given a width
+//  wraps when it is wider than it, whatever `lineBreak` says: the long
+//  sentences on this sheet were placed as one line each, so their second
+//  halves landed on the line below — a qualification over the next
+//  qualification, the "not priced" verdict across the foot of its box,
+//  the note under the job table on the heading after it.
+// ══════════════════════════════════════════════════════════════════
+describe('long sentences keep to their own lines', () => {
+  const LONG = "Outsourced job-work is costed at the vendor's rate (₹18,655), and 4 service bill(s) are also booked to this order "
+    + "(SB/26-27/0011, SB/26-27/0012, SB/26-27/0019…): if one of them is the vendor's bill, the job-work may be counted twice.";
+  const lines = async (over) => pdfLines(await buildOrderPnlPdf(pnl(over)));
+  // The lines from the one that starts with `from` to the one before `until`.
+  const between = (all, from, until) => {
+    const a = all.findIndex((l) => l.text.startsWith(from));
+    const b = all.findIndex((l, i) => i > a && l.text.startsWith(until));
+    return all.slice(a, b);
+  };
+  const gaps = (rows) => rows.slice(1).map((l, i) => Math.round((l.y - rows[i].y) * 10) / 10);
+
+  it('a qualification too long for one line is not printed over the next one', async () => {
+    const all = await lines({ warnings: [LONG, 'This order has no jobs yet — production cost is ₹0.', '2 shift(s) are still open and not yet costed.'] });
+    const rows = between(all, '•  Outsourced', 'Prepared by');
+    expect(rows.length).toBeGreaterThan(3);              // the long one took more than a line
+    expect(rows.map((l) => l.text).join(' ')).toContain('counted twice');
+    for (const g of gaps(rows)) expect(g).toBeGreaterThanOrEqual(9);
+  });
+
+  it('short qualifications sit as they did, a line each', async () => {
+    const all = await lines({ warnings: ['This order has no jobs yet — production cost is ₹0.', '2 shift(s) are still open and not yet costed.'] });
+    expect(gaps(between(all, '•  This order', 'Prepared by'))).toEqual([12]);
+  });
+
+  it('the "not priced" verdict stays inside its box, clear of the heading under it', async () => {
+    const all = await lines({ totals: { producedMeters: 13570, orderedQuantity: 16000, profit: -220460, marginPct: null, costPerMeter: 16.25 } });
+    const rows = between(all, 'NOT PRICED —', 'REVENUE');
+    expect(rows.length).toBe(2);                         // it does not fit one line
+    const heading = all.find((l) => l.text.startsWith('REVENUE'));
+    expect(heading.y - rows[rows.length - 1].y).toBeGreaterThanOrEqual(20);
+  });
+
+  it('the note under the job table does not run into the next heading', async () => {
+    // One order line, so the yarn table starts on the same page as the note.
+    const one = pnl().revenue.lines.slice(0, 1);
+    const all = await lines({ revenue: { ...pnl().revenue, lines: one } });
+    const at = all.findIndex((l) => l.text.startsWith('Yarn is drawn against the ORDER'));
+    const note = [all[at], all[at + 1]];
+    expect(note[1].text).toMatch(/rate card\.$/);       // the note runs to a second line
+    const heading = all.find((l) => l.text.startsWith('YARN ISSUED'));
+    expect(heading.y).toBeGreaterThan(note[1].y);        // on the same page, under it
+    expect(heading.y - note[1].y).toBeGreaterThanOrEqual(12);
+  });
+
+  it('says how a wage is shared when a weaver minds several looms', async () => {
+    const text = await build();
+    expect(text).toMatch(/Scheduled shift hours x hourly rate, shared across looms/);
+    expect(text).toMatch(/paid for the shift once/);
   });
 });
