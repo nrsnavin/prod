@@ -38,6 +38,26 @@ const IST = 330 * 60_000;
 // The day shift starts at 08:00 (services/machineLoading.js DAY_STARTS).
 const DAY_SHIFT_STARTS = 8;
 
+/** Whether year, month (0-11) and day name a day that exists. */
+function isRealDay(y, m, d) {
+  const x = new Date(Date.UTC(y, m, d));
+  return x.getUTCFullYear() === y && x.getUTCMonth() === m && x.getUTCDate() === d;
+}
+
+/**
+ * Whether text that begins "YYYY-MM-DD" names a day that exists.
+ *
+ * "2026-02-30" has the shape of a date, and JavaScript reads it as the
+ * 2nd of March: any day number up to 31 rolls into the next month
+ * without a word. A bill misread as "31 April" was saved as the 1st of
+ * May. A date that is not a day is no date. Text that does not begin
+ * that way is not judged here.
+ */
+function leadsWithRealDay(text) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?!\d)/.exec(String(text ?? '').trim());
+  return !m || isRealDay(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
 /** The India calendar day of a value as [y, m (0-11), d]; null if unreadable. */
 function partsOf(v) {
   if (v == null || v === '') return null;
@@ -45,7 +65,9 @@ function partsOf(v) {
   // "2026-11-08", or a time with no zone ("2026-11-08T20:00:00.000", as
   // the phone app sends): wall-clock time in the factory, so that date.
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$/.exec(s);
-  if (m) return [Number(m[1]), Number(m[2]) - 1, Number(m[3])];
+  // Only when it is a day: "2026-13-01" used to come back as January 2027.
+  if (m) return isRealDay(Number(m[1]), Number(m[2]) - 1, Number(m[3])) ? [Number(m[1]), Number(m[2]) - 1, Number(m[3])] : null;
+  if (!leadsWithRealDay(s)) return null;
   const t = new Date(v).getTime();
   if (Number.isNaN(t)) return null;
   // 23:59:59.999 UTC is how this app marks the end of a calendar date
@@ -115,6 +137,9 @@ function moment(v) {
       if (wall.getUTCMonth() !== mo - 1 || wall.getUTCDate() !== d || wall.getUTCHours() !== h || mi > 59 || sec > 59) return null;
       return new Date(wall.getTime() - IST);
     }
+    // The same date on its own, or with a zone ("2026-02-30T10:00:00Z"),
+    // went to JavaScript's reader, which rolls it into March.
+    if (!leadsWithRealDay(v)) return null;
   }
   const t = new Date(typeof v === 'string' ? v.trim() : v).getTime();
   return Number.isNaN(t) ? null : new Date(t);
@@ -142,4 +167,4 @@ function daysBetween(from, to) {
   return a && b ? Math.round((b.getTime() - a.getTime()) / DAY) : null;
 }
 
-module.exports = { DAY, IST, calendarDay, calendarDayEnd, dayStart, dayEnd, shiftDay, moment, ymd, daysBetween };
+module.exports = { DAY, IST, calendarDay, calendarDayEnd, dayStart, dayEnd, shiftDay, moment, ymd, daysBetween, leadsWithRealDay };

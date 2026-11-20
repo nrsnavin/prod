@@ -26,6 +26,8 @@ function dateFrom(value, label, fallback = null) {
   const sent = Array.isArray(value) ? value[0] : value;
   const d = sent instanceof Date ? sent : new Date(typeof sent === 'string' ? sent.trim() : sent);
   if (typeof sent === 'object' && !(sent instanceof Date)) throw new ErrorHandler(`${label} is not a date`, 400);
+  // "2026-02-30" is read by JavaScript as the 2nd of March: not a date.
+  if (typeof sent === 'string' && !factoryDay.leadsWithRealDay(sent)) throw new ErrorHandler(`${label} is not a date`, 400);
   if (Number.isNaN(d.getTime())) throw new ErrorHandler(`${label} is not a date`, 400);
   return d;
 }

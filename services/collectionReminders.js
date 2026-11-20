@@ -46,7 +46,7 @@ async function due(cfg, now = new Date()) {
       : recent.has(String(r.party)) ? `contacted in the last ${cfg.everyDays || 7} days`
         : r.oldestDays < (cfg.minOverdueDays ?? 3) ? `only ${r.oldestDays} days past due`
           : r.next.action !== 'remind' ? `${r.next.label.toLowerCase()} — for a person, not a reminder`
-            : !collections.e164(r.contact.phone || r.contact.accountantPhone) ? 'no phone on file' : null;
+            : !collections.reminderPhone(r.contact) ? 'no phone on file' : null;
     if (why) skip.push({ party: r.party, partyName: r.partyName, overdue: r.overdue, why });
     else send.push(r);
   }
@@ -74,7 +74,7 @@ async function run({ now = new Date(), force = false } = {}) {
   const list = await due(cfg, now);
   const out = [];
   for (const r of list.send) {
-    const to = collections.e164(r.contact.phone || r.contact.accountantPhone);
+    const to = collections.reminderPhone(r.contact);
     const { message } = await collections.draft(r, { company, tone: r.next.tone });
     const res = await sendWhatsApp(to, message);
     const result = res.sent ? 'sent' : res.dryRun ? 'dry_run' : collections.failedResult(res.error);

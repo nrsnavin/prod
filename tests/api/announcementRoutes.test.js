@@ -84,6 +84,12 @@ const itIs = (indiaTime) => jest.useFakeTimers({
 const post = async (over = {}) => {
   const res = await as(admin).post('/', { title: 'Safety drill', body: 'Friday at 4 pm', ...over });
   expect(res.status).toBe(201);
+  // A notice with no start date starts "now" — by the model's own clock,
+  // which is the real one whatever `itIs` says (the default was taken
+  // before the clock was set). Left alone, these tests passed only while
+  // the real date was before the days they are about: they began to fail
+  // on 20 November 2026. The start is put on the test's clock instead.
+  if (over.validFrom === undefined) await A.updateOne({ _id: res.body.data._id }, { $set: { validFrom: new Date() } });
   return res.body.data;
 };
 /** The titles a worker in weaving sees — on the employee app, and on the web. */
@@ -159,6 +165,13 @@ describe('a notice valid until a day', () => {
 
   it('refuses a date that is not one (unchanged)', async () => {
     expect((await as(admin).post('/', { title: 'x', body: 'y', validUntil: 'next week' })).status).toBe(400);
+    // A date that is not a day was kept as one in the next month: "30
+    // February" a notice up until the 2nd of March.
+    for (const validUntil of ['2027-02-30', '2026-11-31', '2026-13-01']) {
+      const res = await as(admin).post('/', { title: 'x', body: 'y', validUntil });
+      expect([validUntil, res.status, res.body.message]).toEqual([validUntil, 400, 'validUntil is not a date']);
+    }
+    expect((await as(admin).post('/', { title: 'x', body: 'y', validFrom: '2027-02-30' })).status).toBe(400);
     const n = await post();
     expect((await as(admin).put(`/${n._id}`, { validUntil: 'next week' })).status).toBe(400);
   });

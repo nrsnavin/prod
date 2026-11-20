@@ -170,4 +170,22 @@ describe('a shift\'s run time', () => {
     expect((await as(admin).get(`/loom-sensor/run?machine=${m._id}&date=2026-10-21&shift=DAY`)).body.run.runTime).toBe(run.runTime);
     expect(await sensors.shiftRun(m._id, { dateKey: '2026-10-22', shift: 'DAY' })).toBeNull();
   });
+
+  // The date was checked for its shape only. "2026-10-51" has it, and was
+  // read as the 20th of November: an answer about a day nobody asked for.
+  it('is refused for a date that is not a day, not answered for another one', async () => {
+    const m = await loom();
+    const d = await M.LoomDevice.create({ machine: m._id, keyId: 'ld_test2', keyHash: 'x' });
+    // Readings on 20 November, which is what "October 51st" works out to.
+    const nov = (hm, total) => ({ at: ist(`2026-11-20T${hm}:00`), runSecondsTotal: total });
+    await M.LoomReading.insertMany([nov('07:55', 100), nov('12:00', 100 + 3 * 3600), nov('20:05', 100 + 7 * 3600)].map((x) => ({ ...x, device: d._id, machine: m._id })));
+    for (const date of ['2026-10-51', '2026-13-01', '2026-02-30', '2026-00-10']) {
+      const res = await as(admin).get(`/loom-sensor/run?machine=${m._id}&date=${date}&shift=DAY`);
+      expect([date, res.status]).toEqual([date, 400]);
+      expect(res.body.message).toMatch(/date/);
+    }
+    // A real day still answers, and a leap day is one.
+    expect((await as(admin).get(`/loom-sensor/run?machine=${m._id}&date=2026-11-20&shift=DAY`)).body.run).toMatchObject({ complete: true });
+    expect((await as(admin).get(`/loom-sensor/run?machine=${m._id}&date=2028-02-29&shift=DAY`)).status).toBe(200);
+  });
 });

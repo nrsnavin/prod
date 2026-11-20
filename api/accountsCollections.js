@@ -35,7 +35,7 @@ router.get("/collections/auto-remind", catchAsyncErrors(async (_req, res) => {
   const s = await require("../services/booksLock").getSettings();
   const cfg = s.collections?.autoRemind || {};
   const d = await require("../services/collectionReminders").due(cfg);
-  res.json({ success: true, settings: { ...cfg, acknowledgeReplies: !!s.collections?.acknowledgeReplies, assistant: !!s.collections?.assistant }, send: d.send.map((r) => ({ party: r.party, partyName: r.partyName, overdue: r.overdue, oldestDays: r.oldestDays, tone: r.next.tone, phone: r.contact.phone || r.contact.accountantPhone })), skip: d.skip, more: d.more, whatsapp: whatsappConfigured() });
+  res.json({ success: true, settings: { ...cfg, acknowledgeReplies: !!s.collections?.acknowledgeReplies, assistant: !!s.collections?.assistant }, send: d.send.map((r) => ({ party: r.party, partyName: r.partyName, overdue: r.overdue, oldestDays: r.oldestDays, tone: r.next.tone, phone: collections.reminderPhone(r.contact) })), skip: d.skip, more: d.more, whatsapp: whatsappConfigured() });
 }));
 router.post("/collections/auto-remind/run", isAdmin("admin"), catchAsyncErrors(async (_req, res) => {
   res.json({ success: true, ...(await require("../services/collectionReminders").run({ force: true })) });
@@ -54,7 +54,7 @@ router.post("/collections/draft", catchAsyncErrors(async (req, res, next) => {
   // The ladder picks the tone unless the person did.
   const tone = req.body?.tone === "firm" || req.body?.tone === "gentle" ? req.body.tone : entry.next.tone;
   const out = await collections.draft(entry, { company: settings.companyName || "Balu Elastics", tone });
-  res.json({ success: true, ...out, tone, to: collections.e164(entry.contact.accountantPhone || entry.contact.phone), entry });
+  res.json({ success: true, ...out, tone, to: collections.reminderPhone(entry.contact), entry });
 }));
 
 router.post("/collections/send", catchAsyncErrors(async (req, res, next) => {

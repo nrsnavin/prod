@@ -11,6 +11,7 @@ const MIN_REASON = 8;
 const DAY = 86_400_000;
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v || '')) && /^[0-9a-fA-F]{24}$/.test(String(v || ''));
 const { r2 } = require('../utils/money');
+const { leadsWithRealDay } = require('../utils/factoryDay');
 
 const IST = 330 * 60_000;
 
@@ -29,6 +30,9 @@ function businessDay(d) {
 /** A document date from a request: "YYYY-MM-DD" as that day; a moment as its day in India. */
 function readDate(value, label, fallback = null) {
   if (value === undefined || value === null || value === '') return fallback instanceof Date ? businessDay(fallback) : fallback;
+  // "2026-04-31" is read by JavaScript as the 1st of May: a bill dated a
+  // day that does not exist was posted to a month it was never in.
+  if (typeof value === 'string' && !leadsWithRealDay(value)) throw new ErrorHandler(`${label} is not a date`, 400);
   if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) {
     const d = new Date(`${value}T00:00:00Z`);
     if (Number.isNaN(d.getTime())) throw new ErrorHandler(`${label} is not a date`, 400);

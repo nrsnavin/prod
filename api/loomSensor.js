@@ -18,6 +18,7 @@
 const express = require('express');
 const catchAsyncErrors = require('../middleware/catchAsyncErrors');
 const ErrorHandler = require('../utils/ErrorHandler');
+const factoryDay = require('../utils/factoryDay');
 const sensors = require('../services/loomSensor');
 
 /** The board's route: authenticated by its key alone. */
@@ -45,9 +46,11 @@ admin.post('/devices/:id/key', catchAsyncErrors(async (req, res) => {
 admin.delete('/devices/:id', catchAsyncErrors(async (req, res) => {
   res.json({ success: true, device: await sensors.removeDevice(req.params.id) });
 }));
+/** A real calendar day, written as one: "2026-10-51" has the shape and was read as 20 November. */
+const isDay = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && factoryDay.ymd(s) === s;
 admin.get('/run', catchAsyncErrors(async (req, res, next) => {
   const { machine, date, shift } = req.query;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) || !['DAY', 'NIGHT'].includes(shift)) return next(new ErrorHandler('date (YYYY-MM-DD) and shift (DAY or NIGHT) are needed', 400));
+  if (!isDay(date) || !['DAY', 'NIGHT'].includes(shift)) return next(new ErrorHandler('date (YYYY-MM-DD) and shift (DAY or NIGHT) are needed', 400));
   res.json({ success: true, run: await sensors.shiftRun(machine, { dateKey: date, shift }) });
 }));
 

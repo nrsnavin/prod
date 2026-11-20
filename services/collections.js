@@ -198,6 +198,18 @@ function e164(phone) {
 }
 
 /**
+ * Where a payment reminder goes: the accountant's mobile when the
+ * customer gave one, else the customer's own — as a receipt, a statement
+ * and a balance confirmation do. The reminder sent on a schedule used
+ * the customer's own first, so the timer and the office reminded the
+ * same customer at two different numbers.
+ *
+ * The first that IS a number: an accountant's mobile kept as "NA" used
+ * to stand in front of a perfectly good one. '' when neither is.
+ */
+const reminderPhone = (contact) => e164(contact?.accountantPhone) || e164(contact?.phone);
+
+/**
  * Whether a number (in any form) is a customer's or a supplier's on file:
  * the party's own number, or their accountant's. Compared as E.164, so
  * "96777 07535" and "+91 9677707535" are the same number.
@@ -217,4 +229,4 @@ async function knownPhone(phone) {
   return numbers.includes(want);
 }
 
-module.exports = { overdue, draft, template, e164, log, historyOf, nextStep, knownPhone, REACHED, sendFailed, failedResult };
+module.exports = { overdue, draft, template, e164, reminderPhone, log, historyOf, nextStep, knownPhone, REACHED, sendFailed, failedResult };
