@@ -97,7 +97,9 @@ async function buildOrderStatusPdf(data) {
   if (days == null) deliveryLine = 'No supply date set on this order.';
   else if (data.overdue) deliveryLine = `OVERDUE by ${Math.abs(days)} day(s) — supply date was ${data.supplyDate}.`;
   else if (data.dueSoon) deliveryLine = `Due in ${days} day(s) — supply date ${data.supplyDate}.`;
-  else if (data.status === 'Completed') deliveryLine = `Completed. Supply date was ${data.supplyDate}.`;
+  // An order that is over has no days left to count: a cancelled one past
+  // its date read "-12 day(s) to the supply date".
+  else if (['Completed', 'Cancelled', 'Deleted'].includes(data.status)) deliveryLine = `${data.status}. Supply date was ${data.supplyDate}.`;
   else deliveryLine = `${days} day(s) to the supply date of ${data.supplyDate}.`;
 
   const flagged = data.overdue || data.dueSoon;

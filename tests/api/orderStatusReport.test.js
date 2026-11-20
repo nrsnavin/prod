@@ -233,6 +233,29 @@ describe('the delivery position', () => {
     expect(res.body.data.overdue).toBe(false);
   });
 
+  // Found reading services/orderStatusReport.js line by line: "open" was
+  // "not completed and not cancelled" — its own copy of the rule
+  // (services/deliveryRisk.js OPEN_STATUSES), which a deleted order passed.
+  it('does not call a deleted order overdue', async () => {
+    const { order } = await makeOrder({ supplyDate: days(-12), status: 'Deleted' });
+    const res = await report(order._id);
+    expect(res.body.data.overdue).toBe(false);
+    expect(res.body.data.dueSoon).toBe(false);
+  });
+
+  it('prints a cancelled order as cancelled, not as "-12 day(s) to the supply date"', async () => {
+    const { pdfText } = require('../helpers/pdfText');
+    for (const status of ['Cancelled', 'Deleted']) {
+      const { order } = await makeOrder({ supplyDate: days(-12), status });
+      const res = await request(app).get(`/api/v2/order/${order._id}/status-report.pdf`).set('Cookie', adminCookie()).buffer(true).parse((r, cb) => { const b = []; r.on('data', (c) => b.push(c)); r.on('end', () => cb(null, Buffer.concat(b))); });
+      const text = pdfText(res.body);
+      expect(text).not.toMatch(/-\s?12 day/);
+      expect(text).not.toMatch(/OVERDUE/);
+      expect(text).toMatch(new RegExp(`${status}\\. Supply date was`));
+      await Order.deleteMany({}); await Customer.deleteMany({}); await Elastic.deleteMany({});
+    }
+  });
+
   it('says nothing when there is no supply date', async () => {
     const { order } = await makeOrder();
     await Order.collection.updateOne({ _id: order._id }, { $unset: { supplyDate: '' } });

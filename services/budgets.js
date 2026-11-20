@@ -25,11 +25,17 @@ const fyEnd = (fy) => new Date(Date.UTC(Number(fy.slice(0, 4)) + 1, 2, 31, 23, 5
 /** 0 for April … 11 for March. */
 const monthIndex = (d) => (new Date(d).getUTCMonth() + 9) % 12;
 
-/** How many of the year's months have begun by `now`: 12 for a past year, 0 for one to come. */
+/**
+ * How many of the year's months have begun by `now`: 12 for a past year, 0 for one to come.
+ * Begun in India: the month was read off the moment itself, which is UTC,
+ * so until 05:30 on the 1st the new month had not started — and on the
+ * 1st of April neither had the year.
+ */
 function monthsElapsed(fy, now = new Date()) {
-  if (now > fyEnd(fy)) return 12;
-  if (now < fyStart(fy)) return 0;
-  return monthIndex(now) + 1;
+  const day = require('../utils/factoryDay').calendarDay(now) || now;
+  if (day > fyEnd(fy)) return 12;
+  if (day < fyStart(fy)) return 0;
+  return monthIndex(day) + 1;
 }
 
 async function actuals(fy) {
@@ -97,16 +103,24 @@ async function save(fy, rows, by) {
   // saved where no screen would show them again.
   if (!isFy(fy)) throw new ErrorHandler('fy must be like 2026-27', 400);
   if (!Array.isArray(rows) || !rows.length) throw new ErrorHandler('rows is required', 400);
-  const saved = [];
+  // Every row is checked before any is saved: a list refused at its third
+  // row had already changed the first two.
+  const ready = [];
   for (const [i, r] of rows.entries()) {
-    if (!isId(r.category)) throw new ErrorHandler(`Row ${i + 1}: pick the expense head`, 400);
+    if (!isId(r?.category)) throw new ErrorHandler(`Row ${i + 1}: pick the expense head`, 400);
     const c = await ExpenseCategory.findById(r.category).select('name').lean();
     if (!c) throw new ErrorHandler(`Row ${i + 1}: head not found`, 404);
     let amounts;
+    // A figure that is one. r2() makes 0 of anything it cannot read, so a
+    // row with only a note — or "sixty thousand" — saved twelve zeros over
+    // the head's budget.
+    const figure = (v) => v !== null && v !== undefined && String(v).trim() !== '' && Number.isFinite(Number(v));
     if (Array.isArray(r.amounts)) {
       if (r.amounts.length !== 12) throw new ErrorHandler(`Row ${i + 1} (${c.name}): twelve monthly amounts, April to March`, 400);
+      if (!r.amounts.every(figure)) throw new ErrorHandler(`Row ${i + 1} (${c.name}): each month's amount must be a number`, 400);
       amounts = r.amounts.map((n) => r2(n));
     } else {
+      if (!figure(r.annual)) throw new ErrorHandler(`Row ${i + 1} (${c.name}): give the year's figure, or twelve monthly amounts`, 400);
       const annual = r2(r.annual);
       if (!(annual >= 0)) throw new ErrorHandler(`Row ${i + 1} (${c.name}): annual must be 0 or more`, 400);
       const each = Math.floor((annual / 12) * 100) / 100;
@@ -114,8 +128,12 @@ async function save(fy, rows, by) {
       amounts[11] = r2(annual - each * 11);   // the rounding lands in March
     }
     if (amounts.some((n) => !(n >= 0))) throw new ErrorHandler(`Row ${i + 1} (${c.name}): amounts must be 0 or more`, 400);
-    const doc = await Budget.findOneAndUpdate({ fy, category: c._id }, { $set: { amounts, note: String(r.note || '').trim().slice(0, 200), updatedBy: by || undefined } }, { upsert: true, new: true, setDefaultsOnInsert: true }).lean();
-    saved.push(doc);
+    // The note changes only when one is sent: the screen sends figures alone.
+    ready.push({ category: c._id, set: { amounts, ...(r.note !== undefined ? { note: String(r.note || '').trim().slice(0, 200) } : {}), updatedBy: by || undefined } });
+  }
+  const saved = [];
+  for (const x of ready) {
+    saved.push(await Budget.findOneAndUpdate({ fy, category: x.category }, { $set: x.set }, { upsert: true, new: true, setDefaultsOnInsert: true }).lean());
   }
   return saved;
 }

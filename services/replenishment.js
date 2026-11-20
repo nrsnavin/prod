@@ -72,6 +72,8 @@ const DEFAULT_SERVICE_LEVEL = 95;
 
 const zFor = (pct) => SERVICE_LEVELS[pct] ?? SERVICE_LEVELS[DEFAULT_SERVICE_LEVEL];
 
+const factoryDay = require('../utils/factoryDay');
+
 const DAY_MS = 86_400_000;
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const r2 = (v) => Math.round(v * 100) / 100;
@@ -238,10 +240,12 @@ function position({
     shouldOrder,
     suggestedQty,
     daysOfCover: daysOfCover != null ? r2(daysOfCover) : null,
-    projectedStockoutDate: stockoutAt ? stockoutAt.toISOString().slice(0, 10) : null,
+    // The day it is in India at that moment (utils/factoryDay.js): the UTC
+    // date is a day behind from 18:30 UTC to midnight.
+    projectedStockoutDate: stockoutAt ? factoryDay.ymd(stockoutAt) : null,
     // Null when there is no demand at all — "order by" is meaningless
     // for a material nothing consumes, and a date there would be noise.
-    orderByDate: orderByAt ? orderByAt.toISOString().slice(0, 10) : null,
+    orderByDate: orderByAt ? factoryDay.ymd(orderByAt) : null,
     alreadyLate,
     severity,
   };

@@ -249,6 +249,43 @@ describe('budgets', () => {
     expect(r.ytdActual).toBe(12500);
     expect(cmp.totals.actualTotal).toBe(12500);
   });
+
+  // Found reading services/budgets.js line by line.
+  it('counts the month that has begun in India, not on the server\'s clock', () => {
+    const { monthsElapsed } = require('../../services/budgets');
+    // 01:30 on the 1st of November in India is still October in UTC:
+    // "7 of 12 months run", and November's budget left out of "to date".
+    expect(monthsElapsed('2026-27', new Date('2026-10-31T20:00:00Z'))).toBe(8);
+    expect(monthsElapsed('2026-27', new Date('2026-10-31T18:00:00Z'))).toBe(7);   // 23:30 on the 31st
+    // The same half-night at the year's turn: the new year has begun, the old one is done.
+    expect(monthsElapsed('2027-28', new Date('2027-03-31T20:00:00Z'))).toBe(1);
+    expect(monthsElapsed('2026-27', new Date('2027-03-31T20:00:00Z'))).toBe(12);
+    expect(monthsElapsed('2026-27', new Date('2026-03-31T20:00:00Z'))).toBe(1);
+    expect(monthsElapsed('2026-27', new Date('2026-03-31T18:00:00Z'))).toBe(0);
+  });
+
+  it('does not take a row with no figure as a budget of nothing', async () => {
+    const cat = await M.ExpenseCategory.create({ name: 'Repairs', approvalAbove: 10_000_000 });
+    expect((await put('/accounts/budgets', { fy: '2026-27', rows: [{ category: cat._id, annual: 60000 }] })).status).toBe(200);
+    // A note alone, or a figure that is not a number, used to save twelve zeros over it.
+    for (const row of [{ category: cat._id, note: 'reviewed' }, { category: cat._id, annual: 'sixty thousand' }, { category: cat._id, amounts: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 'x'] }]) {
+      const res = await put('/accounts/budgets', { fy: '2026-27', rows: [row] });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/Repairs/);
+    }
+    const still = (await get('/accounts/budgets?fy=2026-27')).body.rows.find((r) => r.name === 'Repairs');
+    expect(still.budgetTotal).toBe(60000);
+    // A list refused at its second row leaves its first as it was, and a
+    // save of figures alone leaves the note.
+    await put('/accounts/budgets', { fy: '2026-27', rows: [{ category: cat._id, annual: 60000, note: 'AMC from July' }] });
+    const half = await put('/accounts/budgets', { fy: '2026-27', rows: [{ category: cat._id, annual: 99000 }, { category: cat._id }] });
+    expect(half.status).toBe(400);
+    expect((await get('/accounts/budgets?fy=2026-27')).body.rows.find((r) => r.name === 'Repairs')).toMatchObject({ budgetTotal: 60000, note: 'AMC from July' });
+    await put('/accounts/budgets', { fy: '2026-27', rows: [{ category: cat._id, annual: 72000 }] });
+    expect((await get('/accounts/budgets?fy=2026-27')).body.rows.find((r) => r.name === 'Repairs')).toMatchObject({ budgetTotal: 72000, note: 'AMC from July' });
+    // Nought is a figure: a head can be budgeted at nothing.
+    expect((await put('/accounts/budgets', { fy: '2026-27', rows: [{ category: cat._id, annual: 0 }] })).status).toBe(200);
+  });
 });
 
 describe('cost centres', () => {

@@ -180,7 +180,10 @@ async function buildOrderStatusReport(orderId) {
   const unplanned = Math.max(0, totals.ordered - jobTotals.planned);
 
   const days = daysUntil(order.supplyDate);
-  const open = !['Completed', 'Cancelled'].includes(order.status);
+  // One rule for "still open" (services/deliveryRisk.js). This was its own
+  // copy — "not completed, not cancelled" — which a deleted order passed:
+  // its sheet read OVERDUE.
+  const open = require('./deliveryRisk').OPEN_STATUSES.includes(order.status || 'Open');
 
   return {
     orderId: String(order._id),

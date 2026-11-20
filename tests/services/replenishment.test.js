@@ -201,6 +201,16 @@ describe('the date to order by', () => {
     expect(p.alreadyLate).toBe(false);
   });
 
+  it('names the day in India, not the day the server\'s clock is on', () => {
+    // Worked out at 01:30 on the 21st of November in India (20:00 UTC on
+    // the 20th): 100 on hand at 10/day runs out ten days on, the 1st of
+    // December; with four days' wait, order by the 27th. Read off the UTC
+    // date, both came out a day early every evening after 18:30 UTC.
+    const p = position({ onHand: 100, demand: steady, leadTimeDays: 4, now: new Date('2026-11-20T20:00:00Z') });
+    expect(p.projectedStockoutDate).toBe('2026-12-01');
+    expect(p.orderByDate).toBe('2026-11-27');
+  });
+
   it('says so when an order placed today already arrives too late', () => {
     // 50 on hand at 10/day is 5 days of cover against a 14-day wait.
     // This is the case that stops a loom, and it is not the same thing
