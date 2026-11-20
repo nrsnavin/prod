@@ -80,7 +80,7 @@ function parse(json, period) {
 
 /** Store the month's lines (replacing an earlier upload of the same month) and match them. */
 async function upload({ period, json, by }) {
-  if (!/^\d{4}-\d{2}$/.test(String(period || ''))) throw Object.assign(new Error('period must be YYYY-MM'), { status: 400 });
+  if (!cal.isMonthKey(period)) throw Object.assign(new Error('period must be YYYY-MM'), { status: 400 });
   const entries = parse(json, period);
   await Gstr2bEntry.deleteMany({ period });
   // Two lines with the same key (a supplier's numbering reused) keep the first.

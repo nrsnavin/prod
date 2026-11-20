@@ -214,7 +214,7 @@ router.get("/payment-runs", catchAsyncErrors(async (req, res) => {
 }));
 
 router.get("/close", catchAsyncErrors(async (req, res) => {
-  const month = /^\d{4}-\d{2}$/.test(String(req.query.month || "")) ? req.query.month : cal.shiftMonth(cal.monthKey(), -1);
+  const month = cal.isMonthKey(req.query.month) ? req.query.month : cal.shiftMonth(cal.monthKey(), -1);
   res.json({ success: true, ...(await insights.closeChecklist(month)) });
 }));
 

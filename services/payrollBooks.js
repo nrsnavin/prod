@@ -118,7 +118,7 @@ async function postPaid(month, req) {
  */
 async function addDeposit({ kind, month, amount, challanNo, depositedOn, account, note, by, requestId }) {
   if (!['pf', 'esi', 'pt'].includes(kind)) throw Object.assign(new Error('kind must be pf, esi or pt'), { status: 400 });
-  if (!/^\d{4}-\d{2}$/.test(String(month || ''))) throw Object.assign(new Error('month must be YYYY-MM'), { status: 400 });
+  if (!cal.isMonthKey(month)) throw Object.assign(new Error('month must be YYYY-MM'), { status: 400 });
   if (!(r2(amount) > 0)) throw Object.assign(new Error('amount must be more than 0'), { status: 400 });
   if (!depositedOn) throw Object.assign(new Error('depositedOn is required'), { status: 400 });
   const data = { kind, month, amount: r2(amount), challanNo: String(challanNo || '').trim(), depositedOn, account: account || undefined, note: String(note || '').trim(), createdBy: by || undefined };

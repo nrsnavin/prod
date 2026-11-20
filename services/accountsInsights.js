@@ -481,7 +481,7 @@ async function forecast({ weeks = 6, now = new Date() } = {}) {
  */
 async function closeChecklist(month) {
   // The month asked for; last month (by the books' calendar) when none is.
-  const key = /^\d{4}-\d{2}$/.test(String(month || '')) ? month : cal.shiftMonth(cal.monthKey(), -1);
+  const key = cal.isMonthKey(month) ? month : cal.shiftMonth(cal.monthKey(), -1);
   const { y, m, from, to } = cal.monthRange(key);
   const range = { $gte: from, $lte: to };
   const fresh = { $or: [{ 'tally.batch': { $exists: false } }, { 'tally.batch': null }] };

@@ -37,7 +37,7 @@ const DAY = 86_400_000;
 
 // Years, quarters and months are read off the books' own calendar
 // (utils/bizDates.js), never off the clock of the machine this runs on.
-const { fyRange, fyOf, quarterOf, quarterRange, monthRange, monthKey, parts, at, today: businessToday } = require('../utils/bizDates');
+const { fyRange, fyOf, quarterOf, quarterRange, monthRange, monthKey, isMonthKey, parts, at, today: businessToday } = require('../utils/bizDates');
 
 /** The 7th of the next month; 30 April for March. */
 function dueDate(month) {
@@ -166,7 +166,7 @@ async function notDeducted({ asOf }) {
  * @returns {{ challan, replay }}
  */
 async function addChallan({ month, section, amount, interest = 0, bsrCode, challanNo, depositedOn, account, note, by, requestId }) {
-  if (!/^\d{4}-\d{2}$/.test(String(month || ''))) throw Object.assign(new Error('month must be YYYY-MM'), { status: 400 });
+  if (!isMonthKey(month)) throw Object.assign(new Error('month must be YYYY-MM'), { status: 400 });
   if (!(r2(amount) > 0)) throw Object.assign(new Error('amount must be more than 0'), { status: 400 });
   if (!section) throw Object.assign(new Error('section is required'), { status: 400 });
   if (!depositedOn) throw Object.assign(new Error('depositedOn is required'), { status: 400 });

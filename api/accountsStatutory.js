@@ -60,10 +60,18 @@ const { isAdmin } = require("../middleware/auth");
 const serviceErr = (err, next) => (err.status ? next(new ErrorHandler(err.message, err.status)) : Promise.reject(err));
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 1 } });
-const MONTH = /^\d{4}-\d{2}$/;
+// A month and a year by what they are (utils/bizDates.js isMonthKey, isFy),
+// not by their shape: "2026-13" used to be a month and "2026-28" a year.
+const isMonth = cal.isMonthKey;
 const lastMonth = () => cal.shiftMonth(cal.monthKey(), -1);   // by the books' calendar
-const monthOf = (q) => (MONTH.test(String(q || "")) ? q : lastMonth());
-const fyOf = (q) => (/^\d{4}-\d{2}$/.test(String(q || "")) ? q : cal.fyOf());
+const monthOf = (q) => (isMonth(q) ? q : lastMonth());
+const fyOf = (q) => (cal.isFy(q) ? q : cal.fyOf());
+/** The year a save is for: the one sent, this one when none was — and a refusal for one that is not a year. */
+function fyGiven(v) {
+  if (v === undefined || v === null || v === "") return cal.fyOf();
+  if (!cal.isFy(v)) throw new ErrorHandler("fy must be like 2026-27", 400);
+  return v;
+}
 const dd = (d) => cal.dmy(d);
 async function sendXlsx(res, name, wb) {
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -110,8 +118,12 @@ router.post("/gstr2b/upload", keepRequestContext(upload.single("file")), catchAs
   let json;
   try { json = JSON.parse(req.file.buffer.toString("utf8")); } catch { return next(new ErrorHandler("The file is not JSON. Download GSTR-2B as JSON (not Excel) from the portal.", 400)); }
   // The period from the file when it says (rtnprd "102026"), else the form.
+  // It was the other way about, and the screen always sends its month:
+  // September's file uploaded while looking at October took October's
+  // place — its lines deleted, its bills marked "not in GSTR-2B".
   const rtn = String(json?.data?.rtnprd || json?.rtnprd || "");
-  const period = MONTH.test(String(req.body?.period || "")) ? req.body.period : /^\d{6}$/.test(rtn) ? `${rtn.slice(2)}-${rtn.slice(0, 2)}` : null;
+  const said = /^\d{6}$/.test(rtn) ? `${rtn.slice(2)}-${rtn.slice(0, 2)}` : "";
+  const period = isMonth(said) ? said : isMonth(req.body?.period) ? req.body.period : null;
   if (!period) return next(new ErrorHandler("Say which month this GSTR-2B is for (period=YYYY-MM)", 400));
   try {
     res.json({ success: true, ...(await gstr2b.upload({ period, json, by: req.user?._id })), periods: await gstr2b.periods() });
@@ -125,13 +137,13 @@ router.post("/gstr2b/upload", keepRequestContext(upload.single("file")), catchAs
 // 2B: the bills, the tax held up, and a message asking them to report it.
 router.get("/gstr2b/follow-ups", catchAsyncErrors(async (req, res, next) => {
   const period = String(req.query?.period || "");
-  if (!MONTH.test(period)) return next(new ErrorHandler("period must be YYYY-MM", 400));
+  if (!isMonth(period)) return next(new ErrorHandler("period must be YYYY-MM", 400));
   res.json({ success: true, period, suppliers: await gstr2b.followUps(period) });
 }));
 
 router.post("/gstr2b/reconcile", catchAsyncErrors(async (req, res, next) => {
   const period = String(req.body?.period || "");
-  if (!MONTH.test(period)) return next(new ErrorHandler("period must be YYYY-MM", 400));
+  if (!isMonth(period)) return next(new ErrorHandler("period must be YYYY-MM", 400));
   res.json({ success: true, ...(await gstr2b.reconcile(period)) });
 }));
 
@@ -143,7 +155,7 @@ router.get("/itc-reversal", catchAsyncErrors(async (req, res) => {
 const itcAction = (fn, code) => catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Bill not found", 404));
   const month = String(req.body?.month || "");
-  if (!MONTH.test(month)) return next(new ErrorHandler("month must be YYYY-MM", 400));
+  if (!isMonth(month)) return next(new ErrorHandler("month must be YYYY-MM", 400));
   try {
     // Not held by the books lock: a step is a figure for that month's
     // GSTR-3B kept on the bill, worked out after the month's books have
@@ -221,8 +233,15 @@ router.post("/tds/challans", isAdmin("admin", "accounts"), catchAsyncErrors(asyn
 }));
 
 router.get("/tds/26q", catchAsyncErrors(async (req, res, next) => {
-  const q = ["Q1", "Q2", "Q3", "Q4"].includes(req.query.q) ? req.query.q : tds.quarterOf(new Date(Date.now() - 45 * 86_400_000));
-  const r = await tds.form26q(fyOf(req.query.fy), q);
+  // With no quarter asked for: the one that ended last (45 days back, a
+  // return being due a month and a half after its quarter) — in the year
+  // THAT quarter is in. The year used to be today's: through April and
+  // half of May the screen opened on the last quarter of a year just begun.
+  const then = new Date(Date.now() - 45 * 86_400_000);
+  const asked = ["Q1", "Q2", "Q3", "Q4"].includes(req.query.q);
+  const q = asked ? req.query.q : tds.quarterOf(then);
+  const fy = cal.isFy(req.query.fy) ? req.query.fy : asked ? cal.fyOf() : cal.fyOf(then);
+  const r = await tds.form26q(fy, q);
   if (req.query.format !== "xlsx") return res.json({ success: true, ...r });
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("26Q");
@@ -254,9 +273,9 @@ router.post("/tds/certificates", isAdmin("admin", "accounts"), catchAsyncErrors(
   if (!["Q1", "Q2", "Q3", "Q4"].includes(b.quarter)) return next(new ErrorHandler("quarter must be Q1–Q4", 400));
   const amount = Number(b.amount);
   if (!(amount >= 0)) return next(new ErrorHandler("amount must be 0 or more", 400));
-  let on;
-  try { on = readDate(b.on, "on", new Date()); } catch (err) { return next(err); }
-  const data = { kind: b.kind, partyType, party: party._id, partyName: party.name, fy: fyOf(b.fy), quarter: b.quarter, certNo: String(b.certNo || "").trim().slice(0, 20), section: String(b.section || "").trim().toUpperCase(), amount: r2(amount), on, note: String(b.note || "").trim().slice(0, 200), createdBy: req.user?._id };
+  let on, fy;
+  try { on = readDate(b.on, "on", new Date()); fy = fyGiven(b.fy); } catch (err) { return next(err); }
+  const data = { kind: b.kind, partyType, party: party._id, partyName: party.name, fy, quarter: b.quarter, certNo: String(b.certNo || "").trim().slice(0, 20), section: String(b.section || "").trim().toUpperCase(), amount: r2(amount), on, note: String(b.note || "").trim().slice(0, 200), createdBy: req.user?._id };
   // Recorded once: the same request sent twice is answered by the first
   // one's row, and a certificate number is entered once for a party,
   // quarter and section.
@@ -282,8 +301,10 @@ router.get("/tds/receivable", catchAsyncErrors(async (req, res) => {
 
 router.post("/tds/26as", keepRequestContext(upload.single("file")), catchAsyncErrors(async (req, res, next) => {
   if (!req.file) return next(new ErrorHandler("Attach Form 26AS as CSV or Excel", 400));
+  let fy;
+  try { fy = fyGiven(req.body?.fy); } catch (err) { return next(err); }
   try {
-    const r = await tds.upload26as({ fy: fyOf(req.body?.fy), buffer: req.file.buffer, filename: req.file.originalname, by: req.user?._id });
+    const r = await tds.upload26as({ fy, buffer: req.file.buffer, filename: req.file.originalname, by: req.user?._id });
     res.json({ success: true, ...r, receivable: await tds.receivable(r.fy) });
   } catch (err) { if (err.status) return next(new ErrorHandler(err.message, err.status)); throw err; }
 }));
@@ -299,7 +320,7 @@ router.get("/payroll-books", catchAsyncErrors(async (req, res) => {
 
 const payrollPost = (fn) => catchAsyncErrors(async (req, res, next) => {
   const month = String(req.body?.month || "");
-  if (!MONTH.test(month)) return next(new ErrorHandler("month must be YYYY-MM", 400));
+  if (!isMonth(month)) return next(new ErrorHandler("month must be YYYY-MM", 400));
   try {
     const out = await fn(month, req);
     res.status(201).json({ success: true, journal: out.journal, summary: out.summary });

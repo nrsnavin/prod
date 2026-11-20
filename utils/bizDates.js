@@ -22,6 +22,8 @@
 //    dayOfMonth(y, m, d) that day, or the month's last when it has none
 //    endOf(day)          the last millisecond of a day
 //    monthKey(d)         "2026-10"
+//    isMonthKey(s)       is `s` a month's label: a year and one of its twelve
+//    isFy(s)             is `s` a financial year's: "2026-27", not "2026-28"
 //    monthRange(key)     { y, m, from, to }: first day to last millisecond
 //    monthsBetween(a, b) the month keys from a's month to b's
 //    shiftMonth(key, n)  the month n months on (or back)
@@ -59,6 +61,16 @@ const daysIn = (y, m) => at(y, m + 1, 0).getUTCDate();
 const dayOfMonth = (y, m, d) => { const first = at(y, m, 1); return at(first.getUTCFullYear(), first.getUTCMonth() + 1, Math.min(d, daysIn(first.getUTCFullYear(), first.getUTCMonth() + 1))); };
 
 const monthKey = (d) => { const p = parts(d); return `${p.y}-${pad(p.m)}`; };
+
+// A month and a financial year are written alike ("2026-10", "2026-27"),
+// and each was checked for that shape alone, in a dozen places. So
+// "2026-13" was a month (January 2027, worked out and saved under a label
+// January does not use), and "2026-28" — or the month "2026-11" — a
+// financial year (2026-27's figures under another name, beside its own).
+/** "2026-10": a year and one of its twelve months. */
+const isMonthKey = (s) => typeof s === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(s);
+/** "2026-27": April to March, the second half the year after the first. */
+const isFy = (s) => typeof s === 'string' && /^\d{4}-\d{2}$/.test(s) && Number(s.slice(5)) === (Number(s.slice(0, 4)) + 1) % 100;
 
 function monthRange(key) {
   const [y, m] = String(key).split('-').map(Number);
@@ -105,4 +117,4 @@ function dmy(d, sep = '-') {
   return p ? `${pad(p.d)}${sep}${pad(p.m)}${sep}${p.y}` : '';
 }
 
-module.exports = { DAY, today, dayOf, parts, at, endOf, daysIn, dayOfMonth, monthKey, monthRange, shiftMonth, monthsBetween, fyOf, fyStartYear, fyRange, quarterOf, quarterRange, dmy };
+module.exports = { DAY, today, dayOf, parts, at, endOf, daysIn, dayOfMonth, monthKey, isMonthKey, isFy, monthRange, shiftMonth, monthsBetween, fyOf, fyStartYear, fyRange, quarterOf, quarterRange, dmy };

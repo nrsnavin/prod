@@ -36,7 +36,8 @@ const router = express.Router();
 const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 const ErrorHandler = require("../utils/ErrorHandler");
 const { isAdmin } = require("../middleware/auth");
-const { isId, readDate, DAY } = require("../services/accountsHelpers");
+const { isId, readDate, businessDay, DAY } = require("../services/accountsHelpers");
+const cal = require("../utils/bizDates");
 const fixedAssets = require("../services/fixedAssets");
 const closingStock = require("../services/closingStock");
 const budgets = require("../services/budgets");
@@ -51,8 +52,11 @@ const registers = require("../services/registers");
 const { fp } = require("../services/accountsHelpers");
 const { ACTION_CODES } = require("../utils/fingerprint");
 
-const FY = /^\d{4}-\d{2}$/;
-const fyOf = (q) => (FY.test(String(q || "")) ? q : fixedAssets.fyOf(new Date()));
+// A year that is one (utils/bizDates.js isFy), else this year: "2026-28"
+// and the month "2026-11" used to be handed on as years.
+const fyOf = (q) => (cal.isFy(q) ? q : fixedAssets.fyOf(new Date()));
+/** The first of this month by India's calendar: where a period starts when none is asked for. */
+const monthStart = () => { const t = cal.today(); return new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1)); };
 const dd = (d) => { if (!d) return ""; const t = new Date(d); const p = (n) => String(n).padStart(2, "0"); return `${p(t.getUTCDate())}-${p(t.getUTCMonth() + 1)}-${t.getUTCFullYear()}`; };
 /** A service's error to the client, anything else up the chain. */
 const fail = (err, next) => { if (err instanceof ErrorHandler) return next(err); if (err?.status) return next(new ErrorHandler(err.message, err.status)); throw err; };
@@ -158,7 +162,9 @@ router.post("/closing-stock", isAdmin("admin", "accounts"), catchAsyncErrors(asy
   let asOf;
   try { asOf = readDate(req.body?.asOf, "asOf", null); } catch (err) { return next(err); }
   if (!asOf) return next(new ErrorHandler("asOf is required (YYYY-MM-DD)", 400));
-  if (asOf > new Date()) return next(new ErrorHandler("Stock cannot be valued on a day that has not come", 400));
+  // After today, by India's calendar. Compared with the instant now, today
+  // itself "had not come" until 05:30.
+  if (asOf > businessDay(new Date())) return next(new ErrorHandler("Stock cannot be valued on a day that has not come", 400));
   try { res.status(201).json({ success: true, ...(await closingStock.post(asOf, req)) }); }
   catch (err) { return fail(err, next); }
 }));
@@ -181,9 +187,8 @@ router.put("/budgets", isAdmin("admin", "accounts"), catchAsyncErrors(async (req
 router.get("/cost-centres", catchAsyncErrors(async (req, res, next) => {
   let from, to;
   try {
-    const now = new Date();
-    from = readDate(req.query.from, "from", new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
-    to = readDate(req.query.to, "to", now);
+    from = readDate(req.query.from, "from", monthStart());
+    to = readDate(req.query.to, "to", new Date());
   } catch (err) { return next(err); }
   res.json({ success: true, ...(await costCentres.report({ from, to: new Date(to.getTime() + DAY - 1) })) });
 }));
@@ -227,21 +232,42 @@ router.post("/confirmations/:id/reply", isAdmin("admin", "accounts"), catchAsync
 }));
 
 // ── Post-dated cheques ─────────────────────────────────────────────
+const PDC_MAX = 500;
 router.get("/pdc", catchAsyncErrors(async (req, res) => {
   const status = ["held", "deposited", "cleared", "bounced", "all"].includes(req.query.status) ? req.query.status : "held";
   const q = { mode: "cheque", "cheque.status": status === "all" ? { $in: ["held", "deposited", "cleared", "bounced"] } : status };
   if (status !== "bounced") q.status = "posted";
-  const rows = await Payment.find(q).select("kind voucherNo date partyType customer supplier partyName amount account accountName reference cheque allocations.docNo status cancel").sort({ "cheque.date": 1, date: 1 }).limit(500).lean();
-  const today = new Date(); today.setUTCHours(23, 59, 59, 999);
+  // In hand or at the bank is work to do: the soonest first. What is over
+  // (cleared, returned, or every stage together) is a record: the newest
+  // first. Sorted oldest first and cut at five hundred, a cheque cleared
+  // after the five hundredth was never listed again.
+  const waiting = status === "held" || status === "deposited";
+  const [rows, total, held] = await Promise.all([
+    Payment.find(q).select("kind voucherNo date partyType customer supplier partyName amount account accountName reference cheque allocations.docNo status cancel")
+      .sort(waiting ? { "cheque.date": 1, date: 1 } : { "cheque.date": -1, date: -1 }).limit(PDC_MAX).lean(),
+    Payment.countDocuments(q),
+    Payment.find({ status: "posted", "cheque.status": "held" }).select("kind amount cheque.date").lean(),
+  ]);
+  // The end of today in India. The server's own date is yesterday's until
+  // 05:30: a cheque dated today was not yet due.
+  const today = new Date(businessDay(new Date()).getTime() + DAY - 1);
   const inWeek = new Date(today.getTime() + 7 * DAY);
-  const held = await Payment.find({ status: "posted", "cheque.status": "held" }).select("kind amount cheque.date").lean();
   const sum = (xs) => Math.round(xs.reduce((s, x) => s + x.amount, 0) * 100) / 100;
+  // A held cheque RECEIVED is in the drawer, to be deposited; one we GAVE,
+  // post-dated, is money the bank will be asked for. "Due" counted both,
+  // and the screen printed the sum as "to deposit".
+  const of = (kind, by) => {
+    const xs = held.filter((x) => x.kind === kind && (!by || new Date(x.cheque.date) <= by));
+    return { count: xs.length, amount: sum(xs) };
+  };
+  const due = (by) => ({ ...of("receipt", by), issued: of("payment", by) });
+  const received = of("receipt"); const issued = of("payment");
   res.json({
-    success: true, status, rows,
+    success: true, status, rows, total,
     totals: {
-      held: { count: held.length, received: sum(held.filter((x) => x.kind === "receipt")), issued: sum(held.filter((x) => x.kind === "payment")) },
-      dueToday: { count: held.filter((x) => new Date(x.cheque.date) <= today).length, amount: sum(held.filter((x) => new Date(x.cheque.date) <= today)) },
-      dueThisWeek: { count: held.filter((x) => new Date(x.cheque.date) <= inWeek).length, amount: sum(held.filter((x) => new Date(x.cheque.date) <= inWeek)) },
+      held: { count: held.length, received: received.amount, issued: issued.amount, receivedCount: received.count, issuedCount: issued.count },
+      dueToday: due(today),
+      dueThisWeek: due(inWeek),
     },
   });
 }));
@@ -260,6 +286,13 @@ router.post("/payments/:id/cheque", isAdmin("admin", "accounts"), catchAsyncErro
   const allowed = { deposited: ["held"], cleared: ["held", "deposited"], bounced: ["held", "deposited"] };
   if (!allowed[action].includes(from)) return next(new ErrorHandler(`A ${from} cheque cannot be marked ${action}`, 409));
   if (v.status !== "posted") return next(new ErrorHandler("That voucher is cancelled", 409));
+  // A cheque received does not go to the bank before its date: the deposit
+  // slip refuses it (services/depositSlips.js) and this door took it. One
+  // we gave is another matter — handed over early is what post-dated means —
+  // and "cleared" is the bank's own word, which stands.
+  if (action === "deposited" && v.kind === "receipt" && v.cheque.date && new Date(v.cheque.date) > on) {
+    return next(new ErrorHandler(`Cheque ${v.cheque.number || v.voucherNo} is dated ${cal.dmy(v.cheque.date, "/")} — the bank will not take it before then`, 400));
+  }
   const meta = { voucherNo: v.voucherNo, cheque: v.cheque.number, from, to: action, on };
   if (action === "bounced") {
     const reason = String(b.reason || "").trim().slice(0, 200);
@@ -308,10 +341,11 @@ router.get("/interest/draft", catchAsyncErrors(async (req, res, next) => {
 }));
 
 // ── Sales and purchase registers ───────────────────────────────────
+// This month so far when no period is asked for — India's month: the
+// server's own was last month until 05:30 on the 1st.
 function period(req) {
-  const now = new Date();
-  const from = readDate(req.query.from, "from", new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)));
-  const to = readDate(req.query.to, "to", now);
+  const from = readDate(req.query.from, "from", monthStart());
+  const to = readDate(req.query.to, "to", new Date());
   return { from, to: new Date(to.getTime() + DAY - 1) };
 }
 const rateCols = (rows) => [...new Set(rows.flatMap((r) => Object.keys(r.byRate || {})))].sort((a, b) => Number(a) - Number(b));

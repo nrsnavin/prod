@@ -12,7 +12,7 @@ const mongoose = require('mongoose');
 
 const PowerBillSchema = new mongoose.Schema(
   {
-    month: { type: String, required: true, match: /^\d{4}-\d{2}$/ },
+    month: { type: String, required: true, match: /^\d{4}-(0[1-9]|1[0-2])$/ },
     consumerNo: { type: String, default: '' },
     billNo: { type: String, default: '' },
     billDate: { type: Date, default: null },

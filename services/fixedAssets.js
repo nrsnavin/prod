@@ -170,7 +170,10 @@ async function register(fy) {
 
 /** Post (or re-post) the year's Companies Act depreciation as one journal. */
 async function postDepreciation(fy, req) {
-  if (!FY_RE.test(String(fy || ''))) throw new ErrorHandler('fy must be like 2026-27', 400);
+  // A year that is one. "2026-28" has the shape of a year and starts in
+  // 2026: its depreciation is 2026-27's, posted under another label — and
+  // 2026-27 could then be posted as well, the same charge twice.
+  if (!cal.isFy(fy)) throw new ErrorHandler('fy must be like 2026-27', 400);
   const reg = await register(fy);
   if (!(reg.totals.caDep > 0)) throw new ErrorHandler(`No depreciation to post for ${fy}`, 409);
   const L = await ledgers();
@@ -211,10 +214,18 @@ async function create(b, req) {
     location: String(b.location || '').trim().slice(0, 80), identifier: String(b.identifier || '').trim().slice(0, 60),
     createdBy: req?.user?._id, requestId: b.requestId ? String(b.requestId) : undefined,
   };
-  if (b.openingWdv && FY_RE.test(String(b.openingWdv.fy || ''))) {
+  // Opening written-down values, for an asset older than these books. The
+  // year is typed by hand: one that did not fit ("2026", "26-27") used to
+  // drop the values without a word, and the asset was saved at its full
+  // cost, to be depreciated all over again.
+  const opening = b.openingWdv || {};
+  const openingYear = String(opening.fy ?? '').trim();
+  const openingValue = opening.companiesAct !== undefined && opening.companiesAct !== null && opening.companiesAct !== '';
+  if ((openingYear || openingValue) && !cal.isFy(openingYear)) throw new ErrorHandler('openingWdv.fy must be a financial year like 2026-27', 400);
+  if (openingYear) {
     const ca = Number(b.openingWdv.companiesAct); const it = Number(b.openingWdv.incomeTax);
     if (!(ca >= 0) || ca > cost) throw new ErrorHandler('openingWdv.companiesAct must be between 0 and the cost', 400);
-    data.openingWdv = { fy: b.openingWdv.fy, companiesAct: r2(ca), incomeTax: Number.isFinite(it) && it >= 0 ? r2(it) : r2(ca) };
+    data.openingWdv = { fy: openingYear, companiesAct: r2(ca), incomeTax: Number.isFinite(it) && it >= 0 ? r2(it) : r2(ca) };
   }
   if (isId(b.supplierBill)) {
     const bill = await SupplierBill.findById(b.supplierBill).select('billNo supplierBillNo supplier supplierName').lean();

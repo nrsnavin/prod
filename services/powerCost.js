@@ -75,7 +75,7 @@ const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v)
 /** Keep the confirmed figures for the month. */
 async function save(b, { by = null } = {}) {
   const month = String(b.month || '');
-  if (!/^\d{4}-\d{2}$/.test(month)) throw Object.assign(new Error('Pick the month the bill is for'), { status: 400 });
+  if (!bizDates.isMonthKey(month)) throw Object.assign(new Error('Pick the month the bill is for'), { status: 400 });
   const units = num(b.units); const total = num(b.total);
   if (!(units > 0)) throw Object.assign(new Error('The units used are needed'), { status: 400 });
   if (!(total > 0)) throw Object.assign(new Error('The bill\'s total is needed'), { status: 400 });

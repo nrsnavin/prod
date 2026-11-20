@@ -144,7 +144,8 @@ router.post("/tds/read", keepRequestContext(paperUpload.array("files", 6)), catc
   try {
     if (kind === "challan") return res.json({ success: true, kind, ...(await tdsPapers.challan({ pages })) });
     if (kind === "form16a") return res.json({ success: true, kind, ...(await tdsPapers.form16a({ pages })) });
-    const fy = /^\d{4}-\d{2}$/.test(String(req.body?.fy || "")) ? req.body.fy : null;
+    // A year that is one (utils/bizDates.js isFy); otherwise the paper's own.
+    const fy = require("../utils/bizDates").isFy(req.body?.fy) ? req.body.fy : null;
     const out = await tdsPapers.as26({ pages, fy, by: req.user?._id });
     res.json({ success: true, kind, ...out, receivable: out.stored ? await require("../services/tds").receivable(out.stored.fy) : null });
   } catch (err) { return readFailure(err, kind === "26as" ? "Form 26AS" : kind === "form16a" ? "Form 16A" : "challans", next); }

@@ -18,7 +18,7 @@ const ErrorHandler = require('../utils/ErrorHandler');
 const { isId } = require('./accountsHelpers');
 
 const { r2 } = require('../utils/money');
-const FY_RE = /^\d{4}-\d{2}$/;
+const { isFy } = require('../utils/bizDates');
 const MONTHS = ['Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan', 'Feb', 'Mar'];
 const fyStart = (fy) => new Date(Date.UTC(Number(fy.slice(0, 4)), 3, 1));
 const fyEnd = (fy) => new Date(Date.UTC(Number(fy.slice(0, 4)) + 1, 2, 31, 23, 59, 59, 999));
@@ -56,7 +56,7 @@ async function actuals(fy) {
 }
 
 async function compare(fy, now = new Date()) {
-  if (!FY_RE.test(String(fy || ''))) throw new ErrorHandler('fy must be like 2026-27', 400);
+  if (!isFy(fy)) throw new ErrorHandler('fy must be like 2026-27', 400);
   const [categories, budgets, spent] = await Promise.all([
     ExpenseCategory.find({}).select('name ledger active').sort({ name: 1 }).lean(),
     Budget.find({ fy }).lean(),
@@ -93,7 +93,9 @@ async function compare(fy, now = new Date()) {
 
 /** Save the year's figures for the heads given: twelve amounts, or one annual figure spread evenly. */
 async function save(fy, rows, by) {
-  if (!FY_RE.test(String(fy || ''))) throw new ErrorHandler('fy must be like 2026-27', 400);
+  // A year that is one: under "2026-11" or "2026-28" the figures were
+  // saved where no screen would show them again.
+  if (!isFy(fy)) throw new ErrorHandler('fy must be like 2026-27', 400);
   if (!Array.isArray(rows) || !rows.length) throw new ErrorHandler('rows is required', 400);
   const saved = [];
   for (const [i, r] of rows.entries()) {
