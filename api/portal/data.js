@@ -264,12 +264,22 @@ router.get('/orders/:id', catchAsyncErrors(async (req, res) => {
   const dcs = await leftDcs(match).populate('items.elastic', 'name').sort({ dispatchDate: -1, createdAt: -1 }).lean();
   const sent = sentByElastic(dcs);
   const names = await namesOf((order.elasticOrdered || []).map((l) => l.elastic));
+  // Nothing is "still to come" on a cancelled order: the page said so
+  // under "This order was cancelled". What had not left is said as not
+  // supplied instead. A COMPLETED order keeps its remainder as to come:
+  // it is completed when its last job finishes, which is often before
+  // the last lorry, and a challan can still be raised against it.
+  const cancelled = order.status === 'Cancelled';
   const lines = (order.elasticOrdered || []).map((l) => {
     const k = String(l.elastic || '');
     const ordered = qty(l.quantity);
     const produced = qty((order.producedElastic || []).filter((x) => String(x.elastic) === k).reduce((s, x) => s + (Number(x.quantity) || 0), 0));
     const dispatched = sent.get(k) || 0;
-    return { elastic: k, name: names.get(k) || 'Elastic', ordered, produced, dispatched, toCome: Math.max(0, qty(ordered - dispatched)) };
+    const left = Math.max(0, qty(ordered - dispatched));
+    return {
+      elastic: k, name: names.get(k) || 'Elastic', ordered, produced, dispatched,
+      toCome: cancelled ? 0 : left, notSupplied: cancelled ? left : 0,
+    };
   });
   const sum = (key) => qty(lines.reduce((s, l) => s + l[key], 0));
   const hasCertificates = (await certificatesFor(order)).length > 0;
@@ -280,6 +290,7 @@ router.get('/orders/:id', catchAsyncErrors(async (req, res) => {
       date: order.date, supplyDate: order.supplyDate, stage: STAGE[order.status],
       lines,
       totals: { ordered: sum('ordered'), produced: sum('produced'), dispatched: sum('dispatched'), toCome: sum('toCome') },
+      notSupplied: sum('notSupplied'),
       dispatches: dcs.map((dc) => dcRow(dc, order)),
       hasCertificates,
     },
