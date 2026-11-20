@@ -513,7 +513,9 @@ async function readSlipJob(slipId) {
     }
     read = await readSlip(pages);
   } catch (err) {
-    const permanent = err.permanent || ['UNSUPPORTED_TYPE', 'TOO_MANY_PAGES', 'NO_PAGES', 'ANTHROPIC_KEY_MISSING']
+    // REPLY_CUT: the slip is too long for one reading. Reading it again
+    // gives the same answer, and "send it again" the same slip.
+    const permanent = err.permanent || ['UNSUPPORTED_TYPE', 'TOO_MANY_PAGES', 'REPLY_CUT', 'NO_PAGES', 'ANTHROPIC_KEY_MISSING']
       .includes(err.code) || err?.response?.status === 404;
     if (!permanent && slip.readAttempts < MAX_READ_ATTEMPTS) {
       await SlipIngest.updateOne({ _id: slip._id, status: 'reading' }, { $set: { status: 'received' } });
@@ -525,7 +527,7 @@ async function readSlipJob(slipId) {
     });
     const problem = err.code === 'ANTHROPIC_KEY_MISSING'
       ? 'Reading photos is not set up on the server yet.'
-      : err.code === 'UNSUPPORTED_TYPE' || err.code === 'TOO_MANY_PAGES' ? err.message
+      : ['UNSUPPORTED_TYPE', 'TOO_MANY_PAGES', 'REPLY_CUT'].includes(err.code) ? err.message
         : 'The photo could not be fetched or read. Please send it again.';
     const failed = await SlipIngest.findOneAndUpdate(
       { _id: slip._id, status: 'reading' },

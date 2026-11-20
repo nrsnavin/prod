@@ -75,6 +75,28 @@ describe('reading', () => {
     expect((await readSlip([jpeg])).problem).toBe('unreadable');
   });
 
+  // Found reading utils/slipOcr.js line by line.
+  it('a month that does not exist is no date ("2026-13-05" passed a check of the day alone)', () => {
+    expect(asDate('2026-13-05')).toBeNull();
+    expect(asDate('2026-00-10')).toBeNull();
+    expect(asDate('2026-12-31')).toBe('2026-12-31');
+  });
+
+  it('a reply cut off for length says the slip is too long, instead of dropping its rows', async () => {
+    mockCreate
+      .mockResolvedValueOnce(reply({ format: 'slip', rows: [{ machine: '1', production: 10 }] }))
+      .mockResolvedValueOnce({ content: [{ type: 'text', text: '{"format":"slip","rows":[{"machine":"2","produc' }], stop_reason: 'max_tokens', usage: {} });
+    const err = await readSlip([jpeg, jpeg, jpeg, jpeg, jpeg]).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.code).toBe('REPLY_CUT');
+    expect(err.message).toMatch(/too long to read in one go/);
+  });
+
+  it('the printed sheet is described with every column it has', () => {
+    expect(_internals.PROMPT).not.toMatch(/and three\s+HAND-WRITTEN columns: "Production \(m\)", "Timer \(H:M:S\)", "Sign"/);
+    expect(_internals.PROMPT).toMatch(/four\s+HAND-WRITTEN columns: "Production \(m\)", "Timer \(H:M:S\)", "Sign" \(initials\) and "Remarks"/);
+  });
+
   it('refuses what it cannot read before calling anything', async () => {
     await expect(readSlip([{ buffer: Buffer.from('x'), mimetype: 'video/mp4' }])).rejects.toMatchObject({ code: 'UNSUPPORTED_TYPE' });
     await expect(readSlip(Array(11).fill(jpeg))).rejects.toMatchObject({ code: 'TOO_MANY_PAGES' });

@@ -58,8 +58,8 @@ const PROMPTS = Object.freeze({
   },
 
   'shift-sheet-ocr': {
-    version: 'v1.0',
-    notes: 'Handwriting OCR of the printed shift sheet, batched by page.',
+    version: 'v1.1',
+    notes: 'Handwriting OCR of the printed shift sheet, batched by page. v1.1: the sheet has four hand-written columns since the Sign box was added; the reader is told of it, and that initials are never a remark.',
     system: null,   // lives in utils/shiftSheetOcr.js
   },
 
@@ -82,8 +82,8 @@ const PROMPTS = Object.freeze({
   },
 
   'production-slip-ocr': {
-    version: 'v1.2',
-    notes: 'Photos of a production record sent over WhatsApp or uploaded: the printed shift sheet, the printed floor sheet (no plan; v1.1) or the factory\'s own slip. v1.2: both printed sheets carry a Sign box and Remarks. Reads only; matching is done against the database. Prompt lives in utils/slipOcr.js.',
+    version: 'v1.3',
+    notes: 'v1.3: the shift sheet is described as having four hand-written columns (it said three and listed four). Photos of a production record sent over WhatsApp or uploaded: the printed shift sheet, the printed floor sheet (no plan; v1.1) or the factory\'s own slip. v1.2: both printed sheets carry a Sign box and Remarks. Reads only; matching is done against the database. Prompt lives in utils/slipOcr.js.',
     system: null,
   },
 

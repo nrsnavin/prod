@@ -7,7 +7,9 @@
 //  utils/shiftSheetPdf.js, scanned/photographed back to PDF) and
 //  returns the hand-written Production / Timer / Remarks per row,
 //  keyed by the printed Code so the route can map each value back to
-//  its ShiftDetail.
+//  its ShiftDetail. The sheet also has a Sign box (initials) between
+//  Timer and Remarks; the prompt names it so initials are not read as
+//  the remark.
 //
 //  Scale: a 200-machine plan is ~19 pages. We split the upload into
 //  small page-batches (pdf-lib) and OCR them with bounded concurrency
@@ -27,17 +29,19 @@ const CONCURRENCY  = 3;  // parallel vision calls
 
 const PROMPT = [
   'This PDF is a factory "Shift Production Sheet". Each row has PRINTED',
-  'columns (QR, Code, Machine ID, Operator, Job No, Shift, Date) and three',
-  'HAND-WRITTEN columns: "Production (m)", "Timer (H:M:S)" and "Remarks".',
+  'columns (QR, Code, Machine ID, Operator, Job No, Shift, Date) and four',
+  'HAND-WRITTEN columns: "Production (m)", "Timer (H:M:S)", "Sign" and "Remarks".',
+  'The "Sign" box holds the supervisor\'s initials: initials are never a remark',
+  'and are not returned. An older print of the sheet has no "Sign" column.',
   '',
   'For EVERY data row on EVERY page, read the printed Code exactly (format',
-  'like "SD-8F3A2C") and transcribe the three hand-written cells.',
+  'like "SD-8F3A2C") and transcribe the Production, Timer and Remarks cells.',
   '',
   'Rules:',
   '- production: the number of metres written, as an integer. If the cell is',
   '  blank or illegible, use null.',
   '- timer: the written time as "H:MM:SS" (or "HH:MM:SS"). If blank, null.',
-  '- remarks: the written text, or "" if blank.',
+  '- remarks: the text written in the Remarks cell, or "" if blank.',
   '- confidence: your confidence for THIS row\'s hand-written values, 0 to 1.',
   '  Lower it when the handwriting is unclear.',
   '- Do NOT invent rows. Do NOT include the header row.',
@@ -147,8 +151,9 @@ async function extractShiftRows(pdfBuffer) {
   const { batches, total } = await splitIntoBatches(pdfBuffer, BATCH_PAGES);
   const perBatch = await mapPool(batches, CONCURRENCY, (buf) => ocrBatch(claude, buf));
 
-  // Flatten; de-dupe by code (last non-null wins) in case a row appears
-  // on a batch boundary twice.
+  // Flatten; de-dupe by code in case a row appears on a batch boundary
+  // twice: the first reading is kept, unless it had no production figure
+  // and a later one has.
   const byCode = new Map();
   for (const rows of perBatch) {
     for (const r of rows) {

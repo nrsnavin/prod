@@ -34,6 +34,7 @@
 //  }
 // ═════════════════════════════════════════════════════════════════
 const { anthropic, VISION_MODEL } = require('./anthropicClient');
+const { isDayKey } = require('./factoryDay');
 
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const SUPPORTED = new Set([...IMAGE_TYPES, 'application/pdf']);
@@ -45,7 +46,7 @@ const PROMPT = [
   'They are one of three kinds:',
   '',
   'A) "sheet": the factory\'s PRINTED "Shift Production Sheet". A table with printed columns',
-  '   QR, Code (like "SD-8F3A2C"), Machine ID, Operator, Job No, Shift, Date, and three',
+  '   QR, Code (like "SD-8F3A2C"), Machine ID, Operator, Job No, Shift, Date, and four',
   '   HAND-WRITTEN columns: "Production (m)", "Timer (H:M:S)", "Sign" (initials) and "Remarks". The header shows',
   '   a plan number like "SP-20261006-D" (date, then D for day or N for night shift).',
   '',
@@ -105,11 +106,12 @@ function asTimer(v) {
   return `${Number(m[1])}:${m[2].padStart(2, '0')}:${(m[3] ?? '00').padStart(2, '0')}`;
 }
 
+// A day that exists (utils/factoryDay.js). This checked the day of the
+// month alone, so "2026-13-05" came through: month 13 rolls into
+// January and the 5th is still the 5th.
 function asDate(v) {
-  const m = String(v ?? '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
-  return d.getUTCDate() === +m[3] ? `${m[1]}-${m[2]}-${m[3]}` : null;
+  const s = String(v ?? '').trim();
+  return isDayKey(s) ? s : null;
 }
 
 function asShift(v) {
@@ -166,6 +168,14 @@ async function readBatch(claude, pages) {
     max_tokens: 4096,
     messages: [{ role: 'user', content: [...pages.map(contentFor), { type: 'text', text: PROMPT }] }],
   });
+  // The reply ran out of room. Its JSON does not parse, so these photos'
+  // rows used to vanish while the other photos' rows were kept: a slip
+  // that looked read, with a third of its looms missing.
+  if (message.stop_reason === 'max_tokens') {
+    const err = new Error('This is too long to read in one go. Send fewer photos at a time.');
+    err.code = 'REPLY_CUT';
+    throw err;
+  }
   const reply = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
   return { parsed: parseJsonReply(reply) || {}, usage: message.usage };
 }

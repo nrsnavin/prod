@@ -283,6 +283,18 @@ describe('reading in the background', () => {
     expect(after.problem).toMatch(/could not be fetched or read/);
   });
 
+  // Found reading utils/slipOcr.js line by line: a reading cut off for
+  // length was retried three times and then answered "send it again".
+  it('a slip too long to read in one go is failed at once, in those words', async () => {
+    const slip = await svc.receiveUpload({ files: [photo], user: admin });
+    mockRead.mockRejectedValue(Object.assign(new Error('This is too long to read in one go. Send fewer photos at a time.'), { code: 'REPLY_CUT' }));
+    await svc.readSlipJob(slip._id);
+    const after = await SlipIngest.findById(slip._id).lean();
+    expect(after.status).toBe('failed');
+    expect(after.problem).toMatch(/too long to read in one go/);
+    expect(mockRead).toHaveBeenCalledTimes(1);
+  });
+
   it('tells a WhatsApp sender what it read', async () => {
     await plan();
     const sender = { userId: admin._id, name: 'Floor Lead' };
