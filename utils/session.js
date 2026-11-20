@@ -45,8 +45,14 @@ const APP_MAX_AGE = 90 * 24 * 60 * 60 * 1000;
 // The one algorithm tokens are signed with; nothing else is accepted.
 const ALGORITHMS = ['HS256'];
 // Sign-outs remembered per account. Each is forgotten when its token
-// would have expired anyway, so the list stays a handful long.
-const MAX_REMEMBERED = 50;
+// would have expired anyway. A browser's lasts a day; an app's lasts
+// ninety, and a shared tablet signs a person out each time it sits idle —
+// so the list is not "a handful". It was cut to the newest fifty, and the
+// fifty-first sign-out forgot the first: that session's token, good for
+// the rest of its ninety days, worked again. Nothing is forgotten early
+// now. Should the list ever fill, every session of the account is ended
+// instead (endAll) — the person signs in again, and no old token stands.
+const MAX_REMEMBERED = 500;
 
 const COOKIE = 'token';
 
@@ -171,11 +177,16 @@ async function end(user, claims) {
   const longLived = claims.exp && claims.iat && (claims.exp - claims.iat) * 1000 > WEB_MAX_AGE;
   const exp = claims.exp && !longLived ? new Date(claims.exp * 1000) : new Date(Date.now() + APP_MAX_AGE);
   // Forget the ones whose tokens have expired on their own, then remember this one.
-  await User.updateOne({ _id: user._id }, { $pull: { revokedSessions: { exp: { $lt: new Date() } } } });
-  await User.updateOne(
+  const now = await User.findOneAndUpdate(
     { _id: user._id },
-    { $push: { revokedSessions: { $each: [{ sid: claims.sid, exp }], $slice: -MAX_REMEMBERED } } }
-  );
+    { $pull: { revokedSessions: { exp: { $lt: new Date() } } } },
+    { new: true }
+  ).select('+revokedSessions').lean();
+  if ((now?.revokedSessions || []).length >= MAX_REMEMBERED) {
+    await endAll(user._id);
+    return true;
+  }
+  await User.updateOne({ _id: user._id }, { $push: { revokedSessions: { sid: claims.sid, exp } } });
   return true;
 }
 
@@ -186,6 +197,6 @@ async function endAll(userId) {
 }
 
 module.exports = {
-  COOKIE, WEB_MAX_AGE, APP_MAX_AGE, ALGORITHMS,
+  COOKIE, WEB_MAX_AGE, APP_MAX_AGE, ALGORITHMS, MAX_REMEMBERED,
   issue, read, end, endAll, closedReason, cookieOptions, clearedCookieOptions, wantsLongSession, sameSite,
 };

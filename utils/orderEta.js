@@ -133,19 +133,23 @@ function estimateOrderEta({ lines, machines, supplyDate, today, aggregates, week
     }));
   const totalMeters = cleanLines.reduce((s, l) => s + l.quantity, 0);
 
-  // Blended rate: weight per line by meters share so a 90/10 split
-  // doesn't get dragged by a tiny line on a slow elastic.
-  let weightedRate = 0, weightSum = 0;
+  // Blended rate. TIME ADDS; RATES DO NOT. Each line takes its own
+  // metres ÷ its own rate, and the order takes the sum: 9,000 m at 3,000
+  // a day is three machine-days and 1,000 m at 500 a day is two more.
+  // This used to average the RATES by metres (2,750 a day for that
+  // order) and divide the metres by the average — 3.6 machine-days for
+  // work that is 5, so an order with a slow line was always promised
+  // early. The rate reported is the one those days imply (metres ÷ days).
+  let lineDays = 0, ratedMeters = 0;
   let usedColdStart = false;
   const perLineRates = [];
   for (const l of cleanLines) {
     const { rate, source } = metersPerMachineDay({ aggregates, elasticId: l.elastic });
     perLineRates.push({ elastic: l.elastic, meters: l.quantity, rate, source });
     if (source === 'coldstart') usedColdStart = true;
-    weightedRate += rate * l.quantity;
-    weightSum    += l.quantity;
+    if (rate > 0) { lineDays += l.quantity / rate; ratedMeters += l.quantity; }
   }
-  const baseRate = weightSum > 0 ? weightedRate / weightSum : 0;
+  const baseRate = lineDays > 0 ? ratedMeters / lineDays : 0;
 
   // Apply momentum + health to the blended base rate.
   const att = C.clamp(

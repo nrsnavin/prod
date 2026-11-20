@@ -130,6 +130,40 @@ describe('signing out', () => {
     expect(at('desk-session')).toBeLessThan(Date.now() + 2 * 60_000);
   });
 
+  // Found reading utils/session.js line by line. The sign-outs remembered
+  // were cut to the newest fifty — "a handful", when each lasts a day. An
+  // app sign-out lasts ninety, and a shared tablet signs a person out every
+  // time it sits idle: the fifty-first sign-out forgot the first, and that
+  // session's token, good for the rest of its ninety days, worked again.
+  it('never honours a signed-out session again, however many sign-outs follow', async () => {
+    const session = require('../../utils/session');
+    const user = await User.findOne({ email: 'floor@t.co' });
+    const first = session.issue(user, { longLived: true });
+    await session.end(user, jwt.decode(first));
+    await expect(session.read(first)).rejects.toMatchObject({ statusCode: 401 });
+    for (let i = 0; i < 60; i += 1) await session.end(user, jwt.decode(session.issue(user, { longLived: true })));
+    await expect(session.read(first)).rejects.toMatchObject({ statusCode: 401 });
+    // The account still signs in, and that new session stands.
+    const again = session.issue(await User.findById(user._id), { longLived: true });
+    expect((await session.read(again)).user.email).toBe('floor@t.co');
+  });
+
+  it('ends every session rather than forget a sign-out, when the list is full', async () => {
+    const session = require('../../utils/session');
+    const user = await User.findOne({ email: 'floor@t.co' });
+    const first = session.issue(user, { longLived: true });
+    await session.end(user, jwt.decode(first));
+    const far = new Date(Date.now() + 80 * 86_400_000);
+    await User.updateOne({ _id: user._id }, { $push: { revokedSessions: { $each: Array.from({ length: session.MAX_REMEMBERED }, (_, i) => ({ sid: `filler-${i}`, exp: far })) } } });
+    const open = session.issue(await User.findById(user._id), { longLived: true });   // signed in elsewhere
+    const last = session.issue(await User.findById(user._id), { longLived: true });
+    await session.end(await User.findById(user._id), jwt.decode(last));
+    for (const token of [first, last, open]) await expect(session.read(token)).rejects.toMatchObject({ statusCode: 401 });
+    const fresh = await User.findById(user._id).select('+revokedSessions').lean();
+    expect(fresh.revokedSessions || []).toHaveLength(0);
+    expect((await session.read(session.issue(fresh, { longLived: true }))).user.email).toBe('floor@t.co');
+  });
+
   it('CONTROL: a token from before sessions had ids is still honoured', async () => {
     // A deploy must not sign the mill out: older tokens carry no `sid`
     // (and the oldest no `v`), and run until they expire.

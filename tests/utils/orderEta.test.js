@@ -106,6 +106,30 @@ describe('orderEta.estimateOrderEta integration', () => {
     }
   });
 
+  // Found reading utils/orderEta.js line by line. Two elastics on one
+  // order were given ONE rate — the average of their rates by metres —
+  // and the metres divided by it. Time adds; rates do not: 9,000 m at
+  // 3,000 a day is three days and 1,000 m at 500 a day is two more. The
+  // average said 2,750 m a day, so 3.6 machine-days for work that is 5.
+  test('an order of a fast and a slow elastic takes the days of each, added', () => {
+    const r = estimateOrderEta({
+      lines: [{ elastic: 'fast', quantity: 9000 }, { elastic: 'slow', quantity: 1000 }],
+      machines: 1,
+      today: MON_2026_06_15,
+      aggregates: { ...baseAgg, elasticRate: { fast: 3000, slow: 500 } },
+    });
+    expect(r.machineDays).toBe(5);
+    expect(r.weavingDays).toBe(5);
+    expect(r.effRate).toBe(2000);                 // 10,000 m in 5 machine-days
+    expect(r.factors.rawBlendedRate).toBe(2000);
+    // The same order with the slow line alone, then the fast line alone, adds up to it.
+    const one = (elastic, quantity) => estimateOrderEta({ lines: [{ elastic, quantity }], machines: 1, today: MON_2026_06_15, aggregates: { ...baseAgg, elasticRate: { fast: 3000, slow: 500 } } }).machineDays;
+    expect(one('fast', 9000) + one('slow', 1000)).toBe(5);
+    // One elastic, or several at one rate, is as it was.
+    const same = estimateOrderEta({ lines: [{ elastic: 'ela1', quantity: 4000 }, { elastic: 'other', quantity: 2000 }], machines: 2, today: MON_2026_06_15, aggregates: baseAgg });
+    expect(same.machineDays).toBe(6);
+  });
+
   test('flags late risk when expectedDate exceeds supplyDate', () => {
     const r = estimateOrderEta({
       lines: [{ elastic: 'ela1', quantity: 50_000 }],
