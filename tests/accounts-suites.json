@@ -77,5 +77,6 @@
   "tests/api/confirmationsRecipient.test.js",
   "tests/api/collectionsReminderNumber.test.js",
   "tests/services/bankStatementRead.test.js",
-  "tests/api/accountsCloseChecklist.test.js"
+  "tests/api/accountsCloseChecklist.test.js",
+  "tests/api/accountsTallyRoundOff.test.js"
 ]

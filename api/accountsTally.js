@@ -70,9 +70,17 @@ router.get("/tally/preview", catchAsyncErrors(async (req, res, next) => {
   let p;
   try { p = period(req.query); } catch (err) { return next(err); }
   const L = await ledgerNames();
-  const [fresh, all] = await Promise.all([tally.build({ ...p, fresh: true, L }), tally.build({ ...p, fresh: false, L })]);
+  // …and what is dated BEFORE the period and has still not gone: a bill
+  // entered late for a month already sent, a month skipped. Exporting month
+  // by month it would never go, and nothing on the page said so.
+  const [fresh, all, before] = await Promise.all([
+    tally.build({ ...p, fresh: true, L }), tally.build({ ...p, fresh: false, L }),
+    tally.build({ from: new Date(p.from.getTime() - 400 * DAY), to: new Date(p.from.getTime() - 1), fresh: true, L }),
+  ]);
+  const oldest = before.vouchers.reduce((min, v) => (!min || new Date(v.date) < min ? new Date(v.date) : min), null);
   res.json({
     success: true, from: p.from, to: p.to,
+    earlier: { count: before.vouchers.length, oldest },
     counts: tally.countOf(fresh.vouchers, fresh.cancels), vouchers: fresh.vouchers.length + fresh.cancels.length,
     alreadySent: Math.max(0, all.vouchers.length - fresh.vouchers.length),
     ledgers: tally.ledgersOf(fresh.vouchers), problems: fresh.problems, warnings: fresh.warnings,

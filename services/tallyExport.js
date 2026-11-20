@@ -34,7 +34,8 @@
 //    journal, as is an advance applied to a later invoice.
 //  • Dates are the day in India, whatever the server's clock.
 //  • A document cancelled after it went is cancelled in Tally by the next
-//    export, rather than staying live there.
+//    export — whichever period that export is for — rather than staying
+//    live there.
 //
 //  Opening balances are not exported: they came from Tally. An expense
 //  with no supplier is not a voucher of its own — the payment that
@@ -150,10 +151,13 @@ async function build({ from, to, fresh = true, L, costCentres }) {
     Journal.find({ status: 'posted', date: range, ...notSent }).lean(),
   ]);
 
-  // Cancelled here after they went: cancelled there, dated as sent.
+  // Cancelled here after they went: cancelled there, dated as sent. Every
+  // one still waiting, up to the period's end — not only those dated inside
+  // it. A voucher of July cancelled in August used to wait for somebody to
+  // export July again, and stayed live in Tally until they did.
   const cancelled = [];
   for (const t of TYPES) {
-    const q = { status: 'cancelled', 'tally.batch': { $ne: null }, [DATE[t]]: range, ...(fresh ? noBatch('tally.cancelBatch') : {}) };
+    const q = { status: 'cancelled', 'tally.batch': { $ne: null }, [DATE[t]]: fresh ? { $lte: to } : range, ...(fresh ? noBatch('tally.cancelBatch') : {}) };
     for (const d of await MODEL[t].find(q).select(`${NUMBER[t]} ${DATE[t]} kind cancel`).lean()) {
       cancelled.push({ kind: 'cancel', key: `cancel:${t}:${d._id}`, docType: t, doc: d._id, type: VOUCHER_TYPE[t](d), number: d[NUMBER[t]], date: d[DATE[t]], narration: `Cancelled in the ERP${d.cancel?.reason ? `: ${d.cancel.reason}` : ''}` });
     }
@@ -296,7 +300,13 @@ async function build({ from, to, fresh = true, L, costCentres }) {
       v.cr(p, t.grand, bills);
       v.dr(L.sales, t.taxable);
       taxLines(v, t, 'dr', L, false);
-      v.dr(L.roundOff, -(t.roundOff || 0));
+      // The note's round-off, on the side it is on: grand = taxable + tax +
+      // round-off, all of it debited against the party's credit. It was
+      // written with its sign turned, which left the voucher out by twice
+      // the round-off; balance() put that right unseen while twice was
+      // under a rupee. At fifty paise it is a rupee: "does not balance",
+      // and one such note held back the whole period's export.
+      v.dr(L.roundOff, t.roundOff || 0);
     } else if (toCustomer) {
       v.dr(p, t.grand, [{ name: ref, type: 'Agst Ref', amount: t.grand }]);
       v.cr(L.sales, t.taxable);

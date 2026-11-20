@@ -136,6 +136,51 @@ describe('credits applied later, and cancellations', () => {
     expect((await get('/accounts/health')).body.checks.find((c) => c.key === 'cancelled').ok).toBe(true);
   });
 
+  it('a cancellation goes with the next export, whatever month that export is for', async () => {
+    // July's vouchers went in July. The receipt is cancelled afterwards, and
+    // the office's next export is August's: the cancellation used to wait
+    // until somebody exported July again, the voucher live in Tally meanwhile.
+    const s = await scene();
+    const r = (await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: s.customer._id, amount: 10500, mode: 'bank', account: s.bank._id, date: '2026-07-03', allocations: [{ docType: 'Invoice', doc: s.inv._id, amount: 10500 }] })).body.payment;
+    expect((await exportJuly()).status).toBe(201);
+    expect((await post(`/accounts/payments/${r._id}/cancel`, { reason: 'Cheque bounced back' })).status).toBe(200);
+    const august = (await get('/accounts/tally/preview?from=2026-08-01&to=2026-08-31')).body;
+    expect(august.counts).toEqual({ Cancellations: 1 });
+    const sent = await post('/accounts/tally/export', { from: '2026-08-01', to: '2026-08-31' });
+    expect(sent.status).toBe(201);
+    expect(sent.body.batch).toMatchObject({ vouchers: 0, cancels: 1 });
+    expect(await xmlOf(sent.body.batch._id)).toMatch(new RegExp(`<VOUCHER DATE="3-Jul-2026" TAGNAME="Voucher Number" TAGVALUE="${r.voucherNo.replace(/\//g, '\\/')}" VCHTYPE="Receipt" ACTION="Cancel">`));
+    // Once: July's export afterwards has nothing left to send.
+    expect((await exportJuly()).status).toBe(409);
+    // A document cancelled that is dated AFTER the period is not that period's business.
+    const later = (await post('/accounts/payments', { kind: 'receipt', partyType: 'customer', customer: s.customer._id, amount: 500, mode: 'bank', account: s.bank._id, date: '2026-09-05' })).body.payment;
+    expect((await post('/accounts/tally/export', { from: '2026-09-01', to: '2026-09-30' })).status).toBe(201);
+    expect((await post(`/accounts/payments/${later._id}/cancel`, { reason: 'Entered twice' })).status).toBe(200);
+    expect((await get('/accounts/tally/preview?from=2026-08-01&to=2026-08-31')).body.counts).toEqual({});
+    expect((await get('/accounts/tally/preview?from=2026-10-01&to=2026-10-31')).body.counts).toEqual({ Cancellations: 1 });
+  });
+
+  it('the preview says when documents dated before the period have not gone', async () => {
+    // July went. A July bill is entered afterwards (the supplier's bill came
+    // late), and the next export is August's: nothing on the page said that
+    // one of July's documents was still not in Tally.
+    const s = await scene();
+    expect((await exportJuly()).status).toBe(201);
+    expect((await get('/accounts/tally/preview?from=2026-08-01&to=2026-08-31')).body.earlier).toEqual({ count: 0, oldest: null });
+    const late = await post('/accounts/bills', { supplier: s.supplier._id, supplierBillNo: 'SY/901', billDate: '2026-07-20', lines: [{ description: 'Nylon', quantity: 10, rate: 300, gstPercent: 5 }] });
+    expect(late.status).toBe(201);
+    const august = (await get('/accounts/tally/preview?from=2026-08-01&to=2026-08-31')).body;
+    expect(august.counts).toEqual({});
+    expect(august.earlier.count).toBe(1);
+    expect(new Date(august.earlier.oldest).toISOString().slice(0, 10)).toBe('2026-07-20');
+    // Exporting from that date sends it, and then nothing is left behind.
+    const wide = (await get('/accounts/tally/preview?from=2026-07-20&to=2026-08-31')).body;
+    expect(wide.counts).toEqual({ Purchase: 1 });
+    expect(wide.earlier).toEqual({ count: 0, oldest: null });
+    expect((await post('/accounts/tally/export', { from: '2026-07-20', to: '2026-08-31' })).status).toBe(201);
+    expect((await get('/accounts/tally/preview?from=2026-08-01&to=2026-08-31')).body.earlier).toEqual({ count: 0, oldest: null });
+  });
+
   it('two exports at the same moment never send the same document twice', async () => {
     await scene();
     const [a, b] = await Promise.all([exportJuly(), exportJuly()]);
