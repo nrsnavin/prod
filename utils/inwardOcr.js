@@ -35,7 +35,8 @@ function normalise(raw, meta = {}) {
     dcNo: str(raw.dcNo, 40),
     invoiceNo: str(raw.invoiceNo, 40),
     poNumber: str(raw.poNumber, 40),
-    date: /^\d{4}-\d{2}-\d{2}$/.test(String(raw.date || '')) ? raw.date : null,
+    // A day that exists, not just the shape of one (utils/factoryDay.js).
+    date: require('./factoryDay').isDayKey(String(raw.date || '')) ? raw.date : null,
     lines: (Array.isArray(raw.lines) ? raw.lines : []).slice(0, 40).map((l) => ({
       description: str(l?.description, 100),
       quantity: num(l?.quantity),

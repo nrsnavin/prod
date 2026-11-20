@@ -75,7 +75,7 @@ function normaliseNotice(raw, meta = {}) {
     problem: null,
     authority: AUTHORITIES.includes(raw.authority) ? raw.authority : 'other',
     form, reference: str(raw.reference, 60), subject: str(raw.subject, 200),
-    periodText: str(raw.periodText, 60), financialYear: /^\d{4}-\d{2}$/.test(fy) ? fy : '',
+    periodText: str(raw.periodText, 60), financialYear: require('./bizDates').isFy(fy) ? fy : '',
     amount: amount != null && amount >= 0 ? amount : null,
     issuedOn, replyBy, replyByAssumed, hearingOn: asDate(raw.hearingOn),
     summary: str(raw.summary, 600), asks,

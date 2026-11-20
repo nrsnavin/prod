@@ -41,6 +41,15 @@ async function readJson({ pages, prompt, maxTokens = 1200, maxPages = 3 }) {
       : { type: 'image', source: { type: 'base64', media_type: p.mimetype, data } };
   });
   const msg = await claude.messages.create({ model: VISION_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: [...content, { type: 'text', text: prompt }] }] });
+  // The reply ran out of room: the paper holds more than fits one reading.
+  // The cut-off JSON does not parse, so this used to come back "unreadable"
+  // — which sends a person to take a better photo of a paper that was
+  // perfectly clear.
+  if (msg.stop_reason === 'max_tokens') {
+    const e = new Error('This is too long to read in one go. Send fewer pages at a time, or a part of it.');
+    e.code = 'REPLY_CUT';
+    throw e;
+  }
   const reply = (msg.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
   return { data: parseJson(reply), model: VISION_MODEL, usage: msg.usage, latencyMs: Date.now() - startedAt };
 }
@@ -52,7 +61,7 @@ const str = (v, max = 120) => String(v ?? '').trim().slice(0, max);
 /** Map a route-level failure of readJson to { status, message }. */
 function failure(err, what) {
   if (err.code === 'ANTHROPIC_KEY_MISSING') return { status: 503, message: `Reading ${what} is not set up on this server — type the details in.` };
-  if (err.code === 'NO_PAGES' || err.code === 'UNSUPPORTED_TYPE' || err.code === 'TOO_MANY_PAGES') return { status: 400, message: err.message };
+  if (err.code === 'NO_PAGES' || err.code === 'UNSUPPORTED_TYPE' || err.code === 'TOO_MANY_PAGES' || err.code === 'REPLY_CUT') return { status: 400, message: err.message };
   return { status: 502, message: `The ${what} could not be read: ${err.message}` };
 }
 

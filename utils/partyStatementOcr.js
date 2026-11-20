@@ -127,6 +127,15 @@ async function readStatement({ files = [] } = {}) {
     }), { type: 'text', text: PROMPT }];
   const startedAt = Date.now();
   const message = await claude.messages.create({ model, max_tokens: 8192, messages: [{ role: 'user', content }] });
+  // The reply ran out of room: the paper holds more than fits one reading.
+  // The cut-off JSON does not parse, so this used to come back "unreadable"
+  // — which sends a person to take a better photo of a paper that was
+  // perfectly clear.
+  if (message.stop_reason === 'max_tokens') {
+    const e = new Error('This is too long to read in one go. Send fewer pages at a time, or a part of it.');
+    e.code = 'REPLY_CUT';
+    throw e;
+  }
   const reply = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
   return normalise(parseJsonReply(reply), { model, usage: message.usage, latencyMs: Date.now() - startedAt });
 }

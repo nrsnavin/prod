@@ -73,22 +73,37 @@ async function classifyDefect(imageBuffer, mimetype, spec = {}) {
   const parsed = parseJsonReply(text);
   if (!parsed) return { available: true, ok: false };
 
+  // A line passes when the model said true. Boolean("false") is true: the
+  // word written as text read as a pass.
+  const passed = (v) => v === true || /^(true|pass|passed|yes|ok)$/i.test(String(v ?? '').trim());
   const results = Array.isArray(parsed.results)
     ? parsed.results.map((r) => ({
-        parameter: String(r.parameter || '').trim(),
-        expected: String(r.expected ?? '').trim(),
-        measured: String(r.measured ?? '').trim(),
-        pass: Boolean(r.pass),
+        parameter: String(r?.parameter || '').trim(),
+        expected: String(r?.expected ?? '').trim(),
+        measured: String(r?.measured ?? '').trim(),
+        pass: passed(r?.pass),
       })).filter((r) => r.parameter)
     : [];
+
+  // The verdict. Anything that was not exactly "fail" used to be a pass —
+  // "FAIL", "rejected", or a pass given above a line that failed. A photo
+  // passes only when the model said pass AND nothing it reported says
+  // otherwise; a reply with no verdict at all is no draft.
+  const said = String(parsed.overallResult || '').trim().toLowerCase();
+  const defectCode = String(parsed.defectCode || '').trim();
+  const rejectedMetersHint = Math.max(0, Number(parsed.rejectedMetersHint) || 0);
+  const saidFail = /^(fail|failed|reject|rejected)$/.test(said);
+  const saidPass = /^(pass|passed|ok)$/.test(said);
+  if (!saidFail && !saidPass) return { available: true, ok: false };
+  const overallResult = saidFail || results.some((r) => !r.pass) || defectCode || rejectedMetersHint > 0 ? 'fail' : 'pass';
 
   return {
     available: true,
     ok: true,
-    overallResult: parsed.overallResult === 'fail' ? 'fail' : 'pass',
+    overallResult,
     confidence: Math.max(0, Math.min(100, Number(parsed.confidence) || 0)),
-    defectCode: String(parsed.defectCode || '').trim(),
-    rejectedMetersHint: Math.max(0, Number(parsed.rejectedMetersHint) || 0),
+    defectCode,
+    rejectedMetersHint,
     results,
     notes: String(parsed.notes || '').trim(),
   };

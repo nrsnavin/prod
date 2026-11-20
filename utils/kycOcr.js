@@ -68,7 +68,7 @@ function normaliseId(raw, meta = {}) {
     problem: null,
     kind: ['aadhaar', 'pan', 'both'].includes(raw.kind) ? raw.kind : '',
     name: str(raw.name, 100),
-    dob: /^\d{4}-\d{2}-\d{2}$/.test(String(raw.dob || '')) ? raw.dob : '',
+    dob: require('./factoryDay').isDayKey(String(raw.dob || '')) ? raw.dob : '',
     gender: ['male', 'female', 'other'].includes(String(raw.gender || '').toLowerCase()) ? String(raw.gender).toLowerCase() : '',
     pan: /^[A-Z]{5}\d{4}[A-Z]$/.test(pan) ? pan : '',
     aadhaar: aadhaar.length === 12 ? aadhaar : '',
@@ -90,10 +90,19 @@ async function readIdCard(pages) {
 
 /** How alike two names are, once "M/s", "Pvt Ltd" and punctuation are set aside: true when the same firm or person. */
 function sameName(a, b) {
-  const squash = (s) => String(s || '').toUpperCase().replace(/\b(M\/S|MS|THE|PVT|PRIVATE|LTD|LIMITED|LLP|AND|CO|COMPANY|MR|MRS|MS)\b/g, '').replace(/[^A-Z0-9]/g, '');
-  const x = squash(a); const y = squash(b);
+  const words = (s) => String(s || '').toUpperCase().replace(/\bM\/S\b/g, ' ').replace(/[^A-Z0-9]+/g, ' ')
+    .split(' ').filter((w) => w && !/^(MS|THE|PVT|PRIVATE|LTD|LIMITED|LLP|AND|CO|COMPANY|MR|MRS)$/.test(w));
+  const wa = words(a); const wb = words(b);
+  const x = wa.join(''); const y = wb.join('');
   if (!x || !y) return false;
-  if (x === y || x.includes(y) || y.includes(x)) return true;
+  if (x === y) return true;
+  // One name wholly inside the other, WORD FOR WORD: "Sri Yarn" is "Sri
+  // Yarn Traders". It was looked for letter by letter, so "RAJ" was
+  // "RAJESH Textiles" and "ANAND" was "ANANDHI Mills" — and "the cheque is
+  // in the supplier's name" is the check that stops money going to
+  // somebody else's account.
+  const [few, many] = wa.length <= wb.length ? [wa, wb] : [wb, wa];
+  if (few.join('').length >= 3 && few.every((w) => many.includes(w))) return true;
   const { distance } = require('../services/paymentChecks');
   return Math.min(x.length, y.length) >= 6 && distance(x, y, 2) <= 2;
 }

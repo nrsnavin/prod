@@ -240,6 +240,18 @@ async function extractPurchaseOrder(buffer, mimetype) {
  * the same schema as a document, so it is matched and checked the same.
  * The sender is already known from their number; it is not asked for.
  */
+/**
+ * "Saturday, 2026-11-21": today as the factory has it, with its weekday.
+ * The UTC date was given, which is yesterday's until 05:30 — an order
+ * typed after midnight "for tomorrow" was dated a day early — and no
+ * weekday, so "by Friday" was left to the model's arithmetic.
+ */
+function todayInIndia(now = new Date()) {
+  const factoryDay = require('./factoryDay');
+  const day = factoryDay.calendarDay(now);
+  return `${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][day.getUTCDay()]}, ${factoryDay.ymd(now)}`;
+}
+
 async function extractPurchaseOrderText(text) {
   const claude = anthropic();
   if (!claude) return { available: false };
@@ -247,7 +259,7 @@ async function extractPurchaseOrderText(text) {
     model: TEXT_MODEL,
     max_tokens: 4096,
     output_config: { format: { type: 'json_schema', schema: OUTPUT_SCHEMA } },
-    messages: [{ role: 'user', content: [{ type: 'text', text: `${PROMPT}\n\nThis order came as a WhatsApp message, typed as below (English, Tamil or Tanglish). There is no document: read the lines, quantities, units, any PO number and the date wanted from the text alone. Today is ${new Date().toISOString().slice(0, 10)}.\n\nMessage:\n\"\"\"\n${String(text).slice(0, 3000)}\n\"\"\"` }] }],
+    messages: [{ role: 'user', content: [{ type: 'text', text: `${PROMPT}\n\nThis order came as a WhatsApp message, typed as below (English, Tamil or Tanglish). There is no document: read the lines, quantities, units, any PO number and the date wanted from the text alone. Today is ${todayInIndia()}.\n\nMessage:\n\"\"\"\n${String(text).slice(0, 3000)}\n\"\"\"` }] }],
   });
   const parsed = message.stop_reason === 'refusal' ? null : parseJsonReply(textOf(message));
   if (!parsed) return { available: true, ok: false, model: TEXT_MODEL, usage: message.usage };
@@ -346,7 +358,8 @@ function normaliseDraft(raw) {
     const n = Number(String(v).replace(/[^\d.-]/g, ''));
     return Number.isFinite(n) ? n : null;
   };
-  const date = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : null);
+  // A day that exists (utils/factoryDay.js): the shape alone let "2026-11-31" through.
+  const date = (v) => (require('./factoryDay').isDayKey(String(v || '')) ? String(v) : null);
   const conf = (v) => {
     const n = Number(v);
     // A line with no stated confidence is treated as middling rather

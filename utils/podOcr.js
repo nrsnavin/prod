@@ -40,7 +40,8 @@ function normalisePod(raw, meta = {}) {
   return {
     problem: null,
     dcNumber: str(raw.dcNumber, 40),
-    deliveredOn: /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(Date.parse(d)) ? d : '',
+    // A day that exists: Date.parse takes "2026-04-31" and makes the 1st of May of it.
+    deliveredOn: require('./factoryDay').isDayKey(d) ? d : '',
     receivedBy: str(raw.receivedBy, 80),
     stamped: raw.stamped === true,
     remark,
