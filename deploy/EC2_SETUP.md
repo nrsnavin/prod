@@ -218,7 +218,7 @@ than starting from blank. What to fill in:
 |---|---|---|
 | AI (bill scans, statement matching, Ask Jarvis…) | `ANTHROPIC_API_KEY` | `.env.example` |
 | WhatsApp messages | `WHATSAPP_PROVIDER`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` | `.env.whatsapp.example` |
-| Bank statements by email | `BANK_FEED_IMAP_*`, `BANK_FEED_SENDERS`, `BANK_FEED_EVERY_MIN` | `.env.example` |
+| Bank statements by email | `BANK_FEED_IMAP_*`, `BANK_FEED_SENDERS`, `BANK_FEED_EVERY_MIN`, and `BANK_FEED_AUTHSERV` if lines may post without a person | `.env.example` |
 | Bank statements by SFTP | `BANK_SFTP_*` | `.env.example` |
 | Error reporting | `SENTRY_DSN` | `.env.example` |
 | Aadhaar QR check (UIDAI's signature) | none: run `node scripts/fetch-uidai-certs.js` once | `config/uidai/README.md` |

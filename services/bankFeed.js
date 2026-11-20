@@ -16,6 +16,12 @@
 //                            Others are recorded and left alone.
 //    BANK_FEED_EVERY_MIN     15 (default); 0 turns the timer off (the
 //                            cron route and the "check now" button remain)
+//    BANK_FEED_AUTHSERV      optional, for posting without a person: the
+//                            name the mailbox's own server signs its
+//                            Authentication-Results header with (the
+//                            first word of that header on any received
+//                            mail, e.g. mx1.hostinger.com). Named, only
+//                            that server's header is believed.
 //
 //  Every few minutes the mailbox is read for mail of the last ten days.
 //  Each message is handled once (its Message-ID is recorded, so however
@@ -31,7 +37,15 @@
 //  — is posted without a person, but only from a mail the receiving
 //  server confirms really came from that sender (DKIM pass) and from an
 //  allowed sender, or from the bank's SFTP server (its host key pinned):
-//  a forged statement can suggest, never post.
+//  a forged statement can suggest, never post. What the receiving server
+//  says is its own Authentication-Results header — the topmost, since it
+//  is added on arrival; one further down came with the mail and is the
+//  sender's own writing.
+//
+//  A statement that FAILED (no account could be told, the file could
+//  not be read) is left alone by the timer, and read again when a
+//  person checks the mailbox by hand — usually just after putting right
+//  what its note said.
 //
 //  THE SAME, BY SFTP (MT940)
 //
@@ -175,11 +189,30 @@ function setSftpReader(fn) { sftpReader = fn || sftpRead; }
 // ── One message ────────────────────────────────────────────────────
 const senderOk = (from, allowed) => !allowed.length || allowed.some((a) => (a.startsWith('@') ? from.endsWith(a) : from === a));
 
-/** Did the receiving server see a passing DKIM signature from the sender's own domain? */
+/**
+ * Did the RECEIVING server see a passing DKIM signature from the
+ * sender's own domain?
+ *
+ * Only that server's word counts. It adds its Authentication-Results
+ * header above everything the mail arrived with, so the topmost is the
+ * one read; a header of that name further down was written by whoever
+ * sent the mail. With BANK_FEED_AUTHSERV naming the server, only its
+ * own header is read (the first carrying its name) — which also covers
+ * a mail host that writes none, where the topmost would be the sender's.
+ *
+ * And the signing domain is the sender's, or under it — never one that
+ * merely begins with it (kotak.com.evil.org, kotak.community).
+ */
 function dkimPass(headers, from) {
-  const domain = from.split('@')[1] || '';
-  const ar = [].concat(headers.get('authentication-results') || []).map(String).join(' ').toLowerCase();
-  return !!domain && new RegExp(`dkim=pass[^;]*header\\.(?:d|i)=@?([a-z0-9.-]*\\.)?${domain.replace(/\./g, '\\.')}`).test(ar);
+  const domain = String(from || '').split('@')[1]?.toLowerCase() || '';
+  if (!domain) return false;
+  const all = [].concat(headers.get('authentication-results') || []).map((v) => String(v).toLowerCase());
+  const named = String(process.env.BANK_FEED_AUTHSERV || '').trim().toLowerCase();
+  const serverOf = (v) => (v.match(/^\s*([^\s;]+)/) || [])[1] || '';
+  const own = named ? all.find((v) => serverOf(v) === named) : all[0];
+  if (!own) return false;
+  const d = domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`dkim=pass[^;]*header\\.(?:d|i)=@?(?:[a-z0-9.-]*\\.)?${d}(?![a-z0-9.-])`).test(own);
 }
 
 /** Which bank account a mail is for: its number in the mail, its statement address, or the only one. */
@@ -235,7 +268,30 @@ async function autoPost(statement, account, via = 'email') {
   return posted;
 }
 
-async function handle(raw, { c, accounts, settings }) {
+// ── Read once, and a failed one again when asked ───────────────────
+const READING = 'reading';
+/**
+ * The mails and files a person's check reads again: ones that failed,
+ * and ones a server claimed and never finished (it stopped mid-read) —
+ * not one claimed in the last ten minutes, which may still be being read.
+ */
+const again = (now = new Date()) => ({ $or: [{ status: 'failed' }, { status: 'skipped', note: READING, updatedAt: { $lt: new Date(now.getTime() - 10 * 60_000) } }] });
+
+/**
+ * Claim a mail or file, so that one process reads it and it is read
+ * once. → false when it was read before, or another process has it.
+ * `retry` (a person's check) takes over one that failed, in place.
+ */
+async function claim(base, retry) {
+  try { await BankFeedMessage.create({ ...base, status: 'skipped', note: READING }); return true; } catch (err) {
+    if (err?.code !== 11000) throw err;
+  }
+  if (!retry) return false;
+  return !!(await BankFeedMessage.findOneAndUpdate({ messageId: base.messageId, ...again() }, { $set: { ...base, status: 'skipped', note: READING } }).lean());
+}
+const AGAIN = ' Then check the mailbox again: a statement that failed is read again when a person asks.';
+
+async function handle(raw, { c, accounts, settings, retry = false }) {
   const { simpleParser } = require('mailparser');
   const mail = await simpleParser(raw.source);
   const messageId = mail.messageId || raw.messageId || `sha-${crypto.createHash('sha256').update(raw.source).digest('hex').slice(0, 32)}`;
@@ -243,10 +299,7 @@ async function handle(raw, { c, accounts, settings }) {
   const subject = String(mail.subject || '').slice(0, 300);
   const base = { messageId, from, subject, receivedAt: mail.date || new Date() };
   // Claim the message first: a second process sees the duplicate and leaves it.
-  try { await BankFeedMessage.create({ ...base, status: 'skipped', note: 'reading' }); } catch (err) {
-    if (err?.code === 11000) return { status: 'known' };
-    throw err;
-  }
+  if (!(await claim(base, retry))) return { status: 'known' };
   const finish = async (status, extra = {}) => { await BankFeedMessage.updateOne({ messageId }, { $set: { status, note: '', ...extra } }); return { status, ...extra }; };
 
   const allowed = [...c.senders, ...accounts.map((a) => a.statementFrom).filter(Boolean)];
@@ -257,7 +310,7 @@ async function handle(raw, { c, accounts, settings }) {
     return finish('skipped', { note: pdf ? 'A PDF statement cannot be read — set the bank\'s scheduled statement to CSV or Excel' : 'No CSV or Excel statement attached' });
   }
   const placed = accountFor(accounts, { from, subject, text: String(mail.text || '').slice(0, 5000), filenames: sheets.map((a) => a.filename || '') });
-  if (!placed.account) return finish('failed', { note: `Could not tell which bank account: ${placed.why}. Set "Statements come from" on the account, or include the account number in the statement name.` });
+  if (!placed.account) return finish('failed', { note: `Could not tell which bank account: ${placed.why}. Set "Statements come from" on the account, or include the account number in the statement name.${AGAIN}` });
   const account = placed.account;
   const trusted = c.senders.length > 0 && senderOk(from, c.senders) && dkimPass(mail.headers, from);
   let lines = 0; let newLines = 0; let posted = 0; const statements = [];
@@ -294,13 +347,10 @@ function accountByNumber(accounts, no) {
   return hits.length === 1 ? hits[0] : null;
 }
 
-async function handleFile(file, { c, accounts, settings }) {
+async function handleFile(file, { c, accounts, settings, retry = false }) {
   const { isMt940, parseMt940 } = require('./mt940');
   const base = { messageId: file.id, channel: 'sftp', from: `sftp://${c.sftp.host}`, subject: file.name, receivedAt: file.modifiedAt || new Date() };
-  try { await BankFeedMessage.create({ ...base, status: 'skipped', note: 'reading' }); } catch (err) {
-    if (err?.code === 11000) return { status: 'known' };
-    throw err;
-  }
+  if (!(await claim(base, retry))) return { status: 'known' };
   const finish = async (status, extra = {}) => { await BankFeedMessage.updateOne({ messageId: file.id }, { $set: { status, note: '', ...extra } }); return { status, ...extra }; };
   const auto = !!settings.bankFeed?.autoPost; // the host key is pinned: the file is the bank's
   // What goes in: [{ account, rows?, buffer? }]
@@ -315,12 +365,12 @@ async function handleFile(file, { c, accounts, settings }) {
     }
     for (const [no, rows] of byAccount) {
       const account = no ? accountByNumber(accounts, no) : (accounts.length === 1 ? accounts[0] : null);
-      if (!account) return finish('failed', { note: no ? `The statement is for account ${no}; no bank account here has that number. Add it under Settings → Accounts.` : 'The statement names no account, and there is more than one bank account here.' });
+      if (!account) return finish('failed', { note: no ? `The statement is for account ${no}; no bank account here has that number. Add it under Settings → Accounts.${AGAIN}` : 'The statement names no account, and there is more than one bank account here.' });
       parts.push({ account, rows, accountNo: no });
     }
   } else {
     const placed = accountFor(accounts, { from: '', subject: file.name, text: '', filenames: [file.name] });
-    if (!placed.account) return finish('failed', { note: `Could not tell which bank account: ${placed.why}. Put the account number in the file name the bank uses.` });
+    if (!placed.account) return finish('failed', { note: `Could not tell which bank account: ${placed.why}. Put the account number in the file name the bank uses, or give the account its number.${AGAIN}` });
     parts.push({ account: placed.account, buffer: file.buffer });
   }
   let lines = 0; let newLines = 0; let posted = 0; const statements = [];
@@ -371,7 +421,11 @@ async function run({ trigger = 'timer' } = {}) {
     result.newLines += r.newLines || 0;
     result.posted += r.posted || 0;
   };
-  const isKnown = async (id) => !!(await BankFeedMessage.exists({ messageId: id }));
+  // A person's check reads the failed ones again; the timer and the
+  // scheduler do not, so a file that cannot be read is not fetched every
+  // few minutes.
+  const retry = trigger === 'manual';
+  const isKnown = async (id) => !!(await BankFeedMessage.exists(retry ? { messageId: id, $nor: [again(now)] } : { messageId: id }));
   const errors = [];
   try {
     const accounts = await BankAccount.find({ active: { $ne: false }, kind: 'bank' }).lean();
@@ -379,14 +433,14 @@ async function run({ trigger = 'timer' } = {}) {
     if (mailOn(c)) {
       try {
         const messages = await fetcher(c, { since: new Date(now.getTime() - c.days * DAY), isKnown });
-        for (const m of messages) count(await handle(m, { c, accounts, settings: lease }));
+        for (const m of messages) count(await handle(m, { c, accounts, settings: lease, retry }));
       } catch (err) { errors.push(`Mailbox: ${err.message}`); }
     }
     if (sftpOn(c)) {
       try {
         // Without BANK_SFTP_HOST_KEY the reader connects only far enough to
         // see the server's key, refuses it, and reports it to be checked.
-        await sftpReader(c.sftp, { isKnown, maxPerRun: c.maxPerRun, onFile: async (f) => { const r = await handleFile(f, { c, accounts, settings: lease }); count(r); return r; } });
+        await sftpReader(c.sftp, { isKnown, maxPerRun: c.maxPerRun, onFile: async (f) => { const r = await handleFile(f, { c, accounts, settings: lease, retry }); count(r); return r; } });
       } catch (err) { errors.push(`SFTP: ${err.message}`); }
     }
   } catch (err) {
@@ -417,6 +471,8 @@ async function status() {
   const recent = await BankFeedMessage.find({}).sort({ createdAt: -1 }).limit(20).lean();
   return {
     configured: configured(c), mailbox: mailOn(c) ? c.user : '', everyMin: c.everyMin, senders: c.senders,
+    // The mail host whose signature check is believed, when one is named.
+    authServer: String(process.env.BANK_FEED_AUTHSERV || '').trim().toLowerCase(),
     sftp: sftpOn(c) ? { host: c.sftp.host, dir: c.sftp.dir, hostKeySet: !!c.sftp.hostKey } : null,
     autoPost: !!s.bankFeed?.autoPost, lastRunAt: s.bankFeed?.lastRunAt || null, lastResult: s.bankFeed?.lastResult || null,
     recent: recent.map((m) => ({ _id: m._id, from: m.from, subject: m.subject, receivedAt: m.receivedAt, channel: m.channel || 'email', status: m.status, accountName: m.accountName, newLines: m.newLines, lines: m.lines, posted: m.posted, note: m.note, statement: m.statements?.[0] || null, account: m.account })),

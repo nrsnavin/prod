@@ -142,7 +142,10 @@ describe('statements by email', () => {
   it('answers the screen and the scheduler', async () => {
     await scene();
     let st = (await get('/accounts/bank/feed')).body.feed;
-    expect(st).toMatchObject({ configured: true, mailbox: 'statements@baluelastics.com', autoPost: false, senders: ['@kotak.com'] });
+    expect(st).toMatchObject({ configured: true, mailbox: 'statements@baluelastics.com', autoPost: false, senders: ['@kotak.com'], authServer: '' });
+    process.env.BANK_FEED_AUTHSERV = ' MX1.Hostinger.com ';
+    expect((await get('/accounts/bank/feed')).body.feed.authServer).toBe('mx1.hostinger.com');
+    delete process.env.BANK_FEED_AUTHSERV;
     inbox.push(await mail({ id: 'now', attachments: [{ filename: 'a.csv', content: csv(['02/11/2026,CASH WDL SELF,,5000,,95000']), contentType: 'text/csv' }] }));
     const r = await post('/accounts/bank/feed/run', {});
     expect(r.body.result).toMatchObject({ trigger: 'manual', imported: 1 });
@@ -156,6 +159,109 @@ describe('statements by email', () => {
     delete process.env.BANK_FEED_IMAP_HOST;
     expect((await post('/accounts/bank/feed/run', {})).status).toBe(409);
     expect((await get('/accounts/bank/feed')).body.feed.configured).toBe(false);
+  });
+});
+
+describe('a forged statement can suggest, never post', () => {
+  const h = (v) => new Map([['authentication-results', v]]);
+  afterEach(() => { delete process.env.BANK_FEED_AUTHSERV; });
+
+  it('takes the receiving server\'s word only: its header is on top, one further down is the sender\'s own writing', () => {
+    const ours = 'mx1.hostinger.com; dkim=fail header.d=kotak.com; spf=fail smtp.mailfrom=evil.example';
+    const written = 'mx1.hostinger.com; dkim=pass header.d=kotak.com header.s=s1';
+    expect(feed.dkimPass(h([ours, written]), 'statements@kotak.com')).toBe(false);
+    expect(feed.dkimPass(h(['mx1.hostinger.com; dkim=none', written]), 'statements@kotak.com')).toBe(false);
+    // The same two the other way up: the server said pass.
+    expect(feed.dkimPass(h([written, ours]), 'statements@kotak.com')).toBe(true);
+  });
+
+  it('a signing domain that only begins with the bank\'s is not the bank', () => {
+    const from = 'statements@kotak.com';
+    expect(feed.dkimPass(h('mx; dkim=pass header.d=kotak.com.evil.org header.s=s1'), from)).toBe(false);
+    expect(feed.dkimPass(h('mx; dkim=pass header.d=kotak.community'), from)).toBe(false);
+    expect(feed.dkimPass(h('mx; dkim=pass header.i=@kotak.com.evil.org'), from)).toBe(false);
+    expect(feed.dkimPass(h('mx; dkim=pass header.d=evil-kotak.com'), from)).toBe(false);
+    // The bank's own, however the server writes it.
+    expect(feed.dkimPass(h('mx; dkim=pass header.d=kotak.com; spf=pass'), from)).toBe(true);
+    expect(feed.dkimPass(h('mx; dkim=pass (signature was verified) header.d=kotak.com;dmarc=pass'), from)).toBe(true);
+    expect(feed.dkimPass(h('mx; dkim=pass header.i=@kotak.com header.s=s1 header.b=abc'), from)).toBe(true);
+    expect(feed.dkimPass(h('mx; dkim=pass header.d=mail.kotak.com'), from)).toBe(true);
+    expect(feed.dkimPass(h('MX; DKIM=PASS header.d=KOTAK.COM'), 'Statements@Kotak.com')).toBe(true);
+  });
+
+  it('with the mail host named, only that host\'s header counts', () => {
+    process.env.BANK_FEED_AUTHSERV = 'mx1.hostinger.com';
+    const from = 'statements@kotak.com';
+    // An inner hop wrote its own on top: the named host's is still the one read.
+    expect(feed.dkimPass(h(['inner.hostinger.internal; none', 'mx1.hostinger.com; dkim=pass header.d=kotak.com']), from)).toBe(true);
+    // A mail host that writes none leaves only the sender's: not read at all.
+    expect(feed.dkimPass(h('mx.evil.example; dkim=pass header.d=kotak.com'), from)).toBe(false);
+    // Its own header first, a copy of its name further down: the first is the server's.
+    expect(feed.dkimPass(h(['mx1.hostinger.com; dkim=fail header.d=kotak.com', 'mx1.hostinger.com; dkim=pass header.d=kotak.com']), from)).toBe(false);
+  });
+
+  it('a mail carrying its own "signature checked" line under the server\'s "it did not" posts nothing', async () => {
+    const s = await scene();
+    await put('/accounts/bank/feed', { autoPost: true });
+    const line = `02/11/2026,NEFT SUNRISE GARMENTS ${s.inv.invoiceNumber},UTR9,,10500,110500`;
+    const forged = await mail({ id: 'forged', dkim: true, attachments: [{ filename: 'a.csv', content: csv([line]), contentType: 'text/csv' }] });
+    // What the receiving server adds on arrival goes above everything the mail came with.
+    forged.source = Buffer.concat([Buffer.from('Authentication-Results: mx1.hostinger.com; dkim=none; spf=fail smtp.mailfrom=evil.example\r\n'), forged.source]);
+    inbox.push(forged);
+    expect(await feed.run()).toMatchObject({ imported: 1, posted: 0 });
+    expect(await M.Payment.countDocuments({})).toBe(0);
+    expect((await M.Invoice.findById(s.inv._id).lean()).paidAmount || 0).toBe(0);
+    // It still came in, for a person to look at.
+    const st = await M.BankStatement.findOne({ messageId: '<forged@kotak.com>' }).lean();
+    expect(st.lines[0]).toMatchObject({ status: 'matched' });
+    expect((await M.BankFeedMessage.findOne({ messageId: '<forged@kotak.com>' }).lean()).note).toMatch(/not posted automatically/);
+  });
+});
+
+describe('a statement that failed is read again when a person asks', () => {
+  it('the timer leaves it; "check now" reads it once what its note said is put right', async () => {
+    const s = await scene();
+    const icici = await M.BankAccount.create({ name: 'ICICI CA', kind: 'bank', accountNo: '000405012026' });
+    inbox.push(await mail({ id: 'which', subject: 'Your statement', attachments: [{ filename: 'a.csv', content: csv(['02/11/2026,CASH WDL SELF,,5000,,95000']), contentType: 'text/csv' }] }));
+    expect(await feed.run()).toMatchObject({ checked: 1, failed: 1 });
+    const failed = await M.BankFeedMessage.findOne({ messageId: '<which@kotak.com>' }).lean();
+    expect(failed).toMatchObject({ status: 'failed' });
+    expect(failed.note).toMatch(/Could not tell which bank account/);
+    expect(failed.note).toMatch(/check the mailbox again/i);
+
+    // The account is told where its statements come from.
+    await M.BankAccount.updateOne({ _id: s.kotak._id }, { $set: { statementFrom: 'statements@kotak.com' } });
+    // The timer does not fetch a failed one every few minutes…
+    expect(await feed.run()).toMatchObject({ checked: 0 });
+    expect(await M.BankStatement.countDocuments({})).toBe(0);
+    // …a person's check does.
+    const r = await post('/accounts/bank/feed/run', {});
+    expect(r.body.result).toMatchObject({ trigger: 'manual', checked: 1, imported: 1, newLines: 1 });
+    const now = await M.BankFeedMessage.find({ messageId: '<which@kotak.com>' }).lean();
+    expect(now).toHaveLength(1);
+    expect(now[0]).toMatchObject({ status: 'imported', accountName: 'Kotak CA', newLines: 1 });
+    expect(String(now[0]._id)).toBe(String(failed._id));
+    expect(await M.BankStatement.countDocuments({ account: s.kotak._id })).toBe(1);
+    expect(await M.BankStatement.countDocuments({ account: icici._id })).toBe(0);
+    // Read: asking again does not read it a second time.
+    expect((await post('/accounts/bank/feed/run', {})).body.result).toMatchObject({ checked: 0 });
+    expect(await M.BankStatement.countDocuments({})).toBe(1);
+  });
+
+  it('one left half-read by a server that stopped is picked up too, but not while another may still be reading it', async () => {
+    await scene();
+    const m = await mail({ id: 'half', attachments: [{ filename: 'a.csv', content: csv(['02/11/2026,CASH WDL SELF,,5000,,95000']), contentType: 'text/csv' }] });
+    inbox.push(m);
+    // Claimed a moment ago: someone is on it.
+    await M.BankFeedMessage.create({ messageId: m.messageId, status: 'skipped', note: 'reading' });
+    expect((await post('/accounts/bank/feed/run', {})).body.result).toMatchObject({ checked: 0 });
+    // Claimed an hour ago and never finished.
+    await M.BankFeedMessage.collection.updateOne({ messageId: m.messageId }, { $set: { updatedAt: new Date(Date.now() - 3_600_000) } });
+    expect((await post('/accounts/bank/feed/run', {})).body.result).toMatchObject({ checked: 1, imported: 1 });
+    // A mail set aside for a reason (sender, PDF) is not one of these.
+    inbox.push(await mail({ id: 'pdf2', attachments: [{ filename: 'statement.pdf', content: Buffer.from('%PDF-1.4'), contentType: 'application/pdf' }] }));
+    expect((await post('/accounts/bank/feed/run', {})).body.result).toMatchObject({ checked: 1, skipped: 1 });
+    expect((await post('/accounts/bank/feed/run', {})).body.result).toMatchObject({ checked: 0 });
   });
 });
 
