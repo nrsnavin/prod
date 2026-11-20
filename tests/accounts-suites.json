@@ -75,5 +75,6 @@
   "tests/api/gstSummaryNotes.test.js",
   "tests/api/msmeSettled.test.js",
   "tests/api/confirmationsRecipient.test.js",
-  "tests/api/collectionsReminderNumber.test.js"
+  "tests/api/collectionsReminderNumber.test.js",
+  "tests/services/bankStatementRead.test.js"
 ]

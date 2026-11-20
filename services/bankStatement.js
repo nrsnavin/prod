@@ -74,23 +74,61 @@ async function sheetRows(buffer) {
   return rows;
 }
 
-const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, sept: 8, oct: 9, nov: 10, dec: 11 };
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+/**
+ * That day, at the server's local midnight (which is how a line's key
+ * reads it back: see lineKey) — or null when there is no such day. The
+ * Date constructor makes one of anything: the 31st of February is the
+ * 3rd of March, and month 20 is August of the year after.
+ */
+function localDay(y, m0, d) {
+  if (!(m0 >= 0 && m0 <= 11 && d >= 1 && d <= 31)) return null;
+  const x = new Date(y, m0, d);
+  return x.getMonth() === m0 && x.getDate() === d ? x : null;
+}
+const year4 = (s) => (s.length === 2 ? 2000 + +s : +s);
+
+/**
+ * The date in a statement's date cell, as banks write it: 2026-11-20,
+ * 20/11/2026, 20-11-26, 20.11.2026, 20-Nov-2026, 20 November 2026 (a time
+ * after it is passed over). Day first, always: these are Indian banks'
+ * files. null when it is not a date, or not a day that exists — a date
+ * written month first ("11/20/2026") used to be taken as the 11th of
+ * month 20, which the Date constructor makes August of the next year.
+ */
 function parseDate(v) {
   const s = String(v || '').trim();
-  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
-  m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})/);
-  if (m) { const y = m[3].length === 2 ? 2000 + +m[3] : +m[3]; return new Date(y, +m[2] - 1, +m[1]); }
-  m = s.match(/^(\d{1,2})[ /-]([A-Za-z]{3,4})[ /-](\d{2,4})/);
-  if (m && MONTHS[m[2].toLowerCase()] !== undefined) { const y = m[3].length === 2 ? 2000 + +m[3] : +m[3]; return new Date(y, MONTHS[m[2].toLowerCase()], +m[1]); }
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})(?!\d)/);
+  if (m) return localDay(+m[1], +m[2] - 1, +m[3]);
+  m = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4}|\d{2})(?!\d)/);
+  if (m) return localDay(year4(m[3]), +m[2] - 1, +m[1]);
+  m = s.match(/^(\d{1,2})[ /.-]([A-Za-z]{3,9})\.?,?[ /.-](\d{4}|\d{2})(?!\d)/);
+  if (m) { const mo = MONTHS[m[2].slice(0, 3).toLowerCase()]; return mo === undefined ? null : localDay(year4(m[3]), mo, +m[1]); }
   return null;
 }
+/** Does the cell set out to be a date — three parts, a day, a month and a year — whether or not it is one? */
+const looksLikeDate = (v) => /^\d{1,4}[\s/.-]+(\d{1,2}|[A-Za-z]{3,9})[\s/.,-]+\d{2,4}(?!\d)/.test(String(v || '').trim());
+
 const money = (v) => {
   const s = String(v ?? '').replace(/[,₹\s]/g, '').replace(/^\((.*)\)$/, '-$1');
   if (!s || s === '-') return 0;
-  const n = Number(s.replace(/(cr|dr)$/i, ''));
+  const n = Number(s.replace(/(cr|dr)\.?$/i, ''));
   return Number.isFinite(n) ? n : 0;
 };
+/** "dr" or "cr" written on a figure itself ("1,500.00 Dr", "1500CR."), else ''. */
+const markOn = (v) => { const m = /(cr|dr)\.?\s*$/i.exec(String(v ?? '').trim()); return m ? m[1].toLowerCase() : ''; };
+/**
+ * A balance, below zero when the account is overdrawn. A cash-credit or
+ * overdraft account's balance is marked Dr — on the figure, or in a
+ * column of its own — and the mark was dropped: what was owed to the bank
+ * was read as money in it.
+ */
+function balanceOf(cell, markCell) {
+  const n = money(cell);
+  const own = markOn(cell);
+  const overdrawn = own ? own === 'dr' : String(markCell ?? '').trim().toLowerCase().startsWith('d');
+  return overdrawn ? -Math.abs(n) : n;
+}
 
 /** Which column is which, from the header row the bank wrote. */
 function columnsOf(header) {
@@ -104,7 +142,10 @@ function columnsOf(header) {
   const drcr = find(/dr\s*\/\s*cr|cr\s*\/\s*dr|^type$|debit\/credit/);
   const ref = find(/ref|cheque|chq|utr|instrument/);
   const balance = find(/balance/);
-  return { date, narration, debit, credit, amount, drcr, ref, balance };
+  // Some banks (Kotak) write Dr / Cr twice: once for the amount, and once
+  // more after the balance, for the balance.
+  const balanceMark = balance >= 0 ? h.findIndex((x, i) => i > balance && i !== drcr && /dr\s*\/\s*cr|cr\s*\/\s*dr|debit\/credit/.test(x)) : -1;
+  return { date, narration, debit, credit, amount, drcr, ref, balance, balanceMark };
 }
 
 /**
@@ -203,7 +244,6 @@ async function parseTable(buffer, isSheet, given = null) {
     const r = table[i];
     if (!r || !r.some((x) => String(x || '').trim())) continue;
     const date = parseDate(r[cols.date]);
-    if (!date) continue;
     let amount = 0;
     let direction = null;
     if (cols.debit >= 0 || cols.credit >= 0) {
@@ -213,11 +253,25 @@ async function parseTable(buffer, isSheet, given = null) {
     }
     if (!direction && cols.amount >= 0) {
       const a = money(r[cols.amount]);
-      const t = cols.drcr >= 0 ? String(r[cols.drcr] || '').trim().toLowerCase() : '';
+      // Which way: the Dr / Cr column, else a Dr or Cr on the figure itself
+      // (with no column to say so, "70,000.00 Dr" was money in), else its sign.
+      const t = (cols.drcr >= 0 ? String(r[cols.drcr] || '').trim().toLowerCase() : '') || markOn(r[cols.amount]);
       if (a !== 0) { amount = Math.abs(a); direction = t.startsWith('c') || (!t && a > 0) ? 'in' : 'out'; }
     }
+    // Not a transaction (a heading, an opening balance, a page total).
     if (!direction || amount <= 0) continue;
-    const bal = cols.balance >= 0 && String(r[cols.balance] ?? '').trim() !== '' ? money(r[cols.balance]) : null;
+    if (!date) {
+      // A transaction whose date sets out to be one and is not: the file
+      // is not read on a guess. (It used to be left out without a word —
+      // or, written month first, filed under a day months away.)
+      if (looksLikeDate(r[cols.date])) {
+        const e = new Error(`Row ${i + 1}: the date "${String(r[cols.date]).trim()}" is not a day/month/year date. Download the statement with its dates as DD/MM/YYYY, or as CSV or MT940 from net banking.`);
+        e.code = 'STATEMENT_DATE'; e.status = 400;
+        throw e;
+      }
+      continue;
+    }
+    const bal = cols.balance >= 0 && String(r[cols.balance] ?? '').trim() !== '' ? balanceOf(r[cols.balance], cols.balanceMark >= 0 ? r[cols.balanceMark] : '') : null;
     rows.push({
       index: rows.length, date, narration: String(r[cols.narration] || '').trim().slice(0, 300),
       ref: cols.ref >= 0 ? String(r[cols.ref] || '').trim().slice(0, 60) : '', amount: r2(amount), direction,
@@ -240,13 +294,36 @@ function lineKey(row) {
 }
 
 /**
+ * Is the file oldest first? By its dates, when the first and the last
+ * differ. A statement of one day (the bank's daily file) has only its
+ * balances to go by: each line's balance is the one before it, plus or
+ * minus the line. It was taken as oldest first, so a day written newest
+ * first gave its opening and closing balances from the wrong ends.
+ */
+function isAscending(rows) {
+  const first = new Date(rows[0].date).getTime();
+  const last = new Date(rows[rows.length - 1].date).getTime();
+  if (first !== last) return first < last;
+  const signed = (r) => (r.direction === 'in' ? r.amount : -r.amount);
+  for (let i = 1; i < rows.length; i++) {
+    const a = rows[i - 1];
+    const b = rows[i];
+    if (a.balance == null || b.balance == null) continue;
+    const follows = Math.abs(a.balance + signed(b) - b.balance) < 0.01;    // b came after a
+    const precedes = Math.abs(b.balance + signed(a) - a.balance) < 0.01;   // a came after b
+    if (follows !== precedes) return follows;
+  }
+  return true;
+}
+
+/**
  * The bank's balance before the chronologically first line, when the
  * file has a balance column: that line's balance, less what it brought
  * in or plus what it took out.
  */
 function openingOf(rows) {
   if (!rows.length) return null;
-  const ascending = new Date(rows[0].date) <= new Date(rows[rows.length - 1].date);
+  const ascending = isAscending(rows);
   const first = ascending ? rows[0] : rows[rows.length - 1];
   if (first.balance === null || first.balance === undefined) return null;
   return r2(first.direction === 'in' ? first.balance - first.amount : first.balance + first.amount);
@@ -256,8 +333,8 @@ function openingOf(rows) {
 function closingOf(rows) {
   const withBal = rows.filter((r) => r.balance !== null && r.balance !== undefined);
   if (!withBal.length) return null;
-  // Statements run oldest-first or newest-first; follow the dates.
-  const ascending = new Date(rows[0].date) <= new Date(rows[rows.length - 1].date);
+  // Statements run oldest-first or newest-first.
+  const ascending = isAscending(rows);
   const last = ascending ? withBal[withBal.length - 1] : withBal[0];
   return last.balance;
 }
@@ -540,4 +617,4 @@ async function match(rows, accountId, { useModel = true } = {}) {
   return out;
 }
 
-module.exports = { transferOf, sniff, htmlRows, openingOf, parse, parseDetailed, parseCsv, parseDate, columnsOf, sheetRows, match, nameScore, subsetFor, fifo, lineKey, closingOf, standsAlone, namedIn, suggestNamed };
+module.exports = { transferOf, sniff, htmlRows, openingOf, isAscending, parse, parseDetailed, parseCsv, parseDate, columnsOf, sheetRows, match, nameScore, subsetFor, fifo, lineKey, closingOf, standsAlone, namedIn, suggestNamed };
