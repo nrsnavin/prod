@@ -22,7 +22,6 @@
 // ══════════════════════════════════════════════════════════════════
 
 const factoryDay = require('../utils/factoryDay');
-const { toISODate } = require('../utils/productionStats');
 const Order = require('../models/Order');
 const ShiftDetail = require('../models/ShiftDetail');
 const ShiftPlan = require('../models/ShiftPlan');
@@ -130,7 +129,10 @@ async function money(now) {
     ]);
     return { amount: r2(g?.amount), count: g?.count || 0 };
   };
-  const [salesNow, salesThen] = await Promise.all([sumSales(thisStart, new Date(now.getTime() + 1)), sumSales(lastStart, lastSameDayEnd)]);
+  // Through the end of today, not up to this moment: an invoice is dated
+  // at its day's UTC midnight, which is 05:30 in India — until then the
+  // invoices raised today were left out of the month so far.
+  const [salesNow, salesThen] = await Promise.all([sumSales(thisStart, new Date(today.getTime() + DAY)), sumSales(lastStart, lastSameDayEnd)]);
 
   return {
     receivable: { total: rt.total, overdue: rt.overdue, overdueDocs: overdueDocs.length, docs: rt.count },
@@ -145,15 +147,21 @@ async function money(now) {
 async function floor(now) {
   const [machines, plans] = await Promise.all([
     Machine.find({}).select('status loading').lean(),
-    ShiftPlan.find({ date: { $gte: new Date(factoryDay.calendarDay(now).getTime() - 40 * DAY) } }).select('date totalProduction').lean(),
+    ShiftPlan.find({ date: { $gte: new Date(factoryDay.calendarDay(now).getTime() - 41 * DAY) } }).select('date totalProduction').lean(),
   ]);
   // Metres by day, from the shift plans as the production screen totals
   // them. Today's shift day is still being made, so it is left out of
   // the averages; a day with nothing made (a Sunday) is not a working day.
-  const todayKey = toISODate(factoryDay.shiftDay(now));
+  //
+  // A plan's day is its day in India (factoryDay.ymd), read the same way
+  // for one kept at UTC midnight and one kept the older way at 00:00 IST.
+  // Read off the server's date, the older ones fell on the day before:
+  // one factory day became two, each with part of its metres.
+  const todayKey = factoryDay.ymd(factoryDay.shiftDay(now));
   const byDay = new Map();
   for (const p of plans) {
-    const k = toISODate(p.date);
+    const k = factoryDay.ymd(p.date);
+    if (!k) continue;
     byDay.set(k, (byDay.get(k) || 0) + (p.totalProduction || 0));
   }
   const worked = [...byDay.entries()].filter(([k, v]) => k < todayKey && v > 0).sort(([a], [b]) => (a < b ? -1 : 1));

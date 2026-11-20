@@ -84,6 +84,34 @@ describe('a customer on WhatsApp', () => {
     expect(mockSend).toHaveBeenCalledWith(OFFICE, expect.stringMatching(/asked about order #9999, which is not on file/), expect.anything());
   });
 
+  // "Sent" was worked out as ordered less the order's pending metres — and those are
+  // the metres not yet planned onto a job. An order planned in full, with nothing
+  // woven, told its customer every metre had been sent.
+  it('on: "sent" is what has left on a challan, not what has been planned', async () => {
+    const other = await M.Customer.create({ name: 'Planned Mills', contactName: 'Devi', phoneNumber: '9840022222', gstin: '33AAEPS1002F1Z0' });
+    const planned = await M.Order.create({ customer: other._id, po: 'PM/7', date: new Date(Date.now() - 4 * DAY), supplyDate: new Date(Date.now() + 9 * DAY), status: 'InProgress',
+      elasticOrdered: [{ elastic: el25._id, quantity: 2000, rate: 4 }], pendingElastic: [{ elastic: el25._id, quantity: 0 }] });
+    const dc = (dcNumber, sequence, status, quantity) => M.DeliveryChallan.create({ dcNumber, type: 'elastic', financialYear: '26/27', sequence, order: planned._id, orderNo: planned.orderNo, customerName: other.name, status, dispatchDate: new Date(Date.now() - DAY), items: [{ elastic: el25._id, elasticName: el25.name, unit: 'm', quantity, rate: 0 }], totalQuantity: quantity });
+    const ask = () => incoming('where is my order?', '+919840022222');
+
+    // Nothing has left.
+    let text = said(await ask());
+    expect(text).toMatch(/Order #\d+ \(your PO PM\/7\): in production, due \d{2} \w{3,4} — none of 2,000 m sent yet/);
+    expect(text).not.toMatch(/2,000 of 2,000/);
+
+    // A challan made out but not gone, and one cancelled, are not "sent".
+    await dc('E-26/27-0031', 31, 'draft', 600);
+    await dc('E-26/27-0032', 32, 'cancelled', 400);
+    text = said(await ask());
+    expect(text).toMatch(/none of 2,000 m sent yet/);
+    expect(text).not.toMatch(/E-26\/27-003/);
+
+    // One that left.
+    await dc('E-26/27-0033', 33, 'dispatched', 750);
+    text = said(await ask());
+    expect(text).toMatch(/750 of 2,000 m sent, last on \d{2} \w{3,4} \(E-26\/27-0033\)/);
+  });
+
   it('on: what is due, and an invoice they name; the office is told to send the copies', async () => {
     const st = said(await incoming('please send statement'));
     expect(st).toMatch(/INV\/2026-27\/1182 dated \d{2} \w{3,4}: ₹50,000 — \d+ days past due/);

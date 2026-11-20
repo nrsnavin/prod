@@ -63,6 +63,7 @@ const CLOSED = ['Completed', 'Cancelled'];
 // A challan has left once it is dispatched; a draft has not, a cancelled
 // one carried nothing. Machine-part challans go to repairers, not customers.
 const { LEFT } = require('../../domain/challanStatus');
+const { leftWhere, sentByElastic } = require('../../services/orderDispatched');
 
 const isId = (v) => mongoose.Types.ObjectId.isValid(String(v || '')) && /^[a-f\d]{24}$/i.test(String(v));
 const qty = (n) => Math.round((Number(n) || 0) * 1000) / 1000;
@@ -91,9 +92,8 @@ async function ordersOf(customerId) {
 const orderOfDc = (dc, mine) => (dc.order && mine.byId.get(String(dc.order))) || (dc.orderNo != null && mine.byNo.get(dc.orderNo)) || null;
 
 /** The challans that have left against these orders. */
-function leftDcs(match) {
-  return DeliveryChallan.find({ $or: match, status: { $in: LEFT }, type: { $ne: 'machine_part' } });
-}
+// What has left, by the one definition (services/orderDispatched.js).
+const leftDcs = leftWhere;
 
 const dcQuantity = (dc) => qty((dc.items || []).reduce((s, i) => s + (Number(i.quantity) || 0), 0));
 const dcDate = (dc) => dc.dispatchDate || dc.date || dc.createdAt || null;
@@ -123,17 +123,6 @@ async function namesOf(ids) {
 }
 
 /** What has left, per elastic, on these challans. */
-function sentByElastic(dcs) {
-  const sent = new Map();
-  for (const dc of dcs) {
-    for (const i of dc.items || []) {
-      if (!i.elastic) continue;
-      const k = String(i.elastic._id || i.elastic);
-      sent.set(k, qty((sent.get(k) || 0) + (Number(i.quantity) || 0)));
-    }
-  }
-  return sent;
-}
 
 /** The latest passing test of each elastic made for an order: what a certificate certifies. */
 async function certificatesFor(order, elastics = null) {

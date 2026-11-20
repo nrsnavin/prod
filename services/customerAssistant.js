@@ -107,7 +107,7 @@ const sum = (rows) => (rows || []).reduce((t, r) => t + (Number(r.quantity) || 0
 /** Where their orders are: the one they named, else the ones still open. */
 async function orderStatus(customer, { orderNo, po } = {}) {
   const Order = require('../models/Order');
-  const DeliveryChallan = require('../models/DeliveryChallan');
+  const { sentOn } = require('./orderDispatched');
   const q = { customer: customer._id, status: { $ne: 'Deleted' } };
   let orders;
   if (orderNo) orders = await Order.find({ ...q, orderNo }).lean();
@@ -121,12 +121,15 @@ async function orderStatus(customer, { orderNo, po } = {}) {
   const lines = [];
   for (const o of orders) {
     const ordered = sum(o.elasticOrdered);
-    const pending = o.status === 'Completed' ? 0 : sum(o.pendingElastic);
-    const sent = Math.max(0, ordered - pending);
-    const last = await DeliveryChallan.findOne({ order: o._id, status: { $in: ['dispatched', 'delivered'] } }).sort({ dispatchDate: -1 }).select('dcNumber dispatchDate').lean();
+    // What has left on a challan (services/orderDispatched.js) — the one
+    // figure that may be called "sent". It used to be ordered less the
+    // order's pending metres, and those are the metres not yet planned
+    // onto a job: an order planned in full was "all sent" before a metre
+    // of it was woven.
+    const { total: sent, last } = await sentOn(o);
     lines.push(`• Order #${o.orderNo}${o.po ? ` (your PO ${o.po})` : ''}: ${STAGE[o.status] || o.status}` +
       (o.status !== 'Completed' && o.status !== 'Cancelled' && o.supplyDate ? `, due ${dmy(o.supplyDate)}` : '') +
-      (ordered ? ` — ${money(sent)} of ${money(ordered)} m sent` : '') +
+      (ordered ? (sent > 0 ? ` — ${money(sent)} of ${money(ordered)} m sent` : ` — none of ${money(ordered)} m sent yet`) : '') +
       (last ? `, last on ${dmy(last.dispatchDate)} (${last.dcNumber})` : ''));
   }
   return { text: [...(notFound ? [notFound, 'Your open orders:'] : [`${customer.name} — your order${orders.length === 1 ? '' : 's'}:`]), ...lines].join('\n'), found: orders.length, askOffice: missing };
