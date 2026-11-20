@@ -203,10 +203,21 @@ router.post("/customer-mail/run", catchAsyncErrors(async (_req, res, next) => {
   if (!inbox.configured()) return next(new ErrorHandler("The customer mailbox is not set up (CUSTOMER_IMAP_*)", 400));
   res.json({ success: true, ...(await inbox.run()) });
 }));
+// What nobody has looked at yet is listed whatever has come in since, and
+// counted from the mailbox. The list was the newest 200 mails, handled or
+// not, and "N to look at" was counted off it: an order mailed three weeks
+// ago and never opened dropped off both.
+const MAIL_WAITING_MAX = 500;
+const MAIL_LISTED = 200;
 router.get("/customer-mail", catchAsyncErrors(async (req, res) => {
-  const status = ["new", "done", "dismissed", "skipped"].includes(req.query.status) ? req.query.status : { $in: ["new", "done"] };
-  const rows = await InboxMail.find({ status }).select("-text -draft").sort({ receivedAt: -1 }).limit(200).lean();
-  res.json({ success: true, rows });
+  const one = ["new", "done", "dismissed", "skipped"].includes(req.query.status) ? req.query.status : null;
+  const read = (status, limit) => InboxMail.find({ status }).select("-text -draft").sort({ receivedAt: -1 }).limit(limit).lean();
+  const [rows, waiting] = await Promise.all([
+    one ? read(one, one === "new" ? MAIL_WAITING_MAX : MAIL_LISTED)
+      : Promise.all([read("new", MAIL_WAITING_MAX), read("done", MAIL_LISTED)]).then(([fresh, done]) => [...fresh, ...done].sort((a, b) => new Date(b.receivedAt) - new Date(a.receivedAt))),
+    InboxMail.countDocuments({ status: "new" }),
+  ]);
+  res.json({ success: true, rows, waiting });
 }));
 router.get("/customer-mail/:id", catchAsyncErrors(async (req, res, next) => {
   if (!isId(req.params.id)) return next(new ErrorHandler("Not found", 404));

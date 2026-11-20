@@ -25,7 +25,7 @@ const { ACTION_CODES } = require("../utils/fingerprint");
 const { allocate }     = require("../services/docNumbers");
 const partyLedger      = require("../services/partyLedger");
 const { assertOpen, getSettings, setLock, history: lockHistory } = require("../services/booksLock");
-const { isId, r2, readDate, reasonFrom, fp, withTxn, paging, DAY } = require("../services/accountsHelpers");
+const { isId, r2, readDate, businessDay, reasonFrom, fp, withTxn, paging, DAY } = require("../services/accountsHelpers");
 const bankLines = require("../services/bankLines");
 const aiLedger = require("../services/aiLedger");
 const { promptVersion } = require("../utils/aiPrompts");
@@ -337,8 +337,15 @@ router.post("/opening-balances/import", keepRequestContext(upload.single("file")
   let col = null;
   for (let i = 0; i < Math.min(table.length, 20); i++) {
     const h = table[i].map((x) => String(x || "").trim().toLowerCase());
-    const find = (re) => h.findIndex((x) => re.test(x));
-    const c = { type: find(/^type|party type|group/), party: find(/^party|^name|ledger|customer|supplier/), gstin: find(/gstin|gst no/), ref: find(/ref|bill|invoice|voucher/), date: find(/^date|bill date|invoice date/), due: find(/due/), amount: find(/amount|balance|pending/), drcr: find(/dr\s*\/?\s*cr|side|^dr$|^cr$/) };
+    // A heading is taken for one thing. "Party Type" used to be found as
+    // the Party column too (and every row's party read "Customer"), and
+    // "Bill Date" as the bill's number.
+    const find = (re, not = []) => h.findIndex((x, at) => !not.includes(at) && re.test(x));
+    const type = find(/^type|party type|group/);
+    const gstin = find(/gstin|gst no/);
+    const date = find(/^date|bill date|invoice date/);
+    const due = find(/due/);
+    const c = { type, party: find(/^party|^name|ledger|customer|supplier/, [type, gstin]), gstin, ref: find(/ref|bill|invoice|voucher/, [date, due]), date, due, amount: find(/amount|balance|pending/), drcr: find(/dr\s*\/?\s*cr|side|^dr$|^cr$/) };
     if (c.party >= 0 && c.amount >= 0 && c.party !== c.amount) { at = i; col = c; break; }
   }
   if (!col) return next(new ErrorHandler("Could not find the Party and Amount columns. Use the template: Type, Party, GSTIN, Ref, Date, Due date, Amount, Dr/Cr.", 400));
@@ -445,7 +452,9 @@ router.put("/opening-onboarding", catchAsyncErrors(async (req, res, next) => {
   let asOn;
   try { asOn = readDate(req.body?.asOn, "asOn"); } catch (err) { return next(err); }
   if (!asOn) return next(new ErrorHandler("asOn is required", 400));
-  if (asOn > new Date()) return next(new ErrorHandler("The balances are as on a day already past", 400));
+  // Not after today, by India's calendar. Compared with the instant now,
+  // today itself was "not yet past" until 05:30.
+  if (asOn > businessDay(new Date())) return next(new ErrorHandler("The balances are as on a day already past", 400));
   await onboarding.setAsOn(asOn);
   res.json({ success: true, asOn: asOn.toISOString().slice(0, 10) });
 }));

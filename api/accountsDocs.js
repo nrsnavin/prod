@@ -276,6 +276,22 @@ router.post("/share/draft", catchAsyncErrors(async (req, res, next) => {
     const party = await partyOf(v.partyType, v.customer || v.supplier);
     to = party?.phone || "";
     const docs = (v.allocations || []).map((a) => `• ${a.docNo} — ₹${money(a.amount)}${a.tds ? ` (TDS ₹${money(a.tds)})` : ""}`);
+    const name = party?.name || v.partyName;
+    // A voucher that no longer stands. The draft did not look: a cheque
+    // that came back (which cancels its receipt) still wrote the customer
+    // "Thank you — we have received…". A returned cheque has something to
+    // say, and it is this; any other cancelled voucher has nothing.
+    if (v.status === "cancelled") {
+      const c = v.cheque || {};
+      if (v.kind !== "receipt" || c.status !== "bounced") return next(new ErrorHandler(`${v.voucherNo} is cancelled — there is nothing to tell ${name} about it`, 409));
+      message = [
+        `Dear ${name},`, "",
+        `Your cheque ${c.number || ""} for ₹${money(v.amount)} was returned by the bank${c.bouncedOn ? ` on ${dmy(c.bouncedOn)}` : ""}${c.bounceReason ? `: ${c.bounceReason}` : ""}.`.replace("cheque  for", "cheque for"),
+        `Our receipt ${v.voucherNo} is cancelled${docs.length ? ", and what it had settled is due again:" : "."}`,
+        ...docs, "", "Please arrange the payment at the earliest.", "", company,
+      ].join("\n");
+      return res.json({ success: true, to: e164(to), message });
+    }
     message = v.kind === "receipt"
       ? [`Dear ${party?.name || v.partyName},`, "", `Thank you — we have received ₹${money(v.amount)} on ${dmy(v.date)}${v.reference ? ` (ref ${v.reference})` : ""}, receipt ${v.voucherNo}.`, ...(docs.length ? ["", "Set against:", ...docs] : []), ...(v.unallocated > 0.005 ? [`₹${money(v.unallocated)} is held on account.`] : []), "", company].join("\n")
       : [`Dear ${party?.name || v.partyName},`, "", `We have paid ₹${money(v.amount)} on ${dmy(v.date)}${v.reference ? ` (UTR ${v.reference})` : ""}, voucher ${v.voucherNo}.`, ...(docs.length ? ["", "Against your bills:", ...docs] : []), ...(v.tds?.amount ? [`TDS of ₹${money(v.tds.amount)} deducted u/s ${v.tds.section || "—"}.`] : []), "", company].join("\n");
@@ -283,6 +299,7 @@ router.post("/share/draft", catchAsyncErrors(async (req, res, next) => {
     if (!isId(b.id)) return next(new ErrorHandler("id is required", 400));
     const n = await AccountNote.findById(b.id).select("-attachments.data -fingerprints").lean();
     if (!n) return next(new ErrorHandler("Note not found", 404));
+    if (n.status === "cancelled") return next(new ErrorHandler(`${n.noteNo} is cancelled — there is nothing to tell ${n.partyName || "the party"} about it`, 409));
     const party = await partyOf(n.partyType, n.customer || n.supplier);
     to = party?.phone || "";
     message = [`Dear ${party?.name || n.partyName},`, "", `${n.kind === "credit" ? "Credit" : "Debit"} note ${n.noteNo} dated ${dmy(n.date)} for ₹${money(n.totals?.grand)} against ${n.against?.docNo}: ${n.reason}.`, "", company].join("\n");

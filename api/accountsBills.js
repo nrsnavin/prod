@@ -129,7 +129,15 @@ router.put("/categories/:id", isAdmin("admin"), catchAsyncErrors(async (req, res
   if (!isId(req.params.id)) return next(new ErrorHandler("Category not found", 404));
   const body = {};
   for (const f of CATEGORY_FIELDS) if (req.body?.[f] !== undefined) body[f] = req.body[f];
-  const category = await ExpenseCategory.findByIdAndUpdate(req.params.id, { $set: body }, { new: true, runValidators: true });
+  let category;
+  try {
+    category = await ExpenseCategory.findByIdAndUpdate(req.params.id, { $set: body }, { new: true, runValidators: true });
+  } catch (err) {
+    // Renamed to a name another head has: said as adding one says it (it
+    // used to come back as "Duplicate key name Entered").
+    if (err?.code === 11000) return next(new ErrorHandler("A category with that name exists", 409));
+    throw err;
+  }
   if (!category) return next(new ErrorHandler("Category not found", 404));
   res.json({ success: true, category });
 }));
@@ -137,6 +145,14 @@ router.put("/categories/:id", isAdmin("admin"), catchAsyncErrors(async (req, res
 // ══════════════════════════════════════════════════════════════════
 //  SUPPLIER BILLS
 // ══════════════════════════════════════════════════════════════════
+
+/**
+ * What is still owed on a bill, for the screens. Nothing, once it is
+ * cancelled: worked out from the figures alone, a cancelled bill (nothing
+ * paid on it, by definition) was "outstanding" for its whole amount and
+ * counted its days overdue beside the word Cancelled.
+ */
+const owedOn = (b) => (b.status === "cancelled" ? 0 : r2((b.totals?.grand || 0) - (b.paidAmount || 0) - (b.tdsAmount || 0) - (b.debitedAmount || 0)));
 
 /** What a bill against this PO would hold: the receipts not yet billed. */
 router.get("/bills/po-info", catchAsyncErrors(async (req, res, next) => {
@@ -174,7 +190,7 @@ router.get("/bills", catchAsyncErrors(async (req, res) => {
   ]);
   res.json({
     success: true, total, page, pages: Math.max(1, Math.ceil(total / limit)),
-    bills: bills.map((b) => ({ ...b, outstanding: r2((b.totals?.grand || 0) - b.paidAmount - b.tdsAmount - b.debitedAmount) })),
+    bills: bills.map((b) => ({ ...b, outstanding: owedOn(b) })),
   });
 }));
 
@@ -188,7 +204,7 @@ router.get("/bills/:id", catchAsyncErrors(async (req, res, next) => {
   ]);
   res.json({
     success: true,
-    bill: { ...bill, outstanding: r2((bill.totals?.grand || 0) - bill.paidAmount - bill.tdsAmount - bill.debitedAmount) },
+    bill: { ...bill, outstanding: owedOn(bill) },
     payments: payments.map((p) => ({ _id: p._id, voucherNo: p.voucherNo, date: p.date, mode: p.mode, reference: p.reference, ...(p.allocations.find((a) => String(a.doc) === String(bill._id)) || {}) })),
     notes,
   });
@@ -222,6 +238,10 @@ router.post("/bills", catchAsyncErrors(async (req, res, next) => {
     if (!po) return next(new ErrorHandler("Purchase order not found", 404));
     if (String(po.supplier) !== String(supplier._id)) return next(new ErrorHandler("That purchase order is on another supplier", 400));
   }
+  // The head a service bill goes under is one that exists. Any id was
+  // taken, and the bill's cost was then on no head: the budget report
+  // goes head by head, and never came to it.
+  if (isId(b.category) && !(await ExpenseCategory.exists({ _id: b.category }))) return next(new ErrorHandler("Category not found", 404));
   const inwardIds = Array.isArray(b.inwards) ? [...new Set(b.inwards.filter(isId).map(String))] : [];
   // The supplier's e-invoice QR, as its text: read again here, never taken
   // as the browser described it. The portal's GSTIN and number must be this
