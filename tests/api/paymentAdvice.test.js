@@ -156,6 +156,23 @@ describe('a payment advice', () => {
     expect(q.allocations.map((a) => [a.docNo, a.amount])).toEqual([['DN/2026-27/0001', 1050]]);
   });
 
+  it('finds an invoice written with the year after its number: "731/26-27" is 731, not invoice 27', async () => {
+    const s = await scene();
+    // An open invoice whose own number ends in 27.
+    const inv27 = await M.Invoice.create({
+      invoiceNumber: 'INV/2026-27/0027', financialYear: '2026-27', sequence: 27, invoiceDate: new Date('2026-04-20'), dueDate: new Date('2026-05-20'),
+      order: new mongoose.Types.ObjectId(), customer: s.customer._id, buyer: { name: s.customer.name }, supplyType: 'intra', lines: [], totals: { taxable: 50000, grand: 52500 }, status: 'issued',
+    });
+    await require('../../services/partyLedger').post({ partyType: 'customer', party: s.customer._id, date: inv27.invoiceDate, docType: 'Invoice', doc: inv27._id, docNo: inv27.invoiceNumber, debit: 52500 });
+    reply({
+      problem: null, payerName: s.customer.name, payerGstin: s.customer.gstin, amount: 73500, date: '2026-10-28', reference: '',
+      lines: [{ invoiceNo: `${s.inv701.sequence}/26-27`, paid: 52500 }, { invoiceNo: `INV-${s.inv702.sequence}/2026-27`, paid: 21000 }],
+    });
+    const p = (await post('/accounts/advice/read', { text: 'x' })).body.placed;
+    expect(p.allocations.map((a) => [a.docNo, a.amount])).toEqual([[s.inv701.invoiceNumber, 52500], [s.inv702.invoiceNumber, 21000]]);
+    expect(p.unmatched).toEqual([]);
+  });
+
   it('does not pick one of two customers the payer\'s name could be', async () => {
     const s = await scene();
     await M.Customer.create({ name: `${s.customer.name} Tirupur`, contactName: 'T', phoneNumber: '9311111111' });

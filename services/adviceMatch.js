@@ -24,8 +24,8 @@ const outstanding = require('./outstanding');
 const { oneByName } = require('./partyMatch');
 
 const { r2 } = require('../utils/money');
-const squash = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-const lastNumber = (s) => { const m = String(s || '').match(/(\d+)\D*$/); return m ? Number(m[1]) : null; };
+// A number written short, and one written with the year after it (utils/docNo.js).
+const { squash, lastNumber } = require('../utils/docNo');
 // A number that says what it is: a debit or credit note, not an invoice.
 const NOTE_NO = /^\s*(?:dn|cn|dr|cr|d\/n|c\/n|debit|credit)(?![a-z])/i;
 

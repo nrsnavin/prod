@@ -88,6 +88,34 @@ describe('a supplier\'s statement', () => {
     expect(r.gstinDiffers).toBe(false);
   });
 
+  it('a supplier who writes the year after the number: 119/26-27 is not our 120/26-27', async () => {
+    const supplier = await M.Supplier.create({ name: 'Kovai Threads', gstin: '33AAAPK0002F1Z5', address: 'Coimbatore' });
+    const bill = async (no, date, rate) => (await post('/accounts/bills', { supplier: String(supplier._id), supplierBillNo: no, billDate: date, lines: [{ description: 'Polyester', quantity: 1, rate, gstPercent: 5 }] })).body.bill;
+    await bill('118/26-27', '2026-07-04', 10000);
+    await bill('120/26-27', '2026-07-22', 4000);
+    await bill('121/26-27', '2026-08-10', 6000);
+    reply({
+      problem: null, partyName: 'Kovai Threads', partyGstin: '33AAAPK0002F1Z5', from: '2026-07-01', to: '2026-09-30', opening: 0, closing: 25200,
+      entries: [
+        { date: '2026-07-04', docNo: '118/26-27', kind: 'invoice', debit: 10500, credit: 0, narration: 'Sales' },
+        // Never entered in our books; ours of two days later is another bill.
+        { date: '2026-07-20', docNo: '119/26-27', kind: 'invoice', debit: 8000, credit: 0, narration: 'Sales' },
+        // Written short on their side, and billed for more than we entered.
+        { date: '2026-09-05', docNo: 'INV 121', kind: 'invoice', debit: 6700, credit: 0, narration: 'Sales' },
+      ],
+      confidence: 0.9,
+    });
+    const r = (await send(String(supplier._id))).body.recon;
+    expect(r.matched.map((m) => [m.theirs.docNo, m.ours[0].theirNo, m.by, m.difference])).toEqual([
+      ['118/26-27', '118/26-27', 'number', 0],
+      ['INV 121', '121/26-27', 'number', 400],
+    ]);
+    expect(r.onlyTheirs).toEqual([expect.objectContaining({ docNo: '119/26-27', debit: 8000, likely: 'A bill of theirs not entered in our books' })]);
+    expect(r.onlyOurs).toEqual([expect.objectContaining({ theirNo: '120/26-27', credit: 4200 })]);
+    // Theirs 25,200 − ours 21,000 = 4,200: their 119 (8,000) less our 120 (4,200) plus 121's 400.
+    expect(r.balances).toMatchObject({ ours: 21000, theirs: 25200, difference: 4200, explained: 4200, unexplained: 0 });
+  });
+
   it('reads an Excel sheet as text, and refuses without a supplier or a file', async () => {
     const supplier = await M.Supplier.create({ name: 'Sri Yarn Traders', gstin: '33AAAPS0001F1Z5', address: 'Erode' });
     const ExcelJS = require('exceljs');

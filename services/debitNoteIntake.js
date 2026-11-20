@@ -30,8 +30,7 @@ const { promptVersion } = require('../utils/aiPrompts');
 const { r2 } = require('../utils/money');
 
 const SURFACE = 'debit-note-ocr';
-const squash = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-const lastNumber = (s) => { const m = String(s || '').match(/(\d+)\D*$/); return m ? Number(m[1]) : null; };
+const { squash, lastNumber } = require('../utils/docNo');
 const rupees = (n) => `₹${Number(n).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
 async function findCustomer(read, picked) {
