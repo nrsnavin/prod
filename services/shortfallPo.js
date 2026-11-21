@@ -9,6 +9,7 @@
 // apart between the two.
 
 const PurchaseOrder = require('../models/PurchaseOrder');
+const { stampLineTax, purchaseTaxSettings } = require('./purchaseTax');
 
 /**
  * How much of a row still needs buying.
@@ -84,19 +85,22 @@ async function createShortfallPos(orderable, link = {}, opts = {}) {
 
   const expected = opts.expectedDate ? new Date(opts.expectedDate) : null;
   const created = [];
+  // Each line takes its material's HSN and GST rate, as on any PO.
+  const { defaultGst } = orderable.length ? await purchaseTaxSettings() : { defaultGst: 5 };
 
   for (const [supplierId, group] of bySupplier) {
+    const items = await stampLineTax(group.lines.map((m) => ({
+      rawMaterial: m.rawMaterial,
+      price: Number(m.unitPrice) || 0,
+      // The gap, not the whole requirement — stock on hand is not
+      // bought a second time, and neither is stock already on order.
+      quantity: buyable(m),
+      receivedQuantity: 0,
+    })), { defaultGst });
     const poNo = await nextPoNo();
     const po = await PurchaseOrder.create({
       supplier: supplierId,
-      items: group.lines.map((m) => ({
-        rawMaterial: m.rawMaterial,
-        price: Number(m.unitPrice) || 0,
-        // The gap, not the whole requirement — stock on hand is not
-        // bought a second time, and neither is stock already on order.
-        quantity: buyable(m),
-        receivedQuantity: 0,
-      })),
+      items,
       expectedDate: expected && !isNaN(expected.getTime()) ? expected : undefined,
       notes: typeof opts.notes === 'string' && opts.notes.trim()
         ? opts.notes.trim()

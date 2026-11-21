@@ -61,7 +61,7 @@ async function matchRead(read) {
 // ══════════════════════════════════════════════════════════════════
 async function poBillLines(poOrId, { defaultGst } = {}) {
   const po = poOrId && poOrId.items ? poOrId
-    : await PurchaseOrder.findById(poOrId).populate('supplier', 'name gstin address').populate('items.rawMaterial', 'name unit hsn').lean();
+    : await PurchaseOrder.findById(poOrId).populate('supplier', 'name gstin address gstRegistration').populate('items.rawMaterial', 'name unit hsn gstPercent').lean();
   if (!po) return null;
   const inwards = await MaterialInward.find({ purchaseOrder: po._id }).populate('rawMaterial', 'name unit').sort({ inwardDate: 1 }).lean();
   const billed = await SupplierBill.find({ purchaseOrder: po._id, status: { $ne: 'cancelled' } }).select('billNo inwards supplierBillNo totals').lean();
@@ -69,12 +69,23 @@ async function poBillLines(poOrId, { defaultGst } = {}) {
   for (const b of billed) for (const i of b.inwards || []) onBill.set(String(i), b.billNo);
   let gst = defaultGst;
   if (gst == null) gst = (await require('./documentSettings').getDocumentSettings()).invoice?.defaultGstPercent ?? 5;
+  // Each line at the PO's own HSN and rate (its line's, else the
+  // material's, else the default: services/purchaseTax.js) — and at 0%
+  // from a supplier who cannot charge GST, whose bill with tax on it
+  // would be refused (services/billChecks.js).
+  const { lineGst, lineHsn, noGstReason } = require('./purchaseTax');
+  const noGst = !!noGstReason(po.supplier && typeof po.supplier === 'object' ? po.supplier : null);
   const price = new Map((po.items || []).map((it) => [String(it.rawMaterial?._id || it.rawMaterial), Number(it.price) || 0]));
+  const taxOf = new Map((po.items || []).map((it) => {
+    const m = it.rawMaterial && typeof it.rawMaterial === 'object' ? it.rawMaterial : null;
+    return [String(it.rawMaterial?._id || it.rawMaterial), { gstPercent: noGst ? 0 : lineGst(it, m, gst), hsn: lineHsn(it, m) }];
+  }));
   const free = inwards.filter((i) => !onBill.has(String(i._id)));
   const lines = new Map();
   for (const i of free) {
     const key = String(i.rawMaterial?._id || i.rawMaterial);
-    const row = lines.get(key) || { rawMaterial: key, description: i.rawMaterial?.name || 'Material', unit: i.rawMaterial?.unit || 'kg', quantity: 0, rate: price.get(key) || i.unitPrice || 0, gstPercent: gst, hsn: '', inwards: [], receipts: [] };
+    const t = taxOf.get(key) || { gstPercent: noGst ? 0 : gst, hsn: '' };
+    const row = lines.get(key) || { rawMaterial: key, description: i.rawMaterial?.name || 'Material', unit: i.rawMaterial?.unit || 'kg', quantity: 0, rate: price.get(key) || i.unitPrice || 0, gstPercent: t.gstPercent, hsn: t.hsn, inwards: [], receipts: [] };
     row.quantity = Math.round((row.quantity + (i.quantity || 0)) * 1000) / 1000;
     row.inwards.push(String(i._id));
     row.receipts.push({ _id: String(i._id), quantity: Number(i.quantity) || 0 });

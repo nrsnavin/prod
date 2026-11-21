@@ -13,6 +13,12 @@ const PurchaseItemSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    // GST on the line, copied from the material when the PO is raised
+    // (or typed on the line), so the PO keeps the rate it was sent with.
+    // Lines written before these existed have neither: readers take the
+    // material's, then the default in Settings (services/purchaseTax.js).
+    hsn:        { type: String, trim: true, default: "" },
+    gstPercent: { type: Number, min: 0, max: 100 },
   },
   { _id: false }
 );

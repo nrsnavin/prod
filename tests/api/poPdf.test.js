@@ -93,10 +93,10 @@ describe('GET /supplier/po/:id/pdf', () => {
 describe('purchase-order template', () => {
   const { getDocType, starterTemplate } = require('../../services/pdf/docTypes.js');
 
-  test('keeps rate and amount — a PO commits the company to a price', () => {
+  test('keeps rate and amount — a PO commits the company to a price — with the HSN and GST rate beside them', () => {
     const cols = getDocType('purchase-order').columns.map((c) => c.field);
-    expect(cols).toEqual(['sno', 'description', 'unit', 'qty', 'rate', 'amount']);
-    expect(getDocType('purchase-order').fields.map((f) => f.key)).toContain('totalAmount');
+    expect(cols).toEqual(['sno', 'description', 'hsn', 'unit', 'qty', 'rate', 'gst', 'amount']);
+    expect(getDocType('purchase-order').fields.map((f) => f.key)).toEqual(expect.arrayContaining(['totalAmount', 'taxableAmount', 'grandTotal']));
   });
 
   test('binds nothing the context does not provide', () => {
@@ -193,12 +193,14 @@ describe('a purchase order prints the rate it was raised at', () => {
     expect(text).toContain('Rs. 40');               // a whole-rupee rate as it was
     expect(text).not.toContain('Rs. 40.00');
 
-    // The first order, all whole rupees, prints exactly as before.
+    // The first order, all whole rupees, prints its rates and amounts as
+    // before. (The GST on it is what carries paise: 2.5% of 42,500.)
     const whole = await pdfText((await asPdf(request(app).get(`/api/v2/supplier/po/${po._id}/pdf`).set('Cookie', cookie(admin)))).body);
     expect(whole).toContain('Rs. 320');
     expect(whole).toContain('Rs. 32,000');
     expect(whole).toContain('Rs. 42,500');
-    expect(whole).not.toMatch(/Rs\. [\d,]+\.\d/);
+    for (const s of ['Rs. 320.00', 'Rs. 210.00', 'Rs. 32,000.00', 'Rs. 10,500.00', 'Rs. 42,500.00']) expect(whole).not.toContain(s);
+    expect(whole).toContain('Rs. 1,062.50');
 
     // …and on a design saved before this, whose rate column is still a "currency" cell.
     const { starterTemplate } = require('../../services/pdf/docTypes.js');

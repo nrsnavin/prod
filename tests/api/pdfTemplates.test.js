@@ -167,7 +167,9 @@ describe('the built-in layouts can be saved as they are', () => {
     const rows = Object.fromEntries(docTypes.map((d) => [d.id, d.rowFields.map((f) => f.key)]));
     // A challan: unit and boxes, and no rate or amount to bind.
     expect(rows['delivery-challan']).toEqual(['sno', 'description', 'unit', 'boxes', 'qty']);
-    expect(rows['purchase-order']).toEqual(['sno', 'description', 'unit', 'qty', 'rate', 'amount']);
+    // A PO: rate and amount, with the HSN and GST on the line (and, for a
+    // layout that wants them, the GST amount and the line with GST).
+    expect(rows['purchase-order']).toEqual(['sno', 'description', 'hsn', 'unit', 'qty', 'rate', 'gst', 'amount', 'taxAmount', 'total']);
     // And a name every object has is not a document type.
     expect((await request(app).get('/api/v2/pdf-templates/constructor').set('Cookie', cookie(admin))).status).toBe(404);
   });

@@ -238,19 +238,42 @@ const PO_FIELDS = [
   { key: "partyGstin", label: "Supplier GSTIN" },
   { key: "partyContact", label: "Supplier phone/email" },
   { key: "totalQty", label: "Total quantity" },
-  { key: "totalAmount", label: "Total amount" },
+  { key: "totalAmount", label: "Total amount (before GST)" },
   { key: "lineCount", label: "Number of line items" },
+  // GST (services/purchaseTax.js). tax1/tax2 are CGST and SGST for a
+  // supplier in our state, IGST and a blank for one outside it.
+  { key: "taxableAmount", label: "Taxable value" },
+  { key: "tax1Label", label: "Tax line 1 label (CGST / IGST)" },
+  { key: "tax1Amount", label: "Tax line 1 amount" },
+  { key: "tax2Label", label: "Tax line 2 label (SGST)" },
+  { key: "tax2Amount", label: "Tax line 2 amount" },
+  { key: "cgstAmount", label: "CGST" },
+  { key: "sgstAmount", label: "SGST" },
+  { key: "igstAmount", label: "IGST" },
+  { key: "taxAmount", label: "Total GST" },
+  { key: "roundOffLabel", label: "Round off label" },
+  { key: "roundOff", label: "Round off" },
+  { key: "grandTotal", label: "Grand total (with GST)" },
+  { key: "amountInWords", label: "Grand total in words" },
   { key: "footerNote", label: "Footer note" },
   { key: "termsText", label: "Terms & conditions" },
 ];
 
 const PO_COLUMNS = [
-  { field: "sno", header: "S.No", width: 0.55, align: "left", format: "text" },
-  { field: "description", header: "Material Description", width: 3.3, align: "left", format: "text" },
-  { field: "unit", header: "UOM", width: 0.7, align: "center", format: "text" },
-  { field: "qty", header: "Quantity", width: 1, align: "right", format: "number" },
-  { field: "rate", header: "Rate", width: 1, align: "right", format: "currency" },
-  { field: "amount", header: "Amount", width: 1.2, align: "right", format: "currency" },
+  { field: "sno", header: "S.No", width: 0.45, align: "left", format: "text" },
+  { field: "description", header: "Material Description", width: 2.6, align: "left", format: "text" },
+  { field: "hsn", header: "HSN", width: 0.75, align: "center", format: "text" },
+  { field: "unit", header: "UOM", width: 0.55, align: "center", format: "text" },
+  { field: "qty", header: "Quantity", width: 0.9, align: "right", format: "number" },
+  { field: "rate", header: "Rate", width: 0.9, align: "right", format: "currency" },
+  { field: "gst", header: "GST", width: 0.55, align: "center", format: "text" },
+  { field: "amount", header: "Amount", width: 1.1, align: "right", format: "currency" },
+];
+// Further row keys a saved layout may bind: the GST on the line and the
+// line with its GST.
+const PO_EXTRA_ROW_FIELDS = [
+  { field: "taxAmount", header: "GST amount", width: 1, align: "right", format: "currency" },
+  { field: "total", header: "Total", width: 1.1, align: "right", format: "currency" },
 ];
 
 function poSample() {
@@ -273,15 +296,28 @@ function poSample() {
       partyGstin: "GSTIN: 33AAFCY1234K1Z9",
       partyContact: "+91 90000 11122  ·  sales@cbeyarn.in",
       totalQty: "1,900",
-      totalAmount: "Rs. 1,86,500",
+      totalAmount: "Rs. 1,86,300",
       lineCount: "3",
+      taxableAmount: "Rs. 1,86,300",
+      tax1Label: "CGST @ 2.5%",
+      tax1Amount: "Rs. 4,657.50",
+      tax2Label: "SGST @ 2.5%",
+      tax2Amount: "Rs. 4,657.50",
+      cgstAmount: "Rs. 4,657.50",
+      sgstAmount: "Rs. 4,657.50",
+      igstAmount: "Rs. 0",
+      taxAmount: "Rs. 9,315",
+      roundOffLabel: "",
+      roundOff: "",
+      grandTotal: "Rs. 1,95,615",
+      amountInWords: "Rupees One Lakh Ninety Five Thousand Six Hundred Fifteen Only",
       footerNote: "This is a computer-generated document.",
       termsText: "Please quote our PO number on the invoice and delivery note. Subject to Erode jurisdiction.",
     },
     rows: [
-      { sno: 1, description: "Nylon 40D — Semi-dull", unit: "kg", qty: 800, rate: 105, amount: 84000 },
-      { sno: 2, description: "Spandex 70D", unit: "kg", qty: 600, rate: 118, amount: 70800 },
-      { sno: 3, description: "Polyester 150D — Black", unit: "kg", qty: 500, rate: 63, amount: 31500 },
+      { sno: 1, description: "Nylon 40D — Semi-dull", hsn: "5402", unit: "kg", qty: 800, rate: 105, gst: "5%", amount: 84000, taxAmount: 4200, total: 88200 },
+      { sno: 2, description: "Spandex 70D", hsn: "5404", unit: "kg", qty: 600, rate: 118, gst: "5%", amount: 70800, taxAmount: 3540, total: 74340 },
+      { sno: 3, description: "Polyester 150D — Black", hsn: "5402", unit: "kg", qty: 500, rate: 63, gst: "5%", amount: 31500, taxAmount: 1575, total: 33075 },
     ],
     logo: "",
   };
@@ -343,7 +379,7 @@ function poStarter() {
 
     // ── Items ─────────────────────────────────────────────────
     {
-      id: "table", type: "table", x: L, y: 238, w: W, h: 396, fontSize: 8.5,
+      id: "table", type: "table", x: L, y: 238, w: W, h: 360, fontSize: 8.5,
       headerBg: "#E4E4E4", headerColor: INK, bodyColor: INK,
       gridColor: RULE, grid: true, zebra: false,
       columns: PO_COLUMNS,
@@ -351,20 +387,32 @@ function poStarter() {
 
     // ── Totals ────────────────────────────────────────────────
     // Boxed and right-aligned: on a PO the value is the commitment, so it
-    // gets the emphasis the challan's quantity total does not need.
-    { id: "totbox", type: "box", x: 330, y: 640, w: R - 330, h: 40, lineWidth: 0.6, color: RULE },
-    { id: "tqty_l", type: "text", text: "Total quantity", x: 336, y: 647, w: 110, h: 12, fontSize: 8, color: MUTED },
-    { id: "tqty", type: "field", field: "totalQty", x: 446, y: 646, w: R - 452, h: 12, fontSize: 9, align: "right", color: INK },
-    { id: "tamt_rule", type: "line", x: 330, y: 661, w: R - 330, h: 0, lineWidth: 0.6, color: RULE },
-    { id: "tamt_l", type: "text", text: "TOTAL VALUE", x: 336, y: 667, w: 110, h: 12, fontSize: 8, bold: true, color: MUTED },
-    { id: "tamt", type: "field", field: "totalAmount", x: 430, y: 665, w: R - 436, h: 16, fontSize: 12, bold: true, align: "right", color: INK },
+    // gets the emphasis the challan's quantity total does not need. The
+    // GST is set out under the taxable value the way the supplier's bill
+    // will set it out: CGST and SGST, or IGST.
+    { id: "totbox", type: "box", x: 330, y: 604, w: R - 330, h: 92, lineWidth: 0.6, color: RULE },
+    { id: "tqty_l", type: "text", text: "Total quantity", x: 336, y: 609, w: 110, h: 12, fontSize: 8, color: MUTED },
+    { id: "tqty", type: "field", field: "totalQty", x: 446, y: 608, w: R - 452, h: 12, fontSize: 9, align: "right", color: INK },
+    { id: "ttax_l", type: "text", text: "Taxable value", x: 336, y: 622, w: 110, h: 12, fontSize: 8, color: MUTED },
+    { id: "ttax", type: "field", field: "taxableAmount", x: 446, y: 621, w: R - 452, h: 12, fontSize: 9, align: "right", color: INK },
+    { id: "tax1_l", type: "field", field: "tax1Label", x: 336, y: 635, w: 150, h: 12, fontSize: 8, color: MUTED },
+    { id: "tax1", type: "field", field: "tax1Amount", x: 446, y: 634, w: R - 452, h: 12, fontSize: 9, align: "right", color: INK },
+    { id: "tax2_l", type: "field", field: "tax2Label", x: 336, y: 648, w: 110, h: 12, fontSize: 8, color: MUTED },
+    { id: "tax2", type: "field", field: "tax2Amount", x: 446, y: 647, w: R - 452, h: 12, fontSize: 9, align: "right", color: INK },
+    { id: "rnd_l", type: "field", field: "roundOffLabel", x: 336, y: 661, w: 110, h: 12, fontSize: 8, color: MUTED },
+    { id: "rnd", type: "field", field: "roundOff", x: 446, y: 660, w: R - 452, h: 12, fontSize: 9, align: "right", color: INK },
+    { id: "tamt_rule", type: "line", x: 330, y: 674, w: R - 330, h: 0, lineWidth: 0.6, color: RULE },
+    { id: "tamt_l", type: "text", text: "GRAND TOTAL", x: 336, y: 680, w: 110, h: 12, fontSize: 8, bold: true, color: MUTED },
+    { id: "tamt", type: "field", field: "grandTotal", x: 430, y: 678, w: R - 436, h: 16, fontSize: 12, bold: true, align: "right", color: INK },
 
-    { id: "lines_l", type: "text", text: "Total line items:", x: L, y: 647, w: 90, h: 12, fontSize: 8, color: MUTED },
-    { id: "lines", type: "field", field: "lineCount", x: L + 92, y: 647, w: 40, h: 12, fontSize: 9, bold: true, color: INK },
+    { id: "lines_l", type: "text", text: "Total line items:", x: L, y: 609, w: 90, h: 12, fontSize: 8, color: MUTED },
+    { id: "lines", type: "field", field: "lineCount", x: L + 92, y: 609, w: 40, h: 12, fontSize: 9, bold: true, color: INK },
+    { id: "words_l", type: "text", text: "AMOUNT IN WORDS", x: L, y: 626, w: 200, h: 10, fontSize: 6.5, bold: true, color: MUTED },
+    { id: "words", type: "field", field: "amountInWords", x: L, y: 637, w: 286, h: 24, fontSize: 7.5, color: INK },
 
     // ── Terms ─────────────────────────────────────────────────
-    { id: "l_terms", type: "text", text: "TERMS & CONDITIONS", x: L, y: 692, w: 200, h: 10, fontSize: 6.5, bold: true, color: MUTED },
-    { id: "terms", type: "field", field: "termsText", x: L, y: 703, w: 290, h: 46, fontSize: 7.5, color: MUTED },
+    { id: "l_terms", type: "text", text: "TERMS & CONDITIONS", x: L, y: 702, w: 200, h: 10, fontSize: 6.5, bold: true, color: MUTED },
+    { id: "terms", type: "field", field: "termsText", x: L, y: 712, w: 290, h: 40, fontSize: 7.5, color: MUTED },
 
     // ── Signature strip ───────────────────────────────────────
     { id: "sigbox", type: "box", x: L, y: 758, w: W, h: 52, lineWidth: 0.6, color: RULE },
@@ -581,6 +629,7 @@ const DOC_TYPES = {
     label: "Purchase Order",
     fields: PO_FIELDS,
     columns: PO_COLUMNS,
+    extraRowFields: PO_EXTRA_ROW_FIELDS,
     sample: poSample,
     starter: poStarter,
   },
@@ -599,7 +648,7 @@ const DOC_TYPES = {
 function listDocTypes() {
   return Object.entries(DOC_TYPES).map(([id, d]) => ({
     id, label: d.label, fields: d.fields,
-    rowFields: d.columns.map((c) => ({ key: c.field, label: c.header })),
+    rowFields: [...d.columns, ...(d.extraRowFields || [])].map((c) => ({ key: c.field, label: c.header })),
   }));
 }
 

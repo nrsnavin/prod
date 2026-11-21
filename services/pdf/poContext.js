@@ -1,6 +1,8 @@
 "use strict";
 
 const { indiaDay } = require("../../utils/indiaLabel");
+const { pricePo } = require("../purchaseTax");
+const { amountInWords } = require("../gst");
 
 // ══════════════════════════════════════════════════════════════
 //  PURCHASE-ORDER → template render context
@@ -8,7 +10,12 @@ const { indiaDay } = require("../../utils/indiaLabel");
 //  Maps a PurchaseOrder (supplier + items populated) + Document-Settings
 //  branding into the { fields, rows, logo } shape the template renderer
 //  consumes. Letterhead comes from branding; the vendor + line items
-//  come from the PO. Amount is price × quantity per line.
+//  come from the PO. Amount is price × quantity per line, before GST —
+//  as it always was, so a saved layout binding `amount` and
+//  `totalAmount` reads as before. The GST (services/purchaseTax.js:
+//  the line's rate, else the material's, else the default) is in the
+//  added keys: hsn, gst, taxAmount and total per row; taxableAmount,
+//  the CGST/SGST or IGST lines and grandTotal in the fields.
 // ══════════════════════════════════════════════════════════════
 
 function fmtDate(d) {
@@ -26,8 +33,35 @@ function inr(n) {
   return "Rs. " + v.toLocaleString("en-IN", Number.isInteger(v) ? {} : { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function poToContext(po, branding = {}) {
+const pct = (n) => `${Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 })}%`;
+
+/**
+ * The tax lines under the taxable value: CGST and SGST for a supplier
+ * in our state, IGST for one outside it, or a word on why there is none.
+ * The rate is printed in the label when every line carries the same one.
+ */
+function taxLines(tax) {
+  const t = tax.totals;
+  if (tax.noGst) return [["No GST (composition / unregistered supplier)", "—"], ["", ""]];
+  const rates = [...new Set(tax.lines.filter((l) => l.taxable > 0).map((l) => l.gstPercent))];
+  const one = rates.length === 1 ? rates[0] : null;
+  if (tax.supplyType === "inter") {
+    return [[one != null ? `IGST @ ${pct(one)}` : "IGST", inr(t.igst)], ["", ""]];
+  }
+  return [
+    [one != null ? `CGST @ ${pct(one / 2)}` : "CGST", inr(t.cgst)],
+    [one != null ? `SGST @ ${pct(one / 2)}` : "SGST", inr(t.sgst)],
+  ];
+}
+
+/**
+ * @param po          supplier and items.rawMaterial populated
+ * @param branding    getPdfBranding()
+ * @param taxSettings purchaseTaxSettings(): our state and the default rate
+ */
+function poToContext(po, branding = {}, taxSettings = {}) {
   const items = Array.isArray(po.items) ? po.items : [];
+  const tax = pricePo(po, taxSettings);
   const rows = items.map((it, i) => {
     const qty = Number(it.quantity || 0);
     const rate = Number(it.price || 0);
@@ -35,18 +69,25 @@ function poToContext(po, branding = {}) {
       (it.rawMaterial && it.rawMaterial.name) ||
       it.name ||
       "—";
+    const line = tax.lines[i];
+    const lineTax = r2(line.cgst + line.sgst + line.igst);
     return {
       sno: i + 1,
       description: name,
+      hsn: line.hsn,
       unit: (it.rawMaterial && it.rawMaterial.unit) || it.unit || "",
       qty,
       rate,
+      gst: tax.noGst ? "—" : pct(line.gstPercent),
       amount: r2(qty * rate),
+      taxAmount: lineTax,
+      total: r2(r2(qty * rate) + lineTax),
     };
   });
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
   const totalAmount = r2(rows.reduce((s, r) => s + r.amount, 0));
   const supplier = po.supplier && typeof po.supplier === "object" ? po.supplier : {};
+  const [[tax1Label, tax1Amount], [tax2Label, tax2Amount]] = taxLines(tax);
 
   return {
     logo: branding.logo || "",
@@ -90,6 +131,17 @@ function poToContext(po, branding = {}) {
       totalQty: totalQty.toLocaleString("en-IN"),
       totalAmount: inr(totalAmount),
       lineCount: String(rows.length),
+      // ── GST ──
+      taxableAmount: inr(tax.totals.taxable),
+      tax1Label, tax1Amount, tax2Label, tax2Amount,
+      cgstAmount: inr(tax.totals.cgst),
+      sgstAmount: inr(tax.totals.sgst),
+      igstAmount: inr(tax.totals.igst),
+      taxAmount: inr(tax.totals.tax),
+      roundOffLabel: tax.totals.roundOff ? "Round off" : "",
+      roundOff: tax.totals.roundOff ? inr(tax.totals.roundOff) : "",
+      grandTotal: inr(tax.totals.grand),
+      amountInWords: amountInWords(tax.totals.grand),
       // ── footer / terms (from Document Settings) ──
       footerNote: branding.footerNote || "",
       termsText: branding.termsText || po.notes || "",

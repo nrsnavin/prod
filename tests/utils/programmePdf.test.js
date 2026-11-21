@@ -154,7 +154,9 @@ describe('the covering programme', () => {
     const text = await pdfText(await buildCoveringProgrammePdf(covering()));
     expect(text).toMatch(/to be entered at the machine/i);
     expect(text).toMatch(/\b20\b/);
-    expect(text).not.toMatch(/\b21\b/);
+    // No row 21. (The footer's "Generated 21 Nov …" is the day it ran,
+    // and failed this on the 21st of every month.)
+    expect(text.replace(/Generated [^\n]*/g, '')).not.toMatch(/\b21\b/);
     expect(text).toMatch(/________ kg/);
   });
 

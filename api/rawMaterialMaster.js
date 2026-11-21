@@ -39,6 +39,7 @@ const { unplacedQuantity } = require("../services/yarnLotService");
 const { maybeFirePriceChangeAlert } = require("../utils/inventoryAlerts");
 const { LIVE_STATUSES } = require("../domain/orderStatus");
 const { round3 } = require("../utils/quantity");
+const { readHsn, readGstPercent } = require("../services/purchaseTax");
 const router = express.Router();
 
 /**
@@ -129,6 +130,10 @@ router.post(
     if (!name || !supplier) {
       return next(new ErrorHandler("name and supplier are required", 400));
     }
+    // What a purchase order line takes unless it says otherwise. Blank is
+    // allowed for both: the default rate in Settings then applies.
+    const hsn = readHsn(req.body.hsn);
+    const gstPercent = readGstPercent(req.body.gstPercent);
 
     const resolved = await resolveClassification({ group, category });
     if (resolved.error) return next(new ErrorHandler(resolved.error, 400));
@@ -160,6 +165,8 @@ router.post(
         : defaults.minStock,
       supplier,
       price:    price    || 0,
+      hsn,
+      gstPercent,
     });
 
     res.status(201).json({ success: true, material });
@@ -624,6 +631,11 @@ router.put(
     for (const f of ALLOWED) {
       if (req.body[f] !== undefined) update[f] = req.body[f];
     }
+    // Checked, not copied: an HSN of 4 to 8 digits, a rate from 0 to 100.
+    // Blank clears either back to "the default in Settings". A PO already
+    // raised keeps the rate it was raised at; new ones take this.
+    if (req.body.hsn !== undefined) update.hsn = readHsn(req.body.hsn);
+    if (req.body.gstPercent !== undefined) update.gstPercent = readGstPercent(req.body.gstPercent);
     const priceReason = req.body.priceReason;
 
     const existing = await RawMaterial.findById(_id);

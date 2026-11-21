@@ -214,13 +214,18 @@ describe('editing a notice', () => {
     expect(await onTheApp()).toEqual(['Safety drill']);
   });
 
+  // These three post an end date of 20 November, so the clock is put
+  // before it: on the real clock they began to fail on the 21st, when an
+  // end date already past is refused.
   it('takes an empty end date as taking it away, too', async () => {
+    itIs('2026-11-18T10:00:00');
     const n = await post({ validUntil: '2026-11-20' });
     await as(admin).put(`/${n._id}`, { validUntil: '' });
     expect((await stored(n)).validUntil).toBeUndefined();
   });
 
   it('leaves the end date alone when the change says nothing of it', async () => {
+    itIs('2026-11-18T10:00:00');
     const n = await post({ validUntil: '2026-11-20' });
     await as(admin).put(`/${n._id}`, { isPinned: true });
     const saved = await stored(n);
@@ -229,6 +234,7 @@ describe('editing a notice', () => {
   });
 
   it('can move the end date, kept as the day', async () => {
+    itIs('2026-11-18T10:00:00');
     const n = await post({ validUntil: '2026-11-20' });
     await as(admin).put(`/${n._id}`, { validUntil: '2026-11-24T18:30:00.000Z' });      // the phone's 25th
     expect(new Date((await stored(n)).validUntil).toISOString()).toBe('2026-11-25T00:00:00.000Z');

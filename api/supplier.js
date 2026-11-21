@@ -48,6 +48,7 @@ const { parseMoney, MAX_RATE } = require("../utils/money");
 // PO numbering, the line checks and a PO's status are shared with the
 // other places a PO is raised or received (services/purchaseOrderRules.js).
 const { nextPoNumber, pendingOf, deriveStatus, readPoLines, assertSupplier, round3, overReceipt } = require("../services/purchaseOrderRules");
+const { pricePo, purchaseTaxSettings, stampLineTax } = require("../services/purchaseTax");
 const { requireReason } = require("../utils/auditReason");
 const { momentFrom } = require("../utils/requestDate");
 const { pageOf } = require("../utils/paging");
@@ -229,8 +230,11 @@ router.put(
       return next(new ErrorHandler("Cannot edit a PO that already has receipts.", 400));
     }
 
+    // HSN and rate are part of what the PO commits to, so a change to
+    // either is in the trail beside quantity and price.
+    const lineTrail = (i) => ({ rawMaterial: i.rawMaterial?.toString(), quantity: i.quantity, price: i.price, hsn: i.hsn || "", gstPercent: i.gstPercent ?? null });
     const before = {
-      items: po.items.map((i) => ({ rawMaterial: i.rawMaterial?.toString(), quantity: i.quantity, price: i.price })),
+      items: po.items.map(lineTrail),
       expectedDate: po.expectedDate,
       notes: po.notes,
     };
@@ -248,7 +252,7 @@ router.put(
     stampFingerprint(po, ACTION_CODES.PO_UPDATED, {
       req,
       meta: { auditReason, poNo: po.poNo, before, after: {
-        items: po.items.map((i) => ({ rawMaterial: i.rawMaterial?.toString(), quantity: i.quantity, price: i.price })),
+        items: po.items.map(lineTrail),
         expectedDate: po.expectedDate, notes: po.notes,
       } },
     });
@@ -374,15 +378,23 @@ router.get(
         }
       }
 
-      const [pos, total] = await Promise.all([
+      const [found, total, taxSettings] = await Promise.all([
         PurchaseOrder.find(filter)
-          .populate("supplier",          "name")
-          .populate("items.rawMaterial", "name unit")
+          .populate("supplier",          "name gstin gstRegistration")
+          .populate("items.rawMaterial", "name unit hsn gstPercent")
           .sort({ createdAt: -1 })
           .skip(skip)
           .limit(limit),
         PurchaseOrder.countDocuments(filter),
+        purchaseTaxSettings(),
       ]);
+      // What each PO comes to with its GST, worked out the one way the
+      // detail page and the PDF work it out (services/purchaseTax.js).
+      const pos = found.map((p) => {
+        const o = p.toObject();
+        const { supplyType, noGst, totals } = pricePo(o, taxSettings);
+        return { ...o, tax: { supplyType, noGst, totals } };
+      });
 
       res.status(200).json({
         success: true,
@@ -408,11 +420,12 @@ router.get(
   catchAsyncErrors(async (req, res, next) => {
     try {
       const po = await PurchaseOrder.findById(req.query.id)
-        .populate("supplier",          "name phoneNumber gstin email address contactPerson")
-        .populate("items.rawMaterial", "name unit")
+        .populate("supplier",          "name phoneNumber gstin email address contactPerson gstRegistration")
+        .populate("items.rawMaterial", "name unit hsn gstPercent")
         .lean();
 
       if (!po) return next(new ErrorHandler("Purchase Order not found", 404));
+      const tax = pricePo(po, await purchaseTaxSettings());
 
       const inwardHistory = await MaterialInward.find({ purchaseOrder: po._id })
         .populate("rawMaterial", "name unit")
@@ -432,7 +445,7 @@ router.get(
       // Both names are emitted so neither client breaks, and `pending`
       // is computed once, here, so there is no third place for the same
       // subtraction to be written differently again.
-      po.items = (po.items || []).map((it) => {
+      po.items = (po.items || []).map((it, i) => {
         const received = Number(it.receivedQuantity) || 0;
         return {
           ...it,
@@ -440,8 +453,12 @@ router.get(
           // Floored at zero: over-delivery within tolerance is allowed,
           // and "-8 pending" is not a quantity anyone can act on.
           pending: pendingOf(it),
+          // The line's GST as priced: its own rate, else the material's,
+          // else the default — and the tax on it, split for the supply.
+          ...tax.lines[i],
         };
       });
+      po.tax = { supplyType: tax.supplyType, noGst: tax.noGst, totals: tax.totals };
 
       res.status(200).json({ success: true, po, inwardHistory });
     } catch (error) {
@@ -466,8 +483,8 @@ router.get(
     }
 
     const po = await PurchaseOrder.findById(id)
-      .populate("supplier", "name phoneNumber gstin email address contactPerson")
-      .populate("items.rawMaterial", "name unit")
+      .populate("supplier", "name phoneNumber gstin email address contactPerson gstRegistration")
+      .populate("items.rawMaterial", "name unit hsn gstPercent")
       // What the PO was raised for, when it came out of a job's material
       // shortfall. Printed on the supplier's copy so the purchase stays
       // answerable long after the screen that created it is closed.
@@ -476,13 +493,14 @@ router.get(
       .lean();
     if (!po) return next(new ErrorHandler("Purchase Order not found", 404));
 
-    const [branding, saved] = await Promise.all([
+    const [branding, saved, taxSettings] = await Promise.all([
       getPdfBranding(),
       PdfTemplate.findOne({ docType: "purchase-order" }).lean(),
+      purchaseTaxSettings(),
     ]);
     const template = saved && saved.enabled ? saved : starterTemplate("purchase-order");
 
-    const context = poToContext(po, branding);
+    const context = poToContext(po, branding, taxSettings);
     const pdf = await renderPdf('template', template, context);
 
     res.setHeader("Content-Type", "application/pdf");
@@ -531,16 +549,22 @@ router.post(
         }
       }
 
+      // The same purchase at the same rates — GST included. A source
+      // line from before PO lines carried GST takes the material's rate,
+      // else the default, as a new PO would.
+      const items = await stampLineTax(source.items.map((i) => ({
+        rawMaterial:      i.rawMaterial,
+        price:            i.price,
+        quantity:         i.quantity,
+        receivedQuantity: 0,
+        hsn:              i.hsn || "",
+        gstPercent:       i.gstPercent,
+      })));
       const nextPoNo = await nextPoNumber();
 
       const cloned = await PurchaseOrder.create({
         supplier: source.supplier,
-        items: source.items.map((i) => ({
-          rawMaterial:      i.rawMaterial,
-          price:            i.price,
-          quantity:         i.quantity,
-          receivedQuantity: 0,
-        })),
+        items,
         poNo:   nextPoNo,
         status: "Open",
         ...(forOrder ? { forOrder } : {}),

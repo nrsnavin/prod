@@ -157,6 +157,14 @@ const RawMaterialSchema = new mongoose.Schema(
     // route validation can never persist into money / stock math.
     price:    { type: Number, default: 0, min: 0 },  // per kg — current price
 
+    // ── GST on buying it ───────────────────────────────────────────
+    // What a purchase order line for this material takes unless the
+    // line says otherwise. Blank / null means "the default rate in
+    // Settings → Invoice" — the same convention as Elastic.hsn /
+    // gstPercent on the selling side. services/purchaseTax.js reads them.
+    hsn:        { type: String, trim: true, default: "" },
+    gstPercent: { type: Number, default: null, min: 0, max: 100 },
+
     // ── What the stock on the shelf actually cost ──────────────────
     // `price` above is the LATEST purchase price. It is what a new PO
     // should default to, and it is what everything used to be costed

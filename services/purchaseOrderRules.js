@@ -19,6 +19,7 @@ const ErrorHandler  = require('../utils/ErrorHandler');
 const { nextNumber } = require('../utils/sequence');
 const { parseMoney, MAX_RATE } = require('../utils/money');
 const { round3 } = require('../utils/quantity');
+const { readHsn, readGstPercent, lineGst, lineHsn, purchaseTaxSettings } = require('./purchaseTax');
 
 /**
  * The next PO number: an atomic counter, seeded once from the highest
@@ -58,10 +59,15 @@ function deriveStatus(items) {
  *     never completes;
  *   • a quantity above zero, to three places;
  *   • a price that is one. None is ₹0 ("not priced yet"); a negative
- *     price, or text, used to be stored as sent.
+ *     price, or text, used to be stored as sent;
+ *   • an HSN of 4 to 8 digits and a GST rate from 0 to 100, when the
+ *     line states them. A line that does not takes the material's, and
+ *     a material with no rate the default in Settings
+ *     (services/purchaseTax.js), so every PO line carries the rate it
+ *     was raised at — the phone's Raise PO sends none and is covered.
  *
- * Only these three fields are taken from each line: what has been
- * received is never the sender's to say.
+ * Only these fields are taken from each line: what has been received is
+ * never the sender's to say.
  *
  * Returns the lines to store; throws ErrorHandler(400).
  */
@@ -86,12 +92,21 @@ async function readPoLines(items) {
       if (!read.ok) throw new ErrorHandler(read.reason, 400);
       price = read.value;
     }
-    return { rawMaterial: id, price, quantity: q, receivedQuantity: 0 };
+    const hsn = readHsn(item.hsn, `Line ${idx + 1}: the HSN`);
+    const gstPercent = readGstPercent(item.gstPercent, `Line ${idx + 1}: GST %`);
+    return { rawMaterial: id, price, quantity: q, receivedQuantity: 0, hsn, gstPercent };
   });
-  const known = new Set((await RawMaterial.find({ _id: { $in: [...seen] } }).select('_id').lean()).map((m) => String(m._id)));
-  const missing = lines.findIndex((l) => !known.has(l.rawMaterial));
+  const materials = new Map(
+    (await RawMaterial.find({ _id: { $in: [...seen] } }).select('_id hsn gstPercent').lean()).map((m) => [String(m._id), m])
+  );
+  const missing = lines.findIndex((l) => !materials.has(l.rawMaterial));
   if (missing !== -1) throw new ErrorHandler(`Line ${missing + 1}: that material does not exist`, 400);
-  return lines;
+  const needDefault = lines.some((l) => l.gstPercent === null && !Number.isFinite(Number(materials.get(l.rawMaterial).gstPercent ?? NaN)));
+  const { defaultGst } = needDefault ? await purchaseTaxSettings() : { defaultGst: 5 };
+  return lines.map((l) => {
+    const m = materials.get(l.rawMaterial);
+    return { ...l, hsn: lineHsn(l, m), gstPercent: lineGst(l, m, defaultGst) };
+  });
 }
 
 /**
