@@ -374,6 +374,23 @@ sure, release its Elastic IP and terminate it.
 
 ## Updating later
 
+One command does all of it, in a safe order, and stops at the first
+thing that fails (`deploy/deploy.sh` says what each step does):
+
+```sh
+~/prod/deploy/deploy.sh          # API, staff web app and portal
+~/prod/deploy/deploy.sh api      # API only
+~/prod/deploy/deploy.sh web      # web app and portal only
+```
+
+It refuses a checkout with local edits, builds the web apps before
+anything live changes, installs packages only when the lockfile changed,
+runs the migrations, restarts the service and waits until it answers
+with the database connected, then publishes the web builds and checks
+the public addresses. Each run's log is kept in `~/deploy-logs/`.
+
+The same steps by hand, for when the script cannot be used:
+
 API (`API_DEPLOY.md`):
 
 ```sh
